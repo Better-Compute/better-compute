@@ -400,8 +400,9 @@ setInterval(() => void collector.pull(), 5 * 60_000);
 - **Failures.** A failing source is counted by error code and keeps its samples until they go stale; one source
   never stops another. Each pull has 60 seconds (`pullTimeoutMs`).
 - **DigitalOcean.** The Droplet needs DigitalOcean's metrics agent (`monitoring: true` on the account installs it on
-  new Droplets) and the token `monitoring:read`. Reads spend the account's `sweep` budget; when it runs out the pull
-  answers what it read and the next one starts where it stopped.
+  new Droplets) and the token `monitoring:read`. Droplets are read four at a time (`concurrency`) on the account's
+  `sweep` budget; when it runs out, or the caller's signal aborts at its deadline, the pull answers what it read and
+  the next one starts at the first Droplet it read nothing for.
 
 **Through vps.** A host does not have to build the machine list or the source itself. With
 `vps({ externalMetrics: {} })` (every `5m` by default, at least `1m`; off unless set, since it spends the accounts'
@@ -419,6 +420,8 @@ setInterval(() => void collector.pull(), 60_000); // a database read, no provide
 
 Only the instances asked for, well-formed metric names and finite values are stored; an instance that is no longer
 live loses its rows, and a failed read is logged and waits for the next period while the stored samples go stale.
+Each account's read has 45 seconds and asks for at most `machineLimit` instances (default 500); an account with more
+is read a page per period in id order (logged once), and its live instances on other pages keep their rows.
 
 ## Health and readiness
 

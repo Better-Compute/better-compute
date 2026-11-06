@@ -128,6 +128,7 @@ describe('doMetricsSource', () => {
     const source = doMetricsSource(doAccount as DoConfig, context, {
       fetch: emu.fetch,
       budget: { perMinute: 20, perHour: 5000 },
+      concurrency: 1,
     });
     const machines = Array.from({ length: 5 }, (_, i) => ({
       instance: `inst_${i}`,
@@ -146,6 +147,91 @@ describe('doMetricsSource', () => {
         signal: new AbortController().signal,
       }),
     ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+  });
+
+  it('answers what it read when the deadline passes, and the next pull reads the rest', async () => {
+    const emu = world();
+    // Every request takes 20 ms and honours the caller's signal, like a slow DigitalOcean.
+    const slow: typeof fetch = (input, init) =>
+      new Promise((resolve, reject) => {
+        const signal = init?.signal;
+        const timer = setTimeout(() => resolve(emu.fetch(input, init)), 20);
+        signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        });
+      });
+    const source = doMetricsSource(doAccount as DoConfig, context, {
+      fetch: slow,
+      concurrency: 2,
+    });
+    const machines = Array.from({ length: 12 }, (_, i) => ({
+      instance: `inst_${i}`,
+      machineId: '42',
+    }));
+    // Four sequential requests per Droplet at 20 ms or more: two to three pairs of Droplets fit in 300 ms, not six.
+    const first = await source.read(machines, { signal: AbortSignal.timeout(300) });
+    const firstRead = new Set(first.map((sample) => sample.instance));
+    expect(firstRead.size).toBeGreaterThan(0);
+    expect(firstRead.size).toBeLessThan(12);
+    const full = (instance: string) => first.filter((x) => x.instance === instance).length === 4;
+    expect([...firstRead].some(full)).toBe(true);
+    // The next pull starts where this one stopped, so the Droplets left out are read now.
+    const second = await source.read(machines, { signal: new AbortController().signal });
+    const secondRead = new Set(second.map((sample) => sample.instance));
+    for (const instance of machines.map((m) => m.instance))
+      expect(firstRead.has(instance) || secondRead.has(instance)).toBe(true);
+    expect(secondRead.has([...firstRead][0]!)).toBe(true);
+  });
+
+  it('reads several Droplets at a time, and gets round them all under a small budget', async () => {
+    const emu = world();
+    let open = 0;
+    let peak = 0;
+    const counting: typeof fetch = async (input, init) => {
+      open++;
+      peak = Math.max(peak, open);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      try {
+        return await emu.fetch(input, init);
+      } finally {
+        open--;
+      }
+    };
+    const machines = Array.from({ length: 6 }, (_, i) => ({
+      instance: `inst_${i}`,
+      machineId: '42',
+    }));
+    const source = doMetricsSource(doAccount as DoConfig, context, { fetch: counting });
+    expect(
+      new Set(
+        (await source.read(machines, { signal: new AbortController().signal })).map(
+          (x) => x.instance,
+        ),
+      ).size,
+    ).toBe(6);
+    expect(peak).toBe(4);
+
+    // A budget of 4 sweep requests per pull, 4 Droplets at a time: each pull reads part of 4 Droplets, and the next
+    // starts after them, so no Droplet is starved.
+    freshBudgets();
+    const clock = manualClock(now);
+    const tight = doMetricsSource(
+      doAccount as DoConfig,
+      { ...context, clock },
+      {
+        fetch: emu.fetch,
+        budget: { perMinute: 20, perHour: 5000 },
+      },
+    );
+    const seen = new Set<string>();
+    for (let pass = 0; pass < 2; pass++) {
+      // A minute later the budget's window has room again.
+      if (pass) clock.advance(61_000);
+      for (const sample of await tight.read(machines, { signal: new AbortController().signal }))
+        seen.add(sample.instance);
+    }
+    expect(seen.size).toBe(6);
   });
 
   it('plugs into the externalMetrics collector', async () => {

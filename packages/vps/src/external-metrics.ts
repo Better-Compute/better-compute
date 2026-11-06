@@ -19,6 +19,9 @@ import type { CostsDeps } from './costs.js';
 // gauges from that table (`storedExternalMetrics` in @better-compute/observability), and the provider is asked once
 // per period, not once per replica. Key `all` enqueues each account whose client reads metrics; key `<accountId>`
 // reads one account. A failing read is logged and waits for the next period (the rows go stale, read NaN).
+// One read asks for at most `machineLimit` instances (default 500); an account with more is read a page per period,
+// in id order from where the last read of this process stopped, and the rows of its live instances on other pages
+// are kept (only an instance no longer live loses its rows).
 
 export const externalMetricsWork = 'vps.external-metrics';
 
@@ -30,6 +33,8 @@ export const externalMetricsMachineLimit = 500;
 export interface ExternalMetricsOptions {
   /** How often each account is read (default `5m`, at least `1m`). */
   every?: Duration;
+  /** The most instances one account's read asks for (default 500); more are read a page per period. */
+  machineLimit?: number;
 }
 
 export const externalMetricsMigration: Migration = {
@@ -58,6 +63,7 @@ const metricPattern = /^[a-z][a-z0-9_]{0,63}$/;
 export function externalMetricsSettings(options: ExternalMetricsOptions): {
   every: Duration;
   everyMs: number;
+  machineLimit: number;
 } {
   const every = options.every ?? '5m';
   const everyMs = parseDuration(every);
@@ -66,8 +72,18 @@ export function externalMetricsSettings(options: ExternalMetricsOptions): {
       'INVALID_CONFIG',
       'vps({ externalMetrics: { every } }) must be at least 1m',
     );
-  return { every, everyMs };
+  const machineLimit = options.machineLimit ?? externalMetricsMachineLimit;
+  if (!Number.isInteger(machineLimit) || machineLimit < 1 || machineLimit > 10_000)
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'vps({ externalMetrics: { machineLimit } }) must be an integer from 1 to 10000',
+    );
+  return { every, everyMs, machineLimit };
 }
+
+/** An instance the provider names that is still live, as SQL over `instances` (aliased `as`). */
+const liveInstance = (as = '') =>
+  `${as}external_id IS NOT NULL AND ${as}state NOT IN ('deleted', 'deleting', 'lost', 'error')`;
 
 const readsMetrics = (client: { readMetrics?: unknown }): boolean =>
   typeof client.readMetrics === 'function';
@@ -100,19 +116,48 @@ async function readAccountMetrics(
   deps: CostsDeps,
   context: ReconcileContext,
   accountId: string,
+  paging: { limit: number; after: Map<string, string>; warned: Set<string> },
 ): Promise<{ instances: number; samples: number } | undefined> {
   const account = await context.sql.transaction((tx) => readAccount(tx, accountId));
   if (!account) return undefined;
   const client = await deps.clients.client(account, deps);
   if (!client.readMetrics) return undefined;
-  // Every live instance of the account the provider names: a provider-pool VM runs no bcd.
-  const { rows: live } = await context.sql.query<{ id: string; external_id: string }>(
-    `SELECT id, external_id FROM instances
-      WHERE provider_account_id = $1 AND external_id IS NOT NULL
-        AND state NOT IN ('deleted', 'deleting', 'lost', 'error')
-      ORDER BY id LIMIT ${externalMetricsMachineLimit}`,
-    [account.id],
+  // The live instances of the account the provider names (a provider-pool VM runs no bcd), a page at a time: the
+  // ids after the last page this process read, then from the start again.
+  const page = (where: string, params: unknown[], limit: number) =>
+    context.sql.query<{ id: string; external_id: string }>(
+      `SELECT id, external_id FROM instances
+        WHERE provider_account_id = $1 AND ${liveInstance()} ${where}
+        ORDER BY id LIMIT ${limit}`,
+      [account.id, ...params],
+    );
+  const after = paging.after.get(account.id);
+  let { rows: live } = await page(
+    after === undefined ? '' : 'AND id > $2',
+    after === undefined ? [] : [after],
+    paging.limit + 1,
   );
+  let more = live.length > paging.limit;
+  if (more) live = live.slice(0, paging.limit);
+  else if (after !== undefined) {
+    // Wrapped round: fill the page from the start, up to where this pass began.
+    const { rows: head } = await page('AND id <= $2', [after], paging.limit - live.length + 1);
+    more = head.length > paging.limit - live.length;
+    live = [...live, ...head.slice(0, paging.limit - live.length)];
+  }
+  if (more) {
+    paging.after.set(account.id, live[live.length - 1]!.id);
+    if (!paging.warned.has(account.id)) {
+      paging.warned.add(account.id);
+      deps.log.warn(
+        'vps.external-metrics: the account has more live instances than one read asks for',
+        {
+          accountId: account.id,
+          machineLimit: paging.limit,
+        },
+      );
+    }
+  } else paging.after.delete(account.id);
   const machines = live.map((row) => ({ instance: row.id, machineId: row.external_id }));
   let samples: ProviderMetricSample[] = [];
   if (machines.length > 0) {
@@ -142,10 +187,14 @@ async function readAccountMetrics(
   }
   const kept = [...newest.values()];
   await context.sql.transaction(async (tx) => {
-    // An instance no longer live (or no longer on this account) keeps no rows.
+    // An instance no longer live (or no longer on this account) keeps no rows; a live one on another page keeps its.
     await tx.query(
-      `DELETE FROM instance_external_metrics WHERE account_id = $1 AND NOT (instance_id = ANY($2::text[]))`,
-      [account.id, [...known]],
+      `DELETE FROM instance_external_metrics m
+        WHERE m.account_id = $1
+          AND NOT EXISTS (
+            SELECT 1 FROM instances i
+             WHERE i.id = m.instance_id AND i.provider_account_id = $1 AND ${liveInstance('i.')})`,
+      [account.id],
     );
     if (kept.length === 0) return;
     // A sample older than the stored one is ignored.
@@ -176,6 +225,12 @@ export function externalMetricsReconciler(
   deps: (context: ModuleContext) => CostsDeps,
 ): Reconciler {
   const settings = externalMetricsSettings(options);
+  // Where each account's next page starts (this process's memory: a restart starts from the first instance).
+  const paging = {
+    limit: settings.machineLimit,
+    after: new Map<string, string>(),
+    warned: new Set<string>(),
+  };
   return {
     name: externalMetricsWork,
     shardBy: 'none',
@@ -183,7 +238,7 @@ export function externalMetricsReconciler(
     async run(context, key) {
       const resolved = deps(context);
       if (key === 'all') await seed(resolved, context);
-      else await readAccountMetrics(resolved, context, key);
+      else await readAccountMetrics(resolved, context, key, paging);
       return 'DONE';
     },
   };

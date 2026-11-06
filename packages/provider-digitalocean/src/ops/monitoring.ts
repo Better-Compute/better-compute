@@ -15,8 +15,9 @@ import { parseMachineId } from '../ids.js';
 // two points of the per-mode CPU-seconds counters; memory used is total less available; the filesystem is the root
 // mount's. Bandwidth is read as megabits per second (unverified unit) and reported as bytes per second.
 //
-// When the budget runs out mid-pull the samples read so far are answered (the next pull starts where this one
-// stopped, so every Droplet gets its turn); a missing scope fails the pull. A machine id that is not a Droplet id,
+// Droplets are read four at a time (`concurrency`). When the budget runs out mid-pull, or the caller's signal aborts
+// (vps gives each account's read a deadline), the samples read so far are answered and the next pull starts at the
+// first Droplet this one read nothing for, so every Droplet gets its turn; a missing scope fails the pull. A machine id that is not a Droplet id,
 // and a Droplet DO has no data for, give no sample.
 
 export type DoMetricGroup = 'cpu' | 'memory' | 'load' | 'filesystem' | 'bandwidth';
@@ -50,6 +51,8 @@ export interface DoMetricsSource {
 export interface DoMetricsOptions extends DoProviderOptions {
   /** Default `['cpu', 'memory', 'load']`. */
   metrics?: readonly DoMetricGroup[];
+  /** Droplets read at a time (each one's requests stay sequential). Default 4. */
+  concurrency?: number;
 }
 
 const windowSeconds = 600;
@@ -172,6 +175,8 @@ export function doMetricsSource(
     }
   }
 
+  const concurrency = Math.max(1, Math.floor(options.concurrency ?? 4));
+
   return {
     id: 'digitalocean',
     async read(machines, { signal }) {
@@ -185,21 +190,36 @@ export function doMetricsSource(
       });
       if (valid.length === 0) return out;
       const start = cursor % valid.length;
-      for (let i = 0; i < valid.length; i++) {
-        const { instance, host } = valid[(start + i) % valid.length]!;
-        try {
-          await readOne(instance, host, signal, out);
-        } catch (error) {
-          // The budget is spent: answer what was read, and start the next pull here.
-          if (isComputeError(error, 'RATE_LIMITED')) {
-            cursor = start + i;
-            return out;
+      // Per Droplet, in pull order: whether it finished, and whether it gave any sample.
+      const done = new Array<boolean>(valid.length).fill(false);
+      const read = new Array<boolean>(valid.length).fill(false);
+      let next = 0;
+      let stopped = false;
+      let failure: { error: unknown } | undefined;
+      async function worker(): Promise<void> {
+        while (!stopped && !failure && !signal.aborted && next < valid.length) {
+          const i = next++;
+          const { instance, host } = valid[(start + i) % valid.length]!;
+          const before = out.length;
+          try {
+            await readOne(instance, host, signal, out);
+            done[i] = true;
+          } catch (error) {
+            if (isComputeError(error, 'NOT_FOUND')) done[i] = true;
+            // The budget is spent, or the caller's deadline passed: answer what was read so far.
+            else if (signal.aborted || isComputeError(error, 'RATE_LIMITED')) stopped = true;
+            else failure ??= { error };
+          } finally {
+            if (out.length > before) read[i] = true;
           }
-          if (isComputeError(error, 'NOT_FOUND')) continue;
-          throw error;
         }
       }
-      cursor = start;
+      await Promise.all(Array.from({ length: Math.min(concurrency, valid.length) }, worker));
+      if (failure) throw failure.error;
+      const first = done.findIndex((finished, i) => !finished && !read[i]);
+      // The next pull starts at the first Droplet this one gave nothing for (a Droplet read in part had its turn),
+      // so every Droplet gets its turn however many fit in one pull.
+      cursor = first === -1 ? start : start + first;
       return out;
     },
   };
