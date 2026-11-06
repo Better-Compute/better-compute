@@ -12,6 +12,7 @@ import { registerLoadBalancers } from './load-balancers.js';
 import { registerNatGateways } from './nat-gateways.js';
 import { registerTags } from './tags.js';
 import { registerVolumes } from './volumes.js';
+import { registerVpcPeerings } from './vpc-peerings.js';
 import { registerVpcs } from './vpcs.js';
 import { DoState, errorFixtures, type Json } from './state.js';
 
@@ -113,6 +114,8 @@ export class DoEmulator {
   certificateReads = 1;
   /** How many reads a new NAT gateway answers `NEW` to before it is `ACTIVE`; at 0, at once. */
   natGatewayReads = 1;
+  /** How many reads a peering takes to turn `ACTIVE`, and to be gone once deleted; at 0, at once. */
+  peeringReads = 1;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -303,5 +306,6 @@ export class DoEmulator {
     registerDns(this);
     registerCertificates(this);
     registerNatGateways(this);
+    registerVpcPeerings(this);
   }
 }

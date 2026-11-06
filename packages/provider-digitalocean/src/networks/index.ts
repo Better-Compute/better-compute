@@ -8,6 +8,7 @@ import {
   type ProviderNetworks,
   type ProviderNetworkSpec,
   type ProviderNetworkState,
+  type ProviderPeeringSpec,
   type ProviderResourceState,
   type ProviderSubnetSpec,
 } from '@better-compute/core';
@@ -30,10 +31,12 @@ import {
   type DoFirewallBody,
 } from './firewalls.js';
 import { DoNatGateways } from './nat.js';
+import { DoPeerings } from './peering.js';
 import { accountVpcs, checkSubnet, networkDescription, networkOfVpc, vpcLookup } from './vpcs.js';
 
 export * from './firewalls.js';
 export * from './nat.js';
+export * from './peering.js';
 export * from './vpcs.js';
 
 // Tenant networking on DigitalOcean (DO-D9, DO-D10). A network is no DO object of its own: it is
@@ -121,6 +124,8 @@ export class DoNetworks implements ProviderNetworks {
   readonly #deploymentTag: string;
   /** NAT gateways (P4): one per subnet, deleted before their subnet. */
   readonly #nat: DoNatGateways;
+  /** VPC peerings (P4): between subnets of ours, deleted before their subnets. */
+  readonly #peerings: DoPeerings;
   /** The firewall list, per client (one DoNetworks per client); undefined until read. */
   #firewallCache: { loadedAt: number; firewalls: Promise<readonly DoFirewall[]> } | undefined;
 
@@ -129,6 +134,7 @@ export class DoNetworks implements ProviderNetworks {
     this.#config = config;
     this.#deploymentTag = deploymentTag(deployment);
     this.#nat = new DoNatGateways(client, config, deployment, log);
+    this.#peerings = new DoPeerings(client, config, deployment, log);
   }
 
   // ---------------------------------------------------------------------------- NAT gateways
@@ -146,6 +152,14 @@ export class DoNetworks implements ProviderNetworks {
     context: CallContext,
   ): Promise<ProviderResourceState> {
     return this.#nat.delete(region, name, context);
+  }
+
+  ensurePeering(spec: ProviderPeeringSpec, context: CallContext): Promise<ProviderResourceState> {
+    return this.#peerings.ensure(spec, context);
+  }
+
+  deletePeering(name: string, context: CallContext): Promise<ProviderResourceState> {
+    return this.#peerings.delete(name, context);
   }
 
   // ------------------------------------------------------------------------------ firewalls
@@ -374,13 +388,17 @@ export class DoNetworks implements ProviderNetworks {
     // Ordered teardown (P4): the subnet's NAT gateways of ours go first; while any gateway still
     // serves the VPC, DO would refuse its delete, so the subnet stays pending.
     const serving = await this.#nat.release(vpc, signal);
-    if (serving.length > 0) {
-      const foreign = serving.filter((g) => !this.#nat.isOurs(g));
+    const joining = await this.#peerings.release(vpc, signal);
+    if (serving.length > 0 || joining.length > 0) {
+      const foreign = [
+        ...serving.filter((g) => !this.#nat.isOurs(g)).map((g) => `NAT gateway ${g.id}`),
+        ...joining.filter((p) => !this.#peerings.isOurs(p)).map((p) => `peering ${p.id}`),
+      ];
       return state(
         id,
         'pending',
         foreign.length
-          ? `NAT gateway ${foreign.map((g) => g.id).join(', ')}, which better-compute did not make, still serves VPC ${name}`
+          ? `${foreign.join(', ')}, which better-compute did not make, still hold VPC ${name}`
           : undefined,
       );
     }

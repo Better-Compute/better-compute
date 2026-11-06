@@ -70,6 +70,8 @@ export interface ProviderConformanceSubject {
   certificate?: { certificate: SecretRef; privateKey: SecretRef; chain?: SecretRef };
   /** (edge) The CIDR of the subnet the NAT gateway case makes (default `10.250.0.0/24`). */
   natCidr?: string;
+  /** (edge) The CIDRs of the two subnets the peering case makes (default `10.251.0.0/24`, `10.252.0.0/24`). */
+  peeringCidrs?: readonly [string, string];
 }
 
 const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -1072,6 +1074,82 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
           if (made) await networks.deleteNatGateway!(region, name, call('nat-cleanup')).catch(() => {});
           await networks.deleteSubnet(region, subnet, call('nat-cleanup-subnet')).catch(() => {});
           await networks.deleteNetwork(network, call('nat-cleanup-network')).catch(() => {});
+        }
+      },
+    },
+    {
+      name: 'peerings (when offered): two subnets peered by name, deleted idempotently',
+      async run(subject) {
+        const probe = await client(subject);
+        const networks = probe.impl.networks;
+        if (!networks?.ensurePeering || !networks.deletePeering) return;
+        const { impl, call } = probe;
+        const region =
+          subject.region ??
+          (await impl.listOffers({})).find((offer) => offer.id === subject.offerId)?.region;
+        check(region !== undefined, 'the subject names no region and its offer reports none');
+        const network = key(subject, 'peer-net');
+        const left = key(subject, 'peer-a');
+        const right = key(subject, 'peer-b');
+        const name = key(subject, 'peering');
+        const asResource = (step: () => Promise<{ id: string; state: string; message?: string }>) =>
+          step as () => Promise<ProviderResourceState>;
+        let made = false;
+        try {
+          await settle(
+            subject,
+            asResource(() => networks.ensureNetwork({ name: network }, call('peer-network'))),
+            ['ready'],
+            'ensureNetwork',
+          );
+          for (const [subnet, cidr] of [
+            [left, subject.peeringCidrs?.[0] ?? '10.251.0.0/24'],
+            [right, subject.peeringCidrs?.[1] ?? '10.252.0.0/24'],
+          ] as const)
+            await settle(
+              subject,
+              asResource(() =>
+                networks.ensureSubnet({ network, name: subnet, region, cidr }, call(`peer-${subnet}`)),
+              ),
+              ['ready'],
+              'ensureSubnet',
+            );
+          const spec = {
+            name,
+            network,
+            subnet: left,
+            region,
+            peer: { network, subnet: right, region },
+          };
+          const peering = await settle(
+            subject,
+            () => networks.ensurePeering!(spec, call('peer-ensure')),
+            ['ready'],
+            'ensurePeering',
+          );
+          made = true;
+          checkEqual(
+            (await networks.ensurePeering!(spec, call('peer-ensure-again'))).id,
+            peering.id,
+            'ensuring the peering again returns the same peering',
+          );
+          await settle(
+            subject,
+            () => networks.deletePeering!(name, call('peer-delete')),
+            ['deleted'],
+            'deletePeering',
+          );
+          made = false;
+          checkEqual(
+            (await networks.deletePeering!(name, call('peer-delete-again'))).state,
+            'deleted',
+            'deleting a deleted peering counts as deleted',
+          );
+        } finally {
+          if (made) await networks.deletePeering!(name, call('peer-cleanup')).catch(() => {});
+          for (const subnet of [left, right])
+            await networks.deleteSubnet(region, subnet, call(`peer-cleanup-${subnet}`)).catch(() => {});
+          await networks.deleteNetwork(network, call('peer-cleanup-network')).catch(() => {});
         }
       },
     },

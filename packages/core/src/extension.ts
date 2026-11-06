@@ -782,6 +782,29 @@ export interface ProviderNetworks {
   ensureNatGateway?(spec: ProviderNatGatewaySpec, context: CallContext): Promise<ProviderResourceState>;
   /** (edge) Deletes the NAT gateway `name` this deployment made in `region`; a gone one counts as deleted. */
   deleteNatGateway?(region: string, name: string, context: CallContext): Promise<ProviderResourceState>;
+  /**
+   * (edge) Peers two of this deployment's networks (or, on a provider whose subnets are networks of their own, two
+   * subnets), so their machines reach each other on private addresses. Idempotent by `spec.name`; `pending` while the
+   * provider sets it up. Outputs: `networks` (the two provider-side ids, comma-separated). A peering of that name
+   * between other networks is `INVALID_STATE` (reason `replace`); a side that is not this deployment's is
+   * `INVALID_STATE`. A subnet a peering of ours joins is deleted only after the peering (as with NAT gateways).
+   */
+  ensurePeering?(spec: ProviderPeeringSpec, context: CallContext): Promise<ProviderResourceState>;
+  /** (edge) Deletes the peering `name` this deployment made: `deleting`, then `deleted`. */
+  deletePeering?(name: string, context: CallContext): Promise<ProviderResourceState>;
+}
+
+/** (edge) One side of a peering: a network, and the subnet and region where the provider peers subnets. */
+export interface ProviderPeeringSide {
+  network: string;
+  subnet?: string;
+  region?: string;
+}
+
+/** (edge) A network peering as vps asks for it: `name` is the provider-side name vps derives. */
+export interface ProviderPeeringSpec extends ProviderPeeringSide {
+  name: string;
+  peer: ProviderPeeringSide;
 }
 
 /** (edge) A NAT gateway as vps asks for it: `name` is the provider-side name vps derives. */

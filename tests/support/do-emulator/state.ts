@@ -67,6 +67,8 @@ export class DoState {
   domainRecords = new Map<number, Json>();
   /** Keyed by uuid. DO VPC NAT gateways. */
   natGateways = new Map<string, Json>();
+  /** Keyed by uuid. DO VPC peerings. */
+  vpcPeerings = new Map<string, Json>();
   regions: Json[] = structuredClone(fixture('regions').regions as Json[]);
   sizes: Json[] = structuredClone(fixture('sizes').sizes as Json[]);
 

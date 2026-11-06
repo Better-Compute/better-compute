@@ -28,7 +28,8 @@ const dnsCase =
 const certCase = 'certificates (when offered): a custom certificate by name, deleted idempotently';
 const natCase =
   'nat gateways (when offered): one per subnet by name; the subnet goes only after its gateway';
-const edgeCases = [lbCase, lbRegionCase, dnsCase, certCase, natCase];
+const peeringCase = 'peerings (when offered): two subnets peered by name, deleted idempotently';
+const edgeCases = [lbCase, lbRegionCase, dnsCase, certCase, natCase, peeringCase];
 
 const fail = (code: ConstructorParameters<typeof ComputeError>[0], message: string) =>
   new ComputeError(code, message);
@@ -203,6 +204,7 @@ function fakeProvider(breaks: Breaks = {}, members: { edge?: boolean } = {}) {
 
   const subnets = new Set<string>();
   const gateways = new Map<string, string>();
+  const peerings = new Map<string, 'ready' | 'deleting'>();
   const networks: ProviderNetworks = {
     ensureNetwork: async (spec) => ({ id: spec.name, state: 'ready' }),
     ensureSubnet: async (spec) => {
@@ -235,6 +237,21 @@ function fakeProvider(breaks: Breaks = {}, members: { edge?: boolean } = {}) {
     deleteNatGateway: async (region, name) => {
       gateways.delete(`${region}/${name}`);
       return state(`${region}/${name}`, 'deleted');
+    },
+    ensurePeering: async (spec) => {
+      const known = peerings.get(spec.name);
+      peerings.set(spec.name, 'ready');
+      return state(spec.name, known ? 'ready' : 'pending');
+    },
+    deletePeering: async (name) => {
+      const known = peerings.get(name);
+      if (known === undefined) return state(name, 'deleted');
+      if (known === 'ready') {
+        peerings.set(name, 'deleting');
+        return state(name, 'deleting');
+      }
+      peerings.delete(name);
+      return state(name, 'deleted');
     },
   };
 
