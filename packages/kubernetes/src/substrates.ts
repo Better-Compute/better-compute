@@ -1020,13 +1020,13 @@ async function removeGoneNodes(
     }
     if (candidate.removed || !gone) continue;
     await sql.transaction(async (tx) => {
-      // Re-read under the node's lock: one that reconnected meanwhile is not gone.
-      const { rows: locked } = await tx.query<{ id: string }>(
-        `UPDATE nodes SET no_schedule_reasons = array_append(no_schedule_reasons, $2), version = version + 1
-          WHERE id = $1 AND connectivity <> 'connected' AND NOT ($2 = ANY(no_schedule_reasons)) RETURNING id`,
+      // Re-read: one that reconnected meanwhile is not gone. Capacity's lock order (reservations, quota, then
+      // nodes) is kept: the reservations end first, the node row is written last.
+      const { rows: still } = await tx.query<{ id: string }>(
+        `SELECT id FROM nodes WHERE id = $1 AND connectivity <> 'connected' AND NOT ($2 = ANY(no_schedule_reasons))`,
         [candidate.id, substrateNodeRemovedReason],
       );
-      if (locked.length === 0) return;
+      if (still.length === 0) return;
       const ended = await endNodeReservations(
         {
           clock: deps.clock,
@@ -1037,6 +1037,11 @@ async function removeGoneNodes(
         tx,
         candidate.id,
         'node-removed',
+      );
+      await tx.query(
+        `UPDATE nodes SET no_schedule_reasons = array_append(no_schedule_reasons, $2), version = version + 1
+          WHERE id = $1 AND NOT ($2 = ANY(no_schedule_reasons))`,
+        [candidate.id, substrateNodeRemovedReason],
       );
       await publishSubstrate(deps, tx, row, 'kubernetes.substrate.node-removed', {
         nodeId: candidate.id,
