@@ -38,6 +38,10 @@ One provider account is one AWS account in one region. A fleet in several region
 | `discoverTag`                | –          | `key=value`: discovery yields only instances carrying this tag.                                                                                 |
 | `ipamPoolId`                 | –          | Networks: allocate each VPC range from this Amazon VPC IPAM pool (the network's `cidr` gives the size).                                         |
 | `securityGroupsPerInterface` | `5`        | Networks: the account's security groups per network interface quota; network tags past it are `QUOTA_EXCEEDED`.                                 |
+| `spot`                       | `false`    | Offer and launch Spot capacity (`<zone>/<type>:spot`).                                                                                          |
+| `quotas`                     | `true`     | Cap offers at the EC2 vCPU quota headroom (Service Quotas).                                                                                     |
+| `pricing`                    | `off`      | `off`, `on-demand` (the AWS Price List) or `all` (adds Spot prices).                                                                            |
+| `allowPurchases`             | `false`    | Allow buying capacity (Capacity Blocks, new ODCRs) in this platform account. Spends money.                                                      |
 
 `awsConfig.parse` checks field shapes (`INVALID_INPUT`); the provider checks the region, that every zone is in it, and the role ARN's shape and partition (`INVALID_CONFIG`), so `providerAccounts.create` refuses a bad account before it is stored.
 
@@ -77,7 +81,7 @@ Every instance, root volume and primary network interface better-compute creates
 
 ## Offers and ids
 
-An offer id is `<zone>/<instanceType>`, as in `us-east-1a/p5.48xlarge`. `listOffers` lists the on-demand types offered in the account's zones, skipping bare metal, with vCPUs, memory and GPUs (NVIDIA H100, H200, B200, A100, L4, L40S, A10G and T4 by name; others are `other`). Capacity reservation (`@cr-…`) and Spot (`:spot`) offers parse, and are refused by `create` until AWS phase A3 (`UNSUPPORTED`, reason `phase-a3`). Instance types are cached for a day, offerings and zone ids for an hour. A machine id is the instance id `i-…`; its labels carry `topology.aws/zone-id`.
+An offer id is `<zone>/<instanceType>`, as in `us-east-1a/p5.48xlarge`. `listOffers` lists the on-demand types offered in the account's zones, skipping bare metal, with vCPUs, memory and GPUs (NVIDIA H100, H200, B200, A100, L4, L40S, A10G and T4 by name; others are `other`). Every offer carries `arch`. Capacity reservation (`@cr-…`) and Spot (`:spot`) offers are described under [Capacity markets](#capacity-markets). Instance types are cached for a day, offerings and zone ids for an hour. A machine id is the instance id `i-…`; its labels carry `topology.aws/zone-id`.
 
 ## Images
 
@@ -109,6 +113,17 @@ EC2 takes at most 16 384 bytes of user data. With SSH keys, the user data is a M
 
 `power` maps `on` to `StartInstances`, `graceful-off` and `off` to `StopInstances` (`off` with `Force`), `reset`, `cycle` and `graceful-restart` to `RebootInstances`, and `nmi` to `SendDiagnosticInterrupt`. EC2 refuses a start while an instance is stopping and a stop or reboot while it is pending; `power` reports those states (and an `IncorrectInstanceState` from a state change between its read and its call) as `UNAVAILABLE` (reason `transitional-state`), which the reconciler retries, rather than `INVALID_STATE`, which would fail the instance. `reinstall` replaces the root volume (`CreateReplaceRootVolumeTask`) with the resolved image and does not block.
 
+## Capacity markets
+
+- **Reservations.** `listReservations` reads On-Demand Capacity Reservations and Capacity Blocks for ML (`DescribeCapacityReservations`): an ODCR is reservation `cr-…`, a block `cb:cr-…`. `active` is `ready`; `scheduled`, `payment-pending`, `assessing` and `delayed` are `scheduled`; `pending` is `creating`; gone and unknown states are left out, and so are reservations create cannot launch into (not Linux/UNIX, dedicated tenancy, or outside the account's zones). A reservation another account shares through RAM is `shared`, its zone resolved from the zone id. Ready reservations are offered as `<zone>/<type>@<cr-id>` with their free slots as `count` (market `reserved` or `capacity-block`), and vps admits creates against them (`claimReservationSlot`). `create` on such an offer reads the reservation first (it must be active and hold that type in that zone), targets it, and adds `MarketType=capacity-block` for a block. Machines report `market` and `reservation`.
+- **Spot.** With `spot`, every on-demand offer has a `:spot` twin. A Spot create is a one-time request that terminates on interruption (a shutdown from inside terminates it too). A reclaimed Spot Instance reads as `deleted` with `interruption { kind: 'spot', at, action }`.
+- **Quotas.** With `quotas`, offers carry the EC2 vCPU quota headroom of their family as a machine `count` (`GetServiceQuota`; usage is the vCPUs of pending and running instances, Spot against the Spot quota), and an offer with none left is not available. Cached 5 minutes; an unreadable quota leaves `count` unset.
+- **Prices.** `pricing: 'on-demand'` reads one region-wide Price List `GetProducts` (Linux, shared tenancy, no pre-installed software), cached a day; `'all'` adds `DescribeSpotPriceHistory` for Spot offers, cached 10 minutes. A failed read leaves prices unset and never fails `listOffers`.
+- **Buying.** `listReservationOfferings` (a read) lists the ODCRs the account could create now and the Capacity Blocks on sale. `purchaseReservation` spends money: it is refused unless `allowPurchases` and the account is a platform account, a Capacity Block is bought only while it is on sale at no more than its listed price (the offering id carries both), and a retry with the same key returns what the first attempt bought (the reservation's `better-compute:purchase` tag, and an ODCR's `ClientToken`). `PurchaseCapacityBlock` has no `ClientToken` and EC2's reads lag, so after an attempt that may have bought (vps passes `uncertainSince`) a retry also looks for the block by type, zone, count, start and creation time, and buys again only once `purchasePropagationMs` (15 min) passed with nothing in sight. Without `allowPurchases` the client has no `purchaseReservation` at all. vps's `providerAccounts.purchaseReservation` is root-only, needs `confirm: true`, and buys exactly once.
+- **Policy.** `aws iam-policy` always grants the reservation, offering and Spot price reads, the vCPU quota reads and launches into reservations (any owner's ARN, so RAM-shared ODCRs work with `--account`); `--spot`, `--pricing` and `--allow-purchases` add Spot launches, the Price List and buying (only tagged `better-compute:managed=true`).
+
+The vCPU quota codes beyond standard, G/VT and P (and their Spot twins) are marked _verify_ in `src/markets/quotas.ts`, as are the resource types `PurchaseCapacityBlock` authorizes against.
+
 ## Discovery and attach
 
 `discover` yields every instance that is not terminated (only those tagged `discoverTag`, when set). `claim` writes `better-compute:instance` (and `better-compute:managed` when deletion is handed over) and re-reads: EC2 tags have no compare-and-swap, so a re-read naming another instance is a lost race (`CONFLICT`). Tag reads lag behind writes too: a re-read that does not show the tag (or `managed`) yet is `UNAVAILABLE` (reason `tag-propagation`, retried), and so is a `delete` right after a managed claim that does not see `managed` yet. The vps unique index on the external id referees between control planes. `release` removes the tags only when they name the instance. Deleting an attached instance detaches it by default and leaves it running.
@@ -127,7 +142,7 @@ EC2 takes at most 16 384 bytes of user data. With SSH keys, the user data is a M
 
 ## What comes next
 
-Capacity reservations, Capacity Blocks, Spot and prices (A3), event intake and Spot interruptions (A4), EBS volumes (A5), EC2 hosts joining as bcd nodes (A6), workload roles (A7), EKS (A9), placement groups and EFA (A10), and costs (A11), per `docs/superpowers/plans/2026-10-18-aws-integration-program.md`.
+Event intake and Spot interruptions (A4), EBS volumes (A5), EC2 hosts joining as bcd nodes (A6), workload roles (A7), EKS (A9), placement groups and EFA (A10), and costs (A11), per `docs/superpowers/plans/2026-10-18-aws-integration-program.md`.
 
 ## Testing
 

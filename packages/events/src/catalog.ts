@@ -219,6 +219,13 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
       'Provider capacity reservations seen by the vps.reservations worker: detected { accountId, reservationId, machineType, gpus?, total, state, startsAt? }, changed (+ free, inUse, changes), ready (a scheduled or creating reservation became ready), gone (+ poolId, flavorId when it was bound)',
   },
   {
+    type: 'provider.purchase.*',
+    subject: 'provider-account/{id}',
+    module: 'vps',
+    description:
+      'Provider capacity purchases (AWS A3): requested { accountId, purchaseId, offeringId }, completed (+ reservationId, state), failed (+ code), unknown (+ code: the attempts ran out while one may have bought; check the account)',
+  },
+  {
     type: 'billing.*',
     subject: 'provider-account/{id}',
     module: 'vps',

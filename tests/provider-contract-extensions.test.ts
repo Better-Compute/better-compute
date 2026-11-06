@@ -5,8 +5,11 @@ import {
   type CallContext,
   type ExternalMachine,
   type ExternalReservation,
+  type Offer,
   type ProviderImpl,
   type ProviderNetworks,
+  type ReservationOffering,
+  type ReservationOfferingQuery,
 } from '@better-compute/core';
 import { runConformance } from '@better-compute/core/conformance';
 import { defineProvider, providerConformanceCases } from '@better-compute/vps';
@@ -219,5 +222,63 @@ describe('provider contract extensions', () => {
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
     expect(report.passed).toContain('claim then release round-trips the label');
     expect(report.passed).toContain('discover yields the attachable machine');
+  });
+
+  it('defineProvider accepts the capacity-market members (AWS A3)', async () => {
+    const offering: ReservationOffering = {
+      id: 'cb:cbr-0123456789abcdef0',
+      instanceType: 'p5.48xlarge',
+      zone: 'us-east-1a',
+      count: 2,
+      startsAt: clock.now() + 86_400_000,
+      endsAt: clock.now() + 2 * 86_400_000,
+      upfrontPrice: 2_000,
+      currency: 'USD',
+    };
+    const queries: ReservationOfferingQuery[] = [];
+    const def = defineProvider({
+      id: 'market-fake',
+      version: '1.0.0',
+      provides: ['vps'],
+      config: manifest({}),
+      create: () =>
+        ({
+          listOffers: async () => [
+            { ...offer, market: 'spot', arch: 'arm64', count: 3 },
+            { ...offer, id: 'o2', market: 'capacity-block', count: 0, available: false },
+          ],
+          create: async () => machine('vm-1', { market: 'spot' }),
+          get: async (id) =>
+            machine(id, {
+              state: 'deleted',
+              market: 'spot',
+              interruption: { kind: 'spot', at: clock.now(), action: 'terminate' },
+            }),
+          delete: async () => {},
+          listReservationOfferings: async (query) => {
+            queries.push(query);
+            return [offering];
+          },
+          purchaseReservation: async (id) => ({ ...reservation, id: `cb:${id}` }),
+        }) satisfies ProviderImpl,
+    });
+    const impl = await def.create({}, { clock, secrets: context.secrets, log: context.log });
+    const offers: Offer[] = await impl.listOffers({});
+    expect(offers.map((o) => [o.market, o.count])).toEqual([
+      ['spot', 3],
+      ['capacity-block', 0],
+    ]);
+    expect((await impl.get('vm-1', context))?.interruption).toEqual({
+      kind: 'spot',
+      at: clock.now(),
+      action: 'terminate',
+    });
+    const found = await impl.listReservationOfferings!(
+      { instanceType: 'p5.48xlarge', count: 2, durationHours: 24 },
+      context,
+    );
+    expect(found).toEqual([offering]);
+    expect(queries).toEqual([{ instanceType: 'p5.48xlarge', count: 2, durationHours: 24 }]);
+    expect((await impl.purchaseReservation!(offering.id, context)).id).toBe(`cb:${offering.id}`);
   });
 });

@@ -50,6 +50,7 @@ export const awsErrorCodes: Readonly<Partial<Record<ErrorCode, readonly string[]
     'NoSuchKey',
     'NoSuchBucket',
     'NoSuchEntity',
+    'NoSuchResourceException',
   ],
   CONFLICT: [
     'IdempotentParameterMismatch',

@@ -79,6 +79,30 @@ export const awsConfig = manifest({
     .describe(
       "Networks: the account's security groups per network interface quota (default 5): network tags past it are refused",
     ),
+  spot: field
+    .boolean()
+    .default(false)
+    .describe(
+      'Offer Spot capacity (<zone>/<type>:spot): one-time requests that EC2 may reclaim, terminated on interruption',
+    ),
+  quotas: field
+    .boolean()
+    .default(true)
+    .describe(
+      'Read the EC2 vCPU quotas (Service Quotas) so offers carry their headroom as a machine count',
+    ),
+  pricing: field
+    .option(['off', 'on-demand', 'all'])
+    .default('off')
+    .describe(
+      'Offer prices: on-demand from the AWS Price List (cached a day), all adds Spot prices (cached 10 minutes)',
+    ),
+  allowPurchases: field
+    .boolean()
+    .default(false)
+    .describe(
+      'Allow buying capacity (Capacity Blocks, new ODCRs) in this platform account; spends money, root-only and confirmed',
+    ),
 });
 
 /** The validated account configuration. */
@@ -98,12 +122,20 @@ export interface AwsConfig {
   discoverTag?: string;
   ipamPoolId?: string;
   securityGroupsPerInterface?: number;
+  /** (A3) Offer and launch Spot capacity. */
+  spot: boolean;
+  /** (A3) Cap offers at the EC2 vCPU quota headroom. */
+  quotas: boolean;
+  /** (A3) Which offer prices to read. */
+  pricing: 'off' | 'on-demand' | 'all';
+  /** (A3) Allow purchaseReservation (spends money). */
+  allowPurchases: boolean;
 }
 
 export interface AwsProviderOptions {
   fetch?: typeof fetch;
   /** Tests and VPC endpoints; host options, never account config. */
-  endpoints?: Partial<Record<'ec2' | 'sts', string>>;
+  endpoints?: Partial<Record<'ec2' | 'sts' | 'servicequotas' | 'pricing', string>>;
   /** Ambient identity for platform accounts (default `ambientCredentials()`). */
   credentials?: CredentialSource;
   /** ExternalId prefix: `${externalIdPrefix}:${providerAccountId}` (default 'better-compute'). */
