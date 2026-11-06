@@ -74,6 +74,10 @@ const volume = await compute.api.providerVolumes.create(token, {
 Once it is `ready`, `device` is the path the guest sees it at. On DigitalOcean that is
 `/dev/disk/by-id/scsi-0DO_Volume_<name>`, where `<name>` is the provider name derived from the volume id.
 
+better-compute does not mount it yet: the volume arrives in the guest without a reboot, as a block device (formatted
+when you asked for a `filesystem`), and the guest mounts it, for example with an `/etc/fstab` line on that path with
+`nofail`. Mounting by bcd, and a cloud-init mount for volumes attached at create time, are planned.
+
 The other methods of `providerVolumes`:
 
 | Method     | What it does                                                                                       |

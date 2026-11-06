@@ -632,6 +632,12 @@ Spending stays under the test account's cap; the sweeper leaves no `better-compu
 - **Attach without a reboot.** The guest sees the device as `/dev/disk/by-id/scsi-0DO_Volume_<name>`. On an attach
   after boot, bcd mounts it if the instance has an agent; otherwise the cloud-init snippet that `create` renders
   mounts volumes attached at create time.
+  - *Deferred (2026-11-05, lane do-volumes):* not in P2. vps attaches a provider volume only after its instance's
+    machine exists (`providerVolumes.create` with `instanceId`, or `attach`), so no volume is attached at create time
+    for a cloud-init snippet to mount, and bcd has no mount hook yet. A volume reaches `ready` with its `device` and
+    the guest mounts it. Follow-up: a bcd mount on `providerVolume.attached` for instances with an agent, then a
+    create-time attach (DO `volumes` on the Droplet create) with a rendered mount unit
+    (`/dev/disk/by-id/scsi-0DO_Volume_<name>`, a tenant-chosen or default mount point, `nofail`).
 
 **Task titles**
 
