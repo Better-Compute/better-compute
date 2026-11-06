@@ -12,3 +12,11 @@ export { clustersWork, providerClusterName, type KubernetesDeps } from './store.
 export { clustersReconciler, reconcileCluster, clusterLabel, clusterPollMs } from './reconciler.js';
 export { credentialSubject, renderKubeconfig } from './kubeconfig.js';
 export { clusterHoursMeter, meterClusters } from './usage.js';
+export {
+  parsePoolSubstrate,
+  substrateIdentity,
+  substratePolicyValidator,
+  type PoolSubstrate,
+  type SubstrateCreate,
+  type SubstrateFlavor,
+} from './substrate-policy.js';

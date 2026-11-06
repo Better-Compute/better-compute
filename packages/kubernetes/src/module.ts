@@ -51,6 +51,7 @@ import {
 } from './parse.js';
 import { clustersReconciler } from './reconciler.js';
 import { clustersWork, type KubernetesDeps } from './store.js';
+import { substratePolicyValidator } from './substrate-policy.js';
 import type {
   ClusterRef,
   CreateClusterInput,
@@ -300,6 +301,8 @@ export function kubernetes(
     name: 'kubernetes',
     requires: ['vps'],
     migrations: [...kubernetesMigrations],
+    // pools.create/update refuse a policy.substrate the substrate reconciler could not converge.
+    extensions: [substratePolicyValidator],
     api,
     reconcilers: [
       // Clusters and node pools converged through the provider.

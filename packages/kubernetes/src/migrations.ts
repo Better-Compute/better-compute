@@ -108,6 +108,62 @@ ALTER TABLE usage_windows
 `,
 };
 
+/**
+ * Pool substrates (`policy.substrate`): a pool whose machines are the nodes of a managed cluster. The
+ * `kubernetes.substrates` reconciler records here what it made of the pool's policy; the cluster and its node pools
+ * are ordinary `kubernetes_clusters` / `kubernetes_node_pools` rows marked with `substrate_pool_id`, so the cluster
+ * reconciler, the events, metering and `kubernetesClusters.update` (upgrades) apply to them.
+ *
+ * - `kubernetes_clusters.adopted`: a cluster that existed before (`cluster: { adopt }`). The cluster reconciler reads
+ *   it (`getCluster`) and never creates, changes or deletes it; only its substrate node pools are converged.
+ * - `kubernetes_pool_substrates`: one row per pool that ever had a substrate. `identity` is the canonical account and
+ *   cluster the row was made for (immutable, K-D8); `create_spec` the create-time settings last pushed to the cluster
+ *   row (so a `kubernetesClusters.update` made meanwhile is not reverted); `join_token_id` the live hosted token, if
+ *   any (never the secret); `manifests_sha256` what was last applied (without the token). No credential is stored.
+ */
+export const kubernetesSubstratesMigration: Migration = {
+  name: 'kubernetes/0002_substrates',
+  sql: `
+ALTER TABLE kubernetes_clusters ADD COLUMN adopted bool NOT NULL DEFAULT false;
+ALTER TABLE kubernetes_clusters ADD COLUMN substrate_pool_id text;
+ALTER TABLE kubernetes_node_pools ADD COLUMN substrate_pool_id text;
+CREATE INDEX kubernetes_node_pools_substrate ON kubernetes_node_pools (substrate_pool_id)
+  WHERE substrate_pool_id IS NOT NULL AND state <> 'deleted';
+
+CREATE TABLE kubernetes_pool_substrates (
+  pool_id text PRIMARY KEY,
+  tenant_id text NOT NULL,
+  provider_account_id text NOT NULL,
+  mode text NOT NULL CHECK (mode IN ('create', 'adopt')),
+  -- The provider id of the adopted cluster (mode adopt).
+  adopt_id text,
+  identity text NOT NULL,
+  -- The kubernetes_clusters row (created, or the adopted cluster's row).
+  cluster_id text,
+  create_spec jsonb,
+  state text NOT NULL
+    CHECK (state IN ('pending', 'provisioning', 'ready', 'updating', 'error', 'deleting', 'deleted')),
+  desired_state text NOT NULL CHECK (desired_state IN ('present', 'deleted')),
+  message text,
+  join_token_id text,
+  manifests_sha256 text,
+  applied_at timestamptz,
+  -- Nodes of the substrate's node pools the cluster last listed, and of them the ones whose bcd joined the pool.
+  nodes_listed integer,
+  nodes_joined integer,
+  created_at timestamptz NOT NULL DEFAULT compute_now(),
+  updated_at timestamptz NOT NULL DEFAULT compute_now(),
+  deleted_at timestamptz,
+  version bigint NOT NULL
+);
+-- One live substrate per cluster.
+CREATE UNIQUE INDEX kubernetes_pool_substrates_cluster ON kubernetes_pool_substrates (cluster_id)
+  WHERE state <> 'deleted' AND cluster_id IS NOT NULL;
+CREATE INDEX kubernetes_pool_substrates_live ON kubernetes_pool_substrates (pool_id) WHERE state <> 'deleted';
+`,
+};
+
 export const kubernetesMigrations: readonly Migration[] = Object.freeze([
   kubernetesClustersMigration,
+  kubernetesSubstratesMigration,
 ]);
