@@ -15,9 +15,19 @@ export interface DoAccountReport {
   /** `dropletLimit` is absent when the token lacks `droplet:read`: DigitalOcean then leaves it out. */
   account: { uuid: string; status: string; dropletLimit?: number };
   families: Record<'compute' | 'networks' | 'keys' | 'tags', DoFamilyState>;
-  /** The read scopes the token lacks, in probe order. */
+  /** The read scopes the token lacks, in probe order (the operations scopes last). */
   missing: string[];
+  /** (P9) The operations families, only when the probe is asked for them (`{ operations: true }`). */
+  operations?: Partial<Record<DoOperationsFamily, DoFamilyState>>;
 }
+
+/** (P9) Read scopes the operations surfaces need: none of them is needed to run Droplets. */
+export type DoOperationsFamily = 'billing';
+
+/** One read per operations scope. */
+const operationsProbes: readonly { family: DoOperationsFamily; path: string; scope: string }[] = [
+  { family: 'billing', path: '/customers/my/balance', scope: 'billing:read' },
+];
 
 type Family = keyof DoAccountReport['families'];
 
@@ -55,6 +65,7 @@ export async function probeAccount(
   config: DoConfig,
   context: ProviderContext,
   options: DoProviderOptions = {},
+  scope: { operations?: boolean } = {},
 ): Promise<DoAccountReport> {
   const client: DoClient = clientFor(config, context, options);
   const controller = new AbortController();
@@ -64,7 +75,7 @@ export async function probeAccount(
     controller.abort();
   }, probeTimeoutMs);
   try {
-    return await probe(client, controller.signal);
+    return await probe(client, controller.signal, scope.operations === true);
   } catch (error) {
     // The client rethrows an abort as it is; a caller should see a ComputeError.
     if (timedOut)
@@ -80,28 +91,33 @@ export async function probeAccount(
   }
 }
 
-async function probe(client: DoClient, signal: AbortSignal): Promise<DoAccountReport> {
+/** Whether a GET is refused for scope (true), allowed (false), or failed otherwise (thrown). */
+async function refusedForScope(
+  client: DoClient,
+  path: string,
+  signal: AbortSignal,
+): Promise<boolean> {
+  try {
+    await client.request('GET', path, { query: { per_page: '1' }, signal, budget: 'observe' });
+    return false;
+  } catch (error) {
+    if (isComputeError(error, 'ACCESS_DENIED')) return true;
+    throw error;
+  }
+}
+
+async function probe(
+  client: DoClient,
+  signal: AbortSignal,
+  withOperations: boolean,
+): Promise<DoAccountReport> {
   const { account } = await client.request<{
     account?: { uuid?: unknown; status?: unknown; droplet_limit?: unknown };
   }>('GET', '/account', { signal, budget: 'observe' });
   // droplet_limit needs droplet:read in DigitalOcean's model: without it the body omits the field.
   if (typeof account?.uuid !== 'string' || typeof account.status !== 'string') throw badBody();
 
-  const denied = await Promise.all(
-    probes.map(async ({ path }) => {
-      try {
-        await client.request('GET', path, {
-          query: { per_page: '1' },
-          signal,
-          budget: 'observe',
-        });
-        return false;
-      } catch (error) {
-        if (isComputeError(error, 'ACCESS_DENIED')) return true;
-        throw error;
-      }
-    }),
-  );
+  const denied = await Promise.all(probes.map(({ path }) => refusedForScope(client, path, signal)));
 
   const families: DoAccountReport['families'] = {
     compute: 'ok',
@@ -115,7 +131,19 @@ async function probe(client: DoClient, signal: AbortSignal): Promise<DoAccountRe
     families[family] = 'denied';
     missing.push(scope);
   });
+  let operations: DoAccountReport['operations'];
+  if (withOperations) {
+    const refused = await Promise.all(
+      operationsProbes.map(({ path }) => refusedForScope(client, path, signal)),
+    );
+    operations = {};
+    operationsProbes.forEach(({ family, scope }, i) => {
+      operations![family] = refused[i] ? 'denied' : 'ok';
+      if (refused[i]) missing.push(scope);
+    });
+  }
   return {
+    ...(operations ? { operations } : {}),
     account: {
       uuid: account.uuid,
       status: account.status,
