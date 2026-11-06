@@ -1,4 +1,4 @@
-import { manualClock, type ManualClock } from '@better-compute/core';
+import { manualClock, type Clock, type ManualClock } from '@better-compute/core';
 import type { CredentialSource } from '@better-compute/aws-core';
 import { StsEmulator } from './sts.js';
 import { ec2Error, jsonError, queryError } from './xml.js';
@@ -104,9 +104,16 @@ export class AwsEmulator {
     this.#after.set(operation, hook);
   }
 
+  #follow: Clock | undefined;
+
+  /** Reads time from `clock` from now on (a compute fixture's sim clock). */
+  follow(clock: Clock): void {
+    this.#follow = clock;
+  }
+
   /** The emulator's view of now. */
   now(): number {
-    return this.clock.now() + this.skewMs;
+    return (this.#follow ?? this.clock).now() + this.skewMs;
   }
 
   /** Requests for one operation. */
