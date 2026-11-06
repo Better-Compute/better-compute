@@ -1,0 +1,14 @@
+{
+  "_provenance": "Shape: the BYOIP API reference (byoip_prefixes): uuid, prefix, region, status (active once validated and advertised), validations, failure_reason, advertised, locked, project_id. Taken from the docs, not from a recorded response: every field is unverified. How a reserved IP is drawn from a prefix is unverified too: the provider sends POST /v2/reserved_ips with { region, byoip_prefix_uuid } (this emulator's assumption) behind previews: true. Values are illustrative (TEST-NET-3).",
+  "byoip_prefix": {
+    "uuid": "f00b8f6e-5b8a-4a3c-9d0e-1c2b3a4d5e6f",
+    "prefix": "203.0.113.0/24",
+    "region": "nyc3",
+    "status": "active",
+    "validations": [],
+    "failure_reason": "",
+    "advertised": true,
+    "locked": false,
+    "project_id": "746c6152-2fa2-11ed-92d3-27aaa54e4988"
+  }
+}

@@ -57,6 +57,8 @@ export class DoState {
   reservedIps = new Map<string, Json>();
   /** Keyed by address. DO reserved IPv6 addresses. */
   reservedIpv6 = new Map<string, Json>();
+  /** Keyed by uuid. DO BYOIP prefixes (read-only to the provider). */
+  byoipPrefixes = new Map<string, Json>();
   /** Keyed by uuid. DO load balancers (regional and global). */
   loadBalancers = new Map<string, Json>();
   /** Keyed by uuid. DO certificates. */
