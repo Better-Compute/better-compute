@@ -99,9 +99,18 @@ globs); an instance names one as `instances.create` `workloadIdentity.awsRoleArn
 `sts.amazonaws.com`, subject `t:<tenantId>:instance:<id>`, from the gateway's workload broker, which must list
 that audience) for the role's credentials and serves them on the guest's AWS-compatible metadata paths.
 `better-compute aws workload-role --tenant <tenantId> --issuer <issuer URL> [--policy-arn <arn>]` renders the OIDC
-provider and the role, trusting `aud` `sts.amazonaws.com` and `sub` like `t:<tenantId>:instance:*`. That trust is
-the boundary: the pool's allow-list only narrows which role bcd asks for, and any instance of the tenant in a pool
-with workload identity on can present such a token.
+provider and the role, trusting `aud` `sts.amazonaws.com` and `sub` like `t:<tenantId>:instance:*`.
+
+That trust pins the tenant, not the pool or the instance. The workload broker therefore mints a token for
+`sts.amazonaws.com` only for an instance that names a role its pool still allows (refusal `audience`, reason
+`aws-role-not-allowed`), so an instance without an allowed role cannot get one at all. Until bcd's guest-facing
+`/latest/identity-token` also refuses that audience (the Go half of A7), a guest of an instance that *does* have
+an allowed role can fetch its own STS token and assume any other workload role of its tenant: treat every role
+`aws workload-role` renders for a tenant as reachable by that tenant's role-bearing instances, and keep roles
+that must stay apart in separate tenants.
+
+IAM Roles Anywhere for bcd nodes outside AWS (plan question AQ9) is deferred, as the plan's default: workloads get
+AWS credentials only through this web identity exchange.
 
 The commands ship with this package (the CLI never imports providers). Add them to your configuration:
 

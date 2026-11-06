@@ -30,7 +30,8 @@ import {
 // (`policy.workloadRoles.aws`, ARN globs) on a pool that turned workload identity on; vps passes it
 // to the host as `InstanceSpec.awsRole`, where bcd exchanges the instance's workload token for the
 // role's credentials (aud sts.amazonaws.com, sub t:<tenant>:instance:<id>). The role's own trust
-// pins the tenant, so the allow-list narrows which role bcd asks for; it never widens who may.
+// pins only the tenant; the workload broker enforces the allow-list for that audience
+// (tests/e2e/imds.test.ts).
 
 const T0 = Date.UTC(2026, 8, 24, 12);
 const SITE = 'site_01jz0000000000000000000a71';

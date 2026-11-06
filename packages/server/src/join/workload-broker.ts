@@ -1,3 +1,4 @@
+import { allowedAwsRole } from '@better-compute/capacity';
 import {
   isComputeError,
   newId,
@@ -30,7 +31,11 @@ import type { GatewayCallContext } from './service.js';
 //     before anything else is looked up;
 //  2. the instance is live and placed on that node, with a live allocation there;
 //  3. its pool turned workload identity on (`policy.workloadIdentity: true`);
-//  4. the audience is the issuer's default ('') or one of the configured audiences;
+//  4. the audience is the issuer's default ('') or one of the configured audiences, and a token for
+//     AWS STS (aud `sts.amazonaws.com`, AWS A7) only for an instance that names an AWS role its pool
+//     still allows (`policy.workloadRoles.aws`, as vps's instance spec): every `aws workload-role`
+//     trusts the whole tenant's instances, so the pool allow-list is enforced here, not only by which
+//     role bcd asks for;
 //  5. the request id was not used before, and the instance is within its rate.
 // Tokens live at most 15 minutes. The audit row carries the jti, never the token.
 
@@ -60,6 +65,19 @@ export interface WorkloadBrokerPort {
     request: WorkloadTokenRequest,
     context?: GatewayCallContext,
   ): Promise<WorkloadTokenResponse>;
+}
+
+/** AWS STS's web identity audience (AWS A7): minted only for an instance with an allowed role. */
+export const stsWorkloadAudience = 'sts.amazonaws.com';
+
+/** A token's `aud` claim, read back (the issuer's default audience is not otherwise known here). */
+function tokenAudience(token: string): unknown {
+  try {
+    return (JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString()) as { aud?: unknown })
+      .aud;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Request ids are remembered this long (well past any retry). */
@@ -228,8 +246,13 @@ export function createWorkloadBroker(options: WorkloadBrokerOptions): WorkloadBr
         ).rows[0];
         const hasInstances = tables?.present;
         const { rows } = hasInstances
-          ? await tx.query<{ tenant_id: string; enabled: boolean | null }>(
-              `SELECT i.tenant_id,
+          ? await tx.query<{
+              tenant_id: string;
+              enabled: boolean | null;
+              aws_role_arn: string | null;
+              workload_roles: unknown;
+            }>(
+              `SELECT i.tenant_id, i.aws_role_arn, p.policy->'workloadRoles' AS workload_roles,
                       CASE WHEN jsonb_typeof(p.policy->'workloadIdentity') = 'boolean'
                            THEN (p.policy->>'workloadIdentity')::boolean END AS enabled
                  FROM instances i
@@ -261,6 +284,19 @@ export function createWorkloadBroker(options: WorkloadBrokerOptions): WorkloadBr
       // 5. The audience.
       if (opened.audience !== '' && !audiences.has(opened.audience))
         throw new Refused('audience', 'audience', instance.tenant_id);
+      const roleAllowed = () =>
+        allowedAwsRole(
+          {
+            workloadIdentity: instance.enabled,
+            workloadRoles:
+              typeof instance.workload_roles === 'string'
+                ? JSON.parse(instance.workload_roles)
+                : instance.workload_roles,
+          },
+          instance.aws_role_arn,
+        ) !== undefined;
+      if (opened.audience === stsWorkloadAudience && !roleAllowed())
+        throw new Refused('audience', 'aws-role-not-allowed', instance.tenant_id);
       // 6. Replay and rate: a relayed copy of an answered request burns nothing.
       if (!remember(`${nodeId}\0${opened.requestId}`, now))
         throw new Refused('access-denied', 'replayed', instance.tenant_id);
@@ -273,6 +309,9 @@ export function createWorkloadBroker(options: WorkloadBrokerOptions): WorkloadBr
         ttlSeconds,
         ...(opened.audience ? { audience: opened.audience } : {}),
       });
+      // An issuer whose default audience is STS is held to the same rule; the token is dropped.
+      if (opened.audience === '' && tokenAudience(issued.token) === stsWorkloadAudience && !roleAllowed())
+        throw new Refused('audience', 'aws-role-not-allowed', instance.tenant_id);
       await database.transaction((tx) =>
         tx.query(
           `INSERT INTO audit_events (id, tenant_id, action, resource_type, resource_id, details)

@@ -1142,7 +1142,12 @@ in one region: a fleet in several regions is several accounts.
   `workloadIdentity.awsRoleArn`, if the pool lists it in `policy.workloadRoles.aws` (ARN globs; `INVALID_INPUT`,
   reason `awsRoleNotAllowed`, otherwise). The host gets it as `InstanceSpec.awsRole` while the pool allows it, and bcd
   serves the role's credentials to the guest from the instance's workload token. `aws workload-role --tenant <id>
-  --issuer <url>` renders the role, trusting `sub` like `t:<tenantId>:instance:*`: the tenant pin is in that trust.
+  --issuer <url>` renders the role, trusting `sub` like `t:<tenantId>:instance:*`: that trust pins the tenant, not the pool. The
+  workload broker mints a `sts.amazonaws.com` token only for an instance naming a role its pool still allows
+  (refusal `audience`, reason `aws-role-not-allowed`), so list the audience in `workloadIdentity.audiences` with that
+  in mind. Until bcd's guest endpoint refuses that audience too, a guest of a role-bearing instance can assume any
+  workload role of its tenant: keep roles that must stay apart in separate tenants. IAM Roles Anywhere for non-AWS
+  nodes is deferred.
 - **Tags and the guard.** Instances and root volumes are tagged `better-compute:managed=true` and
   `better-compute:instance=<id>`. `delete` needs the first, `power` and `reinstall` the second, and the generated
   policy makes AWS enforce the same rules (ABAC).

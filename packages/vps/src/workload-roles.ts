@@ -26,8 +26,10 @@ export {
 // `policy.workloadRoles.aws` (ARN globs). vps passes it to the host as `InstanceSpec.awsRole`, and
 // checks the pool again whenever it builds the spec, so a role the pool stops allowing leaves the
 // spec at once (fail closed). bcd exchanges the instance's workload token for the role's
-// credentials; the role's trust pins the tenant (`t:<tenantId>:instance:*`), so the allow-list
-// narrows which role bcd asks for and never widens who may assume one.
+// credentials. The role's trust pins only the tenant (`t:<tenantId>:instance:*`), so the workload
+// broker enforces the same allow-list: it mints a token for `sts.amazonaws.com` only for an instance
+// whose pool still allows its role. Until bcd's guest endpoint refuses that audience (the Go half),
+// a guest of a role-bearing instance can still assume any workload role of its own tenant.
 
 /** `instances.create`'s `workloadIdentity`. */
 export interface InstanceWorkloadIdentity {

@@ -221,9 +221,10 @@ export interface WorkloadRoleOptions {
 
 /**
  * The trust statement of a role a tenant's instances assume (A7): the issuer's OIDC provider, `aud`
- * sts.amazonaws.com, `sub` like `t:<tenantId>:instance:*`. Any instance of the tenant whose pool
- * turned workload identity on can present such a token, so the role is the tenant's, not one pool's:
- * the pool allow-list (`workloadRoles.aws`) only decides which role bcd assumes for an instance.
+ * sts.amazonaws.com, `sub` like `t:<tenantId>:instance:*`. The trust pins the tenant, not a pool:
+ * the workload broker mints that audience only for an instance whose pool allows its role
+ * (`workloadRoles.aws`), but such an instance's guest can, until bcd refuses the audience on its
+ * guest endpoint, present its token to any of the tenant's workload roles.
  */
 export function workloadTrustStatement(options: {
   tenantId: string;

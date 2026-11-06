@@ -227,7 +227,8 @@ export interface ComputeOptions<
   /**
    * v0.5 workload identity (§12.2): pki's workload issuer (the host serves its discovery document and
    * JWKS) and the audiences instances may ask for. Turns on `GatewayServices.workloadToken`, which
-   * mints tokens only for live instances in pools with `policy.workloadIdentity`.
+   * mints tokens only for live instances in pools with `policy.workloadIdentity`, and for the audience
+   * `sts.amazonaws.com` (AWS A7) only for an instance naming an AWS role its pool allows.
    */
   workloadIdentity?: WorkloadIdentityOptions;
   notifier?: Notifier;
