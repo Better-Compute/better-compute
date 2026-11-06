@@ -92,7 +92,8 @@ const privateRanges = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.
 /** A private IPv4 CIDR of /16 to /28 (what AWS takes for a VPC block or a subnet); INVALID_INPUT otherwise. */
 function vpcRange(cidr: string, what: string): Range {
   const range = parseCidr(cidr);
-  if (!range) throw invalidInput(`${what} ${JSON.stringify(cidr.slice(0, 64))} is not an IPv4 CIDR`, 'cidr');
+  if (!range)
+    throw invalidInput(`${what} ${JSON.stringify(cidr.slice(0, 64))} is not an IPv4 CIDR`, 'cidr');
   if (range.prefix < 16 || range.prefix > 28)
     throw invalidInput(`${what} ${cidr} is not /16 to /28, the sizes AWS takes`, 'cidr-size');
   if (!privateRanges.some((allowed) => within(allowed, range)))
@@ -122,7 +123,10 @@ function portRange(text: string): [number, number] {
   const from = Number(match?.[1]);
   const to = match?.[2] !== undefined ? Number(match[2]) : from;
   if (!match || from > to || to > 65535)
-    throw invalidInput(`port ${JSON.stringify(text.slice(0, 16))} is not a port or a range`, 'port');
+    throw invalidInput(
+      `port ${JSON.stringify(text.slice(0, 16))} is not a port or a range`,
+      'port',
+    );
   return [from, to];
 }
 
@@ -178,7 +182,9 @@ interface Vpc {
 }
 
 const tagMap = (element: XmlElement) =>
-  new Map(element.items('tagSet').map((item) => [item.textOf('key') ?? '', item.textOf('value') ?? '']));
+  new Map(
+    element.items('tagSet').map((item) => [item.textOf('key') ?? '', item.textOf('value') ?? '']),
+  );
 
 function parseVpc(item: XmlElement): Vpc {
   const tagged = tagMap(item);
@@ -268,7 +274,10 @@ export class AwsNetworks implements ProviderNetworks {
     try {
       await action();
     } catch (error) {
-      if (!codes.includes(awsCode(error) ?? '') && !(codes.includes('*NotFound') && isComputeError(error, 'NOT_FOUND')))
+      if (
+        !codes.includes(awsCode(error) ?? '') &&
+        !(codes.includes('*NotFound') && isComputeError(error, 'NOT_FOUND'))
+      )
         throw error;
     }
   }
@@ -301,19 +310,28 @@ export class AwsNetworks implements ProviderNetworks {
       }
     }
     if (!namePattern.test(name))
-      throw invalidInput(`network ${JSON.stringify(name.slice(0, 64))} is not a better-compute network name or a VPC id`, 'network-name');
+      throw invalidInput(
+        `network ${JSON.stringify(name.slice(0, 64))} is not a better-compute network name or a VPC id`,
+        'network-name',
+      );
     const doc = await this.#call(
       'DescribeVpcs',
       { Filter: [{ Name: `tag:${networkTags.network}`, Value: [name] }] },
       signal,
     );
-    const found = doc.items('vpcSet').map(parseVpc).sort((a, b) => (a.id < b.id ? -1 : 1));
+    const found = doc
+      .items('vpcSet')
+      .map(parseVpc)
+      .sort((a, b) => (a.id < b.id ? -1 : 1));
     if (found.length > 1)
-      this.host.context.log.warn('aws: more than one VPC carries a network tag; the first is used', {
-        provider: 'aws',
-        network: name,
-        vpcs: found.map((vpc) => vpc.id),
-      });
+      this.host.context.log.warn(
+        'aws: more than one VPC carries a network tag; the first is used',
+        {
+          provider: 'aws',
+          network: name,
+          vpcs: found.map((vpc) => vpc.id),
+        },
+      );
     if (found[0]) return found[0];
     const created = this.#created.get(name);
     if (created && this.host.context.clock.now() - created.at < this.host.consistencyWindowMs())
@@ -332,10 +350,16 @@ export class AwsNetworks implements ProviderNetworks {
     return doc.items('vpcSet').map(parseVpc);
   }
 
-  async ensureNetwork(spec: ProviderNetworkSpec, context: CallContext): Promise<ProviderNetworkState> {
+  async ensureNetwork(
+    spec: ProviderNetworkSpec,
+    context: CallContext,
+  ): Promise<ProviderNetworkState> {
     const { signal } = context;
     if (vpcIdPattern.test(spec.name) || !namePattern.test(spec.name))
-      throw invalidInput(`network ${JSON.stringify(spec.name.slice(0, 64))} is not a better-compute network name`, 'network-name');
+      throw invalidInput(
+        `network ${JSON.stringify(spec.name.slice(0, 64))} is not a better-compute network name`,
+        'network-name',
+      );
     const cidr = spec.cidr ?? defaultNetworkCidr;
     vpcRange(cidr, 'network cidr');
     const vpc = await this.#vpc(spec.name, signal);
@@ -344,14 +368,20 @@ export class AwsNetworks implements ProviderNetworks {
         'CreateVpc',
         {
           ...(this.#config.ipamPoolId
-            ? { Ipv4IpamPoolId: this.#config.ipamPoolId, Ipv4NetmaskLength: Number(cidr.split('/')[1]) }
+            ? {
+                Ipv4IpamPoolId: this.#config.ipamPoolId,
+                Ipv4NetmaskLength: Number(cidr.split('/')[1]),
+              }
             : { CidrBlock: cidr }),
           TagSpecification: this.#ownTags('vpc', spec.name),
         },
         signal,
       );
       const id = doc.child('vpc')?.textOf('vpcId') ?? '';
-      if (!id) throw new ComputeError('PROVIDER_ERROR', 'CreateVpc returned no VPC', undefined, { provider: 'aws' });
+      if (!id)
+        throw new ComputeError('PROVIDER_ERROR', 'CreateVpc returned no VPC', undefined, {
+          provider: 'aws',
+        });
       this.#created.set(spec.name, { id, at: this.host.context.clock.now() });
       return state(id, 'pending');
     }
@@ -359,8 +389,16 @@ export class AwsNetworks implements ProviderNetworks {
 
     if (!this.#dns.has(vpc.id)) {
       // One attribute per call, as EC2 requires; hostnames need support first.
-      await this.#call('ModifyVpcAttribute', { VpcId: vpc.id, EnableDnsSupport: { Value: true } }, signal);
-      await this.#call('ModifyVpcAttribute', { VpcId: vpc.id, EnableDnsHostnames: { Value: true } }, signal);
+      await this.#call(
+        'ModifyVpcAttribute',
+        { VpcId: vpc.id, EnableDnsSupport: { Value: true } },
+        signal,
+      );
+      await this.#call(
+        'ModifyVpcAttribute',
+        { VpcId: vpc.id, EnableDnsHostnames: { Value: true } },
+        signal,
+      );
       this.#dns.add(vpc.id);
     }
 
@@ -396,7 +434,12 @@ export class AwsNetworks implements ProviderNetworks {
       );
       id = doc.child('internetGateway')?.textOf('internetGatewayId') ?? '';
       if (!id)
-        throw new ComputeError('PROVIDER_ERROR', 'CreateInternetGateway returned no gateway', undefined, { provider: 'aws' });
+        throw new ComputeError(
+          'PROVIDER_ERROR',
+          'CreateInternetGateway returned no gateway',
+          undefined,
+          { provider: 'aws' },
+        );
     }
     const gateway = id;
     await this.#tolerate(['Resource.AlreadyAssociated'], () =>
@@ -423,15 +466,23 @@ export class AwsNetworks implements ProviderNetworks {
     const table = await this.#mainRouteTable(vpcId, signal);
     const tableId = table?.textOf('routeTableId');
     if (!table || !tableId)
-      throw new ComputeError('UNAVAILABLE', `VPC ${vpcId} shows no main route table yet`, undefined, {
-        provider: 'aws',
-        reason: 'route-table',
-      });
-    const route = table.items('routeSet').find((item) => item.textOf('destinationCidrBlock') === '0.0.0.0/0');
+      throw new ComputeError(
+        'UNAVAILABLE',
+        `VPC ${vpcId} shows no main route table yet`,
+        undefined,
+        {
+          provider: 'aws',
+          reason: 'route-table',
+        },
+      );
+    const route = table
+      .items('routeSet')
+      .find((item) => item.textOf('destinationCidrBlock') === '0.0.0.0/0');
     if (route?.textOf('gatewayId') === igw) return;
     const params = { RouteTableId: tableId, DestinationCidrBlock: '0.0.0.0/0', GatewayId: igw };
     if (route) await this.#call('ReplaceRoute', params, signal);
-    else await this.#tolerate(['RouteAlreadyExists'], () => this.#call('CreateRoute', params, signal));
+    else
+      await this.#tolerate(['RouteAlreadyExists'], () => this.#call('CreateRoute', params, signal));
   }
 
   async #defaultAcl(vpcId: string, signal: AbortSignal): Promise<XmlElement | undefined> {
@@ -492,7 +543,11 @@ export class AwsNetworks implements ProviderNetworks {
       const old = mine.find((item) => Number(item.textOf('ruleNumber')) === 100 && allowAll(item));
       if (old)
         await this.#tolerate(['*NotFound'], () =>
-          this.#call('DeleteNetworkAclEntry', { NetworkAclId: aclId, RuleNumber: 100, Egress: egress }, signal),
+          this.#call(
+            'DeleteNetworkAclEntry',
+            { NetworkAclId: aclId, RuleNumber: 100, Egress: egress },
+            signal,
+          ),
         );
     }
   }
@@ -513,7 +568,11 @@ export class AwsNetworks implements ProviderNetworks {
   }
 
   /** Deletes one VPC and what better-compute made in it; the reason it must wait, or undefined. */
-  async #deleteVpc(network: string, vpcId: string, signal: AbortSignal): Promise<string | undefined> {
+  async #deleteVpc(
+    network: string,
+    vpcId: string,
+    signal: AbortSignal,
+  ): Promise<string | undefined> {
     const inUse = (error: unknown) => isComputeError(error, 'INVALID_STATE');
     const reasons: string[] = [];
     const attempt = async (what: string, action: () => Promise<unknown>) => {
@@ -537,18 +596,28 @@ export class AwsNetworks implements ProviderNetworks {
       .map((item) => item.textOf('vpcEndpointId') ?? '')
       .filter(Boolean);
     if (endpointIds.length)
-      await attempt('a gateway endpoint', () => this.#call('DeleteVpcEndpoints', { VpcEndpointId: endpointIds }, signal));
+      await attempt('a gateway endpoint', () =>
+        this.#call('DeleteVpcEndpoints', { VpcEndpointId: endpointIds }, signal),
+      );
 
     const subnets = await this.#call('DescribeSubnets', byVpc, signal);
     for (const subnet of subnets.items('subnetSet').map(parseSubnet))
       if (subnet.tags.get(networkTags.network) === network)
-        await attempt(`subnet ${subnet.id}`, () => this.#call('DeleteSubnet', { SubnetId: subnet.id }, signal));
+        await attempt(`subnet ${subnet.id}`, () =>
+          this.#call('DeleteSubnet', { SubnetId: subnet.id }, signal),
+        );
 
     const groups = await this.#call('DescribeSecurityGroups', byVpc, signal);
     for (const item of groups.items('securityGroupInfo')) {
       const id = item.textOf('groupId') ?? '';
-      if (item.textOf('groupName') === 'default' || tagMap(item).get(networkTags.network) !== network) continue;
-      await attempt(`security group ${id}`, () => this.#call('DeleteSecurityGroup', { GroupId: id }, signal));
+      if (
+        item.textOf('groupName') === 'default' ||
+        tagMap(item).get(networkTags.network) !== network
+      )
+        continue;
+      await attempt(`security group ${id}`, () =>
+        this.#call('DeleteSecurityGroup', { GroupId: id }, signal),
+      );
     }
 
     const gateways = await this.#call(
@@ -575,7 +644,9 @@ export class AwsNetworks implements ProviderNetworks {
     for (const item of detached.items('internetGatewaySet'))
       if (item.items('attachmentSet').length === 0) {
         const id = item.textOf('internetGatewayId') ?? '';
-        await attempt(`internet gateway ${id}`, () => this.#call('DeleteInternetGateway', { InternetGatewayId: id }, signal));
+        await attempt(`internet gateway ${id}`, () =>
+          this.#call('DeleteInternetGateway', { InternetGatewayId: id }, signal),
+        );
       }
 
     if (reasons.length) return `VPC ${vpcId}: ${reasons.join(', ')}`;
@@ -588,20 +659,35 @@ export class AwsNetworks implements ProviderNetworks {
 
   // --- Subnets -------------------------------------------------------------------------------------
 
-  async #subnetsBy(filters: { Name: string; Value: string[] }[], signal: AbortSignal): Promise<Subnet[]> {
+  async #subnetsBy(
+    filters: { Name: string; Value: string[] }[],
+    signal: AbortSignal,
+  ): Promise<Subnet[]> {
     const doc = await this.#call('DescribeSubnets', { Filter: filters }, signal);
     return doc.items('subnetSet').map(parseSubnet);
   }
 
-  async ensureSubnet(spec: ProviderSubnetSpec, context: CallContext): Promise<ProviderNetworkState> {
+  async ensureSubnet(
+    spec: ProviderSubnetSpec,
+    context: CallContext,
+  ): Promise<ProviderNetworkState> {
     const { signal } = context;
     const id = `${spec.region}/${spec.name}`;
     if (spec.region !== this.#config.region)
-      throw invalidInput(`region ${spec.region} is not this account's region ${this.#config.region}`, 'region');
+      throw invalidInput(
+        `region ${spec.region} is not this account's region ${this.#config.region}`,
+        'region',
+      );
     if (!namePattern.test(spec.name))
-      throw invalidInput(`subnet ${JSON.stringify(spec.name.slice(0, 64))} is not a better-compute subnet name`, 'subnet-name');
+      throw invalidInput(
+        `subnet ${JSON.stringify(spec.name.slice(0, 64))} is not a better-compute subnet name`,
+        'subnet-name',
+      );
     if (spec.zone === undefined)
-      throw invalidInput('an AWS subnet lives in one Availability Zone: the subnet needs a zone', 'zone-required');
+      throw invalidInput(
+        'an AWS subnet lives in one Availability Zone: the subnet needs a zone',
+        'zone-required',
+      );
     if (!this.#config.zones.includes(spec.zone))
       throw invalidInput(`zone ${spec.zone} is not one of this account's zones`, 'zone');
     const range = vpcRange(spec.cidr, 'subnet cidr');
@@ -637,8 +723,16 @@ export class AwsNetworks implements ProviderNetworks {
     );
     if (sameRange)
       return sameRange.tags.get(networkTags.subnet) === undefined
-        ? state(sameRange.id, 'error', `Range ${spec.cidr} is taken by subnet ${sameRange.id}, which better-compute did not make`)
-        : state(sameRange.id, 'pending', `Range ${spec.cidr} belongs to subnet ${sameRange.tags.get(networkTags.subnet)}`);
+        ? state(
+            sameRange.id,
+            'error',
+            `Range ${spec.cidr} is taken by subnet ${sameRange.id}, which better-compute did not make`,
+          )
+        : state(
+            sameRange.id,
+            'pending',
+            `Range ${spec.cidr} belongs to subnet ${sameRange.tags.get(networkTags.subnet)}`,
+          );
 
     const blocks = vpc.blocks.map((block) => ({ ...block, range: parseCidr(block.cidr) }));
     const covering = blocks.find((block) => block.range && within(block.range, range));
@@ -647,7 +741,8 @@ export class AwsNetworks implements ProviderNetworks {
         return state(id, 'error', `Range ${spec.cidr} straddles a range of VPC ${vpc.id}`);
       return this.#associateBlock(id, vpc, range, signal);
     }
-    if (covering.state !== 'associated') return state(id, 'pending', `Waiting for range ${covering.cidr} of VPC ${vpc.id}`);
+    if (covering.state !== 'associated')
+      return state(id, 'pending', `Waiting for range ${covering.cidr} of VPC ${vpc.id}`);
 
     let created: Subnet | undefined;
     try {
@@ -673,7 +768,9 @@ export class AwsNetworks implements ProviderNetworks {
       throw error;
     }
     if (!created?.id)
-      throw new ComputeError('PROVIDER_ERROR', 'CreateSubnet returned no subnet', undefined, { provider: 'aws' });
+      throw new ComputeError('PROVIDER_ERROR', 'CreateSubnet returned no subnet', undefined, {
+        provider: 'aws',
+      });
     return this.#finishSubnet(spec, vpc, created, signal);
   }
 
@@ -681,28 +778,61 @@ export class AwsNetworks implements ProviderNetworks {
    * A secondary VPC range for a subnet outside the VPC's ranges: the subnet's /16 when that
    * overlaps nothing, else the subnet's own range.
    */
-  async #associateBlock(id: string, vpc: Vpc, range: Range, signal: AbortSignal): Promise<ProviderNetworkState> {
+  async #associateBlock(
+    id: string,
+    vpc: Vpc,
+    range: Range,
+    signal: AbortSignal,
+  ): Promise<ProviderNetworkState> {
     const wide = { start: range.start - (range.start % 2 ** 16), end: 0, prefix: 16 };
     wide.end = wide.start + 2 ** 16 - 1;
-    const taken = vpc.blocks.map((block) => parseCidr(block.cidr)).filter((r): r is Range => r !== undefined);
+    const taken = vpc.blocks
+      .map((block) => parseCidr(block.cidr))
+      .filter((r): r is Range => r !== undefined);
     const block =
-      range.prefix > 16 && !taken.some((other) => overlap(other, wide)) && privateRanges.some((p) => within(p, wide))
+      range.prefix > 16 &&
+      !taken.some((other) => overlap(other, wide)) &&
+      privateRanges.some((p) => within(p, wide))
         ? formatCidr(wide.start, 16)
         : formatCidr(range.start, range.prefix);
     try {
-      const doc = await this.#call('AssociateVpcCidrBlock', { VpcId: vpc.id, CidrBlock: block }, signal);
-      const associated = doc.child('cidrBlockAssociation')?.child('cidrBlockState')?.textOf('state');
-      return state(id, 'pending', associated === 'associated' ? undefined : `Adding range ${block} to VPC ${vpc.id}`);
+      const doc = await this.#call(
+        'AssociateVpcCidrBlock',
+        { VpcId: vpc.id, CidrBlock: block },
+        signal,
+      );
+      const associated = doc
+        .child('cidrBlockAssociation')
+        ?.child('cidrBlockState')
+        ?.textOf('state');
+      return state(
+        id,
+        'pending',
+        associated === 'associated' ? undefined : `Adding range ${block} to VPC ${vpc.id}`,
+      );
     } catch (error) {
       const code = awsCode(error);
-      if (code === 'CidrLimitExceeded' || code === 'InvalidVpc.Range' || isComputeError(error, 'INVALID_INPUT'))
-        return state(id, 'error', `AWS refused range ${block} for VPC ${vpc.id} (${code ?? error})`);
+      if (
+        code === 'CidrLimitExceeded' ||
+        code === 'InvalidVpc.Range' ||
+        isComputeError(error, 'INVALID_INPUT')
+      )
+        return state(
+          id,
+          'error',
+          `AWS refused range ${block} for VPC ${vpc.id} (${code ?? error})`,
+        );
       throw error;
     }
   }
 
   /** Public IPs on launch from config, and private service access (gateway endpoints). */
-  async #finishSubnet(spec: ProviderSubnetSpec, vpc: Vpc, subnet: Subnet, signal: AbortSignal): Promise<ProviderNetworkState> {
+  async #finishSubnet(
+    spec: ProviderSubnetSpec,
+    vpc: Vpc,
+    subnet: Subnet,
+    signal: AbortSignal,
+  ): Promise<ProviderNetworkState> {
     if (subnet.state !== '' && subnet.state !== 'available') return state(subnet.id, 'pending');
     if (subnet.mapPublicIp !== this.#config.associatePublicIp)
       await this.#call(
@@ -710,16 +840,24 @@ export class AwsNetworks implements ProviderNetworks {
         { SubnetId: subnet.id, MapPublicIpOnLaunch: { Value: this.#config.associatePublicIp } },
         signal,
       );
-    if (spec.privateGoogleAccess === true) await this.#ensureServiceAccess(spec.network, vpc.id, signal);
+    if (spec.privateGoogleAccess === true)
+      await this.#ensureServiceAccess(spec.network, vpc.id, signal);
     return state(subnet.id, 'ready');
   }
 
   /** "Private service access": S3 and DynamoDB gateway endpoints on the VPC's main route table. */
   async #ensureServiceAccess(network: string, vpcId: string, signal: AbortSignal): Promise<void> {
-    const prefix = partitionOf(this.#config.region).partition === 'aws-cn' ? 'cn.com.amazonaws' : 'com.amazonaws';
+    const prefix =
+      partitionOf(this.#config.region).partition === 'aws-cn'
+        ? 'cn.com.amazonaws'
+        : 'com.amazonaws';
     const table = (await this.#mainRouteTable(vpcId, signal))?.textOf('routeTableId');
     if (!table) return;
-    const doc = await this.#call('DescribeVpcEndpoints', { Filter: [{ Name: 'vpc-id', Value: [vpcId] }] }, signal);
+    const doc = await this.#call(
+      'DescribeVpcEndpoints',
+      { Filter: [{ Name: 'vpc-id', Value: [vpcId] }] },
+      signal,
+    );
     const have = new Set(doc.items('vpcEndpointSet').map((item) => item.textOf('serviceName')));
     for (const service of ['s3', 'dynamodb']) {
       const name = `${prefix}.${this.#config.region}.${service}`;
@@ -741,10 +879,17 @@ export class AwsNetworks implements ProviderNetworks {
     }
   }
 
-  async deleteSubnet(region: string, name: string, context: CallContext): Promise<ProviderNetworkState> {
+  async deleteSubnet(
+    region: string,
+    name: string,
+    context: CallContext,
+  ): Promise<ProviderNetworkState> {
     const id = `${region}/${name}`;
     if (region !== this.#config.region || !namePattern.test(name)) return state(id, 'deleted');
-    const found = await this.#subnetsBy([{ Name: `tag:${networkTags.subnet}`, Value: [name] }], context.signal);
+    const found = await this.#subnetsBy(
+      [{ Name: `tag:${networkTags.subnet}`, Value: [name] }],
+      context.signal,
+    );
     for (const subnet of found) {
       try {
         await this.#call('DeleteSubnet', { SubnetId: subnet.id }, context.signal);
@@ -760,7 +905,11 @@ export class AwsNetworks implements ProviderNetworks {
 
   // --- Security groups ---------------------------------------------------------------------------------
 
-  async #groupsByName(vpcId: string, names: readonly string[], signal: AbortSignal): Promise<Group[]> {
+  async #groupsByName(
+    vpcId: string,
+    names: readonly string[],
+    signal: AbortSignal,
+  ): Promise<Group[]> {
     if (names.length === 0) return [];
     const doc = await this.#call(
       'DescribeSecurityGroups',
@@ -796,7 +945,12 @@ export class AwsNetworks implements ProviderNetworks {
     signal: AbortSignal,
   ): Promise<Map<string, string>> {
     const ids = new Map<string, string>();
-    for (const group of await this.#groupsByName(vpcId, wanted.map((w) => w.name), signal)) ids.set(group.name, group.id);
+    for (const group of await this.#groupsByName(
+      vpcId,
+      wanted.map((w) => w.name),
+      signal,
+    ))
+      ids.set(group.name, group.id);
     for (const want of wanted) {
       if (ids.has(want.name)) continue;
       const extra: Record<string, string> = want.tag ? { [networkTags.tag]: want.tag } : {};
@@ -824,7 +978,13 @@ export class AwsNetworks implements ProviderNetworks {
           signal,
         );
         const id = doc.textOf('groupId');
-        if (!id) throw new ComputeError('PROVIDER_ERROR', 'CreateSecurityGroup returned no group', undefined, { provider: 'aws' });
+        if (!id)
+          throw new ComputeError(
+            'PROVIDER_ERROR',
+            'CreateSecurityGroup returned no group',
+            undefined,
+            { provider: 'aws' },
+          );
         ids.set(want.name, id);
       } catch (error) {
         if (!isComputeError(error, 'CONFLICT')) throw error;
@@ -855,22 +1015,37 @@ export class AwsNetworks implements ProviderNetworks {
       out.push(...doc.items('securityGroupRuleSet').map(parseRule));
       token = doc.textOf('nextToken') || undefined;
       if (token && seen.has(token))
-        throw new ComputeError('PROVIDER_ERROR', 'AWS returned a pagination token twice', undefined, {
-          provider: 'aws',
-          reason: 'pagination-loop',
-        });
+        throw new ComputeError(
+          'PROVIDER_ERROR',
+          'AWS returned a pagination token twice',
+          undefined,
+          {
+            provider: 'aws',
+            reason: 'pagination-loop',
+          },
+        );
       if (token) seen.add(token);
     } while (token);
     return out;
   }
 
-  async ensureFirewall(spec: ProviderFirewallSpec, context: CallContext): Promise<ProviderNetworkState> {
+  async ensureFirewall(
+    spec: ProviderFirewallSpec,
+    context: CallContext,
+  ): Promise<ProviderNetworkState> {
     const { signal } = context;
     if (!namePattern.test(spec.name))
-      throw invalidInput(`firewall ${JSON.stringify(spec.name.slice(0, 64))} is not a better-compute name`, 'firewall-name');
+      throw invalidInput(
+        `firewall ${JSON.stringify(spec.name.slice(0, 64))} is not a better-compute name`,
+        'firewall-name',
+      );
     const targeted = (spec.targetTags?.length ?? 0) > 0;
     for (const tag of spec.targetTags ?? [])
-      if (!tagPattern.test(tag)) throw invalidInput(`${JSON.stringify(tag.slice(0, 64))} is not a managed network tag`, 'tag');
+      if (!tagPattern.test(tag))
+        throw invalidInput(
+          `${JSON.stringify(tag.slice(0, 64))} is not a managed network tag`,
+          'tag',
+        );
     if (spec.action === 'deny' && targeted)
       return state(
         spec.name,
@@ -889,11 +1064,19 @@ export class AwsNetworks implements ProviderNetworks {
     const network = vpc.ours ? vpc.tags.get(networkTags.network) : undefined;
     if (spec.action === 'deny') {
       if (!network)
-        return state(spec.name, 'error', `A deny rule needs a network better-compute made; ${vpc.id} is adopted`);
+        return state(
+          spec.name,
+          'error',
+          `A deny rule needs a network better-compute made; ${vpc.id} is adopted`,
+        );
       return this.#ensureDeny(spec, vpc.id, signal);
     }
     if (!targeted && !network)
-      return state(spec.name, 'error', `Rule ${spec.name} names no instances and ${vpc.id} is adopted`);
+      return state(
+        spec.name,
+        'error',
+        `Rule ${spec.name} names no instances and ${vpc.id} is adopted`,
+      );
 
     const groups = await this.#ensureGroups(
       vpc.id,
@@ -907,13 +1090,19 @@ export class AwsNetworks implements ProviderNetworks {
     if (spec.disabled !== true)
       for (const groupId of groups.values())
         for (const tuple of tuples(spec))
-          for (const cidr of peers(spec)) desired.push({ groupId, egress: spec.direction === 'egress', ...tuple, cidr });
+          for (const cidr of peers(spec))
+            desired.push({ groupId, egress: spec.direction === 'egress', ...tuple, cidr });
     await this.#applyRules(spec.name, network ?? vpc.id, desired, signal);
     return state(spec.name, 'ready');
   }
 
   /** Makes the rules tagged for `firewall` exactly `desired`: revokes or untags the rest, authorizes or tags what is missing. */
-  async #applyRules(firewall: string, network: string, desired: Permission[], signal: AbortSignal): Promise<void> {
+  async #applyRules(
+    firewall: string,
+    network: string,
+    desired: Permission[],
+    signal: AbortSignal,
+  ): Promise<void> {
     const key = `${networkTags.firewallPrefix}${firewall}`;
     const wanted = new Map(desired.map((p) => [permissionKey(p), p]));
     const current = await this.#rulesOf(firewall, signal);
@@ -950,9 +1139,16 @@ export class AwsNetworks implements ProviderNetworks {
               { Filter: [{ Name: 'group-id', Value: [groupId] }], MaxResults: 1000 },
               signal,
             );
-            const same = doc.items('securityGroupRuleSet').map(parseRule).find((rule) => permissionKey(rule) === permissionKey(p));
+            const same = doc
+              .items('securityGroupRuleSet')
+              .map(parseRule)
+              .find((rule) => permissionKey(rule) === permissionKey(p));
             if (!same) throw inner;
-            await this.#call('CreateTags', { ResourceId: [same.id], Tag: [{ Key: key, Value: 'true' }] }, signal);
+            await this.#call(
+              'CreateTags',
+              { ResourceId: [same.id], Tag: [{ Key: key, Value: 'true' }] },
+              signal,
+            );
           }
         }
       }
@@ -998,7 +1194,9 @@ export class AwsNetworks implements ProviderNetworks {
    * made it (it carries the network tag), else only the firewall's key is removed.
    */
   async #releaseRule(rule: Rule, key: string, signal: AbortSignal): Promise<void> {
-    const others = [...rule.tags.keys()].some((k) => k !== key && k.startsWith(networkTags.firewallPrefix));
+    const others = [...rule.tags.keys()].some(
+      (k) => k !== key && k.startsWith(networkTags.firewallPrefix),
+    );
     if (others || !rule.tags.has(networkTags.network)) {
       await this.#tolerate(['*NotFound'], () =>
         this.#call('DeleteTags', { ResourceId: [rule.id], Tag: [{ Key: key }] }, signal),
@@ -1018,7 +1216,8 @@ export class AwsNetworks implements ProviderNetworks {
     const { signal } = context;
     if (!namePattern.test(name)) return state(name, 'deleted');
     const key = `${networkTags.firewallPrefix}${name}`;
-    for (const rule of await this.#rulesOf(name, signal)) await this.#releaseRule(rule, key, signal);
+    for (const rule of await this.#rulesOf(name, signal))
+      await this.#releaseRule(rule, key, signal);
     const acls = await this.#call(
       'DescribeNetworkAcls',
       { Filter: [{ Name: 'tag-key', Value: [networkTags.network] }] },
@@ -1034,10 +1233,15 @@ export class AwsNetworks implements ProviderNetworks {
 
   // --- Network-wide deny: network ACL entries ---------------------------------------------------
 
-  async #ensureDeny(spec: ProviderFirewallSpec, vpcId: string, signal: AbortSignal): Promise<ProviderNetworkState> {
+  async #ensureDeny(
+    spec: ProviderFirewallSpec,
+    vpcId: string,
+    signal: AbortSignal,
+  ): Promise<ProviderNetworkState> {
     const acl = await this.#defaultAcl(vpcId, signal);
     const aclId = acl?.textOf('networkAclId');
-    if (!acl || !aclId) return state(spec.name, 'pending', `Waiting for the network ACL of ${vpcId}`);
+    if (!acl || !aclId)
+      return state(spec.name, 'pending', `Waiting for the network ACL of ${vpcId}`);
     const egress = spec.direction === 'egress';
     const desired: Omit<NaclEntry, 'number'>[] = [];
     if (spec.disabled !== true)
@@ -1047,7 +1251,9 @@ export class AwsNetworks implements ProviderNetworks {
             egress,
             protocol: naclProtocols[tuple.protocol]!,
             cidr,
-            ...(tuple.protocol === 'tcp' || tuple.protocol === 'udp' ? { from: tuple.from, to: tuple.to } : {}),
+            ...(tuple.protocol === 'tcp' || tuple.protocol === 'udp'
+              ? { from: tuple.from, to: tuple.to }
+              : {}),
           });
     const entries = parseAclEntries(acl);
     const owned = ownedEntries(acl);
@@ -1075,7 +1281,10 @@ export class AwsNetworks implements ProviderNetworks {
       let number = 100 + Math.floor(spec.priority / 10);
       while (taken.has(slot(entry.egress, number))) number++;
       if (number >= naclAllowAllRule)
-        throw invalidInput(`deny rule ${spec.name} needs an ACL rule number past ${naclAllowAllRule - 1}`, 'nacl-rule-number');
+        throw invalidInput(
+          `deny rule ${spec.name} needs an ACL rule number past ${naclAllowAllRule - 1}`,
+          'nacl-rule-number',
+        );
       taken.add(slot(entry.egress, number));
       // The owner tag first: a crash between the two leaves a tag without an entry, which the next
       // ensure repairs, never an entry nobody owns.
@@ -1093,7 +1302,9 @@ export class AwsNetworks implements ProviderNetworks {
             Protocol: entry.protocol,
             RuleAction: 'deny',
             Egress: entry.egress,
-            ...(entry.cidr.includes(':') ? { Ipv6CidrBlock: entry.cidr } : { CidrBlock: entry.cidr }),
+            ...(entry.cidr.includes(':')
+              ? { Ipv6CidrBlock: entry.cidr }
+              : { CidrBlock: entry.cidr }),
             ...(entry.from !== undefined ? { PortRange: { From: entry.from, To: entry.to } } : {}),
             ...(entry.protocol === '1' ? { IcmpTypeCode: { Type: -1, Code: -1 } } : {}),
           },
@@ -1101,12 +1312,21 @@ export class AwsNetworks implements ProviderNetworks {
         );
       } catch (error) {
         const code = awsCode(error);
-        if (code === 'NetworkAclEntryAlreadyExists') return state(spec.name, 'pending', `ACL rule ${number} was taken meanwhile`);
+        if (code === 'NetworkAclEntryAlreadyExists')
+          return state(spec.name, 'pending', `ACL rule ${number} was taken meanwhile`);
         if (code === 'NetworkAclEntryLimitExceeded') {
           await this.#tolerate(['*NotFound'], () =>
-            this.#call('DeleteTags', { ResourceId: [aclId], Tag: [{ Key: denyTag(entry.egress, number) }] }, signal),
+            this.#call(
+              'DeleteTags',
+              { ResourceId: [aclId], Tag: [{ Key: denyTag(entry.egress, number) }] },
+              signal,
+            ),
           );
-          return state(spec.name, 'error', `Network ACL ${aclId} has no room for deny rule ${spec.name} (NetworkAclEntryLimitExceeded)`);
+          return state(
+            spec.name,
+            'error',
+            `Network ACL ${aclId} has no room for deny rule ${spec.name} (NetworkAclEntryLimitExceeded)`,
+          );
         }
         throw error;
       }
@@ -1115,13 +1335,27 @@ export class AwsNetworks implements ProviderNetworks {
   }
 
   /** Deletes an owned entry, then its owner tag. */
-  async #removeDenyEntry(aclId: string, number: number, egress: boolean, signal: AbortSignal, exists = true): Promise<void> {
+  async #removeDenyEntry(
+    aclId: string,
+    number: number,
+    egress: boolean,
+    signal: AbortSignal,
+    exists = true,
+  ): Promise<void> {
     if (exists)
       await this.#tolerate(['*NotFound'], () =>
-        this.#call('DeleteNetworkAclEntry', { NetworkAclId: aclId, RuleNumber: number, Egress: egress }, signal),
+        this.#call(
+          'DeleteNetworkAclEntry',
+          { NetworkAclId: aclId, RuleNumber: number, Egress: egress },
+          signal,
+        ),
       );
     await this.#tolerate(['*NotFound'], () =>
-      this.#call('DeleteTags', { ResourceId: [aclId], Tag: [{ Key: denyTag(egress, number) }] }, signal),
+      this.#call(
+        'DeleteTags',
+        { ResourceId: [aclId], Tag: [{ Key: denyTag(egress, number) }] },
+        signal,
+      ),
     );
   }
 
@@ -1135,7 +1369,10 @@ export class AwsNetworks implements ProviderNetworks {
   async placement(ref: NetworkRef, zone: string, signal: AbortSignal): Promise<AwsPlacement> {
     const vpc = await this.#vpc(ref.network, signal);
     if (!vpc || vpc.state !== 'available')
-      throw new ComputeError('INVALID_STATE', `network ${ref.network} is not ready`, undefined, { provider: 'aws', reason: 'network' });
+      throw new ComputeError('INVALID_STATE', `network ${ref.network} is not ready`, undefined, {
+        provider: 'aws',
+        reason: 'network',
+      });
     let subnet: Subnet | undefined;
     if (ref.subnet === undefined) {
       subnet = (await this.#subnetsBy([{ Name: 'vpc-id', Value: [vpc.id] }], signal))
@@ -1159,21 +1396,38 @@ export class AwsNetworks implements ProviderNetworks {
       );
     }
     if (!subnet)
-      throw new ComputeError('INVALID_STATE', `network ${ref.network} has no subnet ${ref.subnet ?? `in ${zone}`}`, undefined, {
-        provider: 'aws',
-        reason: 'subnet',
-      });
+      throw new ComputeError(
+        'INVALID_STATE',
+        `network ${ref.network} has no subnet ${ref.subnet ?? `in ${zone}`}`,
+        undefined,
+        {
+          provider: 'aws',
+          reason: 'subnet',
+        },
+      );
     if (subnet.zone !== zone)
-      throw invalidInput(`subnet ${ref.subnet ?? subnet.id} is in ${subnet.zone}, but the offer is in ${zone}`, 'subnet-zone');
+      throw invalidInput(
+        `subnet ${ref.subnet ?? subnet.id} is in ${subnet.zone}, but the offer is in ${zone}`,
+        'subnet-zone',
+      );
     const network = vpc.ours ? vpc.tags.get(networkTags.network) : undefined;
     const groupIds = await this.#groupIdsFor(vpc.id, network, ref.tags ?? [], signal);
     return { subnetId: subnet.id, zone: subnet.zone, groupIds };
   }
 
   /** The better-compute security groups of a machine with `machineTags` in a VPC. */
-  async #groupIdsFor(vpcId: string, network: string | undefined, machineTags: readonly string[], signal: AbortSignal): Promise<string[]> {
+  async #groupIdsFor(
+    vpcId: string,
+    network: string | undefined,
+    machineTags: readonly string[],
+    signal: AbortSignal,
+  ): Promise<string[]> {
     for (const tag of machineTags)
-      if (!tagPattern.test(tag)) throw invalidInput(`${JSON.stringify(tag.slice(0, 64))} is not a managed network tag (bc-…)`, 'tag');
+      if (!tagPattern.test(tag))
+        throw invalidInput(
+          `${JSON.stringify(tag.slice(0, 64))} is not a managed network tag (bc-…)`,
+          'tag',
+        );
     const wanted = [
       ...(network ? [{ name: AwsNetworks.groupName('network', network) }] : []),
       ...[...new Set(machineTags)].map((tag) => ({ name: AwsNetworks.groupName('tag', tag), tag })),
@@ -1182,38 +1436,67 @@ export class AwsNetworks implements ProviderNetworks {
     return wanted.map((w) => ids.get(w.name)!);
   }
 
-  async setTags(machineId: string, machineTags: readonly string[], context: CallContext, instanceId?: string): Promise<void> {
+  async setTags(
+    machineId: string,
+    machineTags: readonly string[],
+    context: CallContext,
+    instanceId?: string,
+  ): Promise<void> {
     const { signal } = context;
     parseInstanceId(machineId);
     for (const tag of machineTags)
       if (!tagPattern.test(tag))
-        throw invalidInput(`${JSON.stringify(tag.slice(0, 64))} is not a managed network tag (bc-…)`, 'tag');
+        throw invalidInput(
+          `${JSON.stringify(tag.slice(0, 64))} is not a managed network tag (bc-…)`,
+          'tag',
+        );
     const doc = await this.#call('DescribeInstances', { InstanceId: [machineId] }, signal);
     const instance = doc
       .items('reservationSet')
       .flatMap((reservation) => reservation.items('instancesSet'))
       .find((item) => item.textOf('instanceId') === machineId);
     if (!instance)
-      throw new ComputeError('NOT_FOUND', `instance ${machineId} not found`, undefined, { provider: 'aws' });
+      throw new ComputeError('NOT_FOUND', `instance ${machineId} not found`, undefined, {
+        provider: 'aws',
+      });
     const claimedBy = tagMap(instance).get(tags.instance);
     if (!claimedBy)
-      throw new ComputeError('INVALID_STATE', `${machineId} is not an instance of better-compute; its groups are not touched`, undefined, {
-        provider: 'aws',
-        reason: 'notAttached',
-      });
+      throw new ComputeError(
+        'INVALID_STATE',
+        `${machineId} is not an instance of better-compute; its groups are not touched`,
+        undefined,
+        {
+          provider: 'aws',
+          reason: 'notAttached',
+        },
+      );
     if (instanceId !== undefined && claimedBy !== tagValue(instanceId))
-      throw new ComputeError('INVALID_STATE', `${machineId} belongs to instance ${claimedBy}, not ${instanceId}; its groups are not touched`, undefined, {
-        provider: 'aws',
-        reason: 'notOwned',
-        claimedBy,
-      });
+      throw new ComputeError(
+        'INVALID_STATE',
+        `${machineId} belongs to instance ${claimedBy}, not ${instanceId}; its groups are not touched`,
+        undefined,
+        {
+          provider: 'aws',
+          reason: 'notOwned',
+          claimedBy,
+        },
+      );
     const vpcId = instance.textOf('vpcId');
     const interfaces = instance.items('networkInterfaceSet');
     const primary =
-      interfaces.find((eni) => eni.child('attachment')?.textOf('deviceIndex') === '0') ?? interfaces[0];
+      interfaces.find((eni) => eni.child('attachment')?.textOf('deviceIndex') === '0') ??
+      interfaces[0];
     if (!vpcId || !primary)
-      throw new ComputeError('INVALID_STATE', `${machineId} has no network interface yet`, undefined, { provider: 'aws', reason: 'no-interface' });
-    const currentIds = primary.items('groupSet').map((item) => item.textOf('groupId') ?? '').filter(Boolean);
+      throw new ComputeError(
+        'INVALID_STATE',
+        `${machineId} has no network interface yet`,
+        undefined,
+        { provider: 'aws', reason: 'no-interface' },
+      );
+    const currentIds = primary
+      .items('groupSet')
+      .map((item) => item.textOf('groupId') ?? '')
+      .filter(Boolean);
 
     const vpcDoc = await this.#call('DescribeVpcs', { VpcId: [vpcId] }, signal);
     const vpcItem = vpcDoc.items('vpcSet')[0];
@@ -1229,7 +1512,10 @@ export class AwsNetworks implements ProviderNetworks {
           .items('securityGroupInfo')
           .filter((item) => {
             const t = tagMap(item);
-            return t.has(networkTags.tag) || (t.get(tags.managed) === 'true' && t.has(networkTags.network));
+            return (
+              t.has(networkTags.tag) ||
+              (t.get(tags.managed) === 'true' && t.has(networkTags.network))
+            );
           })
           .map((item) => item.textOf('groupId')),
       );
@@ -1251,7 +1537,8 @@ export class AwsNetworks implements ProviderNetworks {
         { NetworkInterfaceId: primary.textOf('networkInterfaceId') ?? '', SecurityGroupId: next },
         signal,
       );
-    else await this.#call('ModifyInstanceAttribute', { InstanceId: machineId, GroupId: next }, signal);
+    else
+      await this.#call('ModifyInstanceAttribute', { InstanceId: machineId, GroupId: next }, signal);
   }
 }
 
@@ -1293,7 +1580,8 @@ function ownedEntries(acl: XmlElement): { number: number; egress: boolean; firew
   const out: { number: number; egress: boolean; firewall: string }[] = [];
   for (const [key, value] of tagMap(acl)) {
     const match = /^better-compute:deny:(ingress|egress):(\d{1,5})$/.exec(key);
-    if (match) out.push({ egress: match[1] === 'egress', number: Number(match[2]), firewall: value });
+    if (match)
+      out.push({ egress: match[1] === 'egress', number: Number(match[2]), firewall: value });
   }
   return out;
 }

@@ -17,7 +17,12 @@ export interface EmuVpc {
   id: string;
   state: 'pending' | 'available';
   pendingReads: number;
-  cidrs: { associationId: string; cidr: string; state: 'associating' | 'associated'; reads: number }[];
+  cidrs: {
+    associationId: string;
+    cidr: string;
+    state: 'associating' | 'associated';
+    reads: number;
+  }[];
   tags: Tags;
   dnsSupport: boolean;
   dnsHostnames: boolean;
@@ -422,7 +427,13 @@ export class VpcEmulator {
           for (const block of vpc.cidrs)
             if (block.state === 'associating' && block.reads-- <= 0) block.state = 'associated';
         }
-        return ec2Response(action, items('vpcSet', found.map((vpc) => this.#vpcXml(vpc))));
+        return ec2Response(
+          action,
+          items(
+            'vpcSet',
+            found.map((vpc) => this.#vpcXml(vpc)),
+          ),
+        );
       }
       case 'ModifyVpcAttribute': {
         const vpc = this.vpcs.get(p.get('VpcId') ?? '');
@@ -442,10 +453,7 @@ export class VpcEmulator {
         if (!validCidr(cidr) || prefixOf(cidr) < 16 || prefixOf(cidr) > 28)
           return ec2Error('InvalidVpc.Range', `The CIDR '${cidr}' is invalid.`);
         if (vpc.cidrs.some((block) => overlaps(block.cidr, cidr)))
-          return ec2Error(
-            'InvalidVpc.Range',
-            `The CIDR '${cidr}' conflicts with another subnet`,
-          );
+          return ec2Error('InvalidVpc.Range', `The CIDR '${cidr}' conflicts with another subnet`);
         if (vpc.cidrs.length >= 5)
           return ec2Error('CidrLimitExceeded', 'This network has reached its CIDR block limit');
         const block = {
@@ -475,12 +483,14 @@ export class VpcEmulator {
             `The vpc '${id}' has dependencies and cannot be deleted.`,
           );
         this.vpcs.delete(id);
-        for (const [key, table] of this.routeTables) if (table.vpcId === id) this.routeTables.delete(key);
+        for (const [key, table] of this.routeTables)
+          if (table.vpcId === id) this.routeTables.delete(key);
         for (const [key, acl] of this.nacls) if (acl.vpcId === id) this.nacls.delete(key);
         for (const [key, group] of this.groups)
           if (group.vpcId === id) {
             this.groups.delete(key);
-            for (const [ruleId, rule] of this.rules) if (rule.groupId === key) this.rules.delete(ruleId);
+            for (const [ruleId, rule] of this.rules)
+              if (rule.groupId === key) this.rules.delete(ruleId);
           }
         return ec2Response(action, el('return', true));
       }
@@ -581,11 +591,17 @@ export class VpcEmulator {
         const destination = p.get('DestinationCidrBlock') ?? '';
         const gatewayId = p.get('GatewayId') ?? '';
         if (!this.igws.has(gatewayId) && !this.endpoints.has(gatewayId))
-          return ec2Error('InvalidGatewayID.NotFound', `The gateway ID '${gatewayId}' does not exist`);
+          return ec2Error(
+            'InvalidGatewayID.NotFound',
+            `The gateway ID '${gatewayId}' does not exist`,
+          );
         const existing = table.routes.find((route) => route.destination === destination);
         if (action === 'CreateRoute') {
           if (existing)
-            return ec2Error('RouteAlreadyExists', `The route identified by ${destination} already exists.`);
+            return ec2Error(
+              'RouteAlreadyExists',
+              `The route identified by ${destination} already exists.`,
+            );
           table.routes.push({ destination, gatewayId });
         } else {
           if (!existing) return ec2Error('InvalidRoute.NotFound', 'no such route');
@@ -601,7 +617,10 @@ export class VpcEmulator {
         const cidr = p.get('CidrBlock') ?? '';
         const zone = p.get('AvailabilityZone') ?? 'us-east-1a';
         if (!this.ec2.zones.has(zone))
-          return ec2Error('InvalidParameterValue', `Value (${zone}) for parameter availabilityZone is invalid.`);
+          return ec2Error(
+            'InvalidParameterValue',
+            `Value (${zone}) for parameter availabilityZone is invalid.`,
+          );
         if (
           !validCidr(cidr) ||
           prefixOf(cidr) < 16 ||
@@ -610,7 +629,10 @@ export class VpcEmulator {
         )
           return ec2Error('InvalidSubnet.Range', `The CIDR '${cidr}' is invalid.`);
         if ([...this.subnets.values()].some((s) => s.vpcId === vpc.id && overlaps(s.cidr, cidr)))
-          return ec2Error('InvalidSubnet.Conflict', `The CIDR '${cidr}' conflicts with another subnet`);
+          return ec2Error(
+            'InvalidSubnet.Conflict',
+            `The CIDR '${cidr}' conflicts with another subnet`,
+          );
         const subnet: EmuSubnet = {
           id: this.#id('subnet'),
           vpcId: vpc.id,
@@ -642,7 +664,13 @@ export class VpcEmulator {
                       : undefined,
             ),
         );
-        return ec2Response(action, items('subnetSet', found.map((s) => this.#subnetXml(s))));
+        return ec2Response(
+          action,
+          items(
+            'subnetSet',
+            found.map((s) => this.#subnetXml(s)),
+          ),
+        );
       }
       case 'ModifySubnetAttribute': {
         const subnet = this.subnets.get(p.get('SubnetId') ?? '');
@@ -656,7 +684,10 @@ export class VpcEmulator {
         if (!this.subnets.has(id))
           return ec2Error('InvalidSubnetID.NotFound', `The subnet ID '${id}' does not exist`);
         if (this.#liveInstances().some((instance) => instance.subnetId === id))
-          return ec2Error('DependencyViolation', `The subnet '${id}' has dependencies and cannot be deleted.`);
+          return ec2Error(
+            'DependencyViolation',
+            `The subnet '${id}' has dependencies and cannot be deleted.`,
+          );
         this.subnets.delete(id);
         return ec2Response(action, el('return', true));
       }
@@ -680,7 +711,10 @@ export class VpcEmulator {
         };
         this.groups.set(group.id, group);
         this.#defaultEgress(group.id);
-        return ec2Response(action, `${el('return', true)}${el('groupId', group.id)}${tagSet(group.tags)}`);
+        return ec2Response(
+          action,
+          `${el('return', true)}${el('groupId', group.id)}${tagSet(group.tags)}`,
+        );
       }
       case 'DescribeSecurityGroups': {
         const ids = listOf(p, 'GroupId');
@@ -714,7 +748,8 @@ export class VpcEmulator {
       case 'DeleteSecurityGroup': {
         const id = p.get('GroupId') ?? '';
         const group = this.groups.get(id);
-        if (!group) return ec2Error('InvalidGroup.NotFound', `The security group '${id}' does not exist`);
+        if (!group)
+          return ec2Error('InvalidGroup.NotFound', `The security group '${id}' does not exist`);
         if (group.name === 'default')
           return ec2Error('CannotDelete', 'the default security group cannot be deleted');
         if (this.#liveInstances().some((instance) => instance.groups.some((g) => g.id === id)))
@@ -727,7 +762,10 @@ export class VpcEmulator {
       case 'AuthorizeSecurityGroupEgress': {
         const groupId = p.get('GroupId') ?? '';
         if (!this.groups.has(groupId))
-          return ec2Error('InvalidGroup.NotFound', `The security group '${groupId}' does not exist`);
+          return ec2Error(
+            'InvalidGroup.NotFound',
+            `The security group '${groupId}' does not exist`,
+          );
         const egress = action === 'AuthorizeSecurityGroupEgress';
         const tags = tagsOf(p, 'security-group-rule');
         const wanted: Omit<EmuRule, 'id' | 'tags'>[] = [];
@@ -737,11 +775,20 @@ export class VpcEmulator {
           const to = Number(p.get(`IpPermissions.${n}.ToPort`) ?? -1);
           if ((protocol === 'tcp' || protocol === 'udp') && (from < 0 || to > 65535 || from > to))
             return ec2Error('InvalidParameterValue', 'Invalid port range');
-          const base = { groupId, egress, protocol, from: protocol === '-1' ? -1 : from, to: protocol === '-1' ? -1 : to };
+          const base = {
+            groupId,
+            egress,
+            protocol,
+            from: protocol === '-1' ? -1 : from,
+            to: protocol === '-1' ? -1 : to,
+          };
           for (let m = 1; p.has(`IpPermissions.${n}.IpRanges.${m}.CidrIp`); m++)
             wanted.push({ ...base, cidrIpv4: p.get(`IpPermissions.${n}.IpRanges.${m}.CidrIp`)! });
           for (let m = 1; p.has(`IpPermissions.${n}.Ipv6Ranges.${m}.CidrIpv6`); m++)
-            wanted.push({ ...base, cidrIpv6: p.get(`IpPermissions.${n}.Ipv6Ranges.${m}.CidrIpv6`)! });
+            wanted.push({
+              ...base,
+              cidrIpv6: p.get(`IpPermissions.${n}.Ipv6Ranges.${m}.CidrIpv6`)!,
+            });
         }
         const same = (a: Omit<EmuRule, 'id' | 'tags'>, b: Omit<EmuRule, 'id' | 'tags'>) =>
           a.groupId === b.groupId &&
@@ -753,9 +800,14 @@ export class VpcEmulator {
           a.cidrIpv6 === b.cidrIpv6;
         if (wanted.some((rule) => [...this.rules.values()].some((have) => same(have, rule))))
           return ec2Error('InvalidPermission.Duplicate', 'the specified rule already exists');
-        const count = [...this.rules.values()].filter((rule) => rule.groupId === groupId && rule.egress === egress).length;
+        const count = [...this.rules.values()].filter(
+          (rule) => rule.groupId === groupId && rule.egress === egress,
+        ).length;
         if (count + wanted.length > this.ruleLimit)
-          return ec2Error('RulesPerSecurityGroupLimitExceeded', 'The maximum number of rules per security group has been reached.');
+          return ec2Error(
+            'RulesPerSecurityGroupLimitExceeded',
+            'The maximum number of rules per security group has been reached.',
+          );
         const created = wanted.map((rule) => {
           const full: EmuRule = { ...rule, id: this.#id('sgr'), tags: new Map(tags) };
           this.rules.set(full.id, full);
@@ -763,20 +815,29 @@ export class VpcEmulator {
         });
         return ec2Response(
           action,
-          `${el('return', true)}${items('securityGroupRuleSet', created.map((rule) => this.#ruleXml(rule)))}`,
+          `${el('return', true)}${items(
+            'securityGroupRuleSet',
+            created.map((rule) => this.#ruleXml(rule)),
+          )}`,
         );
       }
       case 'RevokeSecurityGroupIngress':
       case 'RevokeSecurityGroupEgress': {
         const groupId = p.get('GroupId') ?? '';
         if (!this.groups.has(groupId))
-          return ec2Error('InvalidGroup.NotFound', `The security group '${groupId}' does not exist`);
+          return ec2Error(
+            'InvalidGroup.NotFound',
+            `The security group '${groupId}' does not exist`,
+          );
         const ids = listOf(p, 'SecurityGroupRuleId');
         const egress = action === 'RevokeSecurityGroupEgress';
         for (const id of ids) {
           const rule = this.rules.get(id);
           if (!rule || rule.groupId !== groupId || rule.egress !== egress)
-            return ec2Error('InvalidSecurityGroupRuleId.NotFound', `The security group rule ID '${id}' does not exist`);
+            return ec2Error(
+              'InvalidSecurityGroupRuleId.NotFound',
+              `The security group rule ID '${id}' does not exist`,
+            );
         }
         for (const id of ids) this.rules.delete(id);
         return ec2Response(action, el('return', true));
@@ -787,7 +848,11 @@ export class VpcEmulator {
           (rule) =>
             (ids.length === 0 || ids.includes(rule.id)) &&
             matches(rule.tags, filters, (name) =>
-              name === 'group-id' ? [rule.groupId] : name === 'security-group-rule-id' ? [rule.id] : undefined,
+              name === 'group-id'
+                ? [rule.groupId]
+                : name === 'security-group-rule-id'
+                  ? [rule.id]
+                  : undefined,
             ),
         );
         const start = Number(p.get('NextToken')?.replace(/^tok-/, '') ?? '0');
@@ -796,7 +861,10 @@ export class VpcEmulator {
         const next = start + max < all.length ? `tok-${start + max}` : undefined;
         return ec2Response(
           action,
-          items('securityGroupRuleSet', page.map((rule) => this.#ruleXml(rule))) + el('nextToken', next),
+          items(
+            'securityGroupRuleSet',
+            page.map((rule) => this.#ruleXml(rule)),
+          ) + el('nextToken', next),
         );
       }
 
@@ -816,7 +884,13 @@ export class VpcEmulator {
                     : undefined,
             ),
         );
-        return ec2Response(action, items('networkAclSet', found.map((acl) => this.#naclXml(acl))));
+        return ec2Response(
+          action,
+          items(
+            'networkAclSet',
+            found.map((acl) => this.#naclXml(acl)),
+          ),
+        );
       }
       case 'CreateNetworkAclEntry':
       case 'ReplaceNetworkAclEntry': {
@@ -844,14 +918,22 @@ export class VpcEmulator {
           action: action_,
           ...(cidr !== undefined ? { cidr } : {}),
           ...(ipv6Cidr !== undefined ? { ipv6Cidr } : {}),
-          ...(ported ? { from: Number(p.get('PortRange.From')), to: Number(p.get('PortRange.To')) } : {}),
+          ...(ported
+            ? { from: Number(p.get('PortRange.From')), to: Number(p.get('PortRange.To')) }
+            : {}),
         };
         const index = acl.entries.findIndex((e) => e.number === number && e.egress === egress);
         if (action === 'CreateNetworkAclEntry') {
           if (index !== -1)
-            return ec2Error('NetworkAclEntryAlreadyExists', `The network acl entry identified by ${number} already exists.`);
+            return ec2Error(
+              'NetworkAclEntryAlreadyExists',
+              `The network acl entry identified by ${number} already exists.`,
+            );
           if (acl.entries.filter((e) => e.egress === egress).length >= this.naclEntryLimit)
-            return ec2Error('NetworkAclEntryLimitExceeded', 'The maximum number of network acl entries has been reached.');
+            return ec2Error(
+              'NetworkAclEntryLimitExceeded',
+              'The maximum number of network acl entries has been reached.',
+            );
           acl.entries.push(entry);
         } else {
           if (index === -1) return ec2Error('InvalidNetworkAclEntry.NotFound', 'no such entry');
@@ -867,7 +949,10 @@ export class VpcEmulator {
         const egress = p.get('Egress') === 'true';
         const index = acl.entries.findIndex((e) => e.number === number && e.egress === egress);
         if (index === -1)
-          return ec2Error('InvalidNetworkAclEntry.NotFound', `The network acl entry identified by ${number} does not exist.`);
+          return ec2Error(
+            'InvalidNetworkAclEntry.NotFound',
+            `The network acl entry identified by ${number} does not exist.`,
+          );
         acl.entries.splice(index, 1);
         return ec2Response(action, el('return', true));
       }
@@ -880,9 +965,15 @@ export class VpcEmulator {
           return ec2Error('InvalidParameterValue', 'the emulator knows gateway endpoints only');
         const service = p.get('ServiceName') ?? '';
         if (!/^com\.amazonaws\.[a-z0-9-]+\.(s3|dynamodb)$/.test(service))
-          return ec2Error('InvalidServiceName', `The Vpc Endpoint Service '${service}' does not exist`);
+          return ec2Error(
+            'InvalidServiceName',
+            `The Vpc Endpoint Service '${service}' does not exist`,
+          );
         if ([...this.endpoints.values()].some((e) => e.vpcId === vpcId && e.service === service))
-          return ec2Error('RouteAlreadyExists', 'an endpoint for the service already routes this table');
+          return ec2Error(
+            'RouteAlreadyExists',
+            'an endpoint for the service already routes this table',
+          );
         const endpoint: EmuEndpoint = {
           id: this.#id('vpce'),
           vpcId,
@@ -905,7 +996,13 @@ export class VpcEmulator {
                   : undefined,
           ),
         );
-        return ec2Response(action, items('vpcEndpointSet', found.map((e) => this.#endpointXml(e))));
+        return ec2Response(
+          action,
+          items(
+            'vpcEndpointSet',
+            found.map((e) => this.#endpointXml(e)),
+          ),
+        );
       }
       case 'DeleteVpcEndpoints': {
         const unsuccessful: string[] = [];
@@ -925,13 +1022,20 @@ export class VpcEmulator {
         const ids = listOf(p, 'GroupId');
         if (ids.length === 0) return this.#inner.handle(request);
         if (ids.length > this.groupsPerInterface)
-          return ec2Error('SecurityGroupsPerInstanceLimitExceeded', 'The maximum number of security groups per interface has been reached.');
+          return ec2Error(
+            'SecurityGroupsPerInstanceLimitExceeded',
+            'The maximum number of security groups per interface has been reached.',
+          );
         const groups = [];
         for (const id of ids) {
           const group = this.groups.get(id);
-          if (!group) return ec2Error('InvalidGroup.NotFound', `The security group '${id}' does not exist`);
+          if (!group)
+            return ec2Error('InvalidGroup.NotFound', `The security group '${id}' does not exist`);
           if (group.vpcId !== instance.vpcId)
-            return ec2Error('InvalidGroup.NotFound', `The security group '${id}' does not exist in VPC '${instance.vpcId}'`);
+            return ec2Error(
+              'InvalidGroup.NotFound',
+              `The security group '${id}' does not exist in VPC '${instance.vpcId}'`,
+            );
           groups.push({ id: group.id, name: group.name });
         }
         instance.groups = groups;
@@ -970,7 +1074,10 @@ export class VpcEmulator {
       el('vpcId', endpoint.vpcId),
       el('serviceName', endpoint.service),
       el('state', 'available'),
-      items('routeTableIdSet', endpoint.routeTableIds.map((id) => id)),
+      items(
+        'routeTableIdSet',
+        endpoint.routeTableIds.map((id) => id),
+      ),
       tagSet(endpoint.tags),
     ].join('');
   }
@@ -983,11 +1090,17 @@ export class VpcEmulator {
     if (subnet) {
       const zone = p.get('Placement.AvailabilityZone');
       if (zone && zone !== subnet.zone)
-        return ec2Error('InvalidParameterValue', `subnet ${subnet.id} is in ${subnet.zone}, not ${zone}`);
+        return ec2Error(
+          'InvalidParameterValue',
+          `subnet ${subnet.id} is in ${subnet.zone}, not ${zone}`,
+        );
       for (const id of groupIds) {
         const group = this.groups.get(id);
         if (!group || group.vpcId !== subnet.vpcId)
-          return ec2Error('InvalidGroup.NotFound', `The security group '${id}' does not exist in VPC '${subnet.vpcId}'`);
+          return ec2Error(
+            'InvalidGroup.NotFound',
+            `The security group '${id}' does not exist in VPC '${subnet.vpcId}'`,
+          );
       }
     }
     const response = await this.#inner.handle(request);
@@ -1001,7 +1114,11 @@ export class VpcEmulator {
       instance.vpcId = subnet.vpcId;
       const groups = groupIds.length
         ? groupIds.map((id) => this.groups.get(id)!)
-        : [[...this.groups.values()].find((g) => g.vpcId === subnet.vpcId && g.name === 'default')!];
+        : [
+            [...this.groups.values()].find(
+              (g) => g.vpcId === subnet.vpcId && g.name === 'default',
+            )!,
+          ];
       instance.groups = groups.map((group) => ({ id: group.id, name: group.name }));
     }
     // The response was rendered before the patch; later reads show the VPC and groups.

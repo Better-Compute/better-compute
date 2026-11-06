@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import type { CallContext, Logger, ProviderFirewallSpec, ProviderNetworks, ProviderSubnetSpec } from '@better-compute/core';
-import { awsConfig, awsProvider, type AwsCompute, type AwsConfig } from '@better-compute/provider-aws';
+import type {
+  CallContext,
+  Logger,
+  ProviderFirewallSpec,
+  ProviderNetworks,
+  ProviderSubnetSpec,
+} from '@better-compute/core';
+import {
+  awsConfig,
+  awsProvider,
+  type AwsCompute,
+  type AwsConfig,
+} from '@better-compute/provider-aws';
 import { AwsEmulator } from './support/aws-emulator/index.js';
 import { Ec2Emulator } from './support/aws-emulator/ec2.js';
 import { VpcEmulator } from './support/aws-emulator/vpc.js';
@@ -136,7 +147,13 @@ describe('networks: VPC', () => {
     const made = vpc.vpcByName('bc-net-1')!;
     // A subnet with a running instance in it blocks the delete.
     await networks.ensureSubnet(
-      { network: 'bc-net-1', name: 'bc-sub-1', region: 'us-east-1', cidr: '10.64.1.0/24', zone: 'us-east-1a' },
+      {
+        network: 'bc-net-1',
+        name: 'bc-sub-1',
+        region: 'us-east-1',
+        cidr: '10.64.1.0/24',
+        zone: 'us-east-1a',
+      },
       call(),
     );
     const subnet = [...vpc.subnets.values()][0]!;
@@ -367,16 +384,28 @@ describe('networks: firewall', () => {
       { group: tagA, egress: false, protocol: 'tcp', from: 22, to: 22, cidr: '203.0.113.0/24' },
       { group: tagA, egress: false, protocol: 'tcp', from: 8000, to: 8080, cidr: '203.0.113.0/24' },
     ]);
-    const tagged = [...vpc.rules.values()].filter((r) => r.tags.has('better-compute:firewall:bc-fw-1'));
+    const tagged = [...vpc.rules.values()].filter((r) =>
+      r.tags.has('better-compute:firewall:bc-fw-1'),
+    );
     expect(tagged.every((r) => r.tags.get('better-compute:network') === 'bc-net-1')).toBe(true);
   });
 
   it('untargeted allow rules land on the network security group', async () => {
     const { networks, call, rulesOf, group } = await withNetwork();
-    await networks.ensureFirewall(rule({ rules: [{ protocol: 'all' }], sources: undefined }), call());
+    await networks.ensureFirewall(
+      rule({ rules: [{ protocol: 'all' }], sources: undefined }),
+      call(),
+    );
     expect(group('bc-net-bc-net-1')).toBeDefined();
     expect(rulesOf('bc-fw-1')).toEqual([
-      { group: 'bc-net-bc-net-1', egress: false, protocol: '-1', from: -1, to: -1, cidr: '0.0.0.0/0' },
+      {
+        group: 'bc-net-bc-net-1',
+        egress: false,
+        protocol: '-1',
+        from: -1,
+        to: -1,
+        cidr: '0.0.0.0/0',
+      },
     ]);
   });
 
@@ -419,10 +448,38 @@ describe('networks: firewall', () => {
       call(),
     );
     expect(rulesOf('bc-fw-1')).toEqual([
-      { group: 'bc-net-bc-net-1', egress: true, protocol: 'icmp', from: -1, to: -1, cidr: '198.51.100.0/24' },
-      { group: 'bc-net-bc-net-1', egress: true, protocol: 'icmp', from: -1, to: -1, cidr: '2001:db8::/32' },
-      { group: 'bc-net-bc-net-1', egress: true, protocol: 'udp', from: 0, to: 65535, cidr: '198.51.100.0/24' },
-      { group: 'bc-net-bc-net-1', egress: true, protocol: 'udp', from: 0, to: 65535, cidr: '2001:db8::/32' },
+      {
+        group: 'bc-net-bc-net-1',
+        egress: true,
+        protocol: 'icmp',
+        from: -1,
+        to: -1,
+        cidr: '198.51.100.0/24',
+      },
+      {
+        group: 'bc-net-bc-net-1',
+        egress: true,
+        protocol: 'icmp',
+        from: -1,
+        to: -1,
+        cidr: '2001:db8::/32',
+      },
+      {
+        group: 'bc-net-bc-net-1',
+        egress: true,
+        protocol: 'udp',
+        from: 0,
+        to: 65535,
+        cidr: '198.51.100.0/24',
+      },
+      {
+        group: 'bc-net-bc-net-1',
+        egress: true,
+        protocol: 'udp',
+        from: 0,
+        to: 65535,
+        cidr: '2001:db8::/32',
+      },
     ]);
   });
 
@@ -430,7 +487,9 @@ describe('networks: firewall', () => {
     const { networks, call, vpc } = await withNetwork();
     await networks.ensureFirewall(rule({ name: 'bc-fw-a', targetTags: [tagA] }), call());
     await networks.ensureFirewall(rule({ name: 'bc-fw-b', targetTags: [tagA] }), call());
-    const shared = [...vpc.rules.values()].filter((r) => r.tags.has('better-compute:firewall:bc-fw-a'));
+    const shared = [...vpc.rules.values()].filter((r) =>
+      r.tags.has('better-compute:firewall:bc-fw-a'),
+    );
     expect(shared).toHaveLength(2);
     expect(shared.every((r) => r.tags.has('better-compute:firewall:bc-fw-b'))).toBe(true);
     expect((await networks.deleteFirewall('bc-fw-a', call())).state).toBe('deleted');
@@ -455,23 +514,33 @@ describe('networks: firewall', () => {
       tags: new Map(),
     });
     await networks.ensureFirewall(rule({ targetTags: [tagA] }), call());
-    expect(vpc.rules.get('sgr-0000000000000beef')!.tags.get('better-compute:firewall:bc-fw-1')).toBe('true');
+    expect(
+      vpc.rules.get('sgr-0000000000000beef')!.tags.get('better-compute:firewall:bc-fw-1'),
+    ).toBe('true');
     await networks.deleteFirewall('bc-fw-1', call());
     expect(vpc.rules.get('sgr-0000000000000beef')!.tags.size).toBe(0);
-    const revoked = emu.calls('RevokeSecurityGroupIngress').map((r) => r.params.get('SecurityGroupRuleId.1'));
+    const revoked = emu
+      .calls('RevokeSecurityGroupIngress')
+      .map((r) => r.params.get('SecurityGroupRuleId.1'));
     expect(revoked).not.toContain('sgr-0000000000000beef');
   });
 
   it('refuses a targeted deny and a rule that filters the other side', async () => {
     const { networks, call } = await withNetwork();
-    expect(await networks.ensureFirewall(rule({ action: 'deny', targetTags: [tagA] }), call())).toMatchObject({
+    expect(
+      await networks.ensureFirewall(rule({ action: 'deny', targetTags: [tagA] }), call()),
+    ).toMatchObject({
       state: 'error',
       message: expect.stringMatching(/network-wide/),
     });
-    expect(await networks.ensureFirewall(rule({ destinations: ['10.64.0.0/16'] }), call())).toMatchObject({
+    expect(
+      await networks.ensureFirewall(rule({ destinations: ['10.64.0.0/16'] }), call()),
+    ).toMatchObject({
       state: 'error',
     });
-    await expect(networks.ensureFirewall(rule({ targetTags: ['Not A Tag'] }), call())).rejects.toMatchObject({
+    await expect(
+      networks.ensureFirewall(rule({ targetTags: ['Not A Tag'] }), call()),
+    ).rejects.toMatchObject({
       code: 'INVALID_INPUT',
     });
     await expect(
@@ -482,16 +551,28 @@ describe('networks: firewall', () => {
   it('network-wide deny compiles to NACL entries in priority order', async () => {
     const { networks, call, vpc, vpcId } = await withNetwork();
     const deny = (overrides: Partial<ProviderFirewallSpec>) =>
-      rule({ action: 'deny', rules: [{ protocol: 'tcp', ports: ['22'] }], sources: ['0.0.0.0/0'], ...overrides });
-    expect((await networks.ensureFirewall(deny({ name: 'bc-deny-late', priority: 500 }), call())).state).toBe('ready');
-    await networks.ensureFirewall(deny({ name: 'bc-deny-early', priority: 100, rules: [{ protocol: 'all' }] }), call());
+      rule({
+        action: 'deny',
+        rules: [{ protocol: 'tcp', ports: ['22'] }],
+        sources: ['0.0.0.0/0'],
+        ...overrides,
+      });
+    expect(
+      (await networks.ensureFirewall(deny({ name: 'bc-deny-late', priority: 500 }), call())).state,
+    ).toBe('ready');
+    await networks.ensureFirewall(
+      deny({ name: 'bc-deny-early', priority: 100, rules: [{ protocol: 'all' }] }),
+      call(),
+    );
     // Same priority as the first: the next free number.
     await networks.ensureFirewall(
       deny({ name: 'bc-deny-same', priority: 509, rules: [{ protocol: 'udp', ports: ['53'] }] }),
       call(),
     );
     const acl = vpc.defaultNacl(vpcId);
-    expect(acl.entries.map((e) => [e.number, e.egress, e.protocol, e.action, e.from, e.to])).toEqual([
+    expect(
+      acl.entries.map((e) => [e.number, e.egress, e.protocol, e.action, e.from, e.to]),
+    ).toEqual([
       [110, false, '-1', 'deny', undefined, undefined],
       [150, false, '6', 'deny', 22, 22],
       [151, false, '17', 'deny', 53, 53],
@@ -504,7 +585,10 @@ describe('networks: firewall', () => {
     // Ensuring again changes nothing; a changed deny replaces only its own entries.
     await networks.ensureFirewall(deny({ name: 'bc-deny-late', priority: 500 }), call());
     expect(acl.entries).toHaveLength(5);
-    await networks.ensureFirewall(deny({ name: 'bc-deny-late', priority: 500, rules: [{ protocol: 'tcp', ports: ['23'] }] }), call());
+    await networks.ensureFirewall(
+      deny({ name: 'bc-deny-late', priority: 500, rules: [{ protocol: 'tcp', ports: ['23'] }] }),
+      call(),
+    );
     expect(acl.entries.find((e) => e.number === 150)).toMatchObject({ from: 23, to: 23 });
     // Delete removes the entry and its owner tag.
     expect((await networks.deleteFirewall('bc-deny-late', call())).state).toBe('deleted');
@@ -515,7 +599,12 @@ describe('networks: firewall', () => {
 
   it('repairs an owner tag whose entry is gone, and reports a full ACL', async () => {
     const { networks, call, vpc, vpcId } = await withNetwork();
-    const deny = rule({ action: 'deny', name: 'bc-deny-1', priority: 0, rules: [{ protocol: 'all' }] });
+    const deny = rule({
+      action: 'deny',
+      name: 'bc-deny-1',
+      priority: 0,
+      rules: [{ protocol: 'all' }],
+    });
     await networks.ensureFirewall(deny, call());
     const acl = vpc.defaultNacl(vpcId);
     acl.entries = acl.entries.filter((e) => e.number !== 100);
@@ -526,7 +615,10 @@ describe('networks: firewall', () => {
       rule({ action: 'deny', name: 'bc-deny-2', priority: 10, rules: [{ protocol: 'all' }] }),
       call(),
     );
-    expect(full).toMatchObject({ state: 'error', message: expect.stringMatching(/NetworkAclEntryLimitExceeded/) });
+    expect(full).toMatchObject({
+      state: 'error',
+      message: expect.stringMatching(/NetworkAclEntryLimitExceeded/),
+    });
     expect([...acl.tags.keys()].filter((k) => k.startsWith('better-compute:deny:'))).toEqual([
       'better-compute:deny:ingress:100',
     ]);
@@ -552,13 +644,23 @@ describe('networks: machines', () => {
     const w = await world(overrides);
     await w.settle(() => w.networks.ensureNetwork({ name: 'bc-net-1' }, w.call()));
     const subnet = await w.networks.ensureSubnet(
-      { network: 'bc-net-1', name: 'bc-sub-1', region: 'us-east-1', cidr: '10.64.1.0/24', zone: 'us-east-1a' },
+      {
+        network: 'bc-net-1',
+        name: 'bc-sub-1',
+        region: 'us-east-1',
+        cidr: '10.64.1.0/24',
+        zone: 'us-east-1a',
+      },
       w.call(),
     );
     const vpcId = w.vpc.vpcByName('bc-net-1')!.id;
     const groupId = (name: string) =>
       [...w.vpc.groups.values()].find((g) => g.vpcId === vpcId && g.name === name)?.id;
-    const create = (key: string, network: Record<string, unknown> = {}, offerId = 'us-east-1a/t3.micro') =>
+    const create = (
+      key: string,
+      network: Record<string, unknown> = {},
+      offerId = 'us-east-1a/t3.micro',
+    ) =>
       w.impl.create(
         {
           offerId,
@@ -577,10 +679,10 @@ describe('networks: machines', () => {
     const machine = await create('ins_1');
     const run = emu.calls('RunInstances')[0]!.params;
     expect(run.get('NetworkInterface.1.SubnetId')).toBe(subnetId);
-    expect([run.get('NetworkInterface.1.SecurityGroupId.1'), run.get('NetworkInterface.1.SecurityGroupId.2')]).toEqual([
-      groupId('bc-net-bc-net-1'),
-      groupId(tagA),
-    ]);
+    expect([
+      run.get('NetworkInterface.1.SecurityGroupId.1'),
+      run.get('NetworkInterface.1.SecurityGroupId.2'),
+    ]).toEqual([groupId('bc-net-bc-net-1'), groupId(tagA)]);
     expect(run.has('SecurityGroupId.1')).toBe(false);
     const instance = ec2.instances.get(machine.id)!;
     expect(instance.vpcId).toBe(vpcId);
@@ -593,8 +695,12 @@ describe('networks: machines', () => {
       code: 'INVALID_INPUT',
       details: { reason: 'subnet-zone' },
     });
-    await expect(create('ins_3', { network: 'bc-net-9' })).rejects.toMatchObject({ code: 'INVALID_STATE' });
-    await expect(create('ins_4', { subnet: 'bc-sub-9' })).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    await expect(create('ins_3', { network: 'bc-net-9' })).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+    });
+    await expect(create('ins_4', { subnet: 'bc-sub-9' })).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+    });
   });
 
   it('setTags swaps the better-compute groups and keeps every other group', async () => {
@@ -634,7 +740,9 @@ describe('networks: machines', () => {
       code: 'INVALID_STATE',
       details: { reason: 'notAttached' },
     });
-    await expect(networks.setTags(machine.id, ['nope'], call())).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(networks.setTags(machine.id, ['nope'], call())).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
     await expect(networks.setTags('i-0000000000000dead', [tagB], call())).rejects.toMatchObject({
       code: 'NOT_FOUND',
     });
@@ -643,10 +751,12 @@ describe('networks: machines', () => {
   it('setTags refuses more groups than an interface takes', async () => {
     const { create, networks, call } = await onNetwork({ securityGroupsPerInterface: 2 });
     const machine = await create('ins_1');
-    await expect(networks.setTags(machine.id, [tagA, tagB], call(), 'ins_1')).rejects.toMatchObject({
-      code: 'QUOTA_EXCEEDED',
-      details: { reason: 'security-groups-per-interface', limit: 2 },
-    });
+    await expect(networks.setTags(machine.id, [tagA, tagB], call(), 'ins_1')).rejects.toMatchObject(
+      {
+        code: 'QUOTA_EXCEEDED',
+        details: { reason: 'security-groups-per-interface', limit: 2 },
+      },
+    );
   });
 
   it('a firewall rule targeting a tag reaches the machine that carries it', async () => {
@@ -665,7 +775,9 @@ describe('networks: machines', () => {
       call(),
     );
     const groups = new Set(ec2.instances.get(machine.id)!.groups.map((g) => g.id));
-    const rules = [...vpc.rules.values()].filter((r) => r.tags.has('better-compute:firewall:bc-fw-ssh'));
+    const rules = [...vpc.rules.values()].filter((r) =>
+      r.tags.has('better-compute:firewall:bc-fw-ssh'),
+    );
     expect(rules).toHaveLength(1);
     expect(groups.has(rules[0]!.groupId)).toBe(true);
   });
