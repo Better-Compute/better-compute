@@ -43,3 +43,9 @@ Enabled but misconfigured is an error, not a skip.
 | File | Covers | Creates |
 | --- | --- | --- |
 | `templates.live.test.ts` | CloudFormation `ValidateTemplate` on the three deployment templates | nothing |
+| `platform.live.test.ts` | `s3BlobStore` (single and multipart put, get, presigned GET, delete), `awsSecretsManagerStore` (put, resolve, tenant check, rotate, delete), `eventBridgeSink` through a real rule to SQS, `sqsSink` | an S3 bucket, a secret, an event bus and rule, two SQS queues, for minutes |
+
+Files create their fixtures through `support/resources.ts` (`liveAws`): each is tagged with the run's tags and its
+ARN is recorded as soon as it exists, so `afterAll` (`cleanUp`, the sweeper's deleters by ARN) deletes it even when
+a later step failed. What `cleanUp` cannot delete stays tagged for the sweeper. `tests/aws-live-resources.test.ts`
+pins those requests on the emulator.

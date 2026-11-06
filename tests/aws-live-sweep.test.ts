@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { liveGate, testRunTagKey } from './live/aws/support/live.js';
-import { sweepTestRuns } from './live/aws/support/sweep.js';
+import { deleteLiveResources, sweepTestRuns } from './live/aws/support/sweep.js';
 import { AwsEmulator, testAccessKeyId, testSecret } from './support/aws-platform-emulator/index.js';
 import { fisFake, recorderFake, s3SweepFake, stsFake, taggingFake, type FakeBucket, type RecordedCall } from './support/aws-live-fakes.js';
 
@@ -53,7 +53,9 @@ function world(
   const sweep = (apply: boolean) =>
     sweepTestRuns({ config: gate.config, deps: { fetch: emu.fetch, clock: emu.clock, endpoint: 'http://emu.local' }, apply });
   const order = () => emu.requests.filter((request) => !['GetResources', 'GetCallerIdentity'].includes(request.operation)).map((request) => request.operation);
-  return { emu, log, tagging, s3, sweep, order };
+  const cleanUp = (arns: string[]) =>
+    deleteLiveResources({ config: gate.config, deps: { fetch: emu.fetch, clock: emu.clock, endpoint: 'http://emu.local' }, arns });
+  return { emu, log, tagging, s3, sweep, cleanUp, order };
 }
 
 const tagged = (resource: string, run = oldRun) => ({ arn: resource, tags: { [testRunTagKey]: run, 'better-compute:managed': 'true' } });
@@ -239,5 +241,30 @@ describe('sweepTestRuns', () => {
     const report = await sweep(false);
     expect(report.wouldDelete).toHaveLength(5);
     expect(tagging.requests).toHaveLength(3);
+  });
+});
+
+describe('deleteLiveResources', () => {
+  // A live file's afterAll: deletes what it created by ARN, at once (the Tagging API lags), with
+  // the sweeper's deleters, order and account rules.
+  it('deletes the given resources in dependency order, without a tag scan', async () => {
+    const buckets = new Map<string, FakeBucket>([['bc-live-bucket', { owner: SANDBOX, versions: [{ key: 'a', versionId: 'v1' }] }]]);
+    const { emu, cleanUp, order } = world([], { buckets });
+    const report = await cleanUp([arn('events', 'event-bus/bc-live-bus'), 'arn:aws:s3:::bc-live-bucket', arn('events', 'rule/bc-live-bus/r1')]);
+    expect(report.pending).toEqual([]);
+    expect(report.deleted).toHaveLength(3);
+    expect(emu.calls('GetResources')).toHaveLength(0);
+    // Same rank keeps the given order; the bus (rank 3) waits for its rule.
+    expect(order()).toEqual(['ListObjectVersions', 'DeleteObjects', 'DeleteBucket', 'ListTargetsByRule', 'RemoveTargets', 'DeleteRule', 'DeleteEventBus']);
+  });
+
+  it('refuses the wrong account and skips what it cannot delete', async () => {
+    const wrong = world([], { account: '111111111111' });
+    await expect(wrong.cleanUp([arn('sqs', 'q')])).rejects.toThrow(/not the sandbox account/);
+    const { cleanUp, order } = world([]);
+    const report = await cleanUp([arn('sqs', 'q', '333333333333'), arn('dynamodb', 'table/t'), 'not-an-arn']);
+    expect(report.deleted).toEqual([]);
+    expect(report.skipped.map((entry) => entry.arn)).toEqual([arn('sqs', 'q', '333333333333'), arn('dynamodb', 'table/t'), 'not-an-arn']);
+    expect(order()).toEqual([]);
   });
 });

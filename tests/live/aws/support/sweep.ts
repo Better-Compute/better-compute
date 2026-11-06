@@ -226,6 +226,17 @@ const jsonTargets = {
   kms: { jsonVersion: '1.1', targetPrefix: 'TrentService' },
 } as const;
 
+/** The S3 URL of a bucket: virtual-hosted on AWS, path-style for an endpoint override or a dotted name (TLS). */
+export function bucketUrl(transport: Transport, bucket: string, query: Readonly<Record<string, string>> = {}): URL {
+  const base = serviceEndpoint('s3', transport.region, transport.endpointOverride);
+  const url =
+    transport.endpointOverride !== undefined || bucket.includes('.')
+      ? new URL(`${base.origin}/${bucket}/`)
+      : new URL(`${base.protocol}//${bucket}.${base.host}/`);
+  for (const [name, value] of Object.entries(query)) url.searchParams.set(name, value);
+  return url;
+}
+
 function clients(transport: Transport, account: string): Clients {
   // EC2 speaks its own query flavour (`Name.N` lists), so it gets a request of its own.
   const ec2Url = serviceEndpoint('ec2', transport.region, transport.endpointOverride);
@@ -250,16 +261,9 @@ function clients(transport: Transport, account: string): Clients {
       return queryClient(transport, { hostPrefix: service, version: service === 'sns' ? '2010-03-31' : '2010-05-15' }).call(action, params);
     },
     async s3(input) {
-      // Virtual-hosted on AWS; path-style for an endpoint override and for dotted names (TLS).
-      const base = serviceEndpoint('s3', transport.region, transport.endpointOverride);
-      const url =
-        transport.endpointOverride !== undefined || input.bucket.includes('.')
-          ? new URL(`${base.origin}/${input.bucket}/`)
-          : new URL(`${base.protocol}//${input.bucket}.${base.host}/`);
-      for (const [name, value] of Object.entries(input.query)) url.searchParams.set(name, value);
       const response = await transport.send({
         method: input.method,
-        url,
+        url: bucketUrl(transport, input.bucket, input.query),
         headers: { ...(input.headers ?? {}), 'x-amz-expected-bucket-owner': account },
         ...(input.body !== undefined ? { body: input.body } : {}),
         service: 's3',
@@ -278,69 +282,42 @@ function clients(transport: Transport, account: string): Clients {
   };
 }
 
-/** One sweep pass over the sandbox account's test-run resources. */
-export async function sweepTestRuns(options: SweepOptions): Promise<SweepReport> {
-  const { config } = options;
-  const deps = options.deps ?? {};
-  const olderThanMs = options.olderThanMs ?? sweepAfterMs;
+interface Queued {
+  text: string;
+  arn: Arn;
+  deleter: Deleter;
+  order: number;
+}
+
+/** The deleter for an ARN of the sandbox account, or why the sweeper leaves it alone. */
+function place(text: string, config: LiveConfig): { arn: Arn; deleter: Deleter } | { reason: string } {
+  const arn = parseArn(text);
+  const deleter = arn ? serviceDeleters[arn.service]?.(arn) : undefined;
+  if (!arn || !deleter)
+    return { reason: `no sweeper for ${arn ? `${arn.service}:${arn.resource.split(/[/:]/)[0]}` : 'this ARN'}; delete it by hand` };
+  // S3 ARNs carry no account; S3 enforces the owner instead (x-amz-expected-bucket-owner).
+  if (arn.account !== config.account && !(arn.service === 's3' && arn.account === ''))
+    return { reason: `belongs to another account (${arn.account || 'none'})` };
+  return { arn, deleter };
+}
+
+/** Checks the credentials are the sandbox account's and builds the transport. */
+async function sandboxTransport(config: LiveConfig, deps: LiveDeps): Promise<Transport> {
   const { account } = await liveIdentity(config, deps);
   if (account !== config.account)
     throw new ComputeError('ACCESS_DENIED', `the credentials are for account ${account}, not the sandbox account ${config.account}`);
-  const transport = createTransport({
+  return createTransport({
     region: config.region,
     credentials: config.credentials,
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
     ...(deps.clock ? { clock: deps.clock } : {}),
     ...(deps.endpoint ? { endpoint: deps.endpoint } : {}),
   });
-  const now = (deps.clock ?? systemClock).now();
-  const tagging = jsonClient(transport, { hostPrefix: 'tagging', jsonVersion: '1.1', targetPrefix: 'ResourceGroupsTaggingAPI_20170126' });
+}
 
-  const report: SweepReport = { found: 0, deleted: [], wouldDelete: [], pending: [], skipped: [] };
-  const queue: { text: string; arn: Arn; deleter: Deleter; order: number }[] = [];
-  let token = '';
-  for (let page = 0; page < 1000; page++) {
-    const response = await tagging.call<{
-      ResourceTagMappingList?: { ResourceARN: string; Tags?: { Key: string; Value: string }[] }[];
-      PaginationToken?: string;
-    }>('GetResources', { TagFilters: [{ Key: testRunTagKey }], ResourcesPerPage: 100, ...(token ? { PaginationToken: token } : {}) });
-    for (const mapping of response.ResourceTagMappingList ?? []) {
-      report.found += 1;
-      const text = mapping.ResourceARN;
-      const run = mapping.Tags?.find((tag) => tag.Key === testRunTagKey)?.Value ?? '';
-      const arn = parseArn(text);
-      const deleter = arn ? serviceDeleters[arn.service]?.(arn) : undefined;
-      if (!arn || !deleter) {
-        report.skipped.push({ arn: text, reason: `no sweeper for ${arn ? `${arn.service}:${arn.resource.split(/[/:]/)[0]}` : 'this ARN'}; delete it by hand` });
-        continue;
-      }
-      // S3 ARNs carry no account; S3 enforces the owner instead (x-amz-expected-bucket-owner).
-      if (arn.account !== config.account && !(arn.service === 's3' && arn.account === '')) {
-        report.skipped.push({ arn: text, reason: `belongs to another account (${arn.account || 'none'})` });
-        continue;
-      }
-      const started = testRunStartedAt(run);
-      if (started === undefined) {
-        report.skipped.push({ arn: text, reason: `${JSON.stringify(run.slice(0, 40))} is not a test-run id` });
-        continue;
-      }
-      if (now - started < olderThanMs) {
-        report.skipped.push({ arn: text, reason: `its run is younger than ${Math.round(olderThanMs / 60_000)} minutes` });
-        continue;
-      }
-      queue.push({ text, arn, deleter, order: queue.length });
-    }
-    token = response.PaginationToken ?? '';
-    if (!token) break;
-  }
-
-  queue.sort((a, b) => a.deleter.rank - b.deleter.rank || a.order - b.order);
-  if (!options.apply) {
-    report.wouldDelete = queue.map((entry) => entry.text);
-    return report;
-  }
-  const api = clients(transport, config.account);
-  for (const entry of queue) {
+/** Deletes `queue` in rank order; one already gone counts as deleted, one that fails is pending. */
+async function runDeletes(api: Clients, queue: Queued[], report: Pick<SweepReport, 'deleted' | 'pending'>): Promise<void> {
+  for (const entry of [...queue].sort((a, b) => a.deleter.rank - b.deleter.rank || a.order - b.order)) {
     try {
       await entry.deleter.remove(api, entry.arn, entry.text);
       report.deleted.push(entry.text);
@@ -353,5 +330,75 @@ export async function sweepTestRuns(options: SweepOptions): Promise<SweepReport>
       report.pending.push({ arn: entry.text, reason: `${code}: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}` });
     }
   }
+}
+
+/** One sweep pass over the sandbox account's test-run resources. */
+export async function sweepTestRuns(options: SweepOptions): Promise<SweepReport> {
+  const { config } = options;
+  const deps = options.deps ?? {};
+  const olderThanMs = options.olderThanMs ?? sweepAfterMs;
+  const transport = await sandboxTransport(config, deps);
+  const now = (deps.clock ?? systemClock).now();
+  const tagging = jsonClient(transport, { hostPrefix: 'tagging', jsonVersion: '1.1', targetPrefix: 'ResourceGroupsTaggingAPI_20170126' });
+
+  const report: SweepReport = { found: 0, deleted: [], wouldDelete: [], pending: [], skipped: [] };
+  const queue: Queued[] = [];
+  let token = '';
+  for (let page = 0; page < 1000; page++) {
+    const response = await tagging.call<{
+      ResourceTagMappingList?: { ResourceARN: string; Tags?: { Key: string; Value: string }[] }[];
+      PaginationToken?: string;
+    }>('GetResources', { TagFilters: [{ Key: testRunTagKey }], ResourcesPerPage: 100, ...(token ? { PaginationToken: token } : {}) });
+    for (const mapping of response.ResourceTagMappingList ?? []) {
+      report.found += 1;
+      const text = mapping.ResourceARN;
+      const run = mapping.Tags?.find((tag) => tag.Key === testRunTagKey)?.Value ?? '';
+      const placed = place(text, config);
+      if ('reason' in placed) {
+        report.skipped.push({ arn: text, reason: placed.reason });
+        continue;
+      }
+      const started = testRunStartedAt(run);
+      if (started === undefined) {
+        report.skipped.push({ arn: text, reason: `${JSON.stringify(run.slice(0, 40))} is not a test-run id` });
+        continue;
+      }
+      if (now - started < olderThanMs) {
+        report.skipped.push({ arn: text, reason: `its run is younger than ${Math.round(olderThanMs / 60_000)} minutes` });
+        continue;
+      }
+      queue.push({ text, ...placed, order: queue.length });
+    }
+    token = response.PaginationToken ?? '';
+    if (!token) break;
+  }
+
+  if (!options.apply) {
+    report.wouldDelete = [...queue].sort((a, b) => a.deleter.rank - b.deleter.rank || a.order - b.order).map((entry) => entry.text);
+    return report;
+  }
+  await runDeletes(clients(transport, config.account), queue, report);
+  return report;
+}
+
+/**
+ * A live file's `afterAll`: deletes the resources it created, by ARN, right away (the Tagging API
+ * lags by minutes, so a fresh resource may not be listed yet), with the sweeper's deleters, order
+ * and account rules. What it cannot delete stays tagged for the scheduled sweep.
+ */
+export async function deleteLiveResources(options: {
+  config: LiveConfig;
+  deps?: LiveDeps;
+  arns: readonly string[];
+}): Promise<Pick<SweepReport, 'deleted' | 'pending' | 'skipped'>> {
+  const transport = await sandboxTransport(options.config, options.deps ?? {});
+  const report: Pick<SweepReport, 'deleted' | 'pending' | 'skipped'> = { deleted: [], pending: [], skipped: [] };
+  const queue: Queued[] = [];
+  for (const text of options.arns) {
+    const placed = place(text, options.config);
+    if ('reason' in placed) report.skipped.push({ arn: text, reason: placed.reason });
+    else queue.push({ text, ...placed, order: queue.length });
+  }
+  await runDeletes(clients(transport, options.config.account), queue, report);
   return report;
 }

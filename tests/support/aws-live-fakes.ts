@@ -105,6 +105,7 @@ export function recorderFake(
 
 export interface FakeBucket {
   owner: string;
+  tags?: Record<string, string>;
   /** Object versions and delete markers, in listing order. */
   versions: { key: string; versionId: string; marker?: boolean }[];
 }
@@ -113,9 +114,13 @@ export interface FakeBucket {
  * S3 bucket teardown for the sweeper: ListObjectVersions (`pageSize` per page), DeleteObjects
  * (checks Content-MD5) and DeleteBucket (BucketNotEmpty while versions remain). Every request must
  * name the bucket's owner in x-amz-expected-bucket-owner, as S3 enforces it (403 otherwise).
- * `failKeys` makes DeleteObjects report those keys as per-object errors.
+ * `failKeys` makes DeleteObjects report those keys as per-object errors. CreateBucket (owned by
+ * `account`) and PutBucketTagging (checks Content-MD5) serve the live files' own fixtures.
  */
-export function s3SweepFake(emu: AwsEmulator, state: { buckets: Map<string, FakeBucket>; pageSize?: number; failKeys?: Set<string> }) {
+export function s3SweepFake(
+  emu: AwsEmulator,
+  state: { buckets: Map<string, FakeBucket>; pageSize?: number; failKeys?: Set<string>; account?: string },
+) {
   const requests: { operation: string; bucket: string; headers: Record<string, string>; query: Record<string, string>; body: string }[] = [];
   const bucketOf = (request: Omit<EmuRequest, 'operation'>) => decodeURIComponent(request.url.pathname.split('/')[1] ?? '');
   emu.register('s3', {
@@ -124,15 +129,30 @@ export function s3SweepFake(emu: AwsEmulator, state: { buckets: Map<string, Fake
       const q = request.url.searchParams;
       if (request.method === 'GET' && q.has('versions')) return 'ListObjectVersions';
       if (request.method === 'POST' && q.has('delete')) return 'DeleteObjects';
-      if (request.method === 'DELETE' && request.url.pathname.split('/').filter(Boolean).length === 1) return 'DeleteBucket';
+      const root = request.url.pathname.split('/').filter(Boolean).length === 1;
+      if (request.method === 'DELETE' && root) return 'DeleteBucket';
+      if (request.method === 'PUT' && root && q.has('tagging')) return 'PutBucketTagging';
+      if (request.method === 'PUT' && root && [...q.keys()].length === 0) return 'CreateBucket';
       return `${request.method}?`;
     },
     handle(request) {
       const name = bucketOf(request);
       const body = Buffer.from(request.body).toString('utf8');
       requests.push({ operation: request.operation, bucket: name, headers: request.headers, query: Object.fromEntries(request.url.searchParams), body });
+      if (request.operation === 'CreateBucket') {
+        if (state.buckets.has(name)) throw new EmuError('BucketAlreadyOwnedByYou', 'already yours', 409);
+        state.buckets.set(name, { owner: state.account ?? '', versions: [] });
+        return new Response(null, { status: 200 });
+      }
       const bucket = state.buckets.get(name);
       if (!bucket) throw new EmuError('NoSuchBucket', 'The specified bucket does not exist', 404);
+      if (request.operation === 'PutBucketTagging') {
+        if (request.headers['content-md5'] !== createHash('md5').update(request.body).digest('base64'))
+          throw new EmuError('InvalidDigest', 'The Content-MD5 you specified was invalid');
+        const tagSet = parseXml(body).child('TagSet')?.all('Tag') ?? [];
+        bucket.tags = Object.fromEntries(tagSet.map((tag) => [tag.textOf('Key') ?? '', tag.textOf('Value') ?? '']));
+        return new Response(null, { status: 204 });
+      }
       if (request.headers['x-amz-expected-bucket-owner'] !== bucket.owner) throw new EmuError('AccessDenied', 'Access Denied', 403);
       switch (request.operation) {
         case 'ListObjectVersions': {
