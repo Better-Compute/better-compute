@@ -34,6 +34,20 @@ export function compareDoksVersion(desired: string, actual: string): number {
   return 0;
 }
 
+/**
+ * How the actual version stands to the desired one for an existing cluster: 0 when it satisfies
+ * it, positive when an upgrade is due, negative only for a downgrade of the minor. A newer patch of
+ * the desired minor satisfies a full-version or slug pin: DOKS's auto-upgrade (every channel but
+ * `extended`) moves a cluster's patch on its own, and DOKS cannot go back to the older one.
+ */
+export function versionGap(desired: string, actual: string): number {
+  const gap = compareDoksVersion(desired, actual);
+  if (gap >= 0) return gap;
+  const want = parseDoksVersion(desired) ?? [];
+  const have = parseDoksVersion(actual) ?? [];
+  return want[0] === have[0] && want[1] === have[1] ? 0 : gap;
+}
+
 /** Newest first. */
 export function byNewest(versions: readonly DoksVersion[]): DoksVersion[] {
   return versions

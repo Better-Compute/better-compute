@@ -55,6 +55,7 @@ import {
   pickVersion,
   readOptions,
   readVersions,
+  versionGap,
 } from './versions.js';
 
 export { kubernetesTag } from './clusters.js';
@@ -247,8 +248,8 @@ export class DoKubernetes implements ProviderKubernetes {
     if (state === 'deleting') return clusterState(id, found);
     await this.#checkImmutable(spec, found, signal);
     if (state !== 'running' && state !== 'degraded') return clusterState(id, found);
-    const upgrade =
-      spec.version !== undefined ? compareDoksVersion(spec.version, found.version) : 0;
+    // A newer patch of the pinned minor (DOKS auto-upgraded it) satisfies the pin.
+    const upgrade = spec.version !== undefined ? versionGap(spec.version, found.version) : 0;
     if (upgrade < 0)
       throw fail(
         'INVALID_STATE',

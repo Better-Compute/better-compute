@@ -832,6 +832,34 @@ describe('doks upgrades and deletes', () => {
     expect([error.code, error.details?.reason]).toEqual(['INVALID_STATE', 'downgrade']);
   });
 
+  it('takes a patch DOKS auto-upgraded past a pinned slug as satisfied, and still applies changes', async () => {
+    const s = await setup();
+    const pinned = { ...standard, version: '1.33.4-do.0' };
+    const id = await readyCluster(s, pinned);
+    expect(s.doks.clusters.get(id)!.version).toBe('1.33.4-do.0');
+    // The regular channel auto-upgrades: DOKS moved the patch on its own.
+    s.doks.clusters.get(id)!.version = '1.33.5-do.1';
+    expect((await s.k8s.ensureCluster(pinned, s.ctx())).state).toBe('ready');
+    const firewalled = { ...pinned, authorizedNetworks: ['198.51.100.0/24'] };
+    expect((await s.k8s.ensureCluster(firewalled, s.ctx())).state).toBe('updating');
+    expect(posted(s, `/kubernetes/clusters/${id}`, 'PUT').at(-1)).toMatchObject({
+      control_plane_firewall: { enabled: true, allowed_addresses: ['198.51.100.0/24'] },
+    });
+    expect(s.doks.clusters.get(id)!.control_plane_firewall.allowed_addresses).toEqual([
+      '198.51.100.0/24',
+    ]);
+    // A full version without the slug is satisfied the same way; never an upgrade or downgrade.
+    expect((await s.k8s.ensureCluster({ ...firewalled, version: '1.33.4' }, s.ctx())).state).toBe(
+      'ready',
+    );
+    expect(posted(s, `/kubernetes/clusters/${id}/upgrade`)).toEqual([]);
+    // An older minor is still a downgrade.
+    const older = await failure(
+      s.k8s.ensureCluster({ ...firewalled, version: '1.32.9-do.2' }, s.ctx()),
+    );
+    expect([older.code, older.details?.reason]).toEqual(['INVALID_STATE', 'downgrade']);
+  });
+
   it('deletes its cluster by id, keeping what the cluster made for its workloads', async () => {
     const s = await setup();
     const id = await readyCluster(s);
