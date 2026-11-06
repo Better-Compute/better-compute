@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
@@ -10,7 +11,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
+	"github.com/better-compute/better-compute/daemon/internal/agent"
 	"github.com/better-compute/better-compute/daemon/internal/cloud/aws"
 )
 
@@ -88,5 +92,50 @@ func TestCloudHostOnlyOnEC2(t *testing.T) {
 	fakeCloud(t, "Amazon EC2")
 	if cloudHost() == nil {
 		t.Fatal("no cloud host on EC2")
+	}
+}
+
+func TestEC2HostWatchesSpotNoticesOnlyOnSpot(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "sys", "class", "dmi", "id")
+	_ = os.MkdirAll(dir, 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "sys_vendor"), []byte("Amazon EC2\n"), 0o644)
+	var spotReads atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest/api/token":
+			_, _ = w.Write([]byte("tok"))
+		case "/latest/meta-data/spot/instance-action":
+			spotReads.Add(1)
+			_, _ = w.Write([]byte(`{"action":"hibernate","time":"2026-11-05T10:02:00Z"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	prevIMDS, prevInterval := cloudIMDS, spotInterval
+	cloudIMDS = func() *aws.Client { return &aws.Client{Root: root, Endpoint: srv.URL} }
+	spotInterval = 5 * time.Millisecond
+	defer func() { cloudIMDS, spotInterval = prevIMDS, prevInterval }()
+
+	host := cloudHost()
+	// On-demand: returns at once, never reads the spot path.
+	host.WatchInterruptions(context.Background(), &agentv1.CloudSection{Lifecycle: "on-demand"}, func(*agent.Interruption) {
+		t.Fatal("a notice on an on-demand instance")
+	})
+	if spotReads.Load() != 0 {
+		t.Fatal("the spot path was read on an on-demand instance")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	got := make(chan *agent.Interruption, 1)
+	go host.WatchInterruptions(ctx, &agentv1.CloudSection{Lifecycle: "spot"}, func(n *agent.Interruption) { got <- n })
+	defer cancel()
+	select {
+	case n := <-got:
+		if n == nil || n.Action != "hibernate" || !n.Deadline.Equal(time.Date(2026, 11, 5, 10, 2, 0, 0, time.UTC)) {
+			t.Fatalf("interruption %+v", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no interruption from the spot notice")
 	}
 }

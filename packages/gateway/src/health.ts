@@ -45,6 +45,9 @@ export const daemonNodeConditions: Readonly<Record<string, { noSchedule: boolean
   // Not a fault: the host section is observed only ([host] units = false; the GPU operator owns
   // the host). Operators see it on the node; capacity books from the inventory alone.
   HostManagedExternally: { noSchedule: false },
+  // (AWS A6) The cloud takes the instance back (an EC2 spot instance-action; reason "<action>:<deadline>"): no new
+  // work while the notice stands; it clears when the notice is withdrawn.
+  SpotInterruption: { noSchedule: true },
 });
 
 /** Conditions a section's state stands for (the section reports it, not a Condition). */

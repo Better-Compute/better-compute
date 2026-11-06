@@ -227,8 +227,10 @@ type Agent struct {
 	// faults are this boot's active device conditions (XIDs); pressure the last PSI sample.
 	faults []*agentv1.Condition
 	// rootDisk is the disk deploy.image wrote (boot.kexec boots it).
-	rootDisk      *inventory.Disk
-	pressure      *agentv1.HostPressure
+	rootDisk *inventory.Disk
+	pressure *agentv1.HostPressure
+	// interruption is the cloud's pending interruption condition (cloud.go), nil when none.
+	interruption  *agentv1.Condition
 	workloads     map[string]*pendingWorkload
 	upgradeNeeded bool
 

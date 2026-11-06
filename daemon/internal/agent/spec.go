@@ -304,6 +304,7 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 	status.Conditions = append(status.Conditions, a.hostcfg.currentConditions()...)
 	status.Conditions = append(status.Conditions, a.kubeConditions()...)
 	status.Conditions = append(status.Conditions, a.devices.currentConditions()...)
+	status.Conditions = append(status.Conditions, a.interruptionLocked()...)
 	if a.o.State.Role == "site" {
 		// The unknown machines that PXE-booted (discovery.go).
 		status.Discovered = a.discovery.list(a.serverNowLocked())
