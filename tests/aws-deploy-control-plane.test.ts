@@ -166,6 +166,30 @@ describe('control-plane template', () => {
     expect(JSON.stringify(connect.Resource)).toContain(':dbuser:${ResourceId}/${DatabaseUser}');
   });
 
+  it('scopes tenant secrets to this deployment, so two deployments in one account cannot read each other', () => {
+    const secretResources = (from: CfnTemplate, role: string) => {
+      const props = from.Resources[role]!.Properties!;
+      const inline = ((props.Policies ?? []) as { PolicyDocument: { Statement: Statement[] } }[]).flatMap((policy) => policy.PolicyDocument.Statement);
+      const managed = ((props.ManagedPolicyArns ?? []) as unknown[])
+        .filter((entry): entry is { Ref: string } => typeof entry === 'object' && entry !== null && 'Ref' in entry)
+        .flatMap((entry) => (from.Resources[entry.Ref]!.Properties!.PolicyDocument as { Statement: Statement[] }).Statement);
+      return [...inline, ...managed]
+        .filter((statement) => [statement.Action].flat().some((action) => action.startsWith('secretsmanager:')))
+        .map((statement) => JSON.stringify(statement.Resource));
+    };
+    const staging = controlPlaneTemplate({ name: 'bc-staging' });
+    for (const role of ['ApiTaskRole', 'WorkerTaskRole', 'GatewayTaskRole']) {
+      const resources = secretResources(staging, role).filter((text) => !text.includes('"Ref"'));
+      expect(resources.length, role).toBeGreaterThan(0);
+      for (const text of resources) expect(text, role).toContain(':secret:better-compute/bc-staging/*');
+    }
+    // The tasks know their deployment, for awsSecretsManagerStore({ prefix: `better-compute/${BC_DEPLOYMENT}` }).
+    for (const task of ['ApiTask', 'WorkerTask', 'GatewayTask', 'MigrateTask']) {
+      const containers = staging.Resources[task]!.Properties!.ContainerDefinitions as Container[];
+      expect(containers[0]!.Environment, task).toContainEqual({ Name: 'BC_DEPLOYMENT', Value: 'bc-staging' });
+    }
+  });
+
   it('keeps every bucket private, TLS-only and encrypted; audit under Object Lock compliance', () => {
     const buckets = ofType(template, 'AWS::S3::Bucket');
     expect(buckets.map(([id]) => id).sort()).toEqual(['AuditBucket', 'BlobsBucket', 'DownloadsBucket', 'SnapshotsBucket']);

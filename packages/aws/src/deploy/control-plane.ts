@@ -47,6 +47,8 @@ const gatewayPort = 8443;
 export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTemplate {
   const resolved = resolveDeploymentOptions(options);
   const { name } = resolved;
+  /** The tasks' `awsSecretsManagerStore` prefix (`better-compute/${BC_DEPLOYMENT}`); IAM confines secrets to it. */
+  const secretNamePrefix = `better-compute/${name}`;
   const tags = (part: string) => deploymentTags(name, part);
   const keyArn = cfnGetAtt('PlatformKey', 'Arn');
   const privateSubnets = cfnSplit(',', cfnImport('PrivateSubnetIds'));
@@ -308,7 +310,9 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
     };
 
   // --- IAM ---------------------------------------------------------------------------------------------
-  const secretPrefix = arn('secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:better-compute/*');
+  // Tenant secrets live under this deployment's own prefix: a second deployment in the same
+  // account and region (staging beside production) can neither read nor overwrite them.
+  const secretPrefix = arn(`secretsmanager:\${AWS::Region}:\${AWS::AccountId}:secret:${secretNamePrefix}/*`);
   const objects = (bucket: string) => bucketArn(bucket, '/*');
   const base: PolicyStatement[] = [
     {
