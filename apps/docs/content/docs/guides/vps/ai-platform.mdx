@@ -141,7 +141,8 @@ another deployment is never changed or deleted (`notManaged`).
 
 Harness agents and action gateways are DigitalOcean previews. Both kinds are listed with `preview: true` and
 `available: false` until the account sets `previews: true`; before that, `create` is `UNSUPPORTED` (`preview`) and
-nothing reaches DigitalOcean.
+nothing reaches DigitalOcean. Turning previews off later does not strand what was made: those resources can still be
+read and deleted, by the tenant or by a tenant teardown.
 
 - **`do.agent-harness`** runs a model with `instructions`, optionally with knowledge bases, guardrails and an action
   gateway. `runtime: 'microvm'` isolates each session in a MicroVM (the default is `container`); the runtime and the

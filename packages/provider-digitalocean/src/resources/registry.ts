@@ -70,14 +70,19 @@ export class DoResources implements ProviderResources {
     return [...this.#kinds.values()].map((kind) => kind.definition);
   }
 
-  #kind(kind: string): DoKind {
+  /**
+   * The kind, for `use`. A preview kind is refused on an account without previews for making or finding one
+   * (`ensure`, `adopt`, `discover`, `release`), never for reading or deleting one (`keep`): a resource made while
+   * previews were on (billed by the hour) can always be torn down, by its tenant or by a tenant teardown.
+   */
+  #kind(kind: string, use: 'make' | 'keep' = 'make'): DoKind {
     const found = this.#kinds.get(kind);
     if (!found)
       throw new ComputeError('UNSUPPORTED', `DigitalOcean serves no ${kind}`, undefined, {
         provider: 'digitalocean',
         reason: 'kind',
       });
-    if (found.definition.preview === true && !this.#env.previews)
+    if (use === 'make' && found.definition.preview === true && !this.#env.previews)
       throw new ComputeError(
         'UNSUPPORTED',
         `${kind} is a DigitalOcean preview; the account must enable previews`,
@@ -102,11 +107,11 @@ export class DoResources implements ProviderResources {
     id: string,
     context: CallContext,
   ): Promise<ProviderResourceState | undefined> {
-    return this.#kind(kind).get(this.#env, id, context);
+    return this.#kind(kind, 'keep').get(this.#env, id, context);
   }
 
   async delete(kind: string, id: string, context: CallContext): Promise<ProviderResourceState> {
-    return this.#kind(kind).delete(this.#env, id, context);
+    return this.#kind(kind, 'keep').delete(this.#env, id, context);
   }
 
   discover(kind: string, context: CallContext): AsyncIterable<ProviderDiscoveredResource> {

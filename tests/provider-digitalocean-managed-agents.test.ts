@@ -63,7 +63,7 @@ const harnessSpec = {
 const gatewaySpec = { region: 'tor1', upstreams: ['https://tools.example.com/v1/'] };
 
 describe('Managed Agents are previews', () => {
-  it('both kinds say so, and every call is refused with nothing sent unless the account enables previews', async () => {
+  it('both kinds say so, and making or finding one is refused with nothing sent unless the account enables previews', async () => {
     const emu = emulator();
     const { resources } = await build(emu);
     const kinds = resources.kinds().filter((entry) => entry.preview === true);
@@ -78,8 +78,9 @@ describe('Managed Agents are previews', () => {
     ] as const) {
       const refusals = [
         await failure(resources.ensure({ kind, name: 'bc-r-a', spec, labels }, ctx())),
-        await failure(resources.get(kind, '0b6c3a4e-1111-4222-8333-444455556666', ctx())),
-        await failure(resources.delete(kind, '0b6c3a4e-1111-4222-8333-444455556666', ctx())),
+        await failure(
+          resources.adopt!(kind, '0b6c3a4e-1111-4222-8333-444455556666', labels, ctx()),
+        ),
         await failure(
           (async () => {
             for await (const _ of resources.discover!(kind, ctx())) void _;
@@ -92,6 +93,46 @@ describe('Managed Agents are previews', () => {
       }
     }
     expect(emu.requests.slice(before)).toEqual([]);
+  });
+
+  it('one made while previews were on can still be read and deleted after the account turns them off', async () => {
+    const emu = emulator();
+    const on = await build(emu, previewAccount);
+    const harness = await settle(
+      on.resources,
+      { kind: 'do.agent-harness', name: 'bc-r-a', spec: harnessSpec, labels },
+      ctx('crs_a'),
+    );
+    const gateway = await settle(
+      on.resources,
+      { kind: 'do.action-gateway', name: 'bc-r-g', spec: gatewaySpec, labels },
+      ctx('crs_g'),
+    );
+    const off = await build(emu, { ...previewAccount, previews: false });
+    for (const [kind, id] of [
+      ['do.agent-harness', harness.id],
+      ['do.action-gateway', gateway.id],
+    ] as const) {
+      expect((await off.resources.get(kind, id, ctx()))?.managedBy).toBe('this');
+      expect((await off.resources.delete(kind, id, ctx())).state).toBe('deleting');
+      expect((await off.resources.delete(kind, id, ctx())).state).toBe('deleted');
+    }
+    expect(emu.state.harnesses.size).toBe(0);
+    expect(emu.state.actionGateways.size).toBe(0);
+  });
+
+  it('a harness or gateway DigitalOcean is already deleting is not sent another DELETE', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu, previewAccount);
+    const harness = seedHarness(emu.state, { name: `bc-r-a-bc${hash}`, status: 'DELETING' });
+    const gateway = seedActionGateway(emu.state, { name: `bc-r-g-bc${hash}`, status: 'DELETING' });
+    expect((await resources.delete('do.agent-harness', harness.uuid, ctx())).state).toBe(
+      'deleting',
+    );
+    expect((await resources.delete('do.action-gateway', gateway.uuid, ctx())).state).toBe(
+      'deleting',
+    );
+    expect(mutations(emu, 'DELETE', /harnesses|action-gateways/)).toEqual([]);
   });
 });
 
@@ -322,6 +363,27 @@ describe('do.action-gateway', () => {
     expect(await settle(resources, request({ id: ready.id, spec: changed }), call())).toMatchObject(
       { state: 'ready', spec: changed },
     );
+  });
+
+  it('delete refuses a gateway made by hand or by another deployment, and sends no DELETE', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu, previewAccount);
+    const byHand = seedActionGateway(emu.state);
+    const foreign = seedActionGateway(emu.state, { name: 'bc-r-tools-bc0123456789ab' });
+    for (const id of [byHand.uuid, foreign.uuid])
+      expect(
+        (await failure(resources.delete('do.action-gateway', id, call()))).details?.reason,
+      ).toBe('notManaged');
+    expect(
+      (await failure(resources.ensure(request({ id: foreign.uuid }), call()))).details?.reason,
+    ).toBe('notManaged');
+    expect(mutations(emu, 'DELETE', /action-gateways/)).toEqual([]);
+    expect(mutations(emu, 'PUT', /action-gateways/)).toEqual([]);
+    const discovered: any[] = [];
+    for await (const found of resources.discover!('do.action-gateway', call()))
+      discovered.push(found);
+    expect(discovered.find((entry) => entry.id === byHand.uuid)?.managedBy).toBeUndefined();
+    expect(discovered.find((entry) => entry.id === foreign.uuid)?.managedBy).toBe('other');
   });
 
   it('only https upstreams validate, at least one', async () => {

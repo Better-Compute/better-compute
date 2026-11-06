@@ -177,6 +177,8 @@ function namedKind<Spec, Object extends DoObject>(shape: Shape<Spec, Object>): D
       const current = await read(env, id, context.signal);
       if (!current) return { id, state: 'deleted' };
       assertNameOwned(env, current.name, what(id));
+      // Already going: polled, not asked again (a second DELETE spends the mutate budget and may be refused).
+      if (phase(current.status, shape.settled) === 'deleting') return { id, state: 'deleting' };
       await found(() =>
         env.client.request('DELETE', path(id), { signal: context.signal, budget: 'mutate' }),
       );

@@ -212,8 +212,9 @@ keys, guardrails, the Managed Agents objects; `resources/kinds/named.ts`).
   `description` change in place). No agents are deployed through the deprecated ADK (DO-D21).
 - **Managed Agents (previews):** `do.agent-harness` (a model, `instructions`, knowledge bases, guardrails and an
   action gateway, on `runtime` `container` or `microvm`; the attachments are account-wide) and `do.action-gateway`
-  (https `upstreams`). Both are `preview: true`: without `previews: true` on the account every call is
-  `UNSUPPORTED` (`preview`) and nothing is sent. Meters `do.agent-harness.hours` and `do.action-gateway.hours`.
+  (https `upstreams`). Both are `preview: true`: without `previews: true` on the account, `ensure`, `adopt`,
+  `discover` and `release` are `UNSUPPORTED` (`preview`) and nothing is sent; `get` and `delete` still work, so one made
+  while previews were on can be torn down. A delete of one DigitalOcean is already deleting sends nothing. Meters `do.agent-harness.hours` and `do.action-gateway.hours`.
 - **Signals (preview):** `resources.signals` reads `GET /v2/managed-agents/signals` (read-only, the `sweep` budget)
   into provider-neutral `ProviderResourceSignal`s for harness agents and gateways: every page (at most 10 000
   signals) and the newest 500 kept; anything else, or a
