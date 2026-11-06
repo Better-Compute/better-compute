@@ -296,6 +296,43 @@ describe('digitaloceanMetal', () => {
     expect(runs.filter((r) => r.command === rebootCommand)).toHaveLength(1);
   });
 
+  it('schedules the reboot detached, so the command returns before the connection drops', () => {
+    // A bare `systemctl reboot` kills the SSH session before an exit status comes back.
+    expect(rebootCommand).toMatch(/^systemd-run --on-active=\d+ --unit=bc-reboot /);
+    expect(rebootCommand.endsWith('systemctl reboot')).toBe(true);
+  });
+
+  it('a reboot that exits non-zero is a PROVIDER_ERROR, not a success', async () => {
+    const fake = fakeSsh();
+    // e.g. a non-root login whose `sudo -n` is refused, or a reboot already scheduled.
+    const ssh: DoSshExecutor = async (target, command, stdin) =>
+      command.includes(rebootCommand.replaceAll("'", "'\\''"))
+        ? { code: 1, stdout: '', stderr: 'sudo: a password is required' }
+        : fake.ssh(target, command, stdin);
+    const compute = await build({ ssh });
+    await compute.create(createRequest(), call('inst_1'));
+    const error = await failure(compute.power!('bm-h100-1', 'graceful-restart', call()));
+    expect([error.code, error.details?.reason]).toEqual(['PROVIDER_ERROR', 'reboot']);
+    expect(error.details?.retryAfterMs).toBeUndefined();
+    expect(JSON.stringify(error)).not.toContain('password');
+  });
+
+  it('a reboot whose connection drops is unconfirmed and never offered as a retry', async () => {
+    const fake = fakeSsh();
+    const ssh: DoSshExecutor = async (target, command, stdin) => {
+      if (command === rebootCommand) throw new Error(`read ${target.host}: connection reset`);
+      return fake.ssh(target, command, stdin);
+    };
+    const compute = await build({ ssh });
+    await compute.create(createRequest(), call('inst_1'));
+    const error = await failure(compute.power!('bm-h100-1', 'graceful-restart', call()));
+    // The machine may be rebooting: an UNAVAILABLE with retryAfterMs would reboot it twice.
+    expect(error.code).not.toBe('UNAVAILABLE');
+    expect([error.code, error.details?.reason]).toEqual(['PROVIDER_ERROR', 'rebootUnconfirmed']);
+    expect(error.details?.retryAfterMs).toBeUndefined();
+    expect(JSON.stringify(error)).not.toContain('198.51.100.10');
+  });
+
   it('identify reads the SMBIOS UUID of a claimed machine', async () => {
     const { ssh } = fakeSsh();
     const compute = await build({ ssh });

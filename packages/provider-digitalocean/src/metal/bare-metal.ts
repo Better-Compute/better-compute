@@ -28,8 +28,11 @@ import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 // - `bootstrap` delivers the single-use `provisioned` join token over SSH stdin into a root-only
 //   file (never user data, argv or a log), installs bcd pinned by sha256 and starts it. DO installs
 //   the OS, so there is no reinstall.
-// - Power: only `graceful-restart` (a reboot over SSH). Without a BMC or an API, a machine that is
-//   powered off can't be powered on again, so every other action is UNSUPPORTED.
+// - Power: only `graceful-restart` (a reboot over SSH, scheduled detached so its exit status comes
+//   back). A non-zero exit is PROVIDER_ERROR; a connection lost on the way is PROVIDER_ERROR
+//   'rebootUnconfirmed', never a retryable UNAVAILABLE that would reboot the machine twice. Without
+//   a BMC or an API, a machine that is powered off can't be powered on again, so every other action
+//   is UNSUPPORTED.
 //
 // Accounts are the platform's only: the machines are the operator's.
 
@@ -179,7 +182,13 @@ export const releaseCommand = [
 ].join('; ');
 export const productUuidCommand = 'cat /sys/class/dmi/id/product_uuid';
 export const writeTokenCommand = `umask 077 && mkdir -p /etc/bcd && cat > ${bareMetalJoinTokenPath}`;
-export const rebootCommand = 'systemctl reboot';
+/**
+ * The reboot, scheduled two seconds out by a transient systemd timer so the command returns (with
+ * an exit status) before the reboot drops the SSH session. A bare `systemctl reboot` kills the
+ * session first, so the result would be lost. The fixed unit name refuses a second reboot while one
+ * is still pending.
+ */
+export const rebootCommand = 'systemd-run --on-active=2 --unit=bc-reboot systemctl reboot';
 /** The command bootstrap's install script runs in (the script is its stdin). */
 export const installCommand = 'sh -s';
 
@@ -318,11 +327,15 @@ class DoBareMetal implements ProviderImpl {
     return machine && this.#config.regions.includes(machine.region) ? machine : undefined;
   }
 
-  /** Runs a command on a machine. An SSH failure is UNAVAILABLE (retried); the key never leaves. */
+  /**
+   * Runs a command on a machine. An SSH failure is UNAVAILABLE (retried) unless `onDrop` names
+   * another error (a command that must not run twice); the key never leaves.
+   */
   async #run(
     machine: DoBareMetalMachine,
     command: string,
     stdin?: string,
+    onDrop?: () => ComputeError,
   ): Promise<{ code: number; stdout: string; stderr: string }> {
     if (!this.#ssh)
       throw fail(
@@ -347,6 +360,7 @@ class DoBareMetal implements ProviderImpl {
     } catch {
       // The executor's error may quote the target or the key's path: it is not passed on.
       this.#context.log.warn('digitalocean.metalUnreachable', { machine: machine.id });
+      if (onDrop) throw onDrop();
       throw fail('UNAVAILABLE', `Bare Metal machine ${machine.id} is unreachable over SSH`, 'ssh', {
         retryAfterMs: 30_000,
       });
@@ -507,7 +521,20 @@ class DoBareMetal implements ProviderImpl {
         'noBmc',
       );
     const machine = await this.#claimed(id, context);
-    await this.#run(machine, rebootCommand);
+    // The claim was just read over SSH, so a failure now most likely came after the command ran.
+    const rebooted = await this.#run(machine, rebootCommand, undefined, () =>
+      fail(
+        'PROVIDER_ERROR',
+        `the connection to ${machine.id} dropped during the reboot: it may be rebooting, so check before trying again`,
+        'rebootUnconfirmed',
+      ),
+    );
+    // e.g. a non-root login whose `sudo -n` is refused, or a reboot already pending. The output is
+    // not passed on (it may quote the sudoers setup).
+    if (rebooted.code !== 0)
+      throw fail('PROVIDER_ERROR', `could not reboot ${machine.id}`, 'reboot', {
+        exitCode: rebooted.code,
+      });
   }
 
   async *list(): AsyncIterable<ExternalMachine> {

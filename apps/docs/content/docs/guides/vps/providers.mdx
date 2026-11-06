@@ -1035,7 +1035,9 @@ The token needs the custom scopes `account:read`, `regions:read`, `sizes:read`, 
   row without reaching `running`, backing off from the second.
 - **Bare Metal GPUs.** `digitaloceanMetalProvider({ machines, ssh })` (id `digitalocean-metal`, `provides: ['metal']`,
   platform accounts only) claims operator-listed machines over SSH with an atomic claim file, bootstraps bcd with the
-  join token over SSH stdin, and reboots them; DigitalOcean's API has no Bare Metal resource. Every machine pins its
+  join token over SSH stdin, and reboots them (a detached `systemd-run` timer, so the exit status comes back; a
+  non-zero exit or a dropped connection is `PROVIDER_ERROR`, never a retry); DigitalOcean's API has no Bare Metal
+  resource. Every machine pins its
   SSH host key (`hostKeySha256`, required); calls act only on the caller's own claim; a login other than `root` runs
   each command through `sudo -n`; a release removes bcd's install and state before the claim.
 - **Droplet metadata.** On a Droplet, bcd reads the metadata service into the inventory system section's `cloud`
