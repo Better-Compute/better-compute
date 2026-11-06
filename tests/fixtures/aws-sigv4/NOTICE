@@ -1,0 +1,5 @@
+The request (.req), canonical request (.creq) and authorization (.authz) vectors in this directory are
+cases of the AWS Signature Version 4 test suite, Copyright Amazon.com, Inc. or its affiliates, licensed
+under the Apache License, Version 2.0. Only cases whose paths are plain ASCII are kept: the suite's
+get-utf8 and get-space cases assume a single path encoding, while non-S3 services double-encode the wire
+path (see packages/aws-core/src/sigv4.ts).
