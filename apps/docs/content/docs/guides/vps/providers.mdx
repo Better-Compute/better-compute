@@ -1140,14 +1140,15 @@ in one region: a fleet in several regions is several accounts.
 - **Attach.** `discover` yields every instance that is not terminated; `claim` writes the ownership tag and re-reads
   it, turning a lost race into `CONFLICT`; deleting an attached instance detaches it and leaves it running.
 - **Costs and list prices.** An account with `costs` set has `costs` (Cost Explorer `GetCostAndUsage`, daily, by
-  the `better-compute:instance` and `better-compute:tenant` tags, filtered to the caller's own linked account), which
-  [provider costs](#billing) read. Cost Explorer groups only by active cost allocation tags: activate them in the payer
-  account with `better-compute aws cost-allocation-tags --activate --yes`, or nothing is attributed to instances or
-  tenants. `listPrices` reads the AWS Price List (partition `aws`), splitting each family's instance price into vCPU
+  the `better-compute:instance` tag provider-aws writes, and the `better-compute:tenant` tag where an operator tagged a
+  resource with it, filtered to the caller's own linked account), which [provider costs](#billing) read. Cost Explorer groups only by active cost allocation tags: activate them in the payer
+  account with `better-compute aws cost-allocation-tags --activate --yes`, or nothing is attributed to instances and
+  budgets track nothing. `listPrices` reads the AWS Price List (partition `aws`), splitting each family's instance price into vCPU
   and GiB prices that compose back to it, for price proposals. `aws iam-policy --costs --prices` adds the permissions.
 - **Governance.** `aws organization-accounts` renders FleetConfig provider accounts for an organization's member
   accounts, `aws quotas` and `aws quota-request --yes` read and raise EC2 vCPU quotas, `aws tag-policy` renders an
-  Organizations tag policy for the better-compute keys, and `aws budget-template` an AWS Budgets template per tenant.
+  Organizations tag policy for the better-compute keys, and `aws budget-template` an AWS Budgets template over everything tagged `better-compute:managed=true` (it
+  refuses `--tenant` and `--pool`: provider-aws does not write those tags).
 
 `tests/provider-aws.test.ts`, `tests/provider-aws-credentials.test.ts`, `tests/provider-aws-attach.test.ts` and
 `tests/provider-aws-cli.test.ts` run the conformance cases and the EC2 specifics against an in-process AWS emulator

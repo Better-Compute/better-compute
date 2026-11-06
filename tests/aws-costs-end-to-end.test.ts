@@ -8,7 +8,7 @@ import { Ec2Emulator } from './support/aws-emulator/ec2.js';
 
 // A11 through vps: a platform AWS account that opts in to Cost Explorer (`costs: 'region'`) is read by the
 // vps.costs worker; rows tagged with a better-compute instance are attributed to the instance's tenant, tenant-
-// tagged rows to that tenant, and the rest (a platform account's) are unattributed.
+// tagged rows (an operator's tag: provider-aws never writes it) to that tenant, and the rest (a platform account's) are unattributed.
 
 afterEach(closeFixtures);
 

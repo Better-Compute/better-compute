@@ -16,7 +16,8 @@ import { tags } from './ids.js';
 // (a payer role never reads its member accounts) and, in `region` scope, to the account's region:
 //
 // 1. regular usage by the `better-compute:instance` tag and USAGE_TYPE;
-// 2. regular usage without that tag, by the `better-compute:tenant` tag and USAGE_TYPE;
+// 2. regular usage without that tag, by the `better-compute:tenant` tag and USAGE_TYPE (provider-aws never writes
+//    that tag: it attributes what an operator tagged, and the rest comes back untagged);
 // 3. everything that is not regular usage (tax, credits, fees, Savings Plan negation) by RECORD_TYPE and SERVICE.
 //
 // The current UTC day is never read (it is incomplete), and a day read stays cached for `cacheMs`, so the vps

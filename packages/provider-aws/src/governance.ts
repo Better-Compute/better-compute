@@ -5,8 +5,10 @@ import { awsCliClient, emitJson, type AwsCliOptions } from './finops-cli.js';
 import { tags } from './ids.js';
 
 // A11 tag governance and budgets: which better-compute tags Cost Explorer may group by (`aws cost-allocation-tags`),
-// an Organizations tag policy that keeps their spelling (`aws tag-policy`), and an AWS Budgets template per tenant
-// (`aws budget-template`). Only `aws cost-allocation-tags --activate --yes` changes AWS; the others render.
+// an Organizations tag policy that keeps their spelling (`aws tag-policy`), and an AWS Budgets template over the
+// `better-compute:managed` tag (`aws budget-template`). Only `aws cost-allocation-tags --activate --yes` changes AWS;
+// the others render. provider-aws writes `managed` and `instance` on what it creates (and `instance` on what it
+// claims), never `tenant` or `pool`: those keys are only on resources an operator tags.
 
 const usage = (message: string) => new ComputeError('INVALID_INPUT', message);
 const text = (value: unknown) => (typeof value === 'string' && value !== '' ? value : undefined);
@@ -16,8 +18,17 @@ const list = (value: unknown) =>
     .map((entry) => entry.trim())
     .filter(Boolean);
 
-/** The tag keys provider-aws writes that cost reports group by: Cost Explorer reads only activated keys. */
-export const costAllocationTagKeys: readonly string[] = [tags.instance, tags.tenant, tags.pool];
+/**
+ * The better-compute tag keys cost reports group or filter by: Cost Explorer and AWS Budgets match only activated
+ * keys. `instance` attributes costs, `tenant` and `pool` attribute operator-tagged costs, and `managed` is what
+ * `budgetTemplate` filters on.
+ */
+export const costAllocationTagKeys: readonly string[] = [
+  tags.instance,
+  tags.tenant,
+  tags.pool,
+  tags.managed,
+];
 
 type TagStatus = 'Active' | 'Inactive' | 'NotSeen';
 
@@ -46,7 +57,7 @@ export function awsCostAllocationTagsCommand(options: AwsCliOptions = {}) {
     group: 'Providers' as const,
     summary: 'Show, or activate, the better-compute cost allocation tags of an AWS payer account',
     description:
-      "aws cost-allocation-tags reads the status of the better-compute:instance, better-compute:tenant and better-compute:pool cost allocation tags (ce:ListCostAllocationTags) as the operator's own AWS identity. Cost Explorer groups costs only by activated tags, so an account with costs set attributes nothing to instances or tenants until they are active; activation is made in the payer (management) account and applies from then on, not to earlier costs. With --activate it lists the inactive keys it would activate, and with --yes as well it activates them (ce:UpdateCostAllocationTagsStatus). A key AWS has not seen yet (NotSeen) appears within a day of the first tagged resource.",
+      "aws cost-allocation-tags reads the status of the better-compute:instance, better-compute:tenant, better-compute:pool and better-compute:managed cost allocation tags (ce:ListCostAllocationTags) as the operator's own AWS identity. Cost Explorer groups costs and AWS Budgets filters them only by activated tags, so an account with costs set attributes nothing to instances until better-compute:instance is active, and an aws budget-template budget tracks nothing until better-compute:managed is; activation is made in the payer (management) account and applies from then on, not to earlier costs. With --activate it lists the inactive keys it would activate, and with --yes as well it activates them (ce:UpdateCostAllocationTagsStatus). A key AWS has not seen yet (NotSeen) appears within a day of the first tagged resource.",
     target: 'none' as const,
     output: 'text' as const,
     flags: {
@@ -166,9 +177,12 @@ export interface BudgetTemplateInput {
   /** The monthly limit, in `currency`. */
   amount: number;
   currency?: string;
-  /** A tenant id: the budget covers costs tagged `better-compute:tenant=<id>`. */
+  /**
+   * Refused: provider-aws does not write `better-compute:tenant` on what it creates, so a tenant budget would
+   * track only operator-tagged costs and never alert on the tenant's instances (fail closed).
+   */
   tenant?: string;
-  /** A pool id: costs tagged `better-compute:pool=<id>`. */
+  /** Refused, as `tenant`: `better-compute:pool` is not written either. */
   pool?: string;
   emails?: readonly string[];
   snsTopicArn?: string;
@@ -178,24 +192,23 @@ export interface BudgetTemplateInput {
   forecastPct?: number;
 }
 
-const idPattern = /^[A-Za-z0-9_.:-]{1,128}$/;
 const emailPattern = /^[^\s@,]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,63}$/;
 
 /**
- * A CloudFormation template with one monthly AWS::Budgets::Budget over the costs of a tenant (`tenant`), a pool
- * (`pool`) or everything better-compute manages (neither), alerting on actual and forecast spend. Cost allocation
- * tags must be active for its filter to match. Pure.
+ * A CloudFormation template with one monthly AWS::Budgets::Budget over everything better-compute manages (the
+ * `better-compute:managed=true` tag on the instances and volumes it creates), alerting on actual and forecast
+ * spend. The tag must be an active cost allocation tag for the filter to match. `tenant` and `pool` are refused:
+ * provider-aws does not write those tags. Pure.
  */
 export function budgetTemplate(input: BudgetTemplateInput) {
   if (!Number.isFinite(input.amount) || input.amount <= 0 || input.amount > 1e9)
     throw usage('--amount is a positive monthly limit');
   const currency = input.currency ?? 'USD';
   if (!/^[A-Z]{3}$/.test(currency)) throw usage('--currency is a three-letter code (USD)');
-  if (input.tenant !== undefined && input.pool !== undefined)
-    throw usage('--tenant and --pool are exclusive');
-  const scoped = input.tenant ?? input.pool;
-  if (scoped !== undefined && !idPattern.test(scoped))
-    throw usage('--tenant and --pool are better-compute ids');
+  if (input.tenant !== undefined || input.pool !== undefined)
+    throw usage(
+      `--tenant and --pool are refused: provider-aws does not write the ${tags.tenant} or ${tags.pool} tags (not written on the instances and volumes it creates), so such a budget would never see their spend; budget everything with the ${tags.managed} tag instead`,
+    );
   const emails = [...(input.emails ?? [])];
   for (const email of emails)
     if (!emailPattern.test(email)) throw usage('--email is an e-mail address');
@@ -218,12 +231,7 @@ export function budgetTemplate(input: BudgetTemplateInput) {
       throw usage(`${flag} is a percentage`);
     return result;
   };
-  const filter =
-    input.tenant !== undefined
-      ? { name: `tenant-${input.tenant}`, tag: `user:${tags.tenant}$${input.tenant}` }
-      : input.pool !== undefined
-        ? { name: `pool-${input.pool}`, tag: `user:${tags.pool}$${input.pool}` }
-        : { name: 'managed', tag: `user:${tags.managed}$true` };
+  const filter = { name: 'managed', tag: `user:${tags.managed}$true` };
   const subscribers = [
     ...emails.map((Address) => ({ SubscriptionType: 'EMAIL', Address })),
     ...(input.snsTopicArn ? [{ SubscriptionType: 'SNS', Address: input.snsTopicArn }] : []),
@@ -245,7 +253,7 @@ export function budgetTemplate(input: BudgetTemplateInput) {
         Type: 'AWS::Budgets::Budget' as const,
         Properties: {
           Budget: {
-            BudgetName: `better-compute-${filter.name}`.slice(0, 100),
+            BudgetName: `better-compute-${filter.name}`,
             BudgetType: 'COST',
             TimeUnit: 'MONTHLY',
             BudgetLimit: { Amount: input.amount, Unit: currency },
@@ -261,14 +269,14 @@ export function budgetTemplate(input: BudgetTemplateInput) {
   };
 }
 
-/** `better-compute aws budget-template --amount <n> [--tenant <id> | --pool <id>] --email <a,b> | --sns-topic <arn>`. */
+/** `better-compute aws budget-template --amount <n> --email <a,b> | --sns-topic <arn>`. */
 export function awsBudgetTemplateCommand() {
   return {
     name: 'aws budget-template' as const,
     group: 'Providers' as const,
     summary: 'Print a CloudFormation template for an AWS Budgets budget over better-compute costs',
     description:
-      'aws budget-template prints a CloudFormation template with one monthly AWS::Budgets::Budget over the costs tagged better-compute:tenant=--tenant, better-compute:pool=--pool, or (neither) everything tagged better-compute:managed=true, alerting --email and --sns-topic subscribers when actual spend passes --actual-pct (80) or forecast spend --forecast-pct (100) of --amount. Deploy it in the payer or member account (cloudformation deploy); the tag must be an active cost allocation tag (aws cost-allocation-tags).',
+      'aws budget-template prints a CloudFormation template with one monthly AWS::Budgets::Budget over everything tagged better-compute:managed=true (the instances and volumes provider-aws creates), alerting --email and --sns-topic subscribers when actual spend passes --actual-pct (80) or forecast spend --forecast-pct (100) of --amount. Deploy it in the payer or member account (cloudformation deploy); better-compute:managed must be an active cost allocation tag (aws cost-allocation-tags --activate --yes) or the budget tracks nothing. --tenant and --pool are refused: provider-aws does not write the better-compute:tenant or better-compute:pool tags, so such a budget would never see their spend.',
     target: 'none' as const,
     output: 'text' as const,
     flags: {
@@ -279,8 +287,16 @@ export function awsBudgetTemplateCommand() {
         description: 'The monthly limit, in --currency',
       },
       currency: { type: 'string' as const, value: 'CODE', description: 'Default USD' },
-      tenant: { type: 'string' as const, value: 'ID', description: "Budget one tenant's costs" },
-      pool: { type: 'string' as const, value: 'ID', description: "Budget one pool's costs" },
+      tenant: {
+        type: 'string' as const,
+        value: 'ID',
+        description: 'Refused: provider-aws does not write the better-compute:tenant tag',
+      },
+      pool: {
+        type: 'string' as const,
+        value: 'ID',
+        description: 'Refused: provider-aws does not write the better-compute:pool tag',
+      },
       email: {
         type: 'string' as const,
         value: 'ADDRESSES',
