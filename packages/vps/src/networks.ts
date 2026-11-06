@@ -143,6 +143,29 @@ CREATE UNIQUE INDEX networks_adopted ON networks (provider_account_id, external_
 `,
 };
 
+/**
+ * (AWS A2) Zone-scoped subnets and a network's own range. `network_subnets.zone` is the zone a subnet
+ * of a zone-scoped provider (`ProviderNetworks.subnetScope: 'zone'`) lives in, NULL on region-scoped
+ * ones; `networks.cidr` is the range given to a provider whose networks have one (an AWS VPC), NULL for
+ * the provider's default.
+ */
+export const vpsNetworkZonesMigration: Migration = {
+  name: 'vps/0084_network_zones',
+  sql: `
+ALTER TABLE network_subnets ADD COLUMN zone text;
+ALTER TABLE networks ADD COLUMN cidr cidr;
+`,
+};
+
+/**
+ * (AWS A2) A subnet asks for private access to the cloud's own services (`privateAccess`): GCE's
+ * Private Google Access, AWS's S3 and DynamoDB gateway endpoints. Off for every existing subnet.
+ */
+export const vpsSubnetPrivateAccessMigration: Migration = {
+  name: 'vps/0085_subnet_private_access',
+  sql: `ALTER TABLE network_subnets ADD COLUMN private_access boolean NOT NULL DEFAULT false;`,
+};
+
 // --- Provider names ----------------------------------------------------------------------------
 
 /**
@@ -179,9 +202,21 @@ export interface NetworkView {
   providerAccountId: string;
   name: string;
   description?: string;
+  /** The network's own range, on providers whose networks have one (an AWS VPC). */
+  cidr?: string;
   state: NetworkState;
   message?: string;
-  subnets: { id: string; name: string; region: string; cidr: string; state: NetworkState }[];
+  /** `zone`: on a zone-scoped provider (AWS), the zone the subnet lives in. */
+  subnets: {
+    id: string;
+    name: string;
+    region: string;
+    zone?: string;
+    cidr: string;
+    /** Private access to the cloud's own services was asked for (`networks.addSubnet`). */
+    privateAccess?: true;
+    state: NetworkState;
+  }[];
   /** Adopted (`networks.adopt`): the provider VPC's own name, which better-compute never deletes. */
   externalNetwork?: string;
   /** Adopted with `sharedTagScoped`: a VPC shared with other machines (`default`). */
@@ -231,6 +266,8 @@ export interface CreateNetworkInput {
   poolId: string;
   name: string;
   description?: string;
+  /** The network's own range (a private IPv4 CIDR), for providers whose networks have one. */
+  cidr?: string;
   idempotencyKey: string;
 }
 export type NetworkRef = { tenantId: string; networkId: string };
@@ -246,7 +283,11 @@ export interface UpdateNetworkInput extends NetworkRef {
 export interface AddSubnetInput extends NetworkRef {
   name: string;
   region: string;
+  /** Required on a zone-scoped provider (AWS): one of the account's zones, in `region`. */
+  zone?: string;
   cidr: string;
+  /** Private access to the cloud's own services (GCE Private Google Access, AWS S3/DynamoDB endpoints). */
+  privateAccess?: boolean;
 }
 export interface RemoveSubnetInput extends NetworkRef {
   subnetId: string;
@@ -272,6 +313,7 @@ const externalNetworkName = /^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$/;
 /** The VPC every GCE project starts with: shared with every VM not put elsewhere. */
 export const defaultNetworkName = 'default';
 const regionName = /^[a-z][a-z0-9-]{1,38}[a-z0-9]$/;
+const zoneName = /^[a-z][a-z0-9-]{1,62}[a-z0-9]$/;
 const protocols = ['tcp', 'udp', 'icmp', 'all'] as const;
 const maxTargets = 64;
 const maxRuleEntries = 20;
@@ -390,6 +432,7 @@ export function parseCreateNetwork(raw: unknown): CreateNetworkInput {
     'poolId',
     'name',
     'description',
+    'cidr',
     'idempotencyKey',
   ]);
   const out: CreateNetworkInput = {
@@ -402,6 +445,8 @@ export function parseCreateNetwork(raw: unknown): CreateNetworkInput {
   if (projectId !== undefined) out.projectId = projectId;
   const description = optional(input.description, description_);
   if (description !== undefined) out.description = description;
+  const cidr = optional(input.cidr, subnetCidr);
+  if (cidr !== undefined) out.cidr = cidr;
   return out;
 }
 
@@ -472,14 +517,28 @@ export function parseUpdateNetwork(raw: unknown): UpdateNetworkInput {
 }
 
 export function parseAddSubnet(raw: unknown): AddSubnetInput {
-  const input = object(raw, ['tenantId', 'networkId', 'name', 'region', 'cidr']);
+  const input = object(raw, [
+    'tenantId',
+    'networkId',
+    'name',
+    'region',
+    'zone',
+    'cidr',
+    'privateAccess',
+  ]);
+  if (input.privateAccess !== undefined && typeof input.privateAccess !== 'boolean')
+    fail('privateAccess must be true or false');
   if (typeof input.region !== 'string' || !regionName.test(input.region)) fail('region is invalid');
+  if (input.zone !== undefined && (typeof input.zone !== 'string' || !zoneName.test(input.zone)))
+    fail('zone is invalid');
   return {
     tenantId: tenant(input.tenantId),
     networkId: id(input.networkId, 'net', 'networkId'),
     name: networkName(input.name),
     region: input.region as string,
+    ...(input.zone !== undefined ? { zone: input.zone as string } : {}),
     cidr: subnetCidr(input.cidr),
+    ...(input.privateAccess === true ? { privateAccess: true } : {}),
   };
 }
 
@@ -684,6 +743,11 @@ export const networkSchemas = {
       ),
       name: nameSchema('The network name, unique in the tenant, e.g. training'),
       description: { type: 'string', maxLength: 256, description: 'What the network is for' },
+      cidr: {
+        type: 'string',
+        description:
+          'The network’s own private (RFC 1918) IPv4 range, on providers whose networks have one (an AWS VPC: /16 to /28, default 10.64.0.0/16); others ignore it',
+      },
       idempotencyKey: {
         type: 'string',
         pattern: '^[A-Za-z0-9._:-]{1,128}$',
@@ -749,10 +813,21 @@ export const networkSchemas = {
         pattern: regionName.source,
         description: 'A region of the account’s configured zones',
       },
+      zone: {
+        type: 'string',
+        pattern: zoneName.source,
+        description:
+          'On a zone-scoped provider (AWS: subnets live in one Availability Zone), required: one of the account’s zones, in region',
+      },
       cidr: {
         type: 'string',
         description:
-          'A private (RFC 1918) IPv4 range from /8 to /29 that overlaps no other subnet of the network',
+          'A private (RFC 1918) IPv4 range from /8 to /29 (narrower where the provider takes less, AWS /16 to /28) that overlaps no other subnet of the network',
+      },
+      privateAccess: {
+        type: 'boolean',
+        description:
+          'Reach the cloud’s own services privately: Private Google Access on GCE, S3 and DynamoDB gateway endpoints on AWS. Default false',
       },
     },
     ['tenantId', 'networkId', 'name', 'region', 'cidr'],
@@ -799,6 +874,7 @@ interface NetworkRow {
   provider_account_id: string;
   name: string;
   description: string | null;
+  cidr: string | null;
   state: NetworkState;
   desired_state: 'present' | 'deleted';
   message: string | null;
@@ -814,7 +890,9 @@ interface SubnetRow {
   network_id: string;
   name: string;
   region: string;
+  zone: string | null;
   cidr: string;
+  private_access: boolean;
   state: NetworkState;
   desired_state: 'present' | 'deleted';
   message: string | null;
@@ -835,8 +913,8 @@ type RuleSpec = Omit<RuleFields, 'enabled'>;
 
 const networkColumns = `id, tenant_id, project_id, pool_id, provider_account_id, name, description, state,
   desired_state, message, encode(request_hash, 'hex') AS request_hash, version, created_at,
-  provisioned_at, external_name, shared_tag_scoped`;
-const subnetColumns = `id, network_id, name, region, cidr::text AS cidr, state, desired_state, message`;
+  provisioned_at, external_name, shared_tag_scoped, cidr::text AS cidr`;
+const subnetColumns = `id, network_id, name, region, zone, cidr::text AS cidr, private_access, state, desired_state, message`;
 const ruleColumns = `id, network_id, name, spec, enabled, state, desired_state, message, version`;
 
 export function networkView(row: NetworkRow, subnets: readonly SubnetRow[]): NetworkView {
@@ -848,6 +926,7 @@ export function networkView(row: NetworkRow, subnets: readonly SubnetRow[]): Net
     providerAccountId: row.provider_account_id,
     name: row.name,
     ...(row.description !== null ? { description: row.description } : {}),
+    ...(row.cidr !== null && row.cidr !== undefined ? { cidr: row.cidr } : {}),
     state: row.state,
     ...(row.message !== null ? { message: row.message } : {}),
     subnets: subnets
@@ -856,7 +935,9 @@ export function networkView(row: NetworkRow, subnets: readonly SubnetRow[]): Net
         id: subnet.id,
         name: subnet.name,
         region: subnet.region,
+        ...(subnet.zone !== null && subnet.zone !== undefined ? { zone: subnet.zone } : {}),
         cidr: subnet.cidr,
+        ...(subnet.private_access === true ? { privateAccess: true as const } : {}),
         state: subnet.state,
       })),
     ...(row.external_name !== null ? { externalNetwork: row.external_name } : {}),
@@ -993,6 +1074,23 @@ async function networkProvider(
   return { accountId: account.id, zones, regions, client };
 }
 
+/**
+ * (AWS A2) Refuses a range whose prefix length the provider does not take (`ProviderNetworks.cidrPrefix`),
+ * so the tenant hears it from the API rather than from a network or subnet in `error`.
+ */
+function assertCidrPrefix(client: ProviderImpl, kind: 'network' | 'subnet', cidr: string): void {
+  const range = client.networks?.cidrPrefix?.[kind];
+  if (range === undefined) return;
+  const prefix = Number(cidr.slice(cidr.indexOf('/') + 1));
+  if (prefix < range[0] || prefix > range[1])
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${kind === 'network' ? 'The network' : 'A subnet'} cidr ${cidr} must be /${range[0]} to /${range[1]} on this provider`,
+      undefined,
+      { cidr, minPrefix: range[0], maxPrefix: range[1] },
+    );
+}
+
 /** A GCE zone's region: `us-central1-a` is in `us-central1`. */
 export function zoneRegion(zone: string): string {
   return zone.replace(/-[a-z]$/, '');
@@ -1005,6 +1103,7 @@ const requestHash = (input: CreateNetworkInput) =>
       projectId: input.projectId,
       name: input.name,
       description: input.description,
+      cidr: input.cidr,
     }),
   );
 
@@ -1031,7 +1130,8 @@ export async function prepareCreateNetwork(
     return { status: 'replay', result: await viewOf(tx, networkId) };
   }
   // Refusals come before anything is staged, so a refused request leaves no projection row behind.
-  const { accountId } = await networkProvider(deps, tx, input.tenantId, input.poolId);
+  const { accountId, client } = await networkProvider(deps, tx, input.tenantId, input.poolId);
+  if (input.cidr !== undefined) assertCidrPrefix(client, 'network', input.cidr);
   await assertNameFree(tx, input.tenantId, input.name);
   await assertNetworkAllowance(tx, input.tenantId);
   await context.authz.upsert(tx, {
@@ -1110,7 +1210,8 @@ export async function createNetwork(
       throw new ComputeError('CONFLICT', 'This idempotency key was used for a different request');
     return viewOf(tx, networkId);
   }
-  const { accountId } = await networkProvider(deps, tx, input.tenantId, input.poolId);
+  const { accountId, client } = await networkProvider(deps, tx, input.tenantId, input.poolId);
+  if (input.cidr !== undefined) assertCidrPrefix(client, 'network', input.cidr);
   await assertNameFree(tx, input.tenantId, input.name);
   // Concurrent creates of one tenant count one after the other.
   await tx.query(`SELECT pg_advisory_xact_lock(hashtext('better-compute:networks:' || $1))`, [
@@ -1120,8 +1221,8 @@ export async function createNetwork(
   try {
     await tx.query(
       `INSERT INTO networks (id, tenant_id, project_id, pool_id, provider_account_id, name, description,
-                             state, desired_state, created_by, idempotency_key, request_hash, version)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 'present', $8, $9, decode($10, 'hex'), 1)`,
+                             state, desired_state, created_by, idempotency_key, request_hash, version, cidr)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 'present', $8, $9, decode($10, 'hex'), 1, $11::cidr)`,
       [
         networkId,
         input.tenantId,
@@ -1133,6 +1234,7 @@ export async function createNetwork(
         caller.identityId,
         input.idempotencyKey,
         hash,
+        input.cidr ?? null,
       ],
     );
   } catch (error) {
@@ -1382,7 +1484,9 @@ export async function addSubnet(
 ): Promise<NetworkView> {
   const network = await openNetwork(tx, input);
   const provider = await networkProvider(deps, tx, network.tenant_id, network.pool_id);
-  const regions = [...new Set([...provider.zones.map(zoneRegion), ...provider.regions])];
+  const regionOf = (zone: string) => provider.client.zoneRegion?.(zone) ?? zoneRegion(zone);
+  assertCidrPrefix(provider.client, 'subnet', input.cidr);
+  const regions = [...new Set([...provider.zones.map(regionOf), ...provider.regions])];
   if (regions.length === 0)
     throw new ComputeError(
       'INVALID_STATE',
@@ -1394,6 +1498,32 @@ export async function addSubnet(
       `region ${input.region} is not one of the account's regions`,
       undefined,
       { regions },
+    );
+  // (AWS A2) A zone-scoped provider's subnet lives in one of the account's zones, in its region.
+  if (provider.client.networks?.subnetScope === 'zone') {
+    if (input.zone === undefined)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `Provider account ${provider.accountId} has zone-scoped subnets: name the subnet's zone`,
+        undefined,
+        { zones: provider.zones },
+      );
+    if (!provider.zones.includes(input.zone))
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `zone ${input.zone} is not one of the account's zones`,
+        undefined,
+        { zones: provider.zones },
+      );
+    if (regionOf(input.zone) !== input.region)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `zone ${input.zone} is in ${regionOf(input.zone)}, not ${input.region}`,
+      );
+  } else if (input.zone !== undefined)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `Provider account ${provider.accountId} has region-wide subnets: a subnet names no zone`,
     );
   const overlap = await tx.query<{ name: string; cidr: string }>(
     `SELECT name, cidr::text AS cidr FROM network_subnets
@@ -1428,15 +1558,23 @@ export async function addSubnet(
     if (previous)
       // A deleted subnet's name is free again: the row is revived (its provider resource is gone).
       await tx.query(
-        `UPDATE network_subnets SET region = $2, cidr = $3::cidr, state = 'pending', desired_state = 'present', message = NULL
+        `UPDATE network_subnets SET region = $2, cidr = $3::cidr, zone = $4, private_access = $5, state = 'pending', desired_state = 'present', message = NULL
           WHERE id = $1`,
-        [previous.id, input.region, input.cidr],
+        [previous.id, input.region, input.cidr, input.zone ?? null, input.privateAccess === true],
       );
     else
       await tx.query(
-        `INSERT INTO network_subnets (id, network_id, name, region, cidr, state, desired_state)
-         VALUES ($1, $2, $3, $4, $5::cidr, 'pending', 'present')`,
-        [newId('snet'), network.id, input.name, input.region, input.cidr],
+        `INSERT INTO network_subnets (id, network_id, name, region, zone, cidr, private_access, state, desired_state)
+         VALUES ($1, $2, $3, $4, $5, $6::cidr, $7, 'pending', 'present')`,
+        [
+          newId('snet'),
+          network.id,
+          input.name,
+          input.region,
+          input.zone ?? null,
+          input.cidr,
+          input.privateAccess === true,
+        ],
       );
   } catch (error) {
     if (exclusionViolation(error))
@@ -1548,8 +1686,13 @@ export async function deleteNetwork(
  * in `us-central1`: the provider's offer ids lead with the zone); `undefined` for other shapes.
  */
 function offerRegion(offerId: string | undefined): string | undefined {
-  const zone = offerId?.includes('/') ? offerId.slice(0, offerId.indexOf('/')) : undefined;
+  const zone = offerZone(offerId);
   return zone ? zoneRegion(zone) : undefined;
+}
+
+/** The zone an offer id leads with (`us-east-1a/m7i.large`), when it has that shape. */
+function offerZone(offerId: string | undefined): string | undefined {
+  return offerId?.includes('/') ? offerId.slice(0, offerId.indexOf('/')) : undefined;
 }
 
 interface LockedNetwork {
@@ -1635,7 +1778,25 @@ export async function placeOnNetwork(
   },
 ): Promise<{ networkId: string; subnetId: string }> {
   const { row, subnets } = await lockNetwork(tx, input, 'provisioned');
-  const region = offerRegion(input.offerId);
+  const zone = offerZone(input.offerId);
+  // A zone-scoped network (AWS A2) matches by zone, and its subnets carry the region the provider
+  // mapped their zone to (`us-west-2-lax-1a` is in `us-west-2`): a GCE-style guess from the zone
+  // (`us-east-1a` would stay `us-east-1a`) never names the place.
+  const zoneScoped = subnets.some((subnet) => subnet.zone !== null && subnet.zone !== undefined);
+  const region = zoneScoped
+    ? zone !== undefined
+      ? subnets.find((subnet) => subnet.zone === zone)?.region
+      : undefined
+    : offerRegion(input.offerId);
+  // A zone-scoped subnet (AWS A2) takes machines of its own zone; a regional one, of its region.
+  const misfit = (subnet: SubnetRow): string | undefined =>
+    subnet.zone !== null && subnet.zone !== undefined
+      ? zone !== undefined && subnet.zone !== zone
+        ? `Subnet ${subnet.id} is in zone ${subnet.zone}, but the flavor's offer is in ${zone}`
+        : undefined
+      : region !== undefined && subnet.region !== region
+        ? `Subnet ${subnet.id} is in ${subnet.region}, but the flavor's offer is in ${region}`
+        : undefined;
   if (input.subnetId !== undefined) {
     const subnet = subnets.find((entry) => entry.id === input.subnetId);
     if (!subnet)
@@ -1643,26 +1804,27 @@ export async function placeOnNetwork(
         'INVALID_INPUT',
         `Subnet ${input.subnetId} is not a subnet of network ${row.id}`,
       );
-    if (region !== undefined && subnet.region !== region)
-      throw new ComputeError(
-        'INVALID_INPUT',
-        `Subnet ${subnet.id} is in ${subnet.region}, but the flavor's offer is in ${region}`,
-      );
+    const wrong = misfit(subnet);
+    if (wrong !== undefined) throw new ComputeError('INVALID_INPUT', wrong);
     if (subnet.state !== 'ready' || subnet.desired_state !== 'present')
       throw subnetNotReady(subnet);
     return { networkId: row.id, subnetId: subnet.id };
   }
   const candidates = subnets.filter(
-    (subnet) =>
-      subnet.desired_state === 'present' && (region === undefined || subnet.region === region),
+    (subnet) => subnet.desired_state === 'present' && misfit(subnet) === undefined,
   );
-  const where = region === undefined ? '' : ` in ${region}`;
+  const place = zoneScoped ? zone : region;
+  const where = place === undefined ? '' : ` in ${place}`;
   if (candidates.length === 0)
     throw new ComputeError(
       'INVALID_INPUT',
       `Network ${row.id} has no subnet${where}; add one (networks.addSubnet) or name another network`,
       undefined,
-      { networkId: row.id, ...(region !== undefined ? { region } : {}) },
+      {
+        networkId: row.id,
+        ...(region !== undefined ? { region } : {}),
+        ...(zoneScoped && zone !== undefined ? { zone } : {}),
+      },
     );
   if (candidates.length > 1)
     throw new ComputeError(
@@ -1790,6 +1952,38 @@ const ruleSpecOf = (fields: RuleFields): RuleSpec => ({
   targets: fields.targets,
 });
 
+/**
+ * (AWS A2) A deny rule the provider cannot honor is refused up front (UNSUPPORTED), so the tenant
+ * learns at the API rather than from a reconciler error: `denyRules: 'network-wide'` (AWS network
+ * ACLs) refuses a deny that targets instances, `'none'` every deny.
+ */
+async function assertDenySupported(
+  deps: NetworkDeps,
+  tx: SqlTx,
+  network: NetworkRow,
+  rule: Pick<RuleFields, 'action' | 'targets'>,
+): Promise<void> {
+  if (rule.action !== 'deny') return;
+  const { client } = await networkProvider(deps, tx, network.tenant_id, network.pool_id);
+  const mode = client.networks?.denyRules ?? 'native';
+  if (mode === 'none')
+    throw new ComputeError(
+      'UNSUPPORTED',
+      'This provider has no deny rules: only allow rules apply',
+      undefined,
+      {
+        denyRules: mode,
+      },
+    );
+  if (mode === 'network-wide' && (rule.targets.instanceIds?.length ?? 0) > 0)
+    throw new ComputeError(
+      'UNSUPPORTED',
+      'This provider applies deny rules network-wide only: a deny rule cannot target instances',
+      undefined,
+      { denyRules: mode },
+    );
+}
+
 export async function createRule(
   deps: NetworkDeps,
   tx: SqlTx,
@@ -1807,6 +2001,7 @@ export async function createRule(
       undefined,
       { limit: maxRulesPerNetwork },
     );
+  await assertDenySupported(deps, tx, network, input);
   assertTagScoped(network, input.targets);
   await assertTargets(tx, network, input.targets);
   const spec = JSON.stringify(ruleSpecOf(input));
@@ -1899,6 +2094,7 @@ export async function updateRule(
       );
     throw error;
   }
+  await assertDenySupported(deps, tx, network, merged);
   assertTagScoped(network, merged.targets);
   if (patched.targets !== undefined) await assertTargets(tx, network, merged.targets);
   await tx.query(
@@ -2258,6 +2454,9 @@ class NetworkWorker {
               {
                 name: this.#networkName,
                 ...(network.description !== null ? { description: network.description } : {}),
+                ...(network.cidr !== null && network.cidr !== undefined
+                  ? { cidr: network.cidr }
+                  : {}),
               },
               this.#call(network.id),
             ),
@@ -2315,7 +2514,14 @@ class NetworkWorker {
       }
       const result = await this.#attempt(() =>
         networks.ensureSubnet(
-          { network: this.#networkName, name, region: subnet.region, cidr: subnet.cidr },
+          {
+            network: this.#networkName,
+            name,
+            region: subnet.region,
+            cidr: subnet.cidr,
+            ...(subnet.zone !== null && subnet.zone !== undefined ? { zone: subnet.zone } : {}),
+            ...(subnet.private_access === true ? { privateGoogleAccess: true } : {}),
+          },
           this.#call(subnet.id),
         ),
       );

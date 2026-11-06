@@ -37,6 +37,10 @@ export interface EmuInstance {
   subnetId: string;
   vpcId: string;
   groups: { id: string; name: string }[];
+  /** Tags of the primary network interface (RunInstances tags it with 'network-interface'). */
+  eniTags: Map<string, string>;
+  /** Network interfaces attached (1 unless a test adds more); the first is the primary. */
+  interfaces?: number;
   terminationProtected: boolean;
   capacityReservationId?: string;
   lifecycle?: 'spot';
@@ -173,6 +177,7 @@ export class Ec2Emulator {
       subnetId: 'subnet-0000000000000000a',
       vpcId: 'vpc-0000000000000000a',
       groups: [{ id: 'sg-0000000000000000a', name: 'default' }],
+      eniTags: new Map(),
       terminationProtected: false,
       notFoundById: 0,
       notFoundByToken: 0,
@@ -222,7 +227,7 @@ export class Ec2Emulator {
         .sort(([a], [b]) => (a < b ? -1 : 1))
         .map(([k, v]) => `${el('key', k)}${el('value', v)}`),
     );
-    const eni = `${el('networkInterfaceId', `eni-${instance.id.slice(2)}`)}${el('subnetId', instance.subnetId)}${el('vpcId', instance.vpcId)}${el('privateIpAddress', instance.privateIp)}${instance.publicIp ? `<association>${el('publicIp', instance.publicIp)}</association>` : ''}${items(
+    const eni = `${el('networkInterfaceId', `eni-${instance.id.slice(2)}`)}<attachment>${el('deviceIndex', 0)}</attachment>${el('subnetId', instance.subnetId)}${el('vpcId', instance.vpcId)}${el('privateIpAddress', instance.privateIp)}${instance.publicIp ? `<association>${el('publicIp', instance.publicIp)}</association>` : ''}${items(
       'groupSet',
       instance.groups.map((g) => `${el('groupId', g.id)}${el('groupName', g.name)}`),
     )}`;
@@ -246,7 +251,14 @@ export class Ec2Emulator {
       el('subnetId', instance.subnetId),
       el('vpcId', instance.vpcId),
       tagSet,
-      items('networkInterfaceSet', [eni]),
+      items('networkInterfaceSet', [
+        eni,
+        ...Array.from(
+          { length: (instance.interfaces ?? 1) - 1 },
+          (_, n) =>
+            `${el('networkInterfaceId', `eni-${instance.id.slice(2)}-${n + 1}`)}<attachment>${el('deviceIndex', n + 1)}</attachment>${el('subnetId', instance.subnetId)}${el('vpcId', instance.vpcId)}`,
+        ),
+      ]),
     ].join('');
   }
 
@@ -557,10 +569,13 @@ export class Ec2Emulator {
     const subnet = p.get('NetworkInterface.1.SubnetId');
     if (subnet) instance.subnetId = subnet;
     for (let n = 1; p.has(`TagSpecification.${n}.ResourceType`); n++) {
+      const type = p.get(`TagSpecification.${n}.ResourceType`);
       const target =
-        p.get(`TagSpecification.${n}.ResourceType`) === 'instance'
+        type === 'instance'
           ? instance.tags
-          : instance.volumeTags;
+          : type === 'network-interface'
+            ? instance.eniTags
+            : instance.volumeTags;
       for (let m = 1; p.has(`TagSpecification.${n}.Tag.${m}.Key`); m++)
         target.set(
           p.get(`TagSpecification.${n}.Tag.${m}.Key`)!,

@@ -89,6 +89,11 @@ export class AwsEmulator {
     this.#routes.unshift({ host, handler });
   }
 
+  /** The handler serving `host` now (the latest matching registration): a wrapping service delegates to it. */
+  handlerFor(host: string): ServiceHandler | undefined {
+    return this.#routes.find((route) => route.host.test(host))?.handler;
+  }
+
   /** The next `times` calls of `operation` fail with `code`. */
   failNext(operation: string, code: string, status = 400, times = 1): void {
     this.#failures.push({ operation, code, status, times });

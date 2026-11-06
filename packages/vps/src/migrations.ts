@@ -9,7 +9,12 @@ import { reservationGrantsMigration } from './reservation-grants.js';
 import { vpsVolumeResizeHoldMigration, vpsVolumesMigration } from './volumes.js';
 import { vpsVolumeStorageMigration } from './volume-storage.js';
 import { providerReservationsMigration } from './provider-reservations.js';
-import { vpsNetworkAdoptMigration, vpsNetworksMigration } from './networks.js';
+import {
+  vpsNetworkAdoptMigration,
+  vpsNetworksMigration,
+  vpsNetworkZonesMigration,
+  vpsSubnetPrivateAccessMigration,
+} from './networks.js';
 import {
   vpsIdentityRebindMigration,
   vpsSandboxExpiringMigration,
@@ -206,4 +211,6 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   poolMachinesMigration,
   vpsInstanceLabelsMigration,
   vpsNetworkAdoptMigration,
+  vpsNetworkZonesMigration,
+  vpsSubnetPrivateAccessMigration,
 ]);

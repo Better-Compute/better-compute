@@ -719,6 +719,8 @@ describe('api', () => {
     // The region must be one of the account's zones' regions.
     const fresh = await createNetwork();
     expect(await codeOf(addSubnet(fresh.id, { region: 'asia-east1' }))).toBe('INVALID_INPUT');
+    // (AWS A2) This provider's subnets are region-wide: a subnet names no zone.
+    expect(await codeOf(addSubnet(fresh.id, { zone: 'us-central1-a' }))).toBe('INVALID_INPUT');
   });
 
   it('takes subnet regions from an account that configures regions, not zones', async () => {
