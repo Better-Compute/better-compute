@@ -3,6 +3,7 @@ import {
   assertLiveInstanceType,
   liveEc2Fetch,
   liveGate,
+  liveMaxLaunches,
   livePreflight,
   liveTags,
   newTestRunId,
@@ -201,6 +202,81 @@ describe('liveEc2Fetch', () => {
     expect(sent).toHaveLength(4);
   });
 
+  it('refuses an EC2 request whose body it cannot read as a 2016-11-15 query form', async () => {
+    const { sent, refused, post } = guarded();
+    const p5 = form('RunInstances', { InstanceType: 'p5.48xlarge', MinCount: '1', MaxCount: '1' });
+    // Every body shape it can read is checked like a string.
+    await expect(refused(new TextEncoder().encode(p5).buffer as unknown as Uint8Array)).resolves.toMatch(/allow-list/);
+    await expect(refused(new URLSearchParams(p5) as unknown as string)).resolves.toMatch(/allow-list/);
+    const request = new Request(ec2Url, { method: 'POST', body: p5 });
+    const viaRequest = await liveEc2Fetch(async () => new Response('<Response/>'), async () => {})(request);
+    expect(viaRequest.status).toBe(403);
+    // What it cannot read, it refuses when it goes to EC2.
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(p5));
+        controller.close();
+      },
+    });
+    await expect(refused(stream as unknown as string)).resolves.toMatch(/cannot read/);
+    await expect(refused('{"Action":"RunInstances"}')).resolves.toMatch(/cannot read/);
+    await expect(refused(new URLSearchParams({ Action: 'RunInstances', Version: '2014-10-01' }).toString())).resolves.toMatch(/cannot read/);
+    const dualStack = await post(p5, 'https://ec2.us-east-1.api.aws/');
+    expect(dualStack.status).toBe(403);
+    expect(sent).toEqual([]);
+    // Other services are not EC2's business.
+    await post(new Blob(['x']) as unknown as string, 'https://my-bucket.s3.us-east-1.amazonaws.com/key');
+    expect(sent).toHaveLength(1);
+  });
+
+  it('allows only the EC2 actions the provider needs', async () => {
+    const { sent, refused, post } = guarded();
+    for (const action of ['CreateTransitGateway', 'CreateVpnGateway', 'CreateVpnConnection', 'CreateClientVpnEndpoint', 'CreateTrafficMirrorSession', 'ModifyHosts', 'CreateNatGateway'])
+      await expect(refused(form(action)), action).resolves.toMatch(/live suite never calls EC2/);
+    expect(sent).toEqual([]);
+    for (const action of ['DescribeInstances', 'DescribeSpotPriceHistory', 'GetConsoleOutput', 'CreateVpc', 'DeleteVpc', 'CreateTags', 'AuthorizeSecurityGroupIngress', 'TerminateInstances', 'AllocateAddress'])
+      expect((await post(form(action))).status, action).toBe(200);
+    expect(sent).toHaveLength(9);
+  });
+
+  it('caps volume sizes, IOPS, throughput and types', async () => {
+    const { sent, refused, post } = guarded();
+    await expect(refused(form('CreateVolume', { Size: '17', AvailabilityZone: 'us-east-1a' }))).resolves.toMatch(/GiB/);
+    await expect(refused(form('CreateVolume', { SnapshotId: 'snap-1', AvailabilityZone: 'us-east-1a' }))).resolves.toMatch(/Size/);
+    await expect(refused(form('CreateVolume', { Size: '8', VolumeType: 'io2', Iops: '3000' }))).resolves.toMatch(/volume type/);
+    await expect(refused(form('CreateVolume', { Size: '8', VolumeType: 'gp3', Iops: '16000' }))).resolves.toMatch(/IOPS/);
+    await expect(refused(form('CreateVolume', { Size: '8', VolumeType: 'gp3', Throughput: '1000' }))).resolves.toMatch(/throughput/);
+    await expect(refused(form('ModifyVolume', { VolumeId: 'vol-1', Size: '100' }))).resolves.toMatch(/GiB/);
+    await expect(
+      refused(form('RunInstances', { InstanceType: 't4g.nano', MinCount: '1', MaxCount: '1', 'BlockDeviceMapping.1.Ebs.VolumeSize': '500' })),
+    ).resolves.toMatch(/GiB/);
+    await expect(
+      refused(form('RunInstances', { InstanceType: 't4g.nano', MinCount: '1', MaxCount: '1', 'BlockDeviceMapping.1.Ebs.VolumeType': 'io2' })),
+    ).resolves.toMatch(/volume type/);
+    expect(sent).toEqual([]);
+    expect((await post(form('CreateVolume', { Size: '8', VolumeType: 'gp3', Iops: '3000', Throughput: '125' }))).status).toBe(200);
+    expect((await post(form('RunInstances', { InstanceType: 't3.micro', MinCount: '1', MaxCount: '1', 'BlockDeviceMapping.1.Ebs.VolumeSize': '8' }))).status).toBe(200);
+  });
+
+  it('caps the launches of a run, across every fetch that shares its budget', async () => {
+    const sent: string[] = [];
+    const base: typeof fetch = async (_input, init) => {
+      sent.push(String(init?.body));
+      return new Response('<Response/>');
+    };
+    const budget = { launches: 2 };
+    const one = liveEc2Fetch(base, async () => {}, budget);
+    const two = liveEc2Fetch(base, async () => {}, budget);
+    const launch = form('RunInstances', { InstanceType: 't4g.nano', MinCount: '1', MaxCount: '1' });
+    expect((await one(ec2Url, { method: 'POST', body: launch })).status).toBe(200);
+    expect((await two(ec2Url, { method: 'POST', body: launch })).status).toBe(200);
+    const third = await one(ec2Url, { method: 'POST', body: launch });
+    expect(third.status).toBe(403);
+    expect(await third.text()).toMatch(/launches/);
+    expect(sent).toHaveLength(2);
+    expect(liveMaxLaunches).toBeGreaterThan(0);
+  });
+
   it('reports the instances RunInstances made, not the VPC, subnet or groups it names', async () => {
     const { created, post } = guarded(
       '<RunInstancesResponse><instancesSet><item><instanceId>i-0123456789abcdef0</instanceId><subnetId>subnet-0aaaaaaaaaaaaaaaa</subnetId><vpcId>vpc-0bbbbbbbbbbbbbbbb</vpcId><groupSet><item><groupId>sg-0cccccccccccccccc</groupId></item></groupSet></item></instancesSet></RunInstancesResponse>',
@@ -223,7 +299,7 @@ describe('liveEc2Fetch', () => {
     ];
     for (const [action, answer, expected] of cases) {
       const { created, post } = guarded(answer);
-      await post(form(action));
+      await post(form(action, action === 'CreateVolume' ? { Size: '8' } : {}));
       expect(created, action).toEqual([[expected]]);
     }
   });

@@ -56,12 +56,19 @@ provider has no such feature yet (`networks`, `pollEvents`, Spot offers). It tak
 | `BETTER_COMPUTE_AWS_LIVE_ATTACHABLE` | An instance id the conformance claim and discover cases may tag and untag |
 | `BETTER_COMPUTE_AWS_LIVE_FIS_ROLE_ARN` | A role FIS can assume, with `ec2:SendSpotInstanceInterruptions` and `ec2:DescribeInstances`; without it the Spot case skips |
 
-The provider's fetch goes through `liveEc2Fetch` (`support/live.ts`). It answers a refused call the way EC2 would
-(403 `UnauthorizedOperation`), so nothing is sent: an instance type off the allow-list in any `…InstanceType`
-parameter, a launch of more than one instance, or any purchase, dedicated host, capacity reservation, NAT gateway or
-fleet. Every instance, VPC, subnet, security group, internet gateway, gateway endpoint, route table, network ACL, volume and
-Elastic IP that EC2
-creates is recorded at once and tagged with the run's tags.
+The provider's fetch goes through `liveEc2Fetch` (`support/live.ts`). It fails closed and answers a refused call the
+way EC2 would (403 `UnauthorizedOperation`), so nothing is sent:
+
+- a request to an EC2 host whose body it cannot read as a 2016-11-15 query form (a stream, a Blob, JSON);
+- any EC2 action off its allow-list: reads (`Describe*`, `Get*`) and the instance, VPC networking, address, volume
+  and tag mutations provider-aws makes. Purchases, dedicated hosts, capacity reservations, NAT gateways, fleets,
+  transit gateways, VPNs and anything new are refused until added on purpose;
+- an instance type off the allow-list in any `…InstanceType` parameter, a launch of more than one instance, or more
+  than `liveMaxLaunches` (20) launches in one run;
+- a volume over 16 GiB, 3000 IOPS or 125 MiB/s, of a type other than gp3 or gp2, or created without a `Size`.
+
+Every instance, VPC, subnet, security group, internet gateway, gateway endpoint, route table, network ACL, volume and
+Elastic IP that EC2 creates is recorded at once and tagged with the run's tags.
 
 Files create their fixtures through `support/resources.ts` (`liveAws`): each is tagged with the run's tags and its
 ARN is recorded as soon as it exists, so `afterAll` (`cleanUp`, the sweeper's deleters by ARN) deletes it even when

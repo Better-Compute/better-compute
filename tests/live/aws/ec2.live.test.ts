@@ -18,8 +18,8 @@ import { liveAws, type LiveAws, type LiveQueue } from './support/resources.js';
 // Spot interruption sent by AWS Fault Injection Service. It runs only behind the live gate and
 // preflight (tests/live/aws/README.md), and only when @better-compute/provider-aws is installed.
 //
-// Spend guards: the provider's fetch is wrapped by `liveEc2Fetch` (t4g.nano / t3.micro only, one
-// instance per launch, no purchases, hosts, reservations, NAT gateways or fleets). Everything EC2
+// Spend guards: the provider's fetch is wrapped by `liveEc2Fetch` (fails closed: an EC2 action allow-list,
+// t4g.nano / t3.micro only, one instance per launch and 20 per run, small gp3/gp2 volumes). Everything EC2
 // creates is tagged with the run's tags the moment it exists and deleted in afterAll.
 //
 // Optional settings:

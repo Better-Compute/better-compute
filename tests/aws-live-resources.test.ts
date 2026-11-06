@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { liveGate, liveTags, newTestRunId, testRunTagKey } from './live/aws/support/live.js';
+import { liveGate, liveMaxLaunches, liveTags, newTestRunId, testRunTagKey } from './live/aws/support/live.js';
 import { liveAws } from './live/aws/support/resources.js';
 import { AwsEmulator, testAccessKeyId, testSecret } from './support/aws-platform-emulator/index.js';
 import { fisFake, recorderFake, s3SweepFake, stsFake, type FakeBucket, type RecordedCall } from './support/aws-live-fakes.js';
@@ -173,6 +173,14 @@ describe('liveAws fixtures', () => {
       await runInstances(aws, 't3.micro');
       expect(aws.untagged).toEqual([`arn:aws:ec2:us-east-1:${SANDBOX}:instance/i-0123456789abcdef0`]);
       expect(aws.created).toEqual(aws.untagged);
+    });
+
+    it('caps the launches of the whole run, across every fetch it hands out', async () => {
+      const { aws, emu } = world();
+      // runInstances asks for a fresh ec2Fetch() each time, as one provider per case would.
+      for (let launch = 0; launch < liveMaxLaunches; launch++) await runInstances(aws, 't4g.nano');
+      await expect(runInstances(aws, 't4g.nano')).rejects.toMatchObject({ code: 'ACCESS_DENIED', message: expect.stringContaining('launches') });
+      expect(emu.calls('RunInstances')).toHaveLength(liveMaxLaunches);
     });
 
     it('never sends a launch off the allow-list', async () => {

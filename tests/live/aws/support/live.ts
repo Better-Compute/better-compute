@@ -182,9 +182,85 @@ export interface LiveCreated {
   id: string;
 }
 
-/** EC2 actions a live run never sends: purchases, dedicated hosts, reservations, NAT gateways, fleets. */
-const refusedEc2Actions =
-  /^(Purchase\w*|AllocateHosts|CreateCapacityReservation\w*|CreateNatGateway|CreateFleet|RequestSpotFleet|RequestSpotInstances|CreateReservedInstancesListing)$/;
+/**
+ * The EC2 actions a live run may send: reads, and the mutations provider-aws makes on instances,
+ * VPC networking, addresses, volumes and tags. Anything else (purchases, dedicated hosts,
+ * reservations, NAT gateways, fleets, transit gateways, VPNs, Client VPN, …) is refused, so a new
+ * costly action fails closed until it is added here on purpose.
+ */
+const allowedEc2Actions = new Set([
+  'RunInstances',
+  'TerminateInstances',
+  'StartInstances',
+  'StopInstances',
+  'RebootInstances',
+  'ModifyInstanceAttribute',
+  'ModifyInstanceMetadataOptions',
+  'CreateReplaceRootVolumeTask',
+  'CreateTags',
+  'DeleteTags',
+  'CreateKeyPair',
+  'ImportKeyPair',
+  'DeleteKeyPair',
+  'CreateVpc',
+  'DeleteVpc',
+  'ModifyVpcAttribute',
+  'AssociateVpcCidrBlock',
+  'DisassociateVpcCidrBlock',
+  'CreateSubnet',
+  'DeleteSubnet',
+  'ModifySubnetAttribute',
+  'CreateSecurityGroup',
+  'DeleteSecurityGroup',
+  'AuthorizeSecurityGroupIngress',
+  'AuthorizeSecurityGroupEgress',
+  'RevokeSecurityGroupIngress',
+  'RevokeSecurityGroupEgress',
+  'ModifySecurityGroupRules',
+  'CreateInternetGateway',
+  'DeleteInternetGateway',
+  'AttachInternetGateway',
+  'DetachInternetGateway',
+  'CreateRouteTable',
+  'DeleteRouteTable',
+  'AssociateRouteTable',
+  'DisassociateRouteTable',
+  'ReplaceRouteTableAssociation',
+  'CreateRoute',
+  'DeleteRoute',
+  'ReplaceRoute',
+  'CreateNetworkAcl',
+  'DeleteNetworkAcl',
+  'CreateNetworkAclEntry',
+  'DeleteNetworkAclEntry',
+  'ReplaceNetworkAclEntry',
+  'ReplaceNetworkAclAssociation',
+  'CreateVpcEndpoint',
+  'DeleteVpcEndpoints',
+  'ModifyVpcEndpoint',
+  'ModifyNetworkInterfaceAttribute',
+  'DeleteNetworkInterface',
+  'AllocateAddress',
+  'ReleaseAddress',
+  'AssociateAddress',
+  'DisassociateAddress',
+  'CreateVolume',
+  'DeleteVolume',
+  'AttachVolume',
+  'DetachVolume',
+  'ModifyVolume',
+  'CreateSnapshot',
+  'DeleteSnapshot',
+]);
+const readEc2Action = /^(Describe|Get)[A-Z]\w*$/;
+// Purchases and the like are refused even when they look like reads (none do today; this keeps it so).
+const refusedEc2Action = /^(Purchase|AllocateHosts|CreateCapacityReservation|CreateNatGateway|CreateFleet|RequestSpot)/;
+
+/** Launches one live run may send (every RunInstances attempt counts). */
+export const liveMaxLaunches = 20;
+
+/** EBS limits a live run stays within: gp3 baseline performance, small volumes. */
+export const liveVolumeLimits = { maxGiB: 16, maxIops: 3000, maxThroughput: 125, types: ['gp3', 'gp2'] } as const;
 
 /** How each EC2 create names the resource it made (never the ones it merely refers to). */
 const createdBy: Record<string, (root: XmlElement) => LiveCreated[]> = {
@@ -218,31 +294,89 @@ function refusal(message: string): Response {
   );
 }
 
-function formOf(body: unknown): URLSearchParams | undefined {
-  const text = typeof body === 'string' ? body : body instanceof Uint8Array ? new TextDecoder().decode(body) : undefined;
+/** The text of a request body, or undefined for one it cannot read without consuming it (a stream, a Blob, FormData). */
+function bodyText(body: unknown): string | undefined {
+  if (typeof body === 'string') return body;
+  if (body instanceof URLSearchParams) return body.toString();
+  if (body instanceof ArrayBuffer) return new TextDecoder().decode(body);
+  if (ArrayBuffer.isView(body)) return new TextDecoder().decode(new Uint8Array(body.buffer, body.byteOffset, body.byteLength));
+  return undefined;
+}
+
+function formOf(text: string | undefined): URLSearchParams | undefined {
   if (text === undefined || !text.startsWith('Action=')) return undefined;
   return new URLSearchParams(text);
 }
 
+/** An EC2 endpoint: `ec2.<region>.amazonaws.com`, `ec2-fips.…`, dual-stack `ec2.<region>.api.aws`, or a VPC endpoint of it. */
+function isEc2Host(input: RequestInfo | URL): boolean {
+  let host: string;
+  try {
+    host = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url).hostname;
+  } catch {
+    return false;
+  }
+  return /(^|\.)ec2(-fips)?\.[a-z0-9-]+\.(amazonaws\.com(\.cn)?|api\.aws)$/.test(host);
+}
+
+function checkVolumes(action: string, params: URLSearchParams): void {
+  const limits = liveVolumeLimits;
+  const number = (key: string, value: string) => {
+    const parsed = Number(value);
+    if (!/^\d+$/.test(value) || !Number.isSafeInteger(parsed)) throw new ComputeError('INVALID_INPUT', `${key} is not a whole number`);
+    return parsed;
+  };
+  for (const [key, value] of params) {
+    if (/(^|\.)(Size|VolumeSize)$/.test(key) && number(key, value) > limits.maxGiB)
+      throw new ComputeError('INVALID_INPUT', `${key}=${value}: a live run's volumes are at most ${limits.maxGiB} GiB`);
+    if (/(^|\.)Iops$/.test(key) && number(key, value) > limits.maxIops)
+      throw new ComputeError('INVALID_INPUT', `${key}=${value}: a live run stays within ${limits.maxIops} IOPS`);
+    if (/(^|\.)Throughput$/.test(key) && number(key, value) > limits.maxThroughput)
+      throw new ComputeError('INVALID_INPUT', `${key}=${value}: a live run stays within ${limits.maxThroughput} MiB/s throughput`);
+    if (/(^|\.)VolumeType$/.test(key) && !(limits.types as readonly string[]).includes(value))
+      throw new ComputeError('INVALID_INPUT', `${key}=${value}: a live run uses only the ${limits.types.join(' or ')} volume type`);
+  }
+  // A volume from a snapshot alone takes the snapshot's size, whatever it is.
+  if (action === 'CreateVolume' && !params.has('Size')) throw new ComputeError('INVALID_INPUT', 'a live run names the Size of every volume it creates');
+}
+
 /**
- * The fetch a provider under test gets in a live run. EC2 query calls (Version 2016-11-15) are
- * checked before they are sent: instance types must be on the allow-list (every `…InstanceType`
- * parameter), RunInstances launches exactly one instance, and purchases, hosts, reservations, NAT
- * gateways and fleets are refused. After a successful create, `onCreated` hears what it made, so
- * the run can tag it and delete it. Request bodies are signed, so they are read, never changed.
+ * The fetch a provider under test gets in a live run. It fails closed: a request to an EC2 host
+ * whose body is not a readable 2016-11-15 query form is refused, and so is any action off the
+ * allow-list (reads, and the instance, network, address, volume and tag mutations provider-aws
+ * makes). Instance types must be on the instance allow-list (every `…InstanceType` parameter),
+ * RunInstances launches exactly one instance and at most `budget.launches` per run (shared by every
+ * fetch that is given the same budget), and volumes stay within `liveVolumeLimits`. After a
+ * successful create, `onCreated` hears what it made, so the run can tag it and delete it. Request
+ * bodies are signed, so they are read, never changed.
  */
-export function liveEc2Fetch(base: typeof fetch, onCreated: (created: LiveCreated[]) => Promise<void>): typeof fetch {
+export function liveEc2Fetch(
+  base: typeof fetch,
+  onCreated: (created: LiveCreated[]) => Promise<void>,
+  budget: { launches: number } = { launches: liveMaxLaunches },
+): typeof fetch {
   return async (input, init) => {
-    const params = formOf(init?.body);
+    const ec2Host = isEc2Host(input);
+    let text = bodyText(init?.body);
+    // A Request carries its own body; reading a clone leaves it to send.
+    if (init?.body === undefined && typeof input === 'object' && input instanceof Request) text = await input.clone().text();
+    const params = formOf(text);
     const action = params?.get('Action') ?? '';
-    if (!params || params.get('Version') !== '2016-11-15') return base(input, init);
+    const isEc2Form = params?.get('Version') === '2016-11-15';
+    if (!ec2Host && !isEc2Form) return base(input, init);
     try {
-      if (refusedEc2Actions.test(action)) throw new ComputeError('ACCESS_DENIED', `the live suite never calls EC2 ${action}`);
+      if (!params || !isEc2Form)
+        throw new ComputeError('ACCESS_DENIED', 'the live suite guard cannot read this EC2 request as a 2016-11-15 query form');
+      if (refusedEc2Action.test(action) || !(allowedEc2Actions.has(action) || readEc2Action.test(action)))
+        throw new ComputeError('ACCESS_DENIED', `the live suite never calls EC2 ${action}`);
       for (const [key, value] of params) if (/(^|\.)InstanceType(\.Value)?$/.test(key)) assertLiveInstanceType(value);
+      checkVolumes(action, params);
       if (action === 'RunInstances') {
         assertLiveInstanceType(params.get('InstanceType') ?? '');
         if (params.get('MinCount') !== '1' || params.get('MaxCount') !== '1')
           throw new ComputeError('INVALID_INPUT', 'a live run launches one instance at a time');
+        if (budget.launches <= 0) throw new ComputeError('QUOTA_EXCEEDED', 'the live run has used all its launches');
+        budget.launches -= 1;
       }
     } catch (error) {
       if (!(error instanceof ComputeError)) throw error;

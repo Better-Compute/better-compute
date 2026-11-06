@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { ComputeError } from '@better-compute/core';
 import { parseXml, serializeEc2Query, type QueryParams, type XmlElement } from '@better-compute/aws-core';
 import { createTransport, jsonClient, serviceEndpoint, type Transport } from '../../../../packages/aws/src/internal/transport.js';
-import { liveEc2Fetch, liveTags, type LiveConfig, type LiveCreated, type LiveDeps } from './live.js';
+import { liveEc2Fetch, liveMaxLaunches, liveTags, type LiveConfig, type LiveCreated, type LiveDeps } from './live.js';
 import { bucketUrl, deleteLiveResources, type SweepReport } from './sweep.js';
 
 type JsonService = 'sqs' | 'events' | 'secretsmanager';
@@ -89,6 +89,8 @@ export function liveAws(config: LiveConfig, runId: string, deps: LiveAwsDeps = {
     ...(deps.endpoint ? { endpoint: deps.endpoint } : {}),
   });
   const created: string[] = [];
+  // One launch budget for the whole run, however many provider fetches it hands out.
+  const launchBudget = { launches: liveMaxLaunches };
   const tags = liveTags(runId);
   const tagMap = Object.fromEntries(tags.map((tag) => [tag.Key, tag.Value]));
   const track = (arn: string) => {
@@ -288,7 +290,7 @@ export function liveAws(config: LiveConfig, runId: string, deps: LiveAwsDeps = {
     },
 
     ec2,
-    ec2Fetch: (base = deps.fetch ?? fetch) => liveEc2Fetch(base, tagCreated),
+    ec2Fetch: (base = deps.fetch ?? fetch) => liveEc2Fetch(base, tagCreated, launchBudget),
 
     async createSpotInterruptionTemplate(instanceArn, roleArn) {
       if (!/^arn:aws[\w-]*:iam::\d{12}:role\/[\w+=,.@/-]{1,512}$/.test(roleArn))
