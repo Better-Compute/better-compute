@@ -898,8 +898,9 @@ describe('iam policy (A3)', () => {
     );
     const quotas = policy.Statement.find((s) => s.Sid === 'Quotas')!;
     expect(quotas.Resource).toBe('arn:aws:servicequotas:us-east-1:222222222222:ec2/*');
+    // Any owner: a RAM-shared ODCR is authorized against its owner's ARN.
     expect(policy.Statement.find((s) => s.Sid === 'RunInReservations')!.Resource).toBe(
-      'arn:aws:ec2:us-east-1:222222222222:capacity-reservation/*',
+      'arn:aws:ec2:us-east-1:*:capacity-reservation/*',
     );
     // Nothing that spends, prices or launches Spot unless asked.
     for (const action of [
@@ -914,6 +915,14 @@ describe('iam policy (A3)', () => {
   it('--spot, --pricing and --allow-purchases add their statements', async () => {
     const policy = iamPolicy({ spot: true, pricing: true, purchases: true });
     const buy = policy.Statement.find((s) => s.Sid === 'BuyCapacity')!;
+    // Buying and tagging stay on the account's own reservations.
+    const narrowed = iamPolicy({ region: 'us-east-1', account: '222222222222', purchases: true });
+    expect(narrowed.Statement.find((s) => s.Sid === 'BuyCapacity')!.Resource).toContain(
+      'arn:aws:ec2:us-east-1:222222222222:capacity-reservation/*',
+    );
+    expect(narrowed.Statement.find((s) => s.Sid === 'TagBoughtCapacity')!.Resource).toBe(
+      'arn:aws:ec2:us-east-1:222222222222:capacity-reservation/*',
+    );
     expect(actionsOf(buy).sort()).toEqual([
       'ec2:CreateCapacityReservation',
       'ec2:PurchaseCapacityBlock',

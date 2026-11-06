@@ -23,6 +23,8 @@ export function marketStatements(options: MarketPolicyOptions): IamStatement[] {
   const { partition, region, account } = options;
   const ec2 = (resource: string) => `arn:${partition}:ec2:${region}:${account}:${resource}`;
   const reservations = ec2('capacity-reservation/*');
+  // A RAM-shared reservation is authorized against its owner's ARN (the owner's account id).
+  const anyReservation = `arn:${partition}:ec2:${region}:*:capacity-reservation/*`;
   const statements: IamStatement[] = [
     {
       Sid: 'MarketReads',
@@ -41,11 +43,12 @@ export function marketStatements(options: MarketPolicyOptions): IamStatement[] {
       Resource: `arn:${partition}:servicequotas:${region}:${account}:ec2/*`,
     },
     {
-      // A launch that targets a reservation names it; the instance stays guarded by RunTagged.
+      // A launch that targets a reservation names it: the account's own, or one shared in through
+      // RAM (named by its owner's account). The instance stays guarded by RunTagged.
       Sid: 'RunInReservations',
       Effect: 'Allow',
       Action: 'ec2:RunInstances',
-      Resource: reservations,
+      Resource: anyReservation,
     },
   ];
   if (options.spot)
