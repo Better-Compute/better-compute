@@ -165,6 +165,36 @@ describe('substrate: create', () => {
     expect(world.kube.get(server, '/api/v1/namespaces/bcd-system/secrets/bcd-join-token')).toBeDefined();
   });
 
+  it('wakes the substrate when its cluster or a node pool changes state, not only on its own poll', async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(createSpec([gpu]));
+    const clusterStates = async () =>
+      (
+        await world!.fixture.database.query<{ state: string }>(
+          `SELECT state FROM kubernetes_clusters WHERE substrate_pool_id = $1`,
+          [pool.id],
+        )
+      ).rows.map((row) => row.state);
+    for (let round = 0; round < 6 && (await clusterStates()).length === 0; round++) {
+      await world.fixture.advance(10_000);
+      await world.fixture.compute.jobs['kubernetes.substrates']!.tick();
+    }
+    const queued = async () =>
+      (
+        await world!.fixture.database.query(`SELECT key FROM work_queue WHERE kind = 'kubernetes.substrates' AND key = $1`, [
+          pool.id,
+        ])
+      ).rows.length;
+    await world.fixture.database.query(`DELETE FROM work_queue WHERE kind = 'kubernetes.substrates'`);
+    expect(await queued()).toBe(0);
+    expect(await clusterStates()).toEqual(['pending']);
+    for (let round = 0; round < 6 && (await queued()) === 0; round++) {
+      await world.fixture.advance(10_000);
+      await world.fixture.compute.jobs['kubernetes.clusters']!.tick();
+    }
+    expect(await queued()).toBe(1);
+  });
+
   it('pushes a version change to the cluster (an upgrade), and keeps the DaemonSet applied', async () => {
     world = await substrateWorld();
     const pool = await world.createPool(createSpec());
@@ -194,6 +224,24 @@ describe('substrate: refusals', () => {
     expect(await world.substrate(pool.id)).toMatchObject({ state: 'error', cluster_id: null });
     expect((await world.substrate(pool.id)).message).toMatch(/kubernetes\(\{ substrate \}\)/);
     expect(world.cloud.calls).toEqual([]);
+    // Doctor says why: pools declare substrates the module cannot run, and a substrate is in error.
+    const findings = await world.module.selfCheck!({ sql: world.fixture.database } as never);
+    expect(findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ check: 'kubernetes.substrate-agent-missing', severity: 'error', count: 1 }),
+        expect.objectContaining({ check: 'kubernetes.substrate-error', severity: 'warning', count: 1 }),
+      ]),
+    );
+    expect(findings.find((entry: any) => entry.check === 'kubernetes.substrate-error')!.message).toContain(pool.id);
+  });
+
+  it('reports no substrate findings when every substrate converges', async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(createSpec());
+    await world.converge(pool.id, 6);
+    expect(await world.substrate(pool.id)).toMatchObject({ state: 'ready' });
+    const findings = await world.module.selfCheck!({ sql: world.fixture.database } as never);
+    expect(findings.filter((entry: any) => entry.check.startsWith('kubernetes.substrate'))).toEqual([]);
   });
 
   it("refuses an account that is not the pool owner's, and a provider without managed Kubernetes", async () => {

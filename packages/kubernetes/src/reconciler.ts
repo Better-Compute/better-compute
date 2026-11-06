@@ -28,6 +28,7 @@ import {
   type KubernetesDeps,
   type NodePoolRow,
 } from './store.js';
+import { substratesWork } from './substrates.js';
 import type { KubernetesClusterState, KubernetesNodePoolState } from './types.js';
 
 // The `kubernetes.clusters` reconciler: converges each cluster at the provider through `ProviderImpl.kubernetes`.
@@ -267,6 +268,7 @@ class ClusterWorker {
         ],
       );
       if (rows.length === 0) return false;
+      if (cluster.state !== update.state) await this.#wakeSubstrate(tx);
       const version = rows[0]!.kubernetes_version;
       if (update.state === 'ready') {
         if (cluster.ready_at === null)
@@ -324,6 +326,7 @@ class ClusterWorker {
         [pool.id, pool.version, state, message ?? null],
       );
       if (rows.length === 0) return false;
+      if (pool.state !== state) await this.#wakeSubstrate(tx);
       const data = { nodePoolId: pool.id, name: pool.name };
       if (state === 'ready' && pool.state !== 'ready')
         await publish(this.deps, tx, this.#cluster, 'kubernetes.nodepool.ready', data);
@@ -348,6 +351,12 @@ class ClusterWorker {
       ),
     );
     if (rows[0] && Number(rows[0].version) !== Number(pool.version)) this.#again = true;
+  }
+
+  /** A pool substrate's cluster changed state: its substrate looks at once (bcd, tokens, removed Nodes). */
+  async #wakeSubstrate(tx: SqlTx): Promise<void> {
+    const poolId = this.#cluster.substrate_pool_id;
+    if (poolId !== null) await this.deps.work.enqueue(tx, substratesWork, poolId);
   }
 
   /** The state a cluster still converging shows: `provisioning` until it was ready once, then `updating`. */

@@ -4,6 +4,7 @@ import {
   defineModule,
   describedBy,
   type ComputeModule,
+  type Finding,
   type KubernetesVersions,
   type MethodContext,
   type MethodDefinition,
@@ -361,7 +362,7 @@ export function kubernetes(
            JOIN provider_accounts a ON a.id = k.provider_account_id
           WHERE k.state <> 'deleted' GROUP BY a.provider ORDER BY a.provider`,
       );
-      return rows
+      const findings: Finding[] = rows
         .filter((row) => !providers.has(row.provider))
         .map((row) => ({
           check: 'kubernetes.provider-missing',
@@ -370,6 +371,37 @@ export function kubernetes(
           fix: `Pass the ${row.provider} provider definition to kubernetes({ providers }), as to vps({ providers })`,
           count: Number(row.clusters),
         }));
+      // Pool substrates: pools that declare one while the module has no agent to run bcd with.
+      if (substrate === undefined) {
+        const { rows: declared } = await context.sql.query<{ pools: string }>(
+          `SELECT count(*)::text AS pools FROM pools WHERE archived_at IS NULL AND policy ? 'substrate'`,
+        );
+        const pools = Number(declared[0]?.pools ?? 0);
+        if (pools > 0)
+          findings.push({
+            check: 'kubernetes.substrate-agent-missing',
+            severity: 'error',
+            message: `${pools} pool(s) declare policy.substrate, but kubernetes({ substrate }) is not configured: their clusters are never created and no bcd joins`,
+            fix: 'Pass kubernetes({ substrate: { agent: kubernetesSubstrateAgent({ image, gatewayUrl, pins, … }) } }) from @better-compute/provider-kubernetes',
+            count: pools,
+          });
+      }
+      // Substrates in error (the message is on the substrate; the pools are named here).
+      const { rows: failing } = await context.sql.query<{ pool_id: string }>(
+        `SELECT pool_id FROM kubernetes_pool_substrates WHERE state = 'error' ORDER BY pool_id LIMIT 101`,
+      );
+      if (failing.length > 0) {
+        const shown = failing.slice(0, 5).map((row) => row.pool_id);
+        const count = failing.length > 100 ? '100+' : String(failing.length);
+        findings.push({
+          check: 'kubernetes.substrate-error',
+          severity: 'warning',
+          message: `${count} pool substrate(s) are in error: ${shown.join(', ')}${failing.length > shown.length ? ', …' : ''}`,
+          fix: 'Read the substrate message (kubernetes.substrate.error events); fix policy.substrate, the provider account or the cluster, or archive the pool',
+          count: Math.min(failing.length, 100),
+        });
+      }
+      return findings;
     },
     // §12.8: a deleted tenant's clusters are deleted at the provider; DONE once all are gone.
     async tenantDeleted(context, tenantId) {

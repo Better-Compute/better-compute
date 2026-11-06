@@ -151,6 +151,10 @@ await compute.api.pools.create(credential, {
   (`substrate-teardown`), waits for their bookings to end (nothing is force-released), removes bcd from the
   cluster, then deletes a created cluster (an adopted one stays).
 - **Secrets.** No credential or join token is stored, logged or published; rows keep the token's id only.
+- **Wake-ups.** A substrate runs when its cluster or one of its node pools changes state, besides its own 10 s poll
+  while converging and the 30 s sweep.
+- **Doctor.** `selfCheck` reports `kubernetes.substrate-agent-missing` (pools declare `policy.substrate` but
+  `kubernetes({ substrate })` is not configured) and `kubernetes.substrate-error` (substrates in error, by pool).
 - **Events** `kubernetes.substrate.*` (`created`, `ready`, `error`, `token-issued`, `token-revoked`, `node-removed`,
   `deleting`, `deleted`), subject `pool/{id}`. Migration `kubernetes/0002_substrates`. Adopted clusters bill no
   `kubernetes.cluster.hours`.
