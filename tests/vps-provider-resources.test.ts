@@ -18,6 +18,8 @@ import { pglite } from '@better-compute/postgres/pglite';
 import { capacityMigrations, capacityModule, setQuota } from '@better-compute/capacity';
 import {
   defineProvider,
+  meterAncillaries,
+  meterProviderResources,
   providerResourceName,
   providerResourcesWork,
   vps,
@@ -983,5 +985,133 @@ describe('instance delete', () => {
     expect(await getVolume(kept.id)).toMatchObject({ state: 'ready', desiredState: 'present' });
     expect((await getVolume(kept.id)).attachment).toBeUndefined();
     expect(cloud.volumes.size).toBe(1);
+  });
+});
+
+describe('usage', () => {
+  const HOUR = 3_600_000;
+  const windows = async (kind: string, sourceId: string) =>
+    (
+      await db.query<{ meter: string; quantity: string; tags: Record<string, string> | string; key: string }>(
+        `SELECT meter, quantity::text, tags, idempotency_key AS key FROM usage_windows
+          WHERE source_kind = $1 AND source_id = $2 ORDER BY window_start`,
+        [kind, sourceId],
+      )
+    ).rows.map((row) => ({
+      ...row,
+      quantity: Number(row.quantity),
+      tags: typeof row.tags === 'string' ? JSON.parse(row.tags) : row.tags,
+    }));
+  const total = (list: { quantity: number }[]) =>
+    Math.round(list.reduce((sum, row) => sum + row.quantity, 0) * 1e6) / 1e6;
+  const meter = (kinds?: ('volume' | 'snapshot' | 'address')[]) =>
+    db.transaction((tx) =>
+      meterProviderResources(tx, clock.now(), { rootTenantId: 'root', meterGraceMs: 0 }, kinds ? { kinds } : {}),
+    );
+  async function advanceTo(at: number): Promise<void> {
+    clock.advance(at - clock.now());
+    await useSimClock(db, clock.now());
+  }
+
+  it('bills a snapshot from ready until deleted, by default, once per hour', async () => {
+    const volume = await createVolume({ sizeGiB: 8 });
+    await drain();
+    const snapshot = await call('providerVolumes', 'snapshot', {
+      tenantId: 'root',
+      volumeId: volume.id,
+      name: `snap-${keyCounter}`,
+      idempotencyKey: `s-${keyCounter}`,
+    });
+    await drain();
+    const readyAt = Date.parse(
+      (
+        await db.query<{ ready_at: string }>(`SELECT ready_at::text FROM provider_snapshots WHERE id = $1`, [
+          snapshot.id,
+        ])
+      ).rows[0]!.ready_at,
+    );
+    const top = Math.floor(clock.now() / HOUR) * HOUR;
+    await advanceTo(top + 2 * HOUR + 60_000);
+    // The ancillary pass meters provider snapshots; volumes and addresses wait for the source_kind CHECK.
+    await db.transaction((tx) => meterAncillaries(tx, clock.now(), { rootTenantId: 'root', meterGraceMs: 0 }));
+    const written = await windows('snapshot', snapshot.id);
+    expect(written.map((row) => row.meter)).toEqual(['vps.snapshot.gib.hours', 'vps.snapshot.gib.hours']);
+    expect(total(written)).toBe(Math.round(((8 * (top + 2 * HOUR - readyAt)) / HOUR) * 1e6) / 1e6);
+    expect(written[0]!.tags).toEqual({
+      pool: doPool,
+      source: 'provider-snapshot',
+      region: 'nyc3',
+      provider: 'fake-do',
+    });
+    expect(written[0]!.key).toBe(`cmp:snapshot:${snapshot.id}:${top}:vps.snapshot.gib.hours`);
+    expect(await windows('volume', volume.id)).toEqual([]);
+    // Again: nothing new.
+    expect((await meter()).windows).toBe(0);
+
+    await call('providerSnapshots', 'delete', { tenantId: 'root', snapshotId: snapshot.id });
+    await drain();
+    await advanceTo(clock.now() + 3 * HOUR);
+    await meter();
+    // It bills until it was deleted, not after.
+    const deletedAt = Date.parse(
+      (
+        await db.query<{ deleted_at: string }>(`SELECT deleted_at::text FROM provider_snapshots WHERE id = $1`, [
+          snapshot.id,
+        ])
+      ).rows[0]!.deleted_at,
+    );
+    expect(total(await windows('snapshot', snapshot.id))).toBe(
+      Math.round(((8 * (deletedAt - readyAt)) / HOUR) * 1e6) / 1e6,
+    );
+  });
+
+  it('bills volumes in GiB-hours and addresses in hours once their source kinds are accepted', async () => {
+    // Stands in for the owner of the source_kind CHECK adding `volume` and `address` (integration).
+    await db.query(`ALTER TABLE usage_windows DROP CONSTRAINT IF EXISTS usage_windows_source_kind_ck`);
+    const volume = await createVolume({ sizeGiB: 12 });
+    const address = await createAddress();
+    const never = await createVolume({ sizeGiB: 5 });
+    await drain();
+    // One that never became ready never bills.
+    await db.query(`UPDATE provider_volumes SET ready_at = NULL, state = 'error' WHERE id = $1`, [never.id]);
+    const top = Math.floor(clock.now() / HOUR) * HOUR;
+    await advanceTo(top + HOUR + 1_000);
+    await meter(['volume', 'address']);
+    const volumeWindows = await windows('volume', volume.id);
+    expect(volumeWindows).toHaveLength(1);
+    expect(volumeWindows[0]).toMatchObject({ meter: 'vps.volume.gib.hours', tags: { source: 'provider-volume' } });
+    expect(volumeWindows[0]!.quantity).toBeGreaterThan(11);
+    expect(volumeWindows[0]!.quantity).toBeLessThan(12);
+    const addressWindows = await windows('address', address.id);
+    expect(addressWindows).toHaveLength(1);
+    expect(addressWindows[0]).toMatchObject({ meter: 'vps.address.hours', tags: { source: 'provider-address' } });
+    expect(addressWindows[0]!.quantity).toBeLessThan(1);
+    expect(await windows('volume', never.id)).toEqual([]);
+    await advanceTo(top + 2 * HOUR + 1_000);
+    await meter(['volume', 'address']);
+    expect((await windows('volume', volume.id))[1]!.quantity).toBe(12);
+    expect((await windows('address', address.id))[1]!.quantity).toBe(1);
+  });
+
+  it('a BYO pool (platform-fee) bills nothing but advances the watermark', async () => {
+    const volume = await createVolume({ sizeGiB: 4 });
+    const snapshot = await call('providerVolumes', 'snapshot', {
+      tenantId: 'root',
+      volumeId: volume.id,
+      name: `snap-${keyCounter}`,
+      idempotencyKey: `s-${keyCounter}`,
+    });
+    await drain();
+    await advanceTo(Math.floor(clock.now() / HOUR) * HOUR + 2 * HOUR);
+    // Another root tenant id: the pool's owner is then a tenant with its own account.
+    await db.transaction((tx) =>
+      meterProviderResources(tx, clock.now(), { rootTenantId: 'platform', meterGraceMs: 0 }),
+    );
+    expect(await windows('snapshot', snapshot.id)).toEqual([]);
+    const { rows } = await db.query<{ metered_until: string | null }>(
+      `SELECT metered_until::text FROM provider_snapshots WHERE id = $1`,
+      [snapshot.id],
+    );
+    expect(rows[0]!.metered_until).not.toBeNull();
   });
 });

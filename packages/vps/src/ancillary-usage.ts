@@ -1,6 +1,7 @@
 import type { Migration, PoolPolicy, SqlTx } from '@better-compute/core';
 import { meterSource, type UsageTags } from '@better-compute/capacity';
 import { billingModeOf, poolAccountTenantSql } from './billing.js';
+import { meterProviderResources } from './provider-resource-usage.js';
 
 // Ancillary metering (platform compute billing, D9): what a tenant holds beside its VMs. A provisioned tenant
 // network bills `network.vpc.hours` from its first `ready` (`provisioned_at`) until it is deleted. These are
@@ -256,17 +257,22 @@ export async function meterSnapshots(
   return { snapshots: rows.length, windows };
 }
 
-/** The `vps.ancillary-usage` pass: networks (Task 12) and sandbox snapshots (Task 13). */
+/**
+ * The `vps.ancillary-usage` pass: networks (Task 12), sandbox snapshots (Task 13) and (DO P2) provider resources
+ * (`defaultProviderResourceKinds`).
+ */
 export async function meterAncillaries(
   tx: SqlTx,
   now: number,
   deps: AncillaryDeps = {},
-): Promise<{ networks: number; snapshots: number; windows: number }> {
+): Promise<{ networks: number; snapshots: number; providerResources: number; windows: number }> {
   const networks = await meterNetworks(tx, now, deps);
   const snapshots = await meterSnapshots(tx, now, deps);
+  const providerResources = await meterProviderResources(tx, now, deps);
   return {
     networks: networks.networks,
     snapshots: snapshots.snapshots,
-    windows: networks.windows + snapshots.windows,
+    providerResources: providerResources.resources,
+    windows: networks.windows + snapshots.windows + providerResources.windows,
   };
 }

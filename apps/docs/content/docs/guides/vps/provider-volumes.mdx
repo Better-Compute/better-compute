@@ -5,7 +5,7 @@ metaTitle: Provider volumes, snapshots and reserved IPs
 icon: HardDrive
 status: new
 packages: ['@better-compute/vps', '@better-compute/core', '@better-compute/provider-digitalocean']
-sources: ['packages/vps/src/provider-resources.ts', 'packages/vps/src/lifecycle.ts', 'packages/core/src/extension.ts', 'packages/core/src/catalog.ts', 'packages/events/src/catalog.ts', 'packages/provider-digitalocean/src/storage/volumes.ts', 'packages/provider-digitalocean/src/edge/addresses.ts', 'packages/provider-digitalocean/src/compute/droplets.ts', 'tests/vps-provider-resources.test.ts', 'tests/do-end-to-end.test.ts', 'tests/provider-digitalocean-volumes.test.ts', 'tests/provider-digitalocean-addresses.test.ts']
+sources: ['packages/vps/src/provider-resources.ts', 'packages/vps/src/provider-resource-usage.ts', 'packages/vps/src/lifecycle.ts', 'packages/core/src/extension.ts', 'packages/core/src/catalog.ts', 'packages/events/src/catalog.ts', 'packages/provider-digitalocean/src/storage/volumes.ts', 'packages/provider-digitalocean/src/edge/addresses.ts', 'packages/provider-digitalocean/src/compute/droplets.ts', 'tests/vps-provider-resources.test.ts', 'tests/do-end-to-end.test.ts', 'tests/provider-digitalocean-volumes.test.ts', 'tests/provider-digitalocean-addresses.test.ts']
 ---
 
 A tenant on a provider pool can keep data and an address that outlive any one instance: a **provider volume** is a
@@ -157,8 +157,11 @@ is gone) leaves its machine running. Its volumes are only detached, `deleteWithI
   growing it books the difference. An address books one `addresses`. A tenant without a quota row for the resource
   gets nothing (`QUOTA_EXCEEDED`, fail closed). The booking is refunded once the provider has deleted the resource.
   Snapshots book no quota.
-- The meters are `vps.volume.gib.hours`, `vps.snapshot.gib.hours` and `vps.address.hours`. In this release the rows
-  record `ready_at`, `deleted_at` and `metered_until`, but usage windows are not written for them yet.
+- On a metered pool, each resource bills from the moment it was `ready` until it is deleted, in whole-hour usage
+  windows written by `vps.ancillary-usage`: a snapshot `vps.snapshot.gib.hours` (its GiB), a volume
+  `vps.volume.gib.hours` (its GiB) and an address `vps.address.hours` (one per hour). One that never became ready never
+  bills; a BYO account's pool (platform fee) bills none of them. In this release only snapshots are metered: volume and
+  address windows need the `volume` and `address` usage source kinds, which the database does not accept yet.
 - Events: `providerVolume.*` (created, updated, ready, attached, detached, resized, error, deleting, deleted),
   `providerVolume.snapshot.*` and `providerAddress.*` (created, updated, ready, assigned, unassigned, error, deleting,
   deleted). See the [event catalog](/docs/reference/events).
