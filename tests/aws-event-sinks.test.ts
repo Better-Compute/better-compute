@@ -1,9 +1,17 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { ComputeError, type ComputeEvent, type EventSink } from '@better-compute/core';
-import { chunkBy, eventBridgeSink, snsSink, sqsSink } from '@better-compute/aws';
+import {
+  chunkBy,
+  eventBridgeSink,
+  firehoseAuditSink,
+  firehoseSink,
+  kinesisSink,
+  snsSink,
+  sqsSink,
+} from '@better-compute/aws';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
 import { AwsEmulator } from './support/aws-platform-emulator/index.js';
-import { eventBridgeFake, snsFake, sqsFake } from './support/aws-platform-emulator/messaging.js';
+import { eventBridgeFake, firehoseFake, kinesisFake, snsFake, sqsFake } from './support/aws-platform-emulator/messaging.js';
 import { sibling } from './support/runtime.js';
 
 describe('chunkBy', () => {
@@ -230,5 +238,55 @@ describe('dispatch', () => {
       );
       expect(rows).toEqual([{ sink: 'eventbridge', event: expect.objectContaining({ type: 'node.poison' }), error: expect.stringMatching(/MalformedDetail/) }]);
     }
+  });
+});
+
+describe('Kinesis and Firehose', () => {
+  it('kinesis partitions by tenant', async () => {
+    const emu = new AwsEmulator();
+    const fake = kinesisFake(emu);
+    const sink = kinesisSink({ ...base(emu), streamName: 'bc-events' });
+    const events = Array.from({ length: 501 }, (_, n) => event(n));
+    await sink.deliver(events);
+    expect(fake.batches).toEqual([500, 1]);
+    expect(fake.records[0]).toEqual({ data: `${JSON.stringify(events[0])}\n`, partitionKey: 'globex', stream: 'bc-events' });
+    expect(fake.records[1]!.partitionKey).toBe('acme');
+    const bySubject = kinesisSink({ ...base(emu), streamArn: 'arn:aws:kinesis:us-east-1:111111111111:stream/bc', partitionKey: 'subject' });
+    await bySubject.deliver([event(3)]);
+    expect(fake.records.at(-1)).toMatchObject({ partitionKey: 'instance/ins_3', stream: 'arn:aws:kinesis:us-east-1:111111111111:stream/bc' });
+    expect(() => kinesisSink({ ...base(emu) })).toThrow(ComputeError);
+  });
+
+  it('firehose records are newline-terminated', async () => {
+    const emu = new AwsEmulator();
+    const fake = firehoseFake(emu);
+    await firehoseSink({ ...base(emu), deliveryStreamName: 'bc-events' }).deliver([event(1), event(2)]);
+    expect(fake.records.map((record) => record.data)).toEqual([`${JSON.stringify(event(1))}\n`, `${JSON.stringify(event(2))}\n`]);
+  });
+
+  it.each(['kinesis', 'firehose'] as const)('throws on a partially failed batch (%s)', async (which) => {
+    const emu = new AwsEmulator();
+    const fake = which === 'kinesis' ? kinesisFake(emu) : firehoseFake(emu);
+    fake.refuse = (record) => (Buffer.from(String(record.Data), 'base64').toString().includes('evt_0002') ? 'InternalFailure' : undefined);
+    const sink = which === 'kinesis' ? kinesisSink({ ...base(emu), streamName: 's' }) : firehoseSink({ ...base(emu), deliveryStreamName: 's' });
+    const error = (await sink.deliver([event(1), event(2), event(3)]).catch((e: unknown) => e)) as ComputeError;
+    expect(error.code).toBe('PROVIDER_ERROR');
+    expect(error.details?.failed).toEqual(['evt_0002']);
+    fake.refuse = () => 'ProvisionedThroughputExceededException';
+    await expect(sink.deliver([event(4)])).rejects.toMatchObject({ code: 'RATE_LIMITED' });
+    fake.refuse = () => undefined;
+    const big = event(9, { data: { blob: 'x'.repeat(1024 * 1024) } });
+    await expect(sink.deliver([big])).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE', details: { eventId: big.id } });
+  });
+
+  it('audit records go through firehoseAuditSink', async () => {
+    const emu = new AwsEmulator();
+    const fake = firehoseFake(emu);
+    const sink = firehoseAuditSink({ ...base(emu), deliveryStreamName: 'bc-audit' });
+    expect(sink).toMatchObject({ extension: 'sink', kind: 'audit', id: 'aws-firehose-audit' });
+    const record = { id: 'aud_1', tenantId: 'acme', time: 1, action: 'instances.delete', resource: { type: 'instance', id: 'ins_1' } };
+    await sink.write([record]);
+    expect(fake.records).toEqual([{ data: `${JSON.stringify(record)}\n`, stream: 'bc-audit' }]);
+    expect(() => firehoseAuditSink({ ...base(emu), deliveryStreamName: 'bad name' })).toThrow(ComputeError);
   });
 });

@@ -8,3 +8,4 @@ export * from './s3.js';
 export * from './s3-snapshots.js';
 export * from './s3-audit.js';
 export * from './event-sinks.js';
+export * from './stream-sinks.js';
