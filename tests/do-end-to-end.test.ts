@@ -9,6 +9,8 @@ import {
   networkDescription,
   networkMemberTag,
   resetBudgets,
+  shareName,
+  shareTag,
   tagFor,
 } from '@better-compute/provider-digitalocean';
 import { closeFixtures, computeFixture, type ComputeFixture } from '@better-compute/testing';
@@ -23,7 +25,8 @@ import { seedSshKey } from './support/do-emulator/keys.js';
 // in the fixture's sealed secret store, backs a provider pool offered to acme; discovery runs every
 // minute and auto-attaches machines tagged for a tenant and its pool. Covers create/stop/delete,
 // attach/detach, auto-attach, a tenant network, a create DO accepts and then fails, and (P2) Block
-// Storage volumes, snapshots and Reserved IPs on an instance through its delete.
+// Storage volumes, snapshots and Reserved IPs on an instance through its delete, and (P6) an NFS share
+// on two instances of a tenant network.
 
 afterEach(closeFixtures);
 // The provider's request budgets are per token and process-wide.
@@ -512,5 +515,105 @@ describe('provider-digitalocean through vps, end to end', () => {
     expect(w.emu.state.reservedIps.get(reserved.address)?.droplet_id).toBeUndefined();
     // No delete of a volume by tag or of a volume vps did not delete.
     expect(requests(w, 'DELETE', /^\/v2\/volumes/)).toHaveLength(0);
+  });
+  it('shares an NFS volume between two instances of a tenant network, then detaches and deletes it (P6)', async () => {
+    const w = await world();
+    const tenantId = w.acmeTenant;
+    const network = await w.api.networks.create(w.acme, {
+      tenantId,
+      poolId: w.poolId,
+      name: 'shared',
+      idempotencyKey: 'net-shared',
+    });
+    const withSubnet = await w.api.networks.addSubnet(w.acme, {
+      tenantId,
+      networkId: network.id,
+      name: 'app',
+      region: REGION,
+      cidr: '10.30.0.0/24',
+    });
+    const subnet = withSubnet.subnets[0];
+    for (let round = 0; round < 8; round++) {
+      if ((await w.api.networks.get(w.acme, { tenantId, networkId: network.id })).state === 'ready') break;
+      await w.tick('vps.networks', 5_000);
+    }
+    const onNetwork = (key: string) =>
+      w.api.instances.create(
+        w.acme,
+        createInput(w, { networkId: network.id, subnetId: subnet.id, idempotencyKey: key }),
+      );
+    const first = await onNetwork('nfs-1');
+    const second = await onNetwork('nfs-2');
+    expect(await settle(w, first.id, 'running')).toMatchObject({ state: 'running' });
+    expect(await settle(w, second.id, 'running')).toMatchObject({ state: 'running' });
+
+    const volume = await w.api.providerVolumes.create(w.acme, {
+      tenantId,
+      poolId: w.poolId,
+      name: 'shared',
+      region: REGION,
+      sizeGiB: 50,
+      kind: 'shared',
+      networkId: network.id,
+      instanceId: first.id,
+      idempotencyKey: 'v-shared',
+    });
+    expect(volume).toMatchObject({ kind: 'shared', networkId: network.id, state: 'pending' });
+    await w.api.providerVolumes.attach(w.acme, { tenantId, volumeId: volume.id, instanceId: second.id });
+    const converge = async (rounds = 8) => {
+      for (let round = 0; round < rounds; round++) await w.tick('vps.provider-resources', 5_000);
+    };
+    await converge();
+
+    const shares = () => [...w.emu.state.nfsShares.values()];
+    const vpc = [...w.emu.state.vpcs.values()].find((v) => v.name === providerResourceName(subnet.id))!;
+    expect(shares()).toEqual([
+      expect.objectContaining({
+        name: shareName(providerResourceName(volume.id), 'default'),
+        region: REGION,
+        size_gib: 50,
+        vpc_ids: [vpc.id],
+        status: 'ACTIVE',
+      }),
+    ]);
+    const share = shares()[0]!;
+    const source = `${share.host}:${share.mount_path}`;
+    const ready = await w.api.providerVolumes.get(w.acme, { tenantId, volumeId: volume.id });
+    expect(ready).toMatchObject({
+      state: 'ready',
+      kind: 'shared',
+      device: source,
+      mount: { source, type: 'nfs4' },
+    });
+    expect(ready.attachments.map((a: { instanceId: string; state: string }) => [a.instanceId, a.state]).sort()).toEqual(
+      [
+        [first.id, 'ready'],
+        [second.id, 'ready'],
+      ].sort(),
+    );
+    const tag = shareTag(share.id);
+    for (const instance of [first, second])
+      expect(dropletOf(w, instance.id)!.tags).toContain(tag);
+
+    // Detach one: its Droplet loses the tag, the other keeps the share; the share keeps its VPC.
+    await w.api.providerVolumes.detach(w.acme, { tenantId, volumeId: volume.id, instanceId: first.id });
+    await converge(4);
+    expect(dropletOf(w, first.id)!.tags).not.toContain(tag);
+    expect(dropletOf(w, second.id)!.tags).toContain(tag);
+    expect(
+      (await w.api.providerVolumes.get(w.acme, { tenantId, volumeId: volume.id })).attachments,
+    ).toEqual([expect.objectContaining({ instanceId: second.id, state: 'ready' })]);
+    expect(shares()[0]!.vpc_ids).toEqual([vpc.id]);
+
+    await w.api.providerVolumes.detach(w.acme, { tenantId, volumeId: volume.id, instanceId: second.id });
+    await converge(4);
+    expect(dropletOf(w, second.id)!.tags).not.toContain(tag);
+    await w.api.providerVolumes.delete(w.acme, { tenantId, volumeId: volume.id });
+    await converge(4);
+    expect(
+      await w.api.providerVolumes.get(w.acme, { tenantId, volumeId: volume.id }),
+    ).toMatchObject({ state: 'deleted' });
+    expect(shares()).toEqual([]);
+    expect(requests(w, 'DELETE', /^\/v2\/nfs\//)).toHaveLength(1);
   });
 });

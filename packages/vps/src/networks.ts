@@ -1522,6 +1522,18 @@ export async function deleteNetwork(
       undefined,
       { clusterIds },
     );
+  // (DO P6) A shared volume is reached over the network: it goes first.
+  const sharedVolumes = await tx.query<{ id: string }>(
+    `SELECT id FROM provider_volumes WHERE network_id = $1 AND state <> 'deleted' ORDER BY id LIMIT 100`,
+    [row.id],
+  );
+  if (sharedVolumes.rows.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Network ${row.name} has ${sharedVolumes.rows.length} shared volume(s) on it`,
+      undefined,
+      { volumeIds: sharedVolumes.rows.map((volume) => volume.id) },
+    );
   await tx.query(
     `UPDATE network_firewall_rules SET desired_state = 'deleted', state = CASE WHEN state = 'deleted' THEN state ELSE 'deleting' END,
             version = version + 1 WHERE network_id = $1`,

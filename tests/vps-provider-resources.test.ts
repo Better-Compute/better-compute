@@ -20,8 +20,10 @@ import {
   defineProvider,
   meterAncillaries,
   meterProviderResources,
+  onInstanceDeleted,
   providerResourceName,
   providerResourcesWork,
+  sharedVolumeMount,
   vps,
   vpsMigrations,
   type ProviderAddressView,
@@ -59,6 +61,8 @@ interface FakeVolume {
   attachedTo?: string;
   /** An attach action still running at the provider (`slowAttach`), to this machine. */
   attaching?: string;
+  /** (DO P6) A shared volume: the machines it is attached to (many at once). */
+  holders?: Set<string>;
 }
 interface FakeAddress {
   id: string;
@@ -124,6 +128,18 @@ const cloud = {
     return false;
   },
   volumeState(volume: FakeVolume, state: ProviderResourceState['state'] = 'ready'): ProviderResourceState {
+    if (volume.holders)
+      // Like a DO share: an NFS source, and no attachedTo (it is on many machines).
+      return {
+        id: volume.id,
+        state,
+        outputs: {
+          region: volume.spec.region,
+          sizeGiB: String(volume.sizeGiB),
+          kind: 'shared',
+          device: `10.20.0.5:/${volume.spec.name}`,
+        },
+      };
     return {
       id: volume.id,
       state,
@@ -175,6 +191,7 @@ const doLike = defineProvider({
       cloud.call(`delete ${machineId} ${options?.volumes?.join(',') || '-'}`);
       cloud.machines.delete(machineId);
       for (const volume of [...cloud.volumes.values()]) {
+        volume.holders?.delete(machineId);
         if (volume.attachedTo !== machineId) continue;
         delete volume.attachedTo;
         if (cloud.selective && options?.volumes?.includes(volume.id)) cloud.volumes.delete(volume.id);
@@ -187,7 +204,9 @@ const doLike = defineProvider({
         cloud.call(`ensureVolume ${spec.name}`);
         const existing = [...cloud.volumes.values()].find((volume) => volume.spec.name === spec.name);
         if (existing) return cloud.volumeState(existing, cloud.running(`create ${spec.name}`) ? 'pending' : 'ready');
+        if (spec.kind === 'shared' && !spec.network) throw new ComputeError('INVALID_INPUT', 'a share needs a network');
         const volume: FakeVolume = { id: `vol-${++cloud.counter}`, spec, sizeGiB: spec.sizeGiB };
+        if (spec.kind === 'shared') volume.holders = new Set();
         cloud.volumes.set(volume.id, volume);
         return cloud.volumeState(volume, cloud.running(`create ${spec.name}`) ? 'pending' : 'ready');
       },
@@ -208,6 +227,10 @@ const doLike = defineProvider({
         const volume = cloud.volumes.get(volumeId)!;
         if (cloud.machines.get(machineId) !== volume.spec.region)
           throw new ComputeError('INVALID_INPUT', 'another region');
+        if (volume.holders) {
+          volume.holders.add(machineId);
+          return { ...cloud.volumeState(volume), outputs: { ...cloud.volumeState(volume).outputs, attachedTo: machineId } };
+        }
         if (volume.attachedTo && volume.attachedTo !== machineId)
           throw new ComputeError('CONFLICT', 'attached to another droplet');
         if (volume.attachedTo === machineId) return { id: volumeId, state: 'ready' };
@@ -222,6 +245,10 @@ const doLike = defineProvider({
       async detachVolume(volumeId, machineId) {
         cloud.call(`detachVolume ${volumeId} ${machineId}`);
         const volume = cloud.volumes.get(volumeId);
+        if (volume?.holders) {
+          volume.holders.delete(machineId);
+          return { id: volumeId, state: 'deleted' };
+        }
         // An attach still running would attach it after this answer (DoVolumes.detachVolume answers deleting).
         if (volume?.attaching) return { id: volumeId, state: 'deleting' };
         if (volume?.attachedTo === machineId) delete volume.attachedTo;
@@ -238,7 +265,8 @@ const doLike = defineProvider({
       async deleteVolume(volumeId) {
         cloud.call(`deleteVolume ${volumeId}`);
         const volume = cloud.volumes.get(volumeId);
-        if (volume?.attachedTo) throw new ComputeError('INVALID_STATE', 'attached');
+        if (volume?.attachedTo || (volume?.holders?.size ?? 0) > 0)
+          throw new ComputeError('INVALID_STATE', 'attached');
         cloud.volumes.delete(volumeId);
         return { id: volumeId, state: 'deleted' };
       },
@@ -506,7 +534,13 @@ const getAddress = (addressId: string): Promise<ProviderAddressView> =>
 
 /** A running provider instance (the instances API is not under test here). */
 async function insertInstance(
-  options: { tenantId?: string; flavor?: string; externalId?: string | null; state?: string } = {},
+  options: {
+    tenantId?: string;
+    flavor?: string;
+    externalId?: string | null;
+    state?: string;
+    networkId?: string;
+  } = {},
 ) {
   const instanceId = `inst_01jz${String(++keyCounter).padStart(22, '0')}`;
   const externalId = options.externalId === null ? null : (options.externalId ?? `droplet-${keyCounter}`);
@@ -527,7 +561,37 @@ async function insertInstance(
   );
   if (externalId)
     cloud.machines.set(externalId, options.flavor === 'flv_sfo' ? 'sfo3' : 'nyc3');
+  if (options.networkId !== undefined)
+    await db.query(`UPDATE instances SET network_id = $2 WHERE id = $1`, [instanceId, options.networkId]);
   return instanceId;
+}
+
+/** (DO P6) A tenant network on the DO account, provisioned, with one ready subnet in nyc3 (unless told otherwise). */
+async function insertNetwork(
+  options: { tenantId?: string; provisioned?: boolean; region?: string | null; accountId?: string } = {},
+) {
+  const networkId = `net_01jz${String(++keyCounter).padStart(22, '0')}`;
+  await db.query(
+    `INSERT INTO networks (id, tenant_id, pool_id, provider_account_id, name, state, desired_state, provisioned_at,
+                           created_by, idempotency_key, request_hash, version)
+     VALUES ($1, $2, $3, $4, $1, $5, 'present', CASE WHEN $6 THEN compute_now() END, 'usr_alice', $1,
+             decode('00', 'hex'), 1)`,
+    [
+      networkId,
+      options.tenantId ?? 'root',
+      doPool,
+      options.accountId ?? doAccount,
+      options.provisioned === false ? 'pending' : 'ready',
+      options.provisioned !== false,
+    ],
+  );
+  if (options.region !== null)
+    await db.query(
+      `INSERT INTO network_subnets (id, network_id, name, region, cidr, state, desired_state)
+       VALUES ($1, $2, 'app', $3, '10.20.0.0/24', 'ready', 'present')`,
+      [`snet_01jz${String(++keyCounter).padStart(22, '0')}`, networkId, options.region ?? 'nyc3'],
+    );
+  return networkId;
 }
 
 const reconciler = () => module.reconcilers!.find((entry) => entry.name === providerResourcesWork)!;
@@ -615,6 +679,8 @@ beforeEach(async () => {
   await db.query(`DELETE FROM provider_addresses`);
   await db.query(`DELETE FROM instance_usage_intervals`);
   await db.query(`DELETE FROM instances`);
+  await db.query(`DELETE FROM network_subnets`);
+  await db.query(`DELETE FROM networks`);
   await db.transaction(async (tx) => {
     await setQuota(tx, 'root', doPool, 'diskGiB', 1000);
     await setQuota(tx, 'root', doPool, 'addresses', 5);
@@ -970,6 +1036,221 @@ describe('providerVolumes', () => {
     await runKey('all');
     await drain();
     expect((await getVolume(volume.id)).state).toBe('ready');
+  });
+});
+
+describe('shared provider volumes (DO P6)', () => {
+  const createShared = (raw: Record<string, unknown> = {}, who: Caller = alice) =>
+    createVolume({ kind: 'shared', sizeGiB: 50, ...raw }, who);
+  const attach = (volumeId: string, instanceId: string) =>
+    call('providerVolumes', 'attach', { tenantId: 'root', volumeId, instanceId });
+  const machinesOf = async (instanceIds: string[]) =>
+    (
+      await db.query<{ external_id: string }>(
+        `SELECT external_id FROM instances WHERE id = ANY($1::text[]) ORDER BY id`,
+        [instanceIds],
+      )
+    ).rows.map((row) => row.external_id);
+  const detach = (volumeId: string, instanceId?: string) =>
+    call('providerVolumes', 'detach', {
+      tenantId: 'root',
+      volumeId,
+      ...(instanceId !== undefined ? { instanceId } : {}),
+    });
+
+  it('create: a shared volume needs a ready network of the tenant on the account, and no filesystem', async () => {
+    const networkId = await insertNetwork();
+    expect(await codeOf(createShared())).toBe('INVALID_INPUT');
+    expect(await codeOf(createShared({ networkId, filesystem: 'ext4' }))).toBe('INVALID_INPUT');
+    expect(await codeOf(createShared({ networkId, deleteWithInstance: true }))).toBe('INVALID_INPUT');
+    expect(await codeOf(createVolume({ networkId }))).toBe('INVALID_INPUT');
+    expect(await codeOf(createShared({ networkId: await insertNetwork({ tenantId: 'other' }) }))).toBe(
+      'INVALID_INPUT',
+    );
+    expect(await codeOf(createShared({ networkId: await insertNetwork({ provisioned: false }) }))).toBe(
+      'INVALID_STATE',
+    );
+    expect(await codeOf(createShared({ networkId: await insertNetwork({ region: 'sfo3' }) }))).toBe(
+      'INVALID_INPUT',
+    );
+    expect(await codeOf(createShared({ networkId: await insertNetwork({ region: null }) }))).toBe(
+      'INVALID_INPUT',
+    );
+    expect(cloud.calls).toEqual([]);
+    expect(await quotaUsed('diskGiB')).toBe(0);
+
+    const shared = await createShared({ networkId, name: 'share', idempotencyKey: 'share-1' });
+    expect(shared).toMatchObject({ kind: 'shared', networkId, sizeGiB: 50, attachments: [] });
+    expect(shared.attachment).toBeUndefined();
+    expect(shared.filesystem).toBeUndefined();
+    expect(await quotaUsed('diskGiB')).toBe(50);
+    // A retry under the key replays; the same key with another kind is another request.
+    expect((await createShared({ networkId, name: 'share', idempotencyKey: 'share-1' })).id).toBe(shared.id);
+    expect(
+      await codeOf(createVolume({ name: 'share', sizeGiB: 50, idempotencyKey: 'share-1' })),
+    ).toBe('CONFLICT');
+    // A block volume says what it is too.
+    expect((await createVolume()).kind).toBe('block');
+
+    await drain();
+    const [share] = [...cloud.volumes.values()].filter((volume) => volume.holders);
+    expect(share!.spec).toMatchObject({
+      name: providerResourceName(shared.id),
+      kind: 'shared',
+      network: { network: providerResourceName(networkId) },
+    });
+    expect(share!.spec.filesystem).toBeUndefined();
+    expect(await getVolume(shared.id)).toMatchObject({
+      state: 'ready',
+      device: `10.20.0.5:/${providerResourceName(shared.id)}`,
+      mount: { source: `10.20.0.5:/${providerResourceName(shared.id)}`, type: 'nfs4' },
+    });
+  });
+
+  it('attaches to many instances of its network, each once, and detaches them one by one', async () => {
+    const networkId = await insertNetwork();
+    const shared = await createShared({ networkId });
+    const first = await insertInstance({ networkId });
+    const second = await insertInstance({ networkId });
+    const offNetwork = await insertInstance();
+    const theirs = await insertInstance({ tenantId: 'other', networkId });
+    expect(await codeOf(attach(shared.id, offNetwork))).toBe('INVALID_INPUT');
+    expect(await codeOf(attach(shared.id, theirs))).toBe('ACCESS_DENIED');
+    expect((await attach(shared.id, first)).attachments).toHaveLength(1);
+    const both = await attach(shared.id, second);
+    expect(both.attachments.map((a: { instanceId: string }) => a.instanceId).sort()).toEqual(
+      [first, second].sort(),
+    );
+    // Attaching to an instance it is on returns it.
+    expect((await attach(shared.id, first)).attachments).toHaveLength(2);
+    await drain();
+    const ready = await getVolume(shared.id);
+    expect(ready.state).toBe('ready');
+    expect(ready.attachments).toEqual([
+      expect.objectContaining({ instanceId: first, state: 'ready', desiredState: 'present' }),
+      expect.objectContaining({ instanceId: second, state: 'ready', desiredState: 'present' }),
+    ]);
+    const [share] = [...cloud.volumes.values()].filter((volume) => volume.holders);
+    expect([...share!.holders!].sort()).toEqual(
+      [...(await machinesOf([first, second]))].sort(),
+    );
+    // A settled shared attachment is not asked again (getVolume reports no attachedTo for a share).
+    const attaches = cloud.calls.filter((entry) => entry.startsWith('attachVolume')).length;
+    await driftNow();
+    await drain();
+    expect(cloud.calls.filter((entry) => entry.startsWith('attachVolume')).length).toBe(attaches);
+    expect(cloud.calls.some((entry) => entry.startsWith('detachVolume'))).toBe(false);
+
+    // Detach names the instance; the delete waits for every attachment to go.
+    expect(await codeOf(detach(shared.id))).toBe('INVALID_INPUT');
+    const one = await detach(shared.id, first);
+    expect(one.attachments).toEqual([
+      expect.objectContaining({ instanceId: first, desiredState: 'deleted' }),
+      expect.objectContaining({ instanceId: second, desiredState: 'present' }),
+    ]);
+    expect(await codeOf(call('providerVolumes', 'delete', { tenantId: 'root', volumeId: shared.id }))).toBe(
+      'INVALID_STATE',
+    );
+    await drain();
+    expect((await getVolume(shared.id)).attachments).toEqual([
+      expect.objectContaining({ instanceId: second, state: 'ready' }),
+    ]);
+    expect([...share!.holders!]).toEqual([...(await machinesOf([second]))]);
+    // Detaching from an instance it is not on returns it as it is.
+    expect((await detach(shared.id, first)).attachments).toHaveLength(1);
+    await detach(shared.id, second);
+    await drain();
+    expect(share!.holders!.size).toBe(0);
+    await call('providerVolumes', 'delete', { tenantId: 'root', volumeId: shared.id });
+    await drain();
+    expect((await getVolume(shared.id)).state).toBe('deleted');
+    expect(cloud.volumes.size).toBe(0);
+    expect(await quotaUsed('diskGiB')).toBe(0);
+  });
+
+  it('an instance delete detaches the shared volume and keeps it', async () => {
+    const networkId = await insertNetwork();
+    const instanceId = await insertInstance({ networkId });
+    const shared = await createShared({ networkId, instanceId });
+    await drain();
+    expect((await getVolume(shared.id)).attachments).toEqual([
+      expect.objectContaining({ instanceId, state: 'ready' }),
+    ]);
+    await db.transaction(async (tx) => {
+      await tx.query(`UPDATE instances SET state = 'deleted', desired_state = 'deleted' WHERE id = $1`, [instanceId]);
+      await onInstanceDeleted(moduleContext(within(tx)), tx, instanceId, { machineDeleted: true });
+    });
+    await drain();
+    const kept = await getVolume(shared.id);
+    expect(kept).toMatchObject({ state: 'ready', desiredState: 'present', attachments: [] });
+  });
+
+  it('snapshots a shared volume; restoring one is UNSUPPORTED', async () => {
+    const networkId = await insertNetwork();
+    const shared = await createShared({ networkId });
+    await drain();
+    const snapshot = await call('providerVolumes', 'snapshot', {
+      tenantId: 'root',
+      volumeId: shared.id,
+      name: 'share-1',
+      idempotencyKey: 'share-snap-1',
+    });
+    await drain();
+    expect((await call('providerSnapshots', 'get', { tenantId: 'root', snapshotId: snapshot.id })).state).toBe(
+      'ready',
+    );
+    expect(
+      await codeOf(
+        call('providerSnapshots', 'restore', {
+          tenantId: 'root',
+          snapshotId: snapshot.id,
+          name: 'restored',
+          idempotencyKey: 'share-restore-1',
+        }),
+      ),
+    ).toBe('UNSUPPORTED');
+  });
+
+  it('a network a shared volume is on is not deleted', async () => {
+    const networkId = await insertNetwork();
+    const shared = await createShared({ networkId });
+    const networks = (api as unknown as Record<string, Record<string, Definition>>).networks!;
+    expect(await codeOf(run(networks.delete!, { tenantId: 'root', networkId }, alice))).toBe('INVALID_STATE');
+    await call('providerVolumes', 'delete', { tenantId: 'root', volumeId: shared.id });
+    await drain();
+    expect(await run(networks.delete!, { tenantId: 'root', networkId }, alice)).toMatchObject({
+      state: 'deleting',
+    });
+  });
+
+  it('a block volume detach naming another instance leaves it attached', async () => {
+    const instanceId = await insertInstance();
+    const other = await insertInstance();
+    const volume = await createVolume({ instanceId });
+    await drain();
+    const kept = await detach(volume.id, other);
+    expect(kept.attachment).toMatchObject({ instanceId, desiredState: 'present' });
+    expect((await detach(volume.id, instanceId)).attachment).toMatchObject({ desiredState: 'deleted' });
+  });
+});
+
+describe('sharedVolumeMount', () => {
+  it('mounts an NFS source at a path that does not cover the system, with _netdev and nofail', () => {
+    expect(sharedVolumeMount('10.20.0.5:/bc-share', '/mnt/shared')).toEqual({
+      source: '10.20.0.5:/bc-share',
+      mountPath: '/mnt/shared',
+      type: 'nfs4',
+      options: 'defaults,_netdev,nofail',
+      cloudConfig: ['10.20.0.5:/bc-share', '/mnt/shared', 'nfs4', 'defaults,_netdev,nofail', '0', '0'],
+      fstab: '10.20.0.5:/bc-share /mnt/shared nfs4 defaults,_netdev,nofail 0 0',
+    });
+    expect(sharedVolumeMount('nfs.example.com:/a/b', '/data/', { readOnly: true }).options).toBe(
+      'ro,_netdev,nofail',
+    );
+    for (const path of ['/', '/etc', '/usr', '/proc/x', 'relative', '/mnt/../etc', '/mnt/a b'])
+      expect(() => sharedVolumeMount('10.20.0.5:/bc-share', path), path).toThrow(/mountPath/);
+    for (const source of ['10.20.0.5', '10.20.0.5:relative', 'host:/a b', 'host:/a\n/etc', 'host:/a/../b', ' :/x'])
+      expect(() => sharedVolumeMount(source, '/mnt/shared'), source).toThrow(/source/);
   });
 });
 

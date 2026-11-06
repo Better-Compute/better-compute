@@ -41,6 +41,12 @@ import { providerResourceName, zoneRegion, type NetworkDeps } from './networks.j
 // or in another region is INVALID_INPUT before any provider call. A volume is attached to one instance at a time and
 // an address assigned to one: a second attach or assign is CONFLICT (never moved silently). An attached volume or an
 // assigned address is not deleted (INVALID_STATE until it is detached or unassigned). Resize only grows.
+//
+// Shared volumes (DO P6): a `kind: 'shared'` volume is a network file share reached over a tenant network
+// (`networkId`, required). It attaches to any number of instances on that network (INVALID_INPUT for one off it),
+// each at most once; a detach names the instance. It has no filesystem to pick, is never deleted with an instance, is
+// not deleted while any instance has it, and its snapshots do not restore (UNSUPPORTED). Its view's `mount` is the NFS
+// source a guest mounts (`sharedVolumeMount`).
 
 /** The work kind of the reconciler (key: a `pvol_`, `psnap_` or `paddr_` id, or `all` for the periodic sweep). */
 export const providerResourcesWork = 'vps.provider-resources';
@@ -120,6 +126,30 @@ CREATE TABLE provider_volume_attachments (
 -- A block volume is attached to one instance at a time.
 CREATE UNIQUE INDEX provider_volume_attachments_live ON provider_volume_attachments (volume_id) WHERE state <> 'deleted';
 CREATE INDEX provider_volume_attachments_instance ON provider_volume_attachments (instance_id) WHERE state <> 'deleted';
+`,
+};
+
+/**
+ * (DO P6) Shared volumes: a network file share (DigitalOcean NFS) is a provider volume of `kind` `shared`, reached
+ * over its tenant network (`network_id`, required for one) and attached to many instances at once. A block volume
+ * keeps one live attachment; a shared one keeps one per instance (`shared` on the attachment says which rule holds).
+ */
+export const providerSharedVolumesMigration: Migration = {
+  name: 'vps/0105_provider_shared_volumes',
+  sql: `
+ALTER TABLE provider_volumes ADD COLUMN kind text NOT NULL DEFAULT 'block' CHECK (kind IN ('block', 'shared'));
+ALTER TABLE provider_volumes ADD COLUMN network_id text REFERENCES networks;
+ALTER TABLE provider_volumes ADD CONSTRAINT provider_volumes_shared_network
+  CHECK (kind = 'block' OR (network_id IS NOT NULL AND NOT delete_with_instance));
+CREATE INDEX provider_volumes_network ON provider_volumes (network_id)
+  WHERE network_id IS NOT NULL AND state <> 'deleted';
+ALTER TABLE provider_volume_attachments ADD COLUMN shared bool NOT NULL DEFAULT false;
+DROP INDEX provider_volume_attachments_live;
+-- A block volume is attached to one instance at a time; a shared one to each instance at most once.
+CREATE UNIQUE INDEX provider_volume_attachments_live ON provider_volume_attachments (volume_id)
+  WHERE state <> 'deleted' AND NOT shared;
+CREATE UNIQUE INDEX provider_volume_attachments_instance_live ON provider_volume_attachments (volume_id, instance_id)
+  WHERE state <> 'deleted';
 `,
 };
 
@@ -206,15 +236,30 @@ export interface ProviderVolumeView {
   filesystem?: 'ext4' | 'xfs' | 'none';
   sourceSnapshotId?: string;
   deleteWithInstance: boolean;
-  /** The guest path the volume appears at once attached. */
+  /** `block`: attached to one instance at a time. `shared` (DO P6): a network file share on many instances. */
+  kind: ProviderVolumeKind;
+  /** (shared) The tenant network the share is reachable from. */
+  networkId?: string;
+  /** The guest path the volume appears at once attached; for a shared volume, the NFS source (`<host>:<path>`). */
   device?: string;
+  /** (shared) What a guest mounts: `sharedVolumeMount(mount.source, path)` makes its cloud-config and fstab lines. */
+  mount?: { source: string; type: 'nfs4' };
   state: ProviderResourceStatus;
   desiredState: Desired;
   message?: string;
-  /** The instance the volume is attached to, or being attached to or detached from. */
-  attachment?: { instanceId: string; state: AttachmentState; desiredState: Desired; message?: string };
+  /** (block) The instance the volume is attached to, or being attached to or detached from. */
+  attachment?: VolumeAttachmentView;
+  /** (shared) Every instance the volume is attached to, or being attached to or detached from. */
+  attachments?: VolumeAttachmentView[];
   version: number;
   createdAt: string;
+}
+export type ProviderVolumeKind = 'block' | 'shared';
+export interface VolumeAttachmentView {
+  instanceId: string;
+  state: AttachmentState;
+  desiredState: Desired;
+  message?: string;
 }
 
 export interface ProviderSnapshotView {
@@ -263,6 +308,10 @@ export interface CreateProviderVolumeInput {
   description?: string;
   region: string;
   sizeGiB: number;
+  /** Absent: `block`. */
+  kind?: ProviderVolumeKind;
+  /** (shared, required) The tenant network the share is reachable from. */
+  networkId?: string;
   filesystem?: 'ext4' | 'xfs' | 'none';
   deleteWithInstance?: boolean;
   /** Attaches the volume to this instance once both exist. */
@@ -270,6 +319,10 @@ export interface CreateProviderVolumeInput {
   idempotencyKey: string;
 }
 export type ProviderVolumeRef = { tenantId: string; volumeId: string };
+export interface DetachProviderVolumeInput extends ProviderVolumeRef {
+  /** The instance to detach from: required for a shared volume; for a block one, a detach naming another is a no-op. */
+  instanceId?: string;
+}
 export interface ListProviderVolumesInput {
   tenantId: string;
   poolId?: string;
@@ -345,6 +398,11 @@ function bool(value: unknown, what: string): boolean {
   if (typeof value !== 'boolean') fail(`${what} must be true or false`);
   return value;
 }
+const kinds = ['block', 'shared'] as const;
+function kindOf(value: unknown): ProviderVolumeKind {
+  if (!kinds.includes(value as never)) fail('kind must be block or shared');
+  return value as ProviderVolumeKind;
+}
 function filesystemOf(value: unknown): 'ext4' | 'xfs' | 'none' {
   if (!filesystems.includes(value as never)) fail('filesystem must be ext4, xfs or none');
   return value as 'ext4' | 'xfs' | 'none';
@@ -364,6 +422,8 @@ export function parseCreateProviderVolume(raw: unknown): CreateProviderVolumeInp
     'description',
     'region',
     'sizeGiB',
+    'kind',
+    'networkId',
     'filesystem',
     'deleteWithInstance',
     'instanceId',
@@ -377,12 +437,24 @@ export function parseCreateProviderVolume(raw: unknown): CreateProviderVolumeInp
     sizeGiB: sizeOf(input.sizeGiB),
     idempotencyKey: key(input.idempotencyKey),
   };
+  const kind = optional(input.kind, kindOf);
+  if (kind !== undefined) out.kind = kind;
+  const networkId = optional(input.networkId, (value) => id(value, 'net', 'networkId'));
+  if (networkId !== undefined) out.networkId = networkId;
+  if (kind === 'shared') {
+    // A share is reached over its tenant network, is a filesystem already, and outlives the instances it is on.
+    if (networkId === undefined) fail('a shared volume needs a networkId: it is reached over that network');
+    if (input.filesystem !== undefined && input.filesystem !== 'none')
+      fail('a shared volume is a network filesystem: filesystem must be absent');
+    if (input.deleteWithInstance === true)
+      fail('a shared volume is on many instances: deleteWithInstance must be false');
+  } else if (networkId !== undefined) fail('networkId is for shared volumes (kind: shared)');
   const projectId = optional(input.projectId, (value) => id(value, 'prj', 'projectId'));
   if (projectId !== undefined) out.projectId = projectId;
   const description = optional(input.description, descriptionOf);
   if (description !== undefined) out.description = description;
   const filesystem = optional(input.filesystem, filesystemOf);
-  if (filesystem !== undefined) out.filesystem = filesystem;
+  if (filesystem !== undefined && kind !== 'shared') out.filesystem = filesystem;
   if (input.deleteWithInstance !== undefined)
     out.deleteWithInstance = bool(input.deleteWithInstance, 'deleteWithInstance');
   const instanceId = optional(input.instanceId, instanceIdOf);
@@ -392,6 +464,16 @@ export function parseCreateProviderVolume(raw: unknown): CreateProviderVolumeInp
 export function parseProviderVolumeRef(raw: unknown): ProviderVolumeRef {
   const input = object(raw, ['tenantId', 'volumeId']);
   return { tenantId: tenant(input.tenantId), volumeId: volumeIdOf(input.volumeId) };
+}
+export function parseDetachProviderVolume(raw: unknown): DetachProviderVolumeInput {
+  const input = object(raw, ['tenantId', 'volumeId', 'instanceId']);
+  const out: DetachProviderVolumeInput = {
+    tenantId: tenant(input.tenantId),
+    volumeId: volumeIdOf(input.volumeId),
+  };
+  const instanceId = optional(input.instanceId, instanceIdOf);
+  if (instanceId !== undefined) out.instanceId = instanceId;
+  return out;
 }
 function parseListInput(raw: unknown): ListProviderVolumesInput {
   const input = object(raw, ['tenantId', 'poolId', 'projectId', 'includeDeleted']);
@@ -588,6 +670,16 @@ export const providerResourceSchemas = {
       description: descriptionSchema,
       region: regionSchema,
       sizeGiB: sizeSchema('The size in GiB (it can grow later, never shrink)'),
+      kind: {
+        enum: [...kinds],
+        default: 'block',
+        description:
+          'block: a disk attached to one instance at a time. shared: a network file share (NFS) many instances of its network mount at once',
+      },
+      networkId: idOf(
+        'net',
+        'The tenant network a shared volume is reachable from (required for, and only for, kind shared)',
+      ),
       filesystem: filesystemSchema,
       deleteWithInstance: deleteWithInstanceSchema,
       instanceId: instanceIdSchema,
@@ -599,6 +691,17 @@ export const providerResourceSchemas = {
     'tenantId',
     'volumeId',
   ]),
+  detachVolume: strictObject(
+    {
+      tenantId: tenantIdSchema,
+      volumeId: volumeIdSchema,
+      instanceId: idOf(
+        'inst',
+        'The instance to detach from: required for a shared volume; for a block volume, naming another instance changes nothing',
+      ),
+    },
+    ['tenantId', 'volumeId'],
+  ),
   listVolumes: listSchema,
   attachVolume: strictObject(
     { tenantId: tenantIdSchema, volumeId: volumeIdSchema, instanceId: instanceIdSchema },
@@ -692,6 +795,8 @@ interface VolumeRow {
   external_id: string | null;
   device: string | null;
   charged_gib: number;
+  kind: ProviderVolumeKind;
+  network_id: string | null;
   state: ProviderResourceStatus;
   desired_state: Desired;
   message: string | null;
@@ -761,7 +866,8 @@ interface AddressRow {
 const common = `state, desired_state, message, ensure_requested, encode(request_hash, 'hex') AS request_hash,
   version, created_at`;
 const volumeColumns = `id, tenant_id, project_id, pool_id, provider_account_id, name, description, region, size_gib,
-  observed_size_gib, filesystem, source_snapshot_id, delete_with_instance, external_id, device, charged_gib, ${common}`;
+  observed_size_gib, filesystem, source_snapshot_id, delete_with_instance, external_id, device, charged_gib, kind,
+  network_id, ${common}`;
 const snapshotColumns = `id, tenant_id, project_id, pool_id, provider_account_id, volume_id, name, region, size_gib,
   external_id, ${common}`;
 const addressColumns = `id, tenant_id, project_id, pool_id, provider_account_id, name, description, region, family,
@@ -770,9 +876,17 @@ const attachmentColumns = `id, volume_id, instance_id, machine_id, state, desire
 
 const iso = (value: Date | string) => new Date(value).toISOString();
 
+const attachmentView = (attachment: AttachmentRow): VolumeAttachmentView => ({
+  instanceId: attachment.instance_id,
+  state: attachment.state,
+  desiredState: attachment.desired_state,
+  ...(attachment.message ? { message: attachment.message } : {}),
+});
+
+/** The volume with its live attachments (a block volume has at most one, shown as `attachment`). */
 export function providerVolumeView(
   row: VolumeRow,
-  attachment?: AttachmentRow,
+  attachments: readonly AttachmentRow[] = [],
 ): ProviderVolumeView {
   const view: ProviderVolumeView = {
     id: row.id,
@@ -783,6 +897,7 @@ export function providerVolumeView(
     region: row.region,
     sizeGiB: Number(row.size_gib),
     deleteWithInstance: row.delete_with_instance,
+    kind: row.kind ?? 'block',
     state: row.state,
     desiredState: row.desired_state,
     version: Number(row.version),
@@ -792,15 +907,12 @@ export function providerVolumeView(
   if (row.description) view.description = row.description;
   if (row.filesystem) view.filesystem = row.filesystem;
   if (row.source_snapshot_id) view.sourceSnapshotId = row.source_snapshot_id;
+  if (row.network_id) view.networkId = row.network_id;
   if (row.device) view.device = row.device;
+  if (row.device && view.kind === 'shared') view.mount = { source: row.device, type: 'nfs4' };
   if (row.message) view.message = row.message;
-  if (attachment)
-    view.attachment = {
-      instanceId: attachment.instance_id,
-      state: attachment.state,
-      desiredState: attachment.desired_state,
-      ...(attachment.message ? { message: attachment.message } : {}),
-    };
+  if (view.kind === 'shared') view.attachments = attachments.map(attachmentView);
+  else if (attachments[0]) view.attachment = attachmentView(attachments[0]);
   return view;
 }
 
@@ -880,8 +992,7 @@ async function liveAttachments(tx: SqlTx, volumeIds: readonly string[]): Promise
 async function volumeViewOf(tx: SqlTx, volumeId: string): Promise<ProviderVolumeView> {
   const row = await readVolume(tx, volumeId);
   if (!row) throw new ComputeError('NOT_FOUND', `Volume ${volumeId} not found`);
-  const [attachment] = await liveAttachments(tx, [volumeId]);
-  return providerVolumeView(row, attachment);
+  return providerVolumeView(row, await liveAttachments(tx, [volumeId]));
 }
 async function readSnapshot(
   tx: SqlTx,
@@ -1123,11 +1234,81 @@ const volumeHash = (input: CreateProviderVolumeInput) =>
       description: input.description,
       region: input.region,
       sizeGiB: input.sizeGiB,
+      // Absent for a block volume, so a block request hashes as it did before shared volumes.
+      kind: input.kind === 'shared' ? 'shared' : undefined,
+      networkId: input.networkId,
       filesystem: input.filesystem,
       deleteWithInstance: input.deleteWithInstance === true,
       instanceId: input.instanceId,
     }),
   );
+
+/**
+ * (shared) The network a shared volume is reachable from: the tenant's (INVALID_INPUT otherwise, as for an instance),
+ * on the volume's provider account, provisioned and not being deleted (INVALID_STATE), with a subnet in the volume's
+ * region (INVALID_INPUT without one; INVALID_STATE while it is not ready). Locked until the transaction commits, so
+ * `networks.delete` sees the volume that is on it.
+ */
+async function sharedNetwork(
+  tx: SqlTx,
+  input: { tenantId: string; networkId: string; region: string },
+  accountId: string,
+): Promise<void> {
+  const { rows } = await tx.query<{
+    id: string;
+    provider_account_id: string;
+    state: string;
+    desired_state: string;
+    provisioned: boolean;
+  }>(
+    `SELECT id, provider_account_id, state, desired_state, provisioned_at IS NOT NULL AS provisioned
+       FROM networks WHERE id = $1 AND tenant_id = $2 FOR SHARE`,
+    [input.networkId, input.tenantId],
+  );
+  const network = rows[0];
+  if (!network || network.state === 'deleted')
+    throw new ComputeError('INVALID_INPUT', `Network ${input.networkId} not found in this tenant`);
+  if (network.provider_account_id !== accountId)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `Network ${network.id} is on provider account ${network.provider_account_id}, not the pool's ${accountId}`,
+    );
+  if (network.desired_state !== 'present' || network.state === 'deleting')
+    throw new ComputeError('INVALID_STATE', `Network ${network.id} is being deleted`);
+  if (!network.provisioned)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Network ${network.id} has not been provisioned yet; retry once it is ready`,
+    );
+  const subnets = await tx.query<{ state: string }>(
+    `SELECT state FROM network_subnets
+      WHERE network_id = $1 AND region = $2 AND desired_state = 'present' AND state <> 'deleted' FOR SHARE`,
+    [network.id, input.region],
+  );
+  if (subnets.rows.length === 0)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `Network ${network.id} has no subnet in ${input.region}; a shared volume is reached over one (networks.addSubnet)`,
+    );
+  if (!subnets.rows.some((subnet) => subnet.state === 'ready'))
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Network ${network.id}'s subnet in ${input.region} is not ready yet; retry once it is`,
+    );
+}
+
+/** (shared) An instance mounts a share only from the share's network (INVALID_INPUT otherwise; NFS has no other gate). */
+async function assertOnNetwork(tx: SqlTx, instanceId: string, networkId: string): Promise<void> {
+  const { rows } = await tx.query<{ network_id: string | null }>(
+    `SELECT network_id FROM instances WHERE id = $1`,
+    [instanceId],
+  );
+  if (rows[0]?.network_id !== networkId)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `Instance ${instanceId} is not on network ${networkId}; a shared volume is reachable only from its network`,
+    );
+}
 
 /**
  * `providerVolumes.create` transaction 1: the idempotency lookup, the pool, provider, region and name checks, and
@@ -1149,6 +1330,8 @@ export async function prepareCreateProviderVolume(
   // Refusals come before anything is staged, so a refused request leaves no projection row behind.
   const provider = await resourceProvider(deps, tx, input.tenantId, input.poolId, 'volumes');
   assertRegion(provider, input.region);
+  if (input.kind === 'shared')
+    await sharedNetwork(tx, { ...input, networkId: input.networkId! }, provider.accountId);
   await assertNameFree(tx, 'provider_volumes', input.tenantId, input.name);
   await context.authz.upsert(
     tx,
@@ -1195,6 +1378,8 @@ interface NewVolume {
   description?: string;
   region: string;
   sizeGiB: number;
+  kind: ProviderVolumeKind;
+  networkId?: string;
   filesystem?: 'ext4' | 'xfs' | 'none';
   sourceSnapshotId?: string;
   deleteWithInstance: boolean;
@@ -1219,14 +1404,16 @@ async function insertVolume(
           region: volume.region,
         })
       : undefined;
+  if (target && volume.kind === 'shared') await assertOnNetwork(tx, target.id, volume.networkId!);
   await chargeQuota(tx, volume.tenantId, volume.poolId, { [volumeQuotaResource]: volume.sizeGiB });
   try {
     await tx.query(
       `INSERT INTO provider_volumes (id, tenant_id, project_id, pool_id, provider_account_id, name, description, region,
                                      size_gib, filesystem, source_snapshot_id, delete_with_instance, charged_gib,
-                                     state, desired_state, created_by, idempotency_key, request_hash, version)
+                                     state, desired_state, created_by, idempotency_key, request_hash, version, kind,
+                                     network_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $9, 'pending', 'present', $13, $14,
-               decode($15, 'hex'), 1)`,
+               decode($15, 'hex'), 1, $16, $17)`,
       [
         volume.id,
         volume.tenantId,
@@ -1243,6 +1430,8 @@ async function insertVolume(
         volume.createdBy,
         volume.idempotencyKey,
         volume.hash,
+        volume.kind,
+        volume.networkId ?? null,
       ],
     );
   } catch (error) {
@@ -1259,9 +1448,9 @@ async function insertVolume(
   }
   if (target)
     await tx.query(
-      `INSERT INTO provider_volume_attachments (id, volume_id, instance_id, state, desired_state)
-       VALUES ($1, $2, $3, 'pending', 'present')`,
-      [newId('pvatt'), volume.id, target.id],
+      `INSERT INTO provider_volume_attachments (id, volume_id, instance_id, state, desired_state, shared)
+       VALUES ($1, $2, $3, 'pending', 'present', $4)`,
+      [newId('pvatt'), volume.id, target.id, volume.kind === 'shared'],
     );
   await deps.authz.upsert(
     tx,
@@ -1285,6 +1474,8 @@ async function insertVolume(
     name: volume.name,
     region: volume.region,
     sizeGiB: volume.sizeGiB,
+    ...(volume.kind === 'shared' ? { kind: 'shared' } : {}),
+    ...(volume.networkId !== undefined ? { networkId: volume.networkId } : {}),
     ...(volume.sourceSnapshotId !== undefined ? { sourceSnapshotId: volume.sourceSnapshotId } : {}),
     ...(target ? { instanceId: target.id } : {}),
   });
@@ -1312,6 +1503,8 @@ export async function createProviderVolume(
   }
   const provider = await resourceProvider(deps, tx, input.tenantId, input.poolId, 'volumes');
   assertRegion(provider, input.region);
+  if (input.kind === 'shared')
+    await sharedNetwork(tx, { ...input, networkId: input.networkId! }, provider.accountId);
   return insertVolume(deps, tx, {
     id: volumeId,
     tenantId: input.tenantId,
@@ -1322,6 +1515,8 @@ export async function createProviderVolume(
     ...(input.description !== undefined ? { description: input.description } : {}),
     region: input.region,
     sizeGiB: input.sizeGiB,
+    kind: input.kind ?? 'block',
+    ...(input.networkId !== undefined ? { networkId: input.networkId } : {}),
     ...(input.filesystem !== undefined ? { filesystem: input.filesystem } : {}),
     deleteWithInstance: input.deleteWithInstance === true,
     ...(input.instanceId !== undefined ? { instanceId: input.instanceId } : {}),
@@ -1336,8 +1531,7 @@ export async function getProviderVolume(
   ref: ProviderVolumeRef,
 ): Promise<ProviderVolumeView> {
   const row = await requireVolume(tx, ref);
-  const [attachment] = await liveAttachments(tx, [row.id]);
-  return providerVolumeView(row, attachment);
+  return providerVolumeView(row, await liveAttachments(tx, [row.id]));
 }
 
 export async function listProviderVolumes(
@@ -1355,7 +1549,9 @@ export async function listProviderVolumes(
     tx,
     rows.map((row) => row.id),
   );
-  const byVolume = new Map(attachments.map((attachment) => [attachment.volume_id, attachment]));
+  const byVolume = new Map<string, AttachmentRow[]>();
+  for (const attachment of attachments)
+    byVolume.set(attachment.volume_id, [...(byVolume.get(attachment.volume_id) ?? []), attachment]);
   return { items: rows.map((row) => providerVolumeView(row, byVolume.get(row.id))) };
 }
 
@@ -1388,6 +1584,7 @@ export async function attachProviderVolume(
   input: AttachProviderVolumeInput,
 ): Promise<ProviderVolumeView> {
   const row = await openVolume(tx, input);
+  if (row.kind === 'shared') return attachShared(deps, tx, row, input);
   const [live] = await liveAttachments(tx, [row.id]);
   if (live) {
     if (live.desired_state === 'present' && live.instance_id === input.instanceId)
@@ -1412,14 +1609,55 @@ export async function attachProviderVolume(
   return volumeViewOf(tx, row.id);
 }
 
-/** `providerVolumes.detach`: the volume leaves its instance. A volume attached to nothing is returned as it is. */
+/**
+ * (shared) Attach to one more instance, which must be on the volume's network: each instance at most once (attaching
+ * again returns the volume), any number of them at a time.
+ */
+async function attachShared(
+  deps: ProviderResourceDeps,
+  tx: SqlTx,
+  row: VolumeRow,
+  input: AttachProviderVolumeInput,
+): Promise<ProviderVolumeView> {
+  const live = (await liveAttachments(tx, [row.id])).find(
+    (attachment) => attachment.instance_id === input.instanceId,
+  );
+  if (live?.desired_state === 'present') return volumeViewOf(tx, row.id);
+  if (live)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Volume ${row.id} is being detached from instance ${live.instance_id}; attach it once it is detached`,
+    );
+  const target = await targetInstance(tx, input.tenantId, input.instanceId, row);
+  await assertOnNetwork(tx, target.id, row.network_id!);
+  await tx.query(
+    `INSERT INTO provider_volume_attachments (id, volume_id, instance_id, state, desired_state, shared)
+     VALUES ($1, $2, $3, 'pending', 'present', true)`,
+    [newId('pvatt'), row.id, target.id],
+  );
+  await touchVolume(deps, tx, row, { attach: target.id });
+  return volumeViewOf(tx, row.id);
+}
+
+/**
+ * `providerVolumes.detach`: the volume leaves an instance. A shared volume names the instance (`instanceId`,
+ * INVALID_INPUT without it); a block volume leaves the one it is on, unless `instanceId` names another (then nothing
+ * changes). A volume not attached to that instance is returned as it is.
+ */
 export async function detachProviderVolume(
   deps: ProviderResourceDeps,
   tx: SqlTx,
-  input: ProviderVolumeRef,
+  input: DetachProviderVolumeInput,
 ): Promise<ProviderVolumeView> {
   const row = await requireVolume(tx, input, true);
-  const [live] = await liveAttachments(tx, [row.id]);
+  if (row.kind === 'shared' && input.instanceId === undefined)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `Volume ${row.id} is shared: name the instance to detach it from (instanceId)`,
+    );
+  const live = (await liveAttachments(tx, [row.id])).find(
+    (attachment) => input.instanceId === undefined || attachment.instance_id === input.instanceId,
+  );
   if (!live || live.desired_state === 'deleted') return volumeViewOf(tx, row.id);
   if (row.delete_with_instance) {
     // Once its instance is being deleted, the volume goes with the machine (whose delete may already name it):
@@ -1482,8 +1720,11 @@ export async function deleteProviderVolume(
 ): Promise<ProviderVolumeView> {
   const row = await requireVolume(tx, input, true);
   if (row.desired_state === 'deleted') return volumeViewOf(tx, row.id);
-  const [live] = await liveAttachments(tx, [row.id]);
-  if (live?.desired_state === 'present')
+  // Every live attachment counts: a shared volume may be on several instances, some of them being detached.
+  const live = (await liveAttachments(tx, [row.id])).find(
+    (attachment) => attachment.desired_state === 'present',
+  );
+  if (live)
     throw new ComputeError(
       'INVALID_STATE',
       `Volume ${row.id} is attached to instance ${live.instance_id}; detach it first`,
@@ -1656,6 +1897,15 @@ export async function restoreProviderSnapshot(
   }
   const snapshot = await readSnapshot(tx, input.snapshotId, { tenantId: input.tenantId });
   if (!snapshot) throw new ComputeError('NOT_FOUND', `Snapshot ${input.snapshotId} not found`);
+  const source = await readVolume(tx, snapshot.volume_id);
+  if (source?.kind === 'shared')
+    // The DigitalOcean provider makes no share from a snapshot (DO P6 D5), so a shared volume restores nowhere yet.
+    throw new ComputeError(
+      'UNSUPPORTED',
+      `Snapshot ${snapshot.id} is of a shared volume; restoring a shared volume's snapshot is not supported`,
+      undefined,
+      { reason: 'sharedRestore' },
+    );
   if (snapshot.state !== 'ready' || snapshot.desired_state !== 'present')
     throw new ComputeError(
       'INVALID_STATE',
@@ -1690,6 +1940,7 @@ export async function restoreProviderSnapshot(
     ...(input.description !== undefined ? { description: input.description } : {}),
     region: snapshot.region,
     sizeGiB,
+    kind: 'block',
     ...(input.filesystem !== undefined ? { filesystem: input.filesystem } : {}),
     sourceSnapshotId: snapshot.id,
     deleteWithInstance: input.deleteWithInstance === true,
@@ -2140,10 +2391,20 @@ async function loadVolume(tx: SqlTx, volumeId: string) {
         )
       ).rows[0]
     : undefined;
+  // (shared) The provider-side name of the network the share is reached over.
+  const network = volume.network_id
+    ? (
+        await tx.query<{ id: string; external_name: string | null }>(
+          `SELECT id, external_name FROM networks WHERE id = $1`,
+          [volume.network_id],
+        )
+      ).rows[0]
+    : undefined;
   return {
     volume,
     attachments: attachments.rows,
     source,
+    network: network ? providerResourceName(network.id, network.external_name) : undefined,
     account: await readAccount(tx, volume.provider_account_id),
   };
 }
@@ -2201,6 +2462,8 @@ async function convergeAttachment(
       return;
     }
     if (attachedTo === machine && attachment.state === 'ready') return;
+    // A shared volume is on many machines and its reads name none: a ready attachment to this machine is settled.
+    if (volume.kind === 'shared' && attachment.state === 'ready' && attachment.machine_id === machine) return;
     const result = await run.attempt(`attach ${attachment.id}`, () =>
       volumes.attachVolume(
         externalId,
@@ -2270,7 +2533,8 @@ async function detachStray(
   attachments: readonly VolumeAttachment[],
   attachedTo: string | undefined,
 ): Promise<{ on?: string; busy?: boolean; error?: string }> {
-  if (attachedTo === undefined) return {};
+  // A shared volume has no single machine to be stray on: each attachment is detached by its own row.
+  if (attachedTo === undefined || volume.kind === 'shared') return {};
   if (attachments.some((a) => a.machine_id === attachedTo || a.external_id === attachedTo))
     return { on: attachedTo };
   const ours = await run.sql.transaction(async (tx) => {
@@ -2388,21 +2652,27 @@ async function reconcileVolume(run: Run, volumeId: string): Promise<void> {
   else await convergeVolume(run, volumes, loaded);
 }
 
-function volumeSpec(volume: VolumeRow, snapshotId: string | undefined): ProviderVolumeSpec {
+function volumeSpec(
+  volume: VolumeRow,
+  snapshotId: string | undefined,
+  network: string | undefined,
+): ProviderVolumeSpec {
   return {
     name: providerResourceName(volume.id),
     region: volume.region,
     sizeGiB: Number(volume.size_gib),
-    kind: 'block',
+    kind: volume.kind ?? 'block',
     ...(volume.filesystem ? { filesystem: volume.filesystem } : {}),
     ...(snapshotId !== undefined ? { snapshotId } : {}),
+    // A share is made in its network's VPC in the region: the provider refuses one without it (fail closed).
+    ...(volume.kind === 'shared' && network !== undefined ? { network: { network } } : {}),
   };
 }
 
 async function convergeVolume(
   run: Run,
   volumes: ProviderVolumes,
-  { volume, attachments, source }: LoadedVolume,
+  { volume, attachments, source, network }: LoadedVolume,
 ): Promise<void> {
   // A volume that goes with its instance's machine, while that machine is being deleted: no provider call (the
   // delete may already have taken it, and an ensure by name would make it again). The instance's finished delete
@@ -2427,7 +2697,7 @@ async function convergeVolume(
     if (!(await run.write('provider_volumes', volume, { ensure_requested: true }))) return;
   }
   const ensured = await run.attempt(`ensure ${volume.id}`, () =>
-    volumes.ensureVolume(volumeSpec(volume, snapshotId), run.call(`ensure:${volume.id}`)),
+    volumes.ensureVolume(volumeSpec(volume, snapshotId, network), run.call(`ensure:${volume.id}`)),
   );
   if (ensured === undefined) return;
   if (ensured === 'missing' || ensured.state === 'error') {
@@ -2511,7 +2781,7 @@ async function convergeVolume(
 async function teardownVolume(
   run: Run,
   volumes: ProviderVolumes,
-  { volume, attachments, source }: LoadedVolume,
+  { volume, attachments, source, network }: LoadedVolume,
 ): Promise<void> {
   let externalId = volume.external_id;
   if (!externalId) {
@@ -2526,9 +2796,9 @@ async function teardownVolume(
     const name = providerResourceName(volume.id);
     const ensured = await run.attempt(`find ${volume.id}`, () =>
       find
-        ? find(name, volume.region, run.call(`find:${volume.id}`))
+        ? find(name, volume.region, run.call(`find:${volume.id}`), volume.kind ?? 'block')
         : volumes.ensureVolume(
-            volumeSpec(volume, source?.external_id ?? undefined),
+            volumeSpec(volume, source?.external_id ?? undefined, network),
             run.call(`ensure:${volume.id}`),
           ),
     );
