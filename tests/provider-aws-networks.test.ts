@@ -1239,7 +1239,15 @@ describe('networks: IAM policy against the calls the code makes', () => {
     w.ec2.instances.get(machine.id)!.interfaces = 2;
     await w.networks.setTags(machine.id, ['bc-fedcba9876543210'], w.call('ins_1'), 'ins_1');
 
-    const policy = iamPolicy({ networks: true, region: 'us-east-1', account: '222222222222' });
+    // The EBS statements (A5) are left out: their conditions need the better-compute:volume tag,
+    // which only EBS volumes carry (a root volume never does, by design); provider-aws-cli checks
+    // their conditions.
+    const policy = iamPolicy({
+      networks: true,
+      volumes: false,
+      region: 'us-east-1',
+      account: '222222222222',
+    });
     const allows = (action: string, type: string) =>
       policy.Statement.filter(
         (s) =>
