@@ -361,6 +361,7 @@ class ResourceWorker {
               ...(row.provider_id !== null ? { id: row.provider_id } : {}),
               ...(parent?.provider_id ? { parent: parent.provider_id } : {}),
               labels: this.#labels(),
+              accountScope: provider.account.tenantId === row.tenant_id ? 'tenant' : 'shared',
             },
             this.#call(),
           ),

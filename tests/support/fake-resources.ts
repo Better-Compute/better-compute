@@ -45,6 +45,8 @@ export interface FakeResourcesCloud {
   failNext?: ComputeError;
   /** Every password handed out, so tests can check none leaks. */
   passwords: string[];
+  /** The `accountScope` of the last ensure, by provider-side name. */
+  scopes: Map<string, string | undefined>;
   reset(): void;
   /** A resource made outside better-compute (or by another deployment). */
   seed(
@@ -62,6 +64,7 @@ export function fakeResourcesCloud(): FakeResourcesCloud {
     delayTicks: 1,
     refuse: new Set(),
     passwords: [],
+    scopes: new Map(),
     reset() {
       this.resources.clear();
       this.calls.length = 0;
@@ -69,6 +72,7 @@ export function fakeResourcesCloud(): FakeResourcesCloud {
       this.refuse.clear();
       delete this.failNext;
       this.passwords.length = 0;
+      this.scopes.clear();
     },
     seed(resource) {
       const id = `f-${++next}`;
@@ -214,6 +218,7 @@ export function fakeProviderResources(
     kinds: () => fakeKinds,
     async ensure(request: ProviderResourceRequest, context: CallContext) {
       call(`ensure ${request.kind} ${request.name}`);
+      cloud.scopes.set(request.name, request.accountScope);
       const kind = kindOf(request.kind);
       if (kind.preview && options.previews !== true)
         throw new ComputeError('UNSUPPORTED', `${kind.kind} is a preview`, undefined, {

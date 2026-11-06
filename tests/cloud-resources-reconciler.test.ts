@@ -144,6 +144,15 @@ describe('cloud.resources: convergence', () => {
     ]);
   });
 
+  it('ensure says whose account it is: shared on a hosted pool, the tenant’s own on its BYO pool', async () => {
+    const hosted = await create({ name: 'scope-hosted' });
+    const own = await create({ name: 'scope-own', poolId: world.acmePoolId });
+    await settled(hosted.id, 'ready');
+    await settled(own.id, 'ready');
+    expect(world.cloud.scopes.get(hosted.providerName)).toBe('shared');
+    expect(world.cloud.scopes.get(own.providerName)).toBe('tenant');
+  });
+
   it('a provider refusal is error (published once); a busy provider is retried later', async () => {
     world.cloud.refuse.add('fake.app');
     const app = await create({ kind: 'fake.app', name: 'refused', spec: { image: 'nginx' } });

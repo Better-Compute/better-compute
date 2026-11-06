@@ -844,6 +844,12 @@ export interface ProviderResourceRequest {
   parent?: string;
   /** Ownership labels (`better-compute-managed`, `-resource`, `-tenant`), written as the provider writes labels. */
   labels?: Readonly<Record<string, string>>;
+  /**
+   * Whose provider account it is. `tenant`: it belongs to the resource's tenant alone (a BYO account). `shared`: it
+   * serves other tenants too (a hosted pool). Absent counts as `shared`: a kind then refuses a spec that reaches
+   * account-wide objects (a VPC, a registry, linked repositories, another resource by name).
+   */
+  accountScope?: 'tenant' | 'shared';
 }
 
 /** (cloud-resources) A resource the account can see, managed by better-compute or not. */
