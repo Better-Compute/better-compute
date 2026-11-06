@@ -10,7 +10,7 @@ import {
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
-import { readAccount, type ProviderAccount } from '@better-compute/vps';
+import { readAccount, releaseQuotaBooking, type ProviderAccount } from '@better-compute/vps';
 import {
   accountResources,
   json,
@@ -24,7 +24,7 @@ import {
   type ResourceRow,
   type ResourcesProvider,
 } from './store.js';
-import { markDeleted } from './resources.js';
+import { markDeleted, quotaOwner } from './resources.js';
 import type { CloudResourceState } from './types.js';
 import { meterRates } from './usage.js';
 
@@ -544,6 +544,8 @@ class ResourceWorker {
         [row.id, row.version, state],
       );
       if (rows.length === 0) return false;
+      // The quota its spec booked (an endpoint's GPUs) is returned with it, once.
+      await releaseQuotaBooking(tx, quotaOwner(row.id));
       await this.deps.authz.remove(tx, {
         type: 'cloud-resource',
         id: row.id,

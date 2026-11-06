@@ -279,6 +279,18 @@ export function providerResourcesConformanceCases(): ConformanceCase<ProviderRes
             `${own.kind}: accountWide answers a list of field names`,
           );
         }
+        if (own.quota !== undefined) {
+          check(typeof own.quota === 'function', `${own.kind}: quota is a function`);
+          const booked: unknown = own.quota(await validSpec(own, subject.spec));
+          check(
+            typeof booked === 'object' &&
+              booked !== null &&
+              Object.values(booked).every(
+                (amount) => Number.isSafeInteger(amount) && (amount as number) >= 0,
+              ),
+            `${own.kind}: quota answers whole, non-negative counts by quota resource`,
+          );
+        }
       },
     },
     {

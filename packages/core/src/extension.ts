@@ -863,6 +863,14 @@ export interface ProviderResourceKind {
    * machines, so they are not account-wide.
    */
   instances?(spec: unknown): readonly string[];
+  /**
+   * (Pure, no I/O.) What the spec books against the tenant's capacity quota on the resource's pool, by quota resource
+   * (`{ gpu: 2 }` for an inference endpoint on two dedicated GPUs): an external booking, quota held without a node.
+   * The caller books it when it records the resource (`QUOTA_EXCEEDED` refuses the create), books the difference when
+   * the spec changes, and returns it once the resource is deleted or released. A kind that books quota cannot be
+   * adopted (its spec is unknown until the takeover). Absent or empty: the kind books nothing.
+   */
+  quota?(spec: unknown): Readonly<Record<string, number>>;
 }
 
 /** (cloud-resources) What `ProviderResources.ensure` is asked for. */

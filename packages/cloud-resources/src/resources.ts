@@ -8,6 +8,7 @@ import {
   type ProviderResourceKind,
   type SqlTx,
 } from '@better-compute/core';
+import { setQuotaBooking } from '@better-compute/vps';
 import { canonical, sha256Hex } from './input.js';
 import {
   kindOf,
@@ -76,6 +77,20 @@ export async function listKinds(
       quota: deps.quotaOf(kind.kind),
     })),
   };
+}
+
+/** Who holds a cloud resource's external quota booking (vps `quota_bookings`). */
+export const quotaOwner = (resourceId: string) => ({ kind: 'cloud-resource', id: resourceId });
+
+/**
+ * What a spec books against the tenant's quota on the pool (`ProviderResourceKind.quota`); undefined for a kind
+ * that books nothing. The provider's answer is checked by the booking (whole, non-negative counts).
+ */
+export function kindQuota(
+  kind: ProviderResourceKind,
+  spec: unknown,
+): Readonly<Record<string, number>> | undefined {
+  return typeof kind.quota === 'function' ? kind.quota(spec) : undefined;
 }
 
 /** What a create resolves before anything is written. */
@@ -509,6 +524,16 @@ export async function createResource(
     }
     throw error;
   }
+  // What the spec books against the pool's quota (an inference endpoint's GPUs), in the same transaction:
+  // QUOTA_EXCEEDED leaves nothing behind.
+  const quota = kindQuota(admitted.kind, admitted.spec);
+  if (quota !== undefined)
+    await setQuotaBooking(
+      tx,
+      quotaOwner(resourceId),
+      { tenantId: input.tenantId, poolId: input.poolId },
+      quota,
+    );
   await deps.authz.upsert(tx, authzRow(resourceId, input, admitted, caller.identityId));
   await deps.work.enqueue(tx, resourcesWork, resourceId);
   await publish(
@@ -580,6 +605,7 @@ export async function updateResource(
   const stored = json(row.spec);
   let spec = stored;
   let identity = row.identity;
+  let quota: Readonly<Record<string, number>> | undefined;
   if (input.spec !== undefined && row.adopted && row.ready_at === null)
     // Its spec is the provider's until the takeover reads it back: a change before that has nothing to apply to.
     throw new ComputeError(
@@ -614,6 +640,7 @@ export async function updateResource(
         undefined,
         { reason: 'replaceRequired', fields: fixed, updatable: [...kind.updatable] },
       );
+    quota = kindQuota(kind, spec);
     if (row.parent_id !== null) {
       identity = identityOf(kind, spec) ?? null;
       if (identity !== null && identity !== row.identity)
@@ -621,6 +648,14 @@ export async function updateResource(
     }
   }
   const providerChange = !same(stored, spec);
+  // The spec's booking follows it: growth is charged (QUOTA_EXCEEDED refuses the change), a shrink returned.
+  if (providerChange && quota !== undefined)
+    await setQuotaBooking(
+      tx,
+      quotaOwner(row.id),
+      { tenantId: row.tenant_id, poolId: row.pool_id },
+      quota,
+    );
   await tx.query(
     `UPDATE cloud_resources
         SET spec = $2::jsonb, description = $3, version = version + 1, updated_at = compute_now(),

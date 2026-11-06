@@ -31,6 +31,7 @@ export * from './sandboxes.js';
 export * from './snapshots.js';
 export * from './volumes.js';
 export * from './volume-storage.js';
+export * from './quota-bookings.js';
 export * from './networks.js';
 export * from './tenancy.js';
 export * from './describe.js';
