@@ -197,11 +197,13 @@ describe('vps on a provider pool that joins an EKS cluster', () => {
 
   it('never launches a node of the cluster for a tenant the pool is offered to', async () => {
     // Its user data and SSH keys would give that tenant root on a node of the operator's cluster.
+    // The tenant learns at instances.create, not from a failed instance.
     const w = await world(eksPolicy);
-    const { vm, view } = await w.launch({}, 'acme');
-    expect(vm).toBeUndefined();
+    await expect(w.launch({}, 'acme')).rejects.toMatchObject({
+      code: 'ACCESS_DENIED',
+      message: expect.stringMatching(/pool owner/),
+    });
     expect(w.emu.calls('RunInstances')).toHaveLength(0);
-    expect(JSON.stringify(view)).toMatch(/pool owner/);
   });
 
   it('launches every machine with the NodeConfig first, keys and user data in the same multipart', async () => {

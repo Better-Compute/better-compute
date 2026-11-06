@@ -1065,6 +1065,8 @@ export interface PoolForInstance {
   /** `policy.runtime`, when the pool names one. */
   runtime?: string;
   singleTenant: boolean;
+  /** (AWS A9) `policy.kubernetes.eks`: its machines are nodes of an EKS cluster. */
+  eksNodes: boolean;
 }
 
 export async function visibleVpsPool(
@@ -1080,6 +1082,7 @@ export async function visibleVpsPool(
     provider_account_id: string | null;
     runtime: string | null;
     single_tenant: boolean | null;
+    eks_nodes: boolean;
   }>(
     // R1: a provider pool's account counts only when the pool's owner tenant owns it; otherwise the
     // pool has no account (INVALID_STATE downstream), whoever the caller is.
@@ -1087,7 +1090,8 @@ export async function visibleVpsPool(
             CASE WHEN a.tenant_id = p.owner_tenant_id THEN p.provider_account_id END AS provider_account_id,
             p.policy->>'runtime' AS runtime,
             CASE WHEN jsonb_typeof(p.policy->'singleTenant') = 'boolean'
-                 THEN (p.policy->>'singleTenant')::boolean END AS single_tenant
+                 THEN (p.policy->>'singleTenant')::boolean END AS single_tenant,
+            (p.policy->'kubernetes'->'eks') IS NOT NULL AS eks_nodes
        FROM pools p LEFT JOIN provider_accounts a ON a.id = p.provider_account_id
       WHERE p.id = $1 AND (p.owner_tenant_id = $2
             OR EXISTS (SELECT 1 FROM pool_offers o WHERE o.pool_id = p.id AND o.tenant_id = $2))
@@ -1104,6 +1108,7 @@ export async function visibleVpsPool(
     class: row.class,
     agent: row.agent,
     singleTenant: row.single_tenant === true,
+    eksNodes: row.eks_nodes === true,
   };
   if (row.provider_account_id !== null) pool.providerAccountId = row.provider_account_id;
   if (row.runtime !== null) pool.runtime = row.runtime;
@@ -1275,6 +1280,16 @@ export async function prepareCreateInstance(
 
   if (isSecretRef(input.userData)) await assertTenantPutSecret(tx, input.tenantId, input.userData);
   const pool = await visibleVpsPool(tx, input.tenantId, input.poolId);
+  // (AWS A9) A machine of an EKS pool is a node of the owner's cluster, and its user data and SSH
+  // keys give its tenant root on it: only the pool owner launches them. Refused here, so the tenant
+  // learns at the API; the reconciler (poolEksJoin) refuses again as the fail-closed backstop.
+  if (pool.eksNodes && input.tenantId !== pool.ownerTenantId)
+    throw new ComputeError(
+      'ACCESS_DENIED',
+      `Pool ${pool.id} joins its machines to an EKS cluster: only the pool owner launches them (an instance's tenant gets root on its machine)`,
+      undefined,
+      { reason: 'eksNodeTenant', poolId: pool.id },
+    );
   // Labels are the provider's: hosted machines have none to carry them.
   if (input.labels !== undefined && pool.class !== 'provider')
     throw new ComputeError(
