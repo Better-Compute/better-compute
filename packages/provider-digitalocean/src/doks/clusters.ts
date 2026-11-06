@@ -130,14 +130,40 @@ export function checkClusterSpec(
   }
 }
 
-/** The tags a new cluster carries: ownership, then the spec's labels (reserved keys dropped). */
-export function clusterTags(spec: KubernetesClusterSpec, deploymentTag: string): string[] {
-  const tags = ownershipTags(deploymentTag);
+/** The tags of the spec's labels (reserved keys dropped). */
+function labelTags(spec: KubernetesClusterSpec): string[] {
+  const tags: string[] = [];
   for (const [key, value] of Object.entries(spec.labels ?? {})) {
     if (reservedLabelKeys.has(key.toLowerCase())) continue;
     tags.push(tagFor(key, value));
   }
-  return [...new Set(tags)];
+  return tags;
+}
+
+/** The tags a new cluster carries: ownership, then the spec's labels (reserved keys dropped). */
+export function clusterTags(spec: KubernetesClusterSpec, deploymentTag: string): string[] {
+  return [...new Set([...ownershipTags(deploymentTag), ...labelTags(spec)])];
+}
+
+const tagKey = (tag: string): string => tag.slice(0, Math.max(tag.indexOf(':'), 0)).toLowerCase();
+
+/**
+ * The cluster's own tags with the spec's labels applied, or undefined when they already are: a
+ * label's tag is added, or replaces the tag of the same key with another value. A tag no label
+ * names is kept (it may be someone else's), so a label taken out of the spec stays on the cluster.
+ */
+export function reconciledTags(
+  spec: KubernetesClusterSpec,
+  cluster: DoksCluster,
+): string[] | undefined {
+  const own = ownTags(cluster);
+  const wanted = labelTags(spec);
+  const keys = new Set(wanted.map(tagKey));
+  const have = new Set(own.map((tag) => tag.toLowerCase()));
+  const stale = own.filter((tag) => keys.has(tagKey(tag)) && !wanted.includes(tag.toLowerCase()));
+  const missing = wanted.filter((tag) => !have.has(tag));
+  if (stale.length === 0 && missing.length === 0) return undefined;
+  return [...own.filter((tag) => !stale.includes(tag)), ...missing];
 }
 
 /** DOKS has no release channels: `extended` keeps a cluster on its version, the rest auto-upgrade. */
@@ -227,7 +253,7 @@ const pluginOn = (cluster: DoksCluster): boolean =>
 /**
  * The fields of the `PUT /kubernetes/clusters/{id}` a running cluster needs, or undefined when it
  * is as wanted: auto-upgrade (the release channel), the control-plane firewall (authorized
- * networks) and the device plugins (off). DOKS takes them in one update.
+ * networks), the device plugins (off) and the labels' tags. DOKS takes them in one update.
  */
 export function clusterUpdate(
   spec: KubernetesClusterSpec,
@@ -246,6 +272,8 @@ export function clusterUpdate(
   )
     update.control_plane_firewall = desired;
   if (pluginOn(cluster)) Object.assign(update, pluginsOff);
+  const tags = reconciledTags(spec, cluster);
+  if (tags) update.tags = tags;
   return Object.keys(update).length > 0 ? update : undefined;
 }
 

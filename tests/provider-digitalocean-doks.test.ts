@@ -325,6 +325,42 @@ describe('doks clusters', () => {
     expect(s.doks.clusters.get(id)!.nvidia_gpu_device_plugin).toEqual({ enabled: false });
   });
 
+  it("applies a label change to an existing cluster's tags, keeping tags it does not name", async () => {
+    const s = await setup();
+    const id = await readyCluster(s);
+    // Someone else's tag on the cluster.
+    s.doks.clusters.get(id)!.tags.push('team:web');
+    const relabelled = {
+      ...standard,
+      labels: { 'better-compute-cluster': 'kc_two', tier: 'gold' },
+    };
+    expect((await s.k8s.ensureCluster(relabelled, s.ctx())).state).toBe('updating');
+    expect(posted(s, `/kubernetes/clusters/${id}`, 'PUT').at(-1)).toEqual({
+      name: 'bc-k-one',
+      tags: [...ours, 'team:web', 'better-compute-cluster:kc_two', 'tier:gold'],
+    });
+    expect(s.doks.clusters.get(id)!.tags).toEqual([
+      'k8s',
+      `k8s:${id}`,
+      ...ours,
+      'team:web',
+      'better-compute-cluster:kc_two',
+      'tier:gold',
+    ]);
+    // As wanted now: nothing more is sent. A label taken out stays (it may not be ours alone).
+    const puts = posted(s, `/kubernetes/clusters/${id}`, 'PUT').length;
+    expect((await s.k8s.ensureCluster(relabelled, s.ctx())).state).toBe('ready');
+    expect(
+      (
+        await s.k8s.ensureCluster(
+          { ...standard, labels: { 'better-compute-cluster': 'kc_two' } },
+          s.ctx(),
+        )
+      ).state,
+    ).toBe('ready');
+    expect(posted(s, `/kubernetes/clusters/${id}`, 'PUT')).toHaveLength(puts);
+  });
+
   it('refuses a region change with INVALID_STATE', async () => {
     const s = await setup();
     await readyCluster(s);
