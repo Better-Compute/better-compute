@@ -11,8 +11,11 @@ import {
   networkHash,
   networkMemberTag,
   probeAccount,
+  spotPriceOf,
+  spotShape,
   type DoCompute,
   type DoConfig,
+  type DoSize,
 } from '@better-compute/provider-digitalocean';
 
 // provider-digitalocean against a real DigitalOcean account. It is OFF unless BC_DO_LIVE and
@@ -373,6 +376,32 @@ describe.skipIf(!enabled)('provider-digitalocean live', () => {
       tags: 'ok',
     });
     expect(report.missing).toEqual([]);
+  });
+
+  // P3's Spot wire shape is a guess (spotShape.verified is false): DO's public OpenAPI has no Spot
+  // member. This read-only case reports what the live size catalog carries, and checks the safety
+  // property the guess relies on: with allowSpot, Spot offers exist exactly for the sizes that carry
+  // the assumed price member, so a wrong guess offers nothing. Spot creates are not tried here (a
+  // Spot GPU Droplet is billable); settle createBody by hand, then set spotShape.verified.
+  it('reports whether live sizes carry the assumed Spot price member', { timeout: 120_000 }, async () => {
+    const sizes = await listAll<DoSize & { slug: string; regions?: string[] }>('/sizes', 'sizes');
+    expect(sizes.length).toBeGreaterThan(0);
+    const priced = sizes.filter((size) => spotPriceOf(size) !== undefined);
+    console.info(
+      `spotShape: ${priced.length} of ${sizes.length} sizes carry ${spotShape.sizePriceField}` +
+        (priced.length ? ` (${priced.slice(0, 10).map((size) => size.slug).join(', ')})` : ''),
+    );
+    const parsed = await provider.config['~standard'].validate({ ...config, allowSpot: true });
+    if ('issues' in parsed && parsed.issues) throw new Error(parsed.issues[0]!.message);
+    const impl = (await provider.create(
+      (parsed as { value: DoConfig }).value,
+      providerContext,
+    )) as DoCompute;
+    const spotOffers = (await impl.listOffers({})).filter((offer) => offer.id.endsWith('@spot'));
+    const pricedHere = new Set(
+      priced.filter((size) => size.regions?.includes(region)).map((size) => `${region}/${size.slug}@spot`),
+    );
+    for (const offer of spotOffers) expect(pricedHere.has(offer.id), offer.id).toBe(true);
   });
 
   it('passes every case of the ProviderImpl contract', { timeout: 900_000 }, async () => {
