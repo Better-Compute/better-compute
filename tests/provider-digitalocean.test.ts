@@ -2225,7 +2225,19 @@ describe('definition', () => {
         image: 'ubuntu-24-04-x64',
         // The DNS case makes and deletes this zone (P4).
         dnsZone: 'conformance.example',
-        context: { secrets, account: platformAccount },
+        // The custom certificate case uploads these PEMs (P4).
+        certificate: { certificate: 'secret://do/cert', privateKey: 'secret://do/key' },
+        context: {
+          secrets: {
+            resolve: async (ref: string) =>
+              ref === 'secret://do/cert'
+                ? '-----BEGIN CERTIFICATE-----\nY29uZm9ybWFuY2UtbGVhZg==\n-----END CERTIFICATE-----\n'
+                : ref === 'secret://do/key'
+                  ? '-----BEGIN PRIVATE KEY-----\nY29uZm9ybWFuY2Uta2V5\n-----END PRIVATE KEY-----\n'
+                  : secrets.resolve(ref),
+          },
+          account: platformAccount,
+        },
       };
     });
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);

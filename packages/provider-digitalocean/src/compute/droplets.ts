@@ -27,6 +27,7 @@ import {
   tagFor,
 } from '../ids.js';
 import { DoAddresses } from '../edge/addresses.js';
+import { DoCertificates } from '../edge/certificates.js';
 import { DoDns } from '../edge/dns.js';
 import { DoLoadBalancers } from '../edge/load-balancers.js';
 import { DoNetworks } from '../networks/index.js';
@@ -187,6 +188,8 @@ export class DoCompute implements ProviderImpl {
   readonly loadBalancers: DoLoadBalancers;
   /** DNS zones and records (P4). */
   readonly dns: DoDns;
+  /** TLS certificates for load balancers (P4). */
+  readonly certificates: DoCertificates;
 
   constructor(
     config: DoConfig,
@@ -204,6 +207,7 @@ export class DoCompute implements ProviderImpl {
     this.addresses = new DoAddresses(client, config, options.deployment, context.log);
     this.loadBalancers = new DoLoadBalancers(client, config, options.deployment, context.log);
     this.dns = new DoDns(client, options.deployment, context.log);
+    this.certificates = new DoCertificates(client, options.deployment, context.log);
   }
 
   /** Whether better-compute may delete the Droplet: managed, and in this deployment (R3). */

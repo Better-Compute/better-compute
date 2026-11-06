@@ -3,6 +3,7 @@ import { registerAddresses } from './addresses.js';
 import { registerActions } from './actions.js';
 import { registerAutoscale } from './autoscale.js';
 import { registerCatalog } from './catalog.js';
+import { registerCertificates } from './certificates.js';
 import { registerDns } from './dns.js';
 import { registerDroplets } from './droplets.js';
 import { registerFirewalls } from './firewalls.js';
@@ -107,6 +108,8 @@ export class DoEmulator {
   loadBalancerReads = 1;
   /** How many load balancers the account may hold. */
   loadBalancerLimit = 10;
+  /** How many reads a new Let's Encrypt certificate answers `pending` to before it is `verified`. */
+  certificateReads = 1;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -295,5 +298,6 @@ export class DoEmulator {
     registerAddresses(this);
     registerLoadBalancers(this);
     registerDns(this);
+    registerCertificates(this);
   }
 }
