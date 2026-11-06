@@ -165,7 +165,7 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
       attributes: { visibility: 'string', verified: 'boolean' },
     },
     [`${p}profile`]: { actions: action('profiles', 'read', 'manage') },
-    [`${p}provider-account`]: { actions: action('providers', 'read', 'manage') },
+    [`${p}provider-account`]: { actions: action('providers', 'read', 'manage', 'purchase') },
     [`${p}sandbox`]: {
       parent: `${p}pool`,
       actions: action('sandboxes', 'create', 'read', 'update', 'exec', 'delete'),

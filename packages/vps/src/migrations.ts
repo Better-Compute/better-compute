@@ -10,6 +10,10 @@ import { vpsVolumeResizeHoldMigration, vpsVolumesMigration } from './volumes.js'
 import { vpsVolumeStorageMigration } from './volume-storage.js';
 import { providerReservationsMigration } from './provider-reservations.js';
 import {
+  providerPurchasesMigration,
+  providerPurchasesUnknownMigration,
+} from './provider-purchases.js';
+import {
   vpsNetworkAdoptMigration,
   vpsNetworksMigration,
   vpsNetworkZonesMigration,
@@ -213,4 +217,6 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsNetworkAdoptMigration,
   vpsNetworkZonesMigration,
   vpsSubnetPrivateAccessMigration,
+  providerPurchasesMigration,
+  providerPurchasesUnknownMigration,
 ]);

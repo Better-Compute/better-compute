@@ -4,6 +4,7 @@ import { assertRegion, parseArn, type AwsPartition } from '@better-compute/aws-c
 import { parseDiscoverTag } from './config.js';
 import { tags } from './ids.js';
 import { networksIamStatements } from './networks.js';
+import { marketStatements } from './markets/iam.js';
 
 // The CLI commands that onboard an AWS account (`aws iam-policy`, `aws trust-policy`). The CLI never
 // imports providers, so an application that uses this one adds the commands to its configuration:
@@ -52,6 +53,12 @@ export function iamPolicy(
     networks?: boolean;
     /** (A5) The EBS volume and snapshot statements (default true). */
     volumes?: boolean;
+    /** (A3) Accounts with `spot`: Spot launches and the Spot service-linked role. */
+    spot?: boolean;
+    /** (A3) Accounts with `pricing`: the Price List. */
+    pricing?: boolean;
+    /** (A3) Accounts with `allowPurchases`: buying Capacity Blocks and creating ODCRs (spends money). */
+    purchases?: boolean;
   } = {},
 ): IamPolicyDocument {
   const partition = options.partition ?? 'aws';
@@ -167,6 +174,14 @@ export function iamPolicy(
       Resource: `arn:${partition}:ssm:${region}::parameter/aws/service/*`,
     },
     { Sid: 'Identity', Effect: 'Allow', Action: 'sts:GetCallerIdentity', Resource: '*' },
+    ...marketStatements({
+      partition,
+      region,
+      account,
+      ...(options.spot ? { spot: true } : {}),
+      ...(options.pricing ? { pricing: true } : {}),
+      ...(options.purchases ? { purchases: true } : {}),
+    }),
   ];
   if (options.kmsKeyArn !== undefined) {
     let key;
@@ -396,7 +411,7 @@ export function awsIamPolicyCommand() {
     group: 'Providers' as const,
     summary: 'Print the IAM permissions policy an AWS provider account needs',
     description:
-      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; EBS volumes and snapshots created only tagged better-compute:managed=true and changed, attached, snapshotted or deleted only when they carry it and their better-compute:volume or better-compute:snapshot name, so never a root volume (attach and detach only on instances carrying better-compute:instance); public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; --phases A1,A2 adds tenant networks (VPC, subnet, gateway, security group and endpoint creates tagged better-compute:managed=true, changes and deletes only on resources so tagged, route and network ACL entry edits, and security group swaps on claimed instances).',
+      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; EBS volumes and snapshots created only tagged better-compute:managed=true and changed, attached, snapshotted or deleted only when they carry it and their better-compute:volume or better-compute:snapshot name, so never a root volume (attach and detach only on instances carrying better-compute:instance); public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; --phases A1,A2 adds tenant networks (VPC, subnet, gateway, security group and endpoint creates tagged better-compute:managed=true, changes and deletes only on resources so tagged, route and network ACL entry edits, and security group swaps on claimed instances). Capacity markets: capacity reservation, Capacity Block offering and Spot price reads, EC2 vCPU quota reads and launches into capacity reservations always; --spot adds Spot launches, --pricing the Price List, --allow-purchases buying Capacity Blocks and creating ODCRs (only tagged better-compute:managed=true).',
     target: 'none' as const,
     output: 'text' as const,
     flags: {
@@ -437,6 +452,20 @@ export function awsIamPolicyCommand() {
         description:
           'Program phases to cover, comma-separated (A1 always; A2 adds tenant networks: VPCs, subnets, gateways, security groups, network ACL entries)',
       },
+      spot: {
+        type: 'boolean' as const,
+        description:
+          'Accounts launch Spot (config spot): adds Spot requests and its service-linked role',
+      },
+      pricing: {
+        type: 'boolean' as const,
+        description: 'Accounts read prices (config pricing): adds pricing:GetProducts',
+      },
+      'allow-purchases': {
+        type: 'boolean' as const,
+        description:
+          'Accounts buy capacity (config allowPurchases): adds Capacity Block purchases and ODCR creation, tagged managed',
+      },
       out: outFlag,
     },
     async run(context: AwsCommandContext): Promise<void> {
@@ -464,6 +493,9 @@ export function awsIamPolicyCommand() {
             ? { discoverTag: text(context.flags['discover-tag'])! }
             : {}),
           ...(phases.has('A2') ? { networks: true } : {}),
+          ...(context.flags.spot === true ? { spot: true } : {}),
+          ...(context.flags.pricing === true ? { pricing: true } : {}),
+          ...(context.flags['allow-purchases'] === true ? { purchases: true } : {}),
         }),
       );
     },

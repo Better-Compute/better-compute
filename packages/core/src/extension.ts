@@ -630,6 +630,26 @@ export interface Offer {
   pricePerHour?: number;
   currency?: string;
   available: boolean;
+  /** (AWS A3) How the capacity is bought. Absent: on-demand. */
+  market?: OfferMarket;
+  /** (AWS A3) The CPU architecture of the machine type, when the provider reports it. */
+  arch?: 'x86_64' | 'arm64';
+  /**
+   * (AWS A3) Free slots when known: what a reservation has left, or the quota headroom in machines of
+   * this shape. Absent: unknown (unbounded as far as the offer can tell).
+   */
+  count?: number;
+}
+
+/** (AWS A3) The market an offer's capacity comes from. */
+export type OfferMarket = 'on-demand' | 'spot' | 'reserved' | 'capacity-block';
+
+/** (AWS A3) A notice that the provider will take a machine away, or has. */
+export interface MachineInterruption {
+  kind: 'spot' | 'capacity-block-end' | 'maintenance';
+  /** When it happens (or happened), epoch ms. */
+  at: number;
+  action?: 'terminate' | 'stop' | 'hibernate';
 }
 
 /** A provider image id, or a catalog image `name@version`. */
@@ -682,6 +702,50 @@ export interface ExternalMachine {
   createdAt?: number;
   /** The better-compute instance id the provider's ownership label names, if any. */
   claimedBy?: string;
+  /** (AWS A3) The market the machine's capacity comes from. Absent: on-demand. */
+  market?: OfferMarket;
+  /** (AWS A3) A pending or past interruption of the machine (a Spot reclaim, a Capacity Block's end). */
+  interruption?: MachineInterruption;
+}
+
+/** (AWS A3) What `listReservationOfferings` searches for: capacity that can be bought. */
+export interface ReservationOfferingQuery {
+  instanceType: string;
+  count: number;
+  durationHours: number;
+  /** Epoch ms bounds on the start; absent: as soon as possible. */
+  earliestStart?: number;
+  latestStart?: number;
+}
+
+/** (AWS A3) Capacity a provider sells ahead of time (a Capacity Block offering, an ODCR to create). */
+export interface ReservationOffering {
+  /** The id `purchaseReservation` takes. */
+  id: string;
+  instanceType: string;
+  zone: string;
+  count: number;
+  startsAt: number;
+  endsAt: number;
+  /** What the purchase charges up front; 0 when the capacity is billed as it runs. */
+  upfrontPrice: number;
+  currency: string;
+}
+
+/**
+ * (AWS A3) What vps knows about earlier attempts of one purchase, so a provider whose buy call has
+ * no idempotency token (EC2 PurchaseCapacityBlock) never buys twice when an earlier answer was lost.
+ */
+export interface PurchaseAttempt {
+  /** 1 for the first call of this purchase. */
+  attempt: number;
+  /** When the purchase was requested, epoch ms: nothing it bought is older. */
+  requestedAt: number;
+  /**
+   * Set when an earlier attempt ended without the provider's answer (a timeout, a dropped
+   * connection) and so may have bought: when the latest such attempt started, epoch ms.
+   */
+  uncertainSince?: number;
 }
 
 /** A provider capacity reservation (GCE reservations and the like), as the provider reports it. */
@@ -1185,6 +1249,20 @@ export interface ProviderImpl {
   /** Removes the ownership label if it names `instanceId`. */
   release?(id: string, instanceId: string, context: CallContext): Promise<void>;
   listReservations?(context: CallContext): Promise<ExternalReservation[]>;
+  /** (AWS A3) Capacity the account could buy that matches `query`. A read; it never spends. */
+  listReservationOfferings?(
+    query: ReservationOfferingQuery,
+    context: CallContext,
+  ): Promise<ReservationOffering[]>;
+  /**
+   * (AWS A3) Buys an offering. **Spends money.** vps calls it only for a root caller, after
+   * confirmation, with a stable `idempotencyKey`, so a retried purchase buys once.
+   */
+  purchaseReservation?(
+    offeringId: string,
+    context: CallContext,
+    attempt?: PurchaseAttempt,
+  ): Promise<ExternalReservation>;
   /**
    * (platform compute billing) The provider's list prices, for the regions asked (all when absent). A provider
    * caches what it reads; the prices are the provider's, before any margin.
@@ -1260,6 +1338,12 @@ export interface ProviderInput<C> {
   checkAccount?(config: C, context: ProviderContext & { signal: AbortSignal }): Promise<void>;
   /** A key no two accounts of this provider may share (e.g. a federation audience). Pure; no I/O. */
   accountKey?(config: C): string | undefined;
+  /**
+   * (AWS A3) A person-readable account of a `ReservationOffering` id (what, where, when, what it
+   * costs), shown to whoever approves the purchase; undefined for an id this provider does not
+   * issue. Pure; no I/O.
+   */
+  describeOffering?(offeringId: string): string | undefined;
   /**
    * (v1.0, D11/D12) How this provider's cost rows relate to what compute meters. Pure; no I/O. A record may
    * be a probe built from a pass-through rule's pattern (`sku` and `skuDescription` = the pattern, `service`

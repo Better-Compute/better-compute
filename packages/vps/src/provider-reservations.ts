@@ -499,7 +499,8 @@ export interface UnbindReservationInput {
   reservationId: string;
 }
 
-const reservationIdPattern = /^[A-Za-z0-9._/-]{1,300}$/;
+// `:` for provider prefixes such as AWS Capacity Blocks (`cb:cr-…`).
+const reservationIdPattern = /^[A-Za-z0-9._/:-]{1,300}$/;
 function reservationId(value: unknown): string {
   if (typeof value !== 'string' || !reservationIdPattern.test(value))
     throw new ComputeError('INVALID_INPUT', 'reservationId is invalid');

@@ -146,7 +146,7 @@ export const grantSchemas = {
       accountId,
       reservationId: {
         type: 'string',
-        pattern: '^[A-Za-z0-9._/-]{1,300}$',
+        pattern: '^[A-Za-z0-9._/:-]{1,300}$',
         maxLength: 300,
         description: 'The reservation, as providerAccounts.reservations lists it',
       },
@@ -188,7 +188,7 @@ export const grantSchemas = {
   end: strictObject({ tenantId, accountId, grantId }, ['tenantId', 'accountId', 'grantId']),
 };
 
-const reservationIdPattern = /^[A-Za-z0-9._/-]{1,300}$/;
+const reservationIdPattern = /^[A-Za-z0-9._/:-]{1,300}$/;
 
 function epoch(value: unknown, what: string): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)

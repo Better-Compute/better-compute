@@ -178,6 +178,21 @@ export function machineState(state: string | undefined): ExternalMachine['state'
   return state !== undefined && Object.hasOwn(states, state) ? states[state]! : 'unknown';
 }
 
+/** `Service initiated (2026-10-01 12:00:00 GMT)` → epoch ms. */
+function transitionTime(reason: string | undefined): number | undefined {
+  const match = reason ? /\((\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) GMT\)/.exec(reason) : null;
+  if (!match) return undefined;
+  const at = Date.parse(`${match[1]}T${match[2]}Z`);
+  return Number.isFinite(at) ? at : undefined;
+}
+
+/** The state reasons EC2 gives a Spot Instance it reclaimed, and what it did. */
+const spotReclaims: Readonly<Record<string, 'terminate' | 'stop' | 'hibernate'>> = {
+  'Server.SpotInstanceTermination': 'terminate',
+  'Server.SpotInstanceShutdown': 'stop',
+  'Server.SpotInstanceHibernate': 'hibernate',
+};
+
 /**
  * The `better-compute:` security groups (AD10) an interface carries, by name: one per network tag.
  * A network's own group (`bc-net-<network>`, its untargeted rules) is not a tag.
@@ -191,13 +206,27 @@ export function toMachine(
     region: string;
     types: ReadonlyMap<string, InstanceTypeInfo>;
     zoneIds: ReadonlyMap<string, string>;
+    /** When the read happened: the interruption time when EC2's reason has none. */
+    now?: number;
   },
 ): ExternalMachine {
   const id = instance.textOf('instanceId') ?? '';
   const type = instance.textOf('instanceType');
   const zone = instance.child('placement')?.textOf('availabilityZone');
-  const reservation = instance.textOf('capacityReservationId');
-  const spot = instance.textOf('instanceLifecycle') === 'spot';
+  const capacityReservation = instance.textOf('capacityReservationId');
+  const lifecycle = instance.textOf('instanceLifecycle');
+  const spot = lifecycle === 'spot';
+  const block = lifecycle === 'capacity-block';
+  // vps knows a Capacity Block as cb:cr-… (markets/reservations.ts); the offer id names the cr-… itself.
+  const reservation =
+    capacityReservation && block ? `cb:${capacityReservation}` : capacityReservation;
+  const market = spot
+    ? 'spot'
+    : block
+      ? 'capacity-block'
+      : capacityReservation
+        ? 'reserved'
+        : undefined;
   const tags: Record<string, string> = {};
   for (const item of instance.items('tagSet')) {
     const key = item.textOf('key');
@@ -240,7 +269,9 @@ export function toMachine(
     ...(name ? { name } : {}),
     state: machineState(instance.child('instanceState')?.textOf('name')),
     ...(zone && type
-      ? { offerId: `${zone}/${type}${reservation ? `@${reservation}` : ''}${spot ? ':spot' : ''}` }
+      ? {
+          offerId: `${zone}/${type}${capacityReservation ? `@${capacityReservation}` : ''}${spot ? ':spot' : ''}`,
+        }
       : {}),
     region: info.region,
     addresses,
@@ -253,5 +284,15 @@ export function toMachine(
     ...(reservation ? { reservation } : {}),
     ...(Number.isFinite(launched) ? { createdAt: launched } : {}),
     ...(claimedBy ? { claimedBy } : {}),
+    ...(market ? { market } : {}),
+    ...interruptionOf(),
   };
+
+  function interruptionOf(): Pick<ExternalMachine, 'interruption'> {
+    const code = instance.child('stateReason')?.textOf('code');
+    if (!spot || code === undefined || !Object.hasOwn(spotReclaims, code)) return {};
+    const at = transitionTime(instance.textOf('reason')) ?? info.now;
+    if (at === undefined) return {};
+    return { interruption: { kind: 'spot', at, action: spotReclaims[code]! } };
+  }
 }

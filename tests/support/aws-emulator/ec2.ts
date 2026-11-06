@@ -32,6 +32,8 @@ export interface EmuInstance {
   volumeTags: Map<string, string>;
   launchTime: number;
   stateReason?: string;
+  /** `reason` (StateTransitionReason), e.g. `Service initiated (2026-10-01 12:00:00 GMT)`. */
+  transitionReason?: string;
   privateIp: string;
   publicIp?: string;
   subnetId: string;
@@ -43,7 +45,7 @@ export interface EmuInstance {
   interfaces?: number;
   terminationProtected: boolean;
   capacityReservationId?: string;
-  lifecycle?: 'spot';
+  lifecycle?: 'spot' | 'capacity-block';
   notFoundById: number;
   notFoundByToken: number;
   rootDevice: string;
@@ -135,6 +137,13 @@ export class Ec2Emulator {
   readonly extensions: ((request: EmulatorRequest) => Response | undefined)[] = [];
   /** Extra `blockDeviceMapping` items of an instance (attached EBS volumes). */
   blockDevices: (instance: EmuInstance) => string[] = () => [];
+  /** Operations other emulator modules (capacity.ts) answer, checked before the built-in ones. */
+  readonly extra = new Map<string, (request: EmulatorRequest) => Response>();
+  /** RunInstances hooks: `check` may refuse the launch; `launched` sees the new instance. */
+  readonly runHooks: {
+    check?(params: URLSearchParams): Response | undefined;
+    launched?(instance: EmuInstance, params: URLSearchParams): void;
+  }[] = [];
   #next = 0;
 
   constructor(private readonly emu: AwsEmulator) {
@@ -248,6 +257,7 @@ export class Ec2Emulator {
       instance.stateReason
         ? `<stateReason>${el('code', instance.stateReason)}${el('message', instance.stateReason)}</stateReason>`
         : '',
+      el('reason', instance.transitionReason),
       el('capacityReservationId', instance.capacityReservationId),
       el('instanceLifecycle', instance.lifecycle),
       el('architecture', this.types.get(instance.type)?.arch[0] ?? 'x86_64'),
@@ -284,6 +294,8 @@ export class Ec2Emulator {
   #handle(request: EmulatorRequest): Response {
     const p = request.params;
     const action = request.operation;
+    const extra = this.extra.get(action);
+    if (extra) return extra(request);
     switch (action) {
       case 'DescribeAvailabilityZones': {
         const names = listOf(p, 'ZoneName');
@@ -563,6 +575,10 @@ export class Ec2Emulator {
     const userData = p.get('UserData') ?? undefined;
     if (userData && Buffer.from(userData, 'base64').length > 16_384)
       return ec2Error('InvalidParameterValue', 'User data is limited to 16384 bytes');
+    for (const hook of this.runHooks) {
+      const refused = hook.check?.(p);
+      if (refused) return refused;
+    }
     const instance = this.addInstance({ type, zone, state: 'pending' });
     instance.imageId = imageId.startsWith('resolve:ssm:') ? 'ami-0fedcba9876543210' : imageId;
     instance.publicIp =
@@ -591,6 +607,7 @@ export class Ec2Emulator {
           p.get(`TagSpecification.${n}.Tag.${m}.Value`) ?? '',
         );
     }
+    for (const hook of this.runHooks) hook.launched?.(instance, p);
     return ec2Response(
       'RunInstances',
       `${el('reservationId', `r-${instance.id.slice(2)}`)}${el('ownerId', '222222222222')}${items('instancesSet', [this.#instanceXml(instance)])}`,

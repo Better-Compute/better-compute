@@ -100,3 +100,29 @@ Makes a reservation usable from a provider pool: creates a flavor in the pool wh
 Removes a reservation's binding; returns `reservationId`.
 
 The flavor `bindReservation` created is deleted if no instance uses it, and archived otherwise (instances that use it keep running; no new instance can use it). Unbinding a reservation that is not bound succeeds. The worker does the same when a bound reservation is no longer reported, and then publishes `provider.reservation.gone` with `poolId` and `flavorId`. A missing account or reservation is `NOT_FOUND`.
+
+## reservationOfferings
+
+Lists capacity the account could buy ahead of time; returns `{ items }`, each `{ id, instanceType, zone, count, startsAt, endsAt, upfrontPrice, currency }`. A provider read: nothing is bought.
+
+- **Input.** `query` names the `instanceType`, `count` (1 to 1000) and `durationHours` (1 to 4368), optionally bounded by `earliestStart` and `latestStart` (epoch ms).
+- **Who.** Root (platform) tenant only, on the platform's own provider accounts, like `purchaseReservation`: anyone else, and root on a tenant's account, is `ACCESS_DENIED`. Decided as `compute:providers:read` on the provider account.
+- **Provider calls.** The call reaches the provider live, with no transaction open.
+- **AWS.** The items are On-Demand Capacity Reservations the account could create now, in each of its zones that offers the type (`upfrontPrice` 0: an ODCR bills on-demand rates for every reserved instance while it is active, used or not), and Capacity Blocks for ML on sale in the account's zones (1 to 64 instances). Offering ids describe themselves: `cb:<zone>/<type>/<count>/<hours>/<start epoch seconds>/<upfront cents>/<offering id>` for a block, `odcr:<zone>/<type>/<count>/<hours>` for an ODCR.
+- **Errors.** `NOT_FOUND` for a missing account. `UNSUPPORTED` when the provider sells nothing ahead of time. `INVALID_INPUT` for an instance type the provider does not know.
+
+## purchaseReservation
+
+Buys one offering; returns the purchase `{ id, accountId, offeringId, state, attempts, reservationId?, reservation?, error?, createdAt, updatedAt }`. **This spends money.**
+
+- **Who.** Root (platform) tenant only, decided as `compute:providers:purchase` on the provider account; anyone else is `ACCESS_DENIED`, and so is a purchase from a provider account the root tenant does not own (capacity is bought only in the platform's own accounts).
+- **Confirmation.** The request must carry `confirm: true`, else `CONFIRMATION_REQUIRED` (`details.reason` `confirm-spend`, with `offeringId` and `accountId`); retry with `confirm: true` and the same `idempotencyKey`. An agent acting for a person is held back until the person approves; the approval names what is bought (on AWS: instance type and count, zone, start and end, and the up-front price, or that an ODCR bills on-demand rates for its reserved instance-hours).
+- **Idempotency.** `idempotencyKey` is required and scoped to (tenant, caller identity): a retry with the same key returns the same purchase and never buys twice, including two requests racing on one key. The same key for another account or offering is `CONFLICT`.
+- **Exactly once.** The purchase is recorded in the request's transaction and bought by the `vps.purchases` worker outside any transaction, with a key of its own that the provider makes idempotent. An attempt that ends without the provider's answer (a timeout, a dropped connection) is retried with that key, and the provider is told an earlier attempt may have bought: on AWS a Capacity Block (whose purchase call has no idempotency token) is then looked for by what it is, and is not bought again until 15 minutes passed without it showing.
+- **States.** `state` moves `requested` → `purchasing` → `purchased` (the reservation bought, which the reservations worker then lists so it can be bound), `failed` (`error`: the provider refused, nothing was bought) or `unknown` (the attempts ran out while one may have bought: check the account's reservations). A mutation's poll settles on any of the last three. Events: `provider.purchase.requested`, `completed`, `failed`, `unknown`.
+- **Account gate.** The provider must be able to buy for this account: an AWS account must set `allowPurchases` (off by default) and be a platform account. Otherwise the request is `UNSUPPORTED` (`details.reason` `purchases-unavailable`) and nothing is recorded.
+- **AWS.** `offeringId` is an id `reservationOfferings` listed (`cb:…` or `odcr:…`). A Capacity Block is bought only while EC2 still lists it at no more than the price in its id (else `failed` with `CONFLICT`, `price-changed`, or `CAPACITY_UNAVAILABLE`, `offering-gone`).
+
+## purchases
+
+Returns the account's purchases, newest first (at most 500), as `items`; root (platform) tenant only, decided as `compute:providers:read` on the provider account.

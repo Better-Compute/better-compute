@@ -50,10 +50,13 @@ const machineRef = (description: string): InputSchema => ({
   maxLength: 128,
   description,
 });
-/** A provider reservation id: `<zone>/<name>`, or a shared-in `projects/<owner>/zones/<zone>/reservations/<name>`. */
+/**
+ * A provider reservation id: `<zone>/<name>`, or a shared-in `projects/<owner>/zones/<zone>/reservations/<name>`
+ * (GCP); `cr-…`, or `cb:cr-…` for a Capacity Block (AWS).
+ */
 const reservationRef = (description: string): InputSchema => ({
   type: 'string',
-  pattern: '^[A-Za-z0-9._/-]{1,300}$',
+  pattern: '^[A-Za-z0-9._/:-]{1,300}$',
   maxLength: 300,
   description,
 });
