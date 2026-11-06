@@ -247,3 +247,75 @@ describe('placement groups', () => {
     expect(w.runs()).toHaveLength(0);
   });
 });
+
+describe('instance topology', () => {
+  async function running(w: ReturnType<typeof world>, offer: string, key: string) {
+    const machine = await w.compute.create(request(offer), w.call(key));
+    w.ec2emu.tick();
+    return machine.id;
+  }
+
+  it('labels a running EFA machine with its network nodes, read once an hour', async () => {
+    const w = world();
+    const id = await running(w, 'us-east-1a/p5.48xlarge', 'ins_1');
+    w.placement.topology.set(id, [
+      'nn-1111111111111111a',
+      'nn-2222222222222222b',
+      'nn-3333333333333333c',
+    ]);
+    const machine = await w.compute.get(id, w.call());
+    expect(machine?.labels).toMatchObject({
+      'topology.aws/network-node-1': 'nn-1111111111111111a',
+      'topology.aws/network-node-2': 'nn-2222222222222222b',
+      'topology.aws/network-node-3': 'nn-3333333333333333c',
+      'topology.aws/zone-id': 'use1-az1',
+    });
+    await w.compute.get(id, w.call());
+    const reads = () =>
+      w.placement.calls.filter((c) => c.action === 'DescribeInstanceTopology').length;
+    expect(reads()).toBe(1);
+    w.emu.clock.advance(3_600_001);
+    await w.compute.get(id, w.call());
+    expect(reads()).toBe(2);
+  });
+
+  it('never reads topology for a machine type without EFA, or one not running', async () => {
+    const w = world();
+    const small = await running(w, 'us-east-1a/m7i.large', 'ins_1');
+    const pending = await w.compute.create(request('us-east-1a/p5.48xlarge'), w.call('ins_2'));
+    w.placement.topology.set(pending.id, ['nn-1', 'nn-2', 'nn-3']);
+    expect((await w.compute.get(small, w.call()))?.labels).not.toHaveProperty(
+      'topology.aws/network-node-1',
+    );
+    const seen = await w.compute.get(pending.id, w.call());
+    expect(seen?.state).toBe('pending');
+    expect(seen?.labels).not.toHaveProperty('topology.aws/network-node-1');
+    expect(w.placement.calls.filter((c) => c.action === 'DescribeInstanceTopology')).toHaveLength(
+      0,
+    );
+  });
+
+  it('a tag never poses as topology, and an unreadable topology only warns once', async () => {
+    const logs: unknown[][] = [];
+    const w = world({}, logs);
+    const id = await running(w, 'us-east-1a/p5.48xlarge', 'ins_1');
+    w.ec2emu.instances.get(id)!.tags.set('topology.aws/network-node-1', 'nn-forged');
+    w.placement.failNext.set('DescribeInstanceTopology', 'UnauthorizedOperation');
+    const machine = await w.compute.get(id, w.call());
+    expect(machine?.state).toBe('running');
+    expect(machine?.labels).not.toHaveProperty('topology.aws/network-node-1');
+    w.placement.failNext.set('DescribeInstanceTopology', 'UnauthorizedOperation');
+    w.emu.clock.advance(3_600_001);
+    await w.compute.get(id, w.call());
+    expect(logs.filter(([level]) => level === 'warn')).toHaveLength(1);
+    expect(JSON.stringify(logs)).not.toContain('nn-forged');
+  });
+
+  it('drops node ids that are not EC2 node ids', async () => {
+    const w = world();
+    const id = await running(w, 'us-east-1a/p5.48xlarge', 'ins_1');
+    w.placement.topology.set(id, ['nn-1111111111111111a', 'bad id with spaces', 'nn-3']);
+    const machine = await w.compute.get(id, w.call());
+    expect(machine?.labels).not.toHaveProperty('topology.aws/network-node-1');
+  });
+});

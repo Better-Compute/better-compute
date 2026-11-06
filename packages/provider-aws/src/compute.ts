@@ -30,6 +30,7 @@ import {
 import { aliasRootDeviceOf, resolveImage, ssmImagePrefixes } from './images.js';
 import { AwsNetworks } from './networks.js';
 import { checkPlacement, PlacementGroups, placementParams } from './placement.js';
+import { InstanceTopology } from './topology.js';
 import {
   toMachine,
   type InstanceTypeCache,
@@ -203,6 +204,8 @@ export class AwsCompute implements ProviderImpl {
   readonly #prices: PriceReader;
   /** (A10) Placement groups made on first use. */
   readonly #placementGroups: PlacementGroups;
+  /** (A10) Network nodes of running EFA machines. */
+  readonly #topology: InstanceTopology;
   /** (A4, no queue) When the last DescribeInstanceStatus scan succeeded. */
   #scannedAt: number | undefined;
 
@@ -235,6 +238,11 @@ export class AwsCompute implements ProviderImpl {
     this.#placementGroups = new PlacementGroups(
       (action, params, signal) => this.call(action, params, signal),
       context.clock,
+    );
+    this.#topology = new InstanceTopology(
+      (action, params, signal) => this.call(action, params, signal),
+      context.clock,
+      context.log,
     );
     this.networks = new AwsNetworks({
       config,
@@ -1315,6 +1323,13 @@ export class AwsCompute implements ProviderImpl {
       const failure = terminatedFailure(instance.child('stateReason')?.textOf('code'));
       if (failure instanceof ComputeError) throw failure;
       if (failure === 'error') return { ...machine, state: 'error' };
+    }
+    // (A10) A running machine of an EFA family carries the network nodes above it.
+    if (machine.state === 'running' && machine.machineType) {
+      const info = (
+        await this.#types([machine.machineType], context.signal).catch(() => undefined)
+      )?.get(machine.machineType);
+      if (info?.efa) return this.#topology.label(machine, context.signal);
     }
     return machine;
   }

@@ -1,5 +1,6 @@
 import { ComputeError, type Clock, type ExternalMachine } from '@better-compute/core';
 import type { QueryClient, XmlElement } from '@better-compute/aws-core';
+import { withoutTopology } from './topology.js';
 
 /** One EC2 instance type, as `DescribeInstanceTypes` reports it. */
 export interface InstanceTypeInfo {
@@ -233,7 +234,8 @@ export function toMachine(
     if (key !== undefined && !Object.hasOwn(tags, key) && key !== '__proto__')
       tags[key] = item.textOf('value') ?? '';
   }
-  const labels: Record<string, string> = { ...tags };
+  // Provider topology labels come from EC2's reads, never from a tag.
+  const labels: Record<string, string> = withoutTopology(tags);
   const zoneId = zone ? info.zoneIds.get(zone) : undefined;
   if (zoneId) labels['topology.aws/zone-id'] = zoneId;
   const addresses: string[] = [];

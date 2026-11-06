@@ -5,6 +5,7 @@ export * from './shapes.js';
 export * from './compute.js';
 export * from './networks.js';
 export * from './placement.js';
+export * from './topology.js';
 export * from './images.js';
 export * from './userdata.js';
 export * from './provider.js';
