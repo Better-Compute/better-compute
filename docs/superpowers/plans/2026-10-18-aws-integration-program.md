@@ -594,6 +594,13 @@ These are all implementations of seams that already exist; no core changes:
 
 ### A9 — Kubernetes on AWS (EKS)
 
+> **Status (wf/aws-eks, 2026-11-05):** eksToken, k8s-join mode `eks` (provision `eksNodeConfig`/`eksUserData`,
+> `policy.kubernetes.eks`), the EKS DaemonSet test, and beyond the outline `ProviderKubernetes` on EKS in provider-aws
+> (`src/eks/**`: clusters, Auto Mode for `autopilot`, managed node groups, versions, access-entry credentials; config
+> `eksClusterRoleArn`/`eksNodeRoleArn`/`eksSubnetIds`; `aws iam-policy --eks-*`) and the optional
+> `ProviderKubernetes.listClusters` landed. Open: the vps `providerAccounts.clusters` method, wiring `eksUserData` into
+> provider-pool launches, and bcd's `k8s-join` converger for mode `eks` (it must not run kubeadm).
+
 - **Hosted mode:** provider-kubernetes hosted mode works on EKS today. A9 adds docs plus a test that renders the
   DaemonSet for EKS-shaped nodes: the `eks.amazonaws.com/nodegroup` selector and the GPU taint
   `nvidia.com/gpu=:NoSchedule`.

@@ -1,6 +1,6 @@
 # @better-compute/provider-aws
 
-The Amazon EC2 provider for better-compute. EC2 instances (GPU instances included) become the instances of provider pools, with the same API, reconcilers and guarantees as the other cloud providers: offers, create, get, delete, power, reinstall, list, and discovery and attach. It calls AWS over plain `fetch` through [`@better-compute/aws-core`](../aws-core) (SigV4, the EC2 protocol, credentials); there is no AWS SDK.
+The Amazon EC2 provider for better-compute. EC2 instances (GPU instances included) become the instances of provider pools, with the same API, reconcilers and guarantees as the other cloud providers: offers, create, get, delete, power, reinstall, list, and discovery and attach; managed Kubernetes runs on EKS. It calls AWS over plain `fetch` through [`@better-compute/aws-core`](../aws-core) (SigV4, the EC2 protocol, credentials); there is no AWS SDK.
 
 It is not in the `better-compute` umbrella: install it where you use it.
 
@@ -15,7 +15,7 @@ import { aws } from '@better-compute/provider-aws';
 vps({ providers: [aws] });
 ```
 
-`aws` is `awsProvider()` with default options. `awsProvider({ fetch, endpoints, credentials, externalIdPrefix, platformAccounts, rateLimit, consistencyWindowMs, ssmImagePrefixes })` takes host options: `credentials` is the host's own AWS identity (default: the ambient chain of environment, web identity, container and IMDSv2 credentials), `platformAccounts` lists the AWS account ids a tenant's role may never be in, `endpoints` (`ec2`, `sts`) is for emulators and VPC endpoints, and `ssmImagePrefixes` lists private SSM parameter prefixes raw images may name (see Images). None of them come from account config.
+`aws` is `awsProvider()` with default options. `awsProvider({ fetch, endpoints, credentials, externalIdPrefix, platformAccounts, rateLimit, consistencyWindowMs, ssmImagePrefixes, kubeTransport })` takes host options: `credentials` is the host's own AWS identity (default: the ambient chain of environment, web identity, container and IMDSv2 credentials), `platformAccounts` lists the AWS account ids a tenant's role may never be in, `endpoints` (`ec2`, `sts`, `eks`) is for emulators and VPC endpoints, and `ssmImagePrefixes` lists private SSM parameter prefixes raw images may name (see Images). None of them come from account config.
 
 ## Accounts
 
@@ -111,13 +111,35 @@ EC2 takes at most 16 384 bytes of user data. With SSH keys, the user data is a M
 
 `discover` yields every instance that is not terminated (only those tagged `discoverTag`, when set). `claim` writes `better-compute:instance` (and `better-compute:managed` when deletion is handed over) and re-reads: EC2 tags have no compare-and-swap, so a re-read naming another instance is a lost race (`CONFLICT`). Tag reads lag behind writes too: a re-read that does not show the tag (or `managed`) yet is `UNAVAILABLE` (reason `tag-propagation`, retried), and so is a `delete` right after a managed claim that does not see `managed` yet. The vps unique index on the external id referees between control planes. `release` removes the tags only when they name the instance. Deleting an attached instance detaches it by default and leaves it running.
 
+## Managed Kubernetes (EKS)
+
+The provider implements `ProviderImpl.kubernetes` on Amazon EKS, so [`@better-compute/kubernetes`](../kubernetes) (`kubernetesClusters`, `kubernetesNodePools`, short-lived kubeconfigs) works on an AWS account as it does on GKE. Clusters are regional: the location is the account's `region`. The account needs `eksClusterRoleArn`, `eksNodeRoleArn` and, unless a cluster names its subnets, `eksSubnetIds`.
+
+| Field               | Meaning                                                                                                   |
+| ------------------- | --------------------------------------------------------------------------------------------------------- |
+| `eksClusterRoleArn` | The IAM role new clusters run as.                                                                         |
+| `eksNodeRoleArn`    | The node IAM role of managed node groups and EKS Auto Mode nodes.                                         |
+| `eksSubnetIds`      | Default subnets of new clusters (two or more, in two or more zones); node groups use the cluster subnets. |
+
+- **Clusters.** `standard` is a cluster whose nodes are managed node groups; `autopilot` is EKS Auto Mode (EKS runs the compute, block storage and load balancing; there are no node pools). Every cluster authenticates through access entries only (`authenticationMode: API`): there is no `aws-auth` ConfigMap, and the creator (the account's own principal) gets the cluster-admin access entry. The release channel maps to EKS's support policy (`extended` to `EXTENDED`, the others to `STANDARD`; EKS has no rapid, regular or stable channels and upgrades only when `version` asks). In place, one update at a time: the support policy, the version (one minor per `UpdateClusterVersion`, as EKS upgrades; never down) and the authorized networks (`publicAccessCidrs`; empty means `0.0.0.0/0`). The mode, VPC, subnets and private nodes are immutable (`INVALID_STATE`); with `privateNodes` no subnet may have `MapPublicIpOnLaunch`. A network's `subnet` may list several subnet ids, comma-separated. Deleting a cluster deletes its node groups first. Clusters and node groups carry `better-compute:managed=true`.
+- **Node groups.** Counts are per zone, as on GKE: a node group's sizes are the pool's times the zones of its subnets (all of the cluster's, or those in `zones`). AL2023 AMIs follow the instance type: NVIDIA for GPU types (with the taint `nvidia.com/gpu=:NoSchedule`, as GKE's GPU pools have), arm64 for Graviton, Neuron for Inferentia and Trainium. `spot` is `capacityType: SPOT`. `accelerators` must match the type, since EKS attaches none (`nvidia-l4` x 1 on `g6.xlarge`). `diskType` is refused: managed node groups without a launch template use the AMI's. With `autoscaling` the bounds are the group's min and max size and a cluster autoscaler in the cluster owns the desired size. Only the size and the bounds change in place.
+- **Credentials.** The account principal reaches a cluster's API with an `eksToken` (aws-core: a presigned STS `GetCallerIdentity` signed with the `x-k8s-aws-id` header) through its access entry, which the driver creates with `AmazonEKSClusterAdminPolicy` at cluster scope on a cluster another principal made. Each subject gets a service account in `bc-access` bound to the built-in `view`, `edit` or `cluster-admin` ClusterRole (what `AmazonEKSViewPolicy`, `AmazonEKSEditPolicy` and `AmazonEKSClusterAdminPolicy` grant) and a TokenRequest token for the requested lifetime. Nothing is stored and no token is logged. A cluster that authenticates through the ConfigMap only is `INVALID_STATE`.
+- **Versions** come from `DescribeClusterVersions`: the `rapid`, `regular` and `stable` channels list the versions in standard support, and `extended` adds those in extended support.
+- **Discovery.** `kubernetes.listClusters` lists every cluster of the region, with the nodeadm settings of the ready ones (`policy.kubernetes.eks`), so EC2 machines can join an EKS cluster through `k8s-join` mode `eks`.
+
+`aws iam-policy --eks-cluster-role <arn> --eks-node-role <arn>` adds the EKS statements: reads; `CreateCluster` and `CreateNodegroup` only when they tag `better-compute:managed=true`; updates and deletes only of resources tagged so; an access entry only for the caller's own principal (`eks:principalArn` equal to `${aws:PrincipalArn}`) with only the cluster-admin access policy at cluster scope; `iam:PassRole` of the two roles to EKS; and the EKS service-linked roles. Host options: `endpoints.eks` (emulators, VPC endpoints) and `kubeTransport` (the transport to a cluster's API; by default `node:https` trusting only the cluster's CA).
+
+### Hosted mode and nodeadm
+
+[`@better-compute/provider-kubernetes`](../provider-kubernetes) runs bcd as a DaemonSet in an existing EKS cluster: select a node group with `nodeSelector: { 'eks.amazonaws.com/nodegroup': '<name>' }` and tolerate `nvidia.com/gpu` `NoSchedule` on GPU node groups. Machines of a provider pool join an EKS cluster instead through `policy.kubernetes.eks` (`k8s-join` mode `eks`): provision's `eksUserData` puts nodeadm's `NodeConfig` (`node.eks.aws/v1alpha1`) into the user data of an AL2023 EKS AMI (alias `eks-al2023-<k8s>`), and the node authenticates as the role of its `instanceProfile`, which needs an `EC2_LINUX` access entry on the cluster.
+
 ## What comes next
 
-Networks (A2), capacity reservations, Capacity Blocks, Spot and prices (A3), event intake and Spot interruptions (A4), EBS volumes (A5), EC2 hosts joining as bcd nodes (A6), workload roles (A7), EKS (A9), placement groups and EFA (A10), and costs (A11), per `docs/superpowers/plans/2026-10-18-aws-integration-program.md`.
+Networks (A2), capacity reservations, Capacity Blocks, Spot and prices (A3), event intake and Spot interruptions (A4), EBS volumes (A5), EC2 hosts joining as bcd nodes (A6), workload roles (A7), the `providerAccounts.clusters` API method (A9), placement groups and EFA (A10), and costs (A11), per `docs/superpowers/plans/2026-10-18-aws-integration-program.md`.
 
 ## Testing
 
-`tests/support/aws-emulator` emulates STS, IMDS and EC2 in process through `fetch`. `tests/provider-aws*.test.ts` cover the config, credentials, offers, compute, attach, the CLI policies and the `providerConformanceCases()` suite; `tests/aws-end-to-end.test.ts` drives the provider through vps on PGlite. No test calls AWS.
+`tests/support/aws-emulator` emulates STS, IMDS and EC2 in process through `fetch`, and `tests/support/eks-emulator.ts` EKS and the clusters' Kubernetes API (it verifies each eksToken's signature and the principal's access entry); `tests/provider-aws-eks.test.ts` and `tests/kubernetes-eks.test.ts` cover managed Kubernetes. `tests/provider-aws*.test.ts` cover the config, credentials, offers, compute, attach, the CLI policies and the `providerConformanceCases()` suite; `tests/aws-end-to-end.test.ts` drives the provider through vps on PGlite. No test calls AWS.
 
 ## License
 
