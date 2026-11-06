@@ -29,7 +29,9 @@ export const doConfig = manifest({
   allowSpot: field
     .boolean()
     .default(false)
-    .describe('Offer Spot capacity where DigitalOcean has it'),
+    .describe(
+      'Offer Spot capacity where DigitalOcean has it; while its API shape is unverified, previews must be on too',
+    ),
   discoverTag: field
     .string()
     .optional()

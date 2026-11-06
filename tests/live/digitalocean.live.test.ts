@@ -422,7 +422,7 @@ describe.skipIf(!enabled)('provider-digitalocean live', () => {
       `spotShape: ${priced.length} of ${sizes.length} sizes carry ${spotShape.sizePriceField}` +
         (priced.length ? ` (${priced.slice(0, 10).map((size) => size.slug).join(', ')})` : ''),
     );
-    const parsed = await provider.config['~standard'].validate({ ...config, allowSpot: true });
+    const parsed = await provider.config['~standard'].validate({ ...config, allowSpot: true, previews: true });
     if ('issues' in parsed && parsed.issues) throw new Error(parsed.issues[0]!.message);
     const impl = (await provider.create(
       (parsed as { value: DoConfig }).value,

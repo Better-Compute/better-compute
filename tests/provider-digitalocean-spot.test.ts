@@ -43,7 +43,8 @@ const spotRequest = (over: Record<string, unknown> = {}) => ({
   sshKeys: [testKey],
   ...over,
 });
-const spotAccount = { ...doAccount, regions: ['tor1'], allowSpot: true };
+// Spot is a DigitalOcean preview whose wire shape is unverified: it needs previews as well.
+const spotAccount = { ...doAccount, regions: ['tor1'], allowSpot: true, previews: true };
 const spotTag = tagFor(labels.capacity, 'spot');
 const dropletPosts = (emu: DoEmulator) =>
   emu.requests.filter((r) => r.method === 'POST' && r.url.pathname === '/v2/droplets');
@@ -72,6 +73,11 @@ describe('spot offers', () => {
     freshBudgets();
     const off = await build(spotEmulator(), { ...spotAccount, allowSpot: false });
     expect((await off.listOffers({})).some((o) => o.id.endsWith('@spot'))).toBe(false);
+  });
+
+  it('while the wire shape is unverified, Spot offers need previews too', async () => {
+    const compute = await build(spotEmulator(1.25), { ...spotAccount, previews: false });
+    expect((await compute.listOffers({})).some((o) => o.id.endsWith('@spot'))).toBe(false);
   });
 
   it('a catalog with no Spot member yields no Spot offer even with allowSpot', async () => {
@@ -138,5 +144,30 @@ describe('spot creates', () => {
     );
     expect([noSpot.code, noSpot.details?.reason]).toEqual(['INVALID_INPUT', 'spot']);
     expect(emu.requests).toHaveLength(before);
+  });
+
+  it('without a cached catalog, a Spot create loads it and refuses a size without a Spot price', async () => {
+    const emu = spotEmulator();
+    const compute = await build(emu, spotAccount);
+    const refused = await failure(
+      compute.create(
+        spotRequest({ offerId: 'tor1/gpu-l40sx1-48gb@spot', image: 'ubuntu-24-04-x64' }),
+        ctx(),
+      ),
+    );
+    expect([refused.code, refused.details?.reason]).toEqual(['INVALID_INPUT', 'spot']);
+    expect(dropletPosts(emu)).toHaveLength(0);
+    // A size with a Spot price goes through on the same uncached path.
+    freshBudgets();
+    const fresh = await build(spotEmulator(), spotAccount);
+    await fresh.create(spotRequest(), ctx('ok'));
+  });
+
+  it('while the wire shape is unverified, a Spot create needs previews: no POST', async () => {
+    const emu = spotEmulator();
+    const compute = await build(emu, { ...spotAccount, previews: false });
+    const refused = await failure(compute.create(spotRequest(), ctx()));
+    expect([refused.code, refused.details?.reason]).toEqual(['UNSUPPORTED', 'spotPreview']);
+    expect(emu.requests).toHaveLength(0);
   });
 });

@@ -1,3 +1,4 @@
+import type { DoConfig } from '../config.js';
 import type { DoSize } from './types.js';
 
 // Spot GPU Droplets (P3, DO-D14). DigitalOcean sells Spot GPU capacity (public preview since
@@ -22,6 +23,15 @@ export const spotShape = {
   createBody: { capacity_type: 'spot' } as Readonly<Record<string, string>>,
   verified: false,
 } as const;
+
+/**
+ * Whether the account may use Spot at all: `allowSpot`, and, while the wire shape above is a guess,
+ * `previews` as well (Spot is a DigitalOcean preview). An unverified Spot create that DO ignored
+ * would be an on-demand GPU Droplet at full price that better-compute tags and treats as Spot.
+ */
+export function spotEnabled(config: Pick<DoConfig, 'allowSpot' | 'previews'>): boolean {
+  return config.allowSpot === true && (spotShape.verified || config.previews === true);
+}
 
 /** The Spot price per hour of a size, when DigitalOcean offers Spot capacity for it. */
 export function spotPriceOf(size: DoSize): number | undefined {

@@ -32,8 +32,8 @@ import { poolMembers } from './autoscale.js';
 import { ensureSshKeys } from './keys.js';
 import { DoCatalogImages } from './catalog.js';
 import { checkGpuImage, classifyImage, imageParam, type ImageChoice } from './images.js';
-import { cachedSize, gpuModelOf, listOffers } from './offers.js';
-import { spotPriceOf, spotShape } from './spot.js';
+import { cachedSize, gpuModelOf, listOffers, sizeOf } from './offers.js';
+import { spotEnabled, spotPriceOf, spotShape } from './spot.js';
 import { assignTag, ensureTag, hasTag, spelled, unassignTag } from './tags.js';
 import type { DoAction, DoDroplet, DoVpc } from './types.js';
 
@@ -307,7 +307,7 @@ export class DoCompute implements ProviderImpl {
         `offer ${request.offerId} is in ${region}, which this account does not use`,
         'region',
       );
-    if (spot) this.checkSpot(size);
+    if (spot) await this.checkSpot(size, signal);
     const imageChoice = this.checkImage(classifyImage(request.image), request.catalogImage);
     if (Buffer.byteLength(request.userData, 'utf8') > maxUserDataBytes)
       throw fail(
@@ -433,18 +433,26 @@ export class DoCompute implements ProviderImpl {
   }
 
   /**
-   * Refuses a Spot create the account does not allow (DO-D14), or one for a size the cached
-   * catalog shows without Spot capacity. Without a cached catalog DO decides.
+   * Refuses a Spot create the account does not allow (DO-D14; while the wire shape is unverified,
+   * one without `previews` too), or one for a size the catalog shows without a Spot price. The
+   * catalog is loaded when the client holds none: DO is never left to decide, since a Spot member it
+   * ignored would make an on-demand Droplet that reads back as Spot.
    */
-  protected checkSpot(size: string): void {
+  protected async checkSpot(size: string, signal: AbortSignal): Promise<void> {
     if (!this.config.allowSpot)
       throw fail(
         'UNSUPPORTED',
         'Spot capacity is off for this DigitalOcean account (allowSpot)',
         'spot',
       );
-    const known = cachedSize(this.client, size);
-    if (known && spotPriceOf(known) === undefined)
+    if (!spotEnabled(this.config))
+      throw fail(
+        'UNSUPPORTED',
+        "DigitalOcean Spot is a preview whose API shape better-compute hasn't verified: it needs previews as well as allowSpot",
+        'spotPreview',
+      );
+    const known = cachedSize(this.client, size) ?? (await sizeOf(this.client, size, signal));
+    if (!known || spotPriceOf(known) === undefined)
       throw fail('INVALID_INPUT', `size ${size} has no Spot capacity on DigitalOcean`, 'spot');
   }
 

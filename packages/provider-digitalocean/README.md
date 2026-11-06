@@ -123,7 +123,9 @@ Imports need `image:create` (and `image:update` for transfers, `image:delete` fo
 
 ## Spot
 
-With `allowSpot`, a size whose catalog entry reports a Spot price gets a second offer `region/size@spot` at that price (DigitalOcean changes it daily). A create for it sends the Spot request member and tags the Droplet `better-compute-capacity:spot`, so it reads back with its `@spot` offer id; a tenant label can't forge that tag. A Spot create for a size the cached catalog shows without Spot is `INVALID_INPUT` (`spot`).
+With `allowSpot`, a size whose catalog entry reports a Spot price gets a second offer `region/size@spot` at that price (DigitalOcean changes it daily). A create for it sends the Spot request member and tags the Droplet `better-compute-capacity:spot`, so it reads back with its `@spot` offer id; a tenant label can't forge that tag. A Spot create loads the size catalog when the client holds none, and one for a size without a Spot price is `INVALID_INPUT` (`spot`) before any create is sent: DigitalOcean is never left to decide, since a Spot member it ignored would make an on-demand GPU Droplet that better-compute reads back, and treats, as Spot.
+
+**Spot needs `previews` too, for now.** Spot is a DigitalOcean preview and the wire shape below is a guess, so while `spotShape.verified` is false an account needs `previews: true` as well as `allowSpot`: without it there are no `@spot` offers and a Spot create is `UNSUPPORTED` (`spotPreview`).
 
 **The wire shape is not verified.** DigitalOcean's public OpenAPI has no Spot member on sizes or on the Droplet create (checked 2026-11-05). The provider's assumptions are data in one place, `spotShape` in `compute/spot.ts` (`verified: false`): the size member `spot_price_hourly` and the create member `capacity_type: 'spot'`. A catalog without the size member yields no Spot offer at all, so a wrong guess offers nothing rather than something else. The live suite settles it.
 
