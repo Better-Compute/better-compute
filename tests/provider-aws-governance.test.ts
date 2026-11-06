@@ -7,9 +7,11 @@ import {
   type AwsCompute,
   type AwsConfig,
   awsCostAllocationTagsCommand,
+  awsGovernancePolicyCommand,
   awsTagPolicyCommand,
   budgetTemplate,
   costAllocationTagKeys,
+  governancePolicy,
   tagPolicy,
   type AwsCommandContext,
 } from '@better-compute/provider-aws';
@@ -158,6 +160,47 @@ describe('provider-aws governance', () => {
     }
     const { context } = harness({ amount: '10', tenant: 'tnt_acme', email: 'a@example.com' });
     await expect(awsBudgetTemplateCommand().run(context)).rejects.toThrow(/--tenant/);
+  });
+
+  it('governance-policy is the operator identity policy for the governance commands, mutations opt-in', async () => {
+    const actions = (policy: ReturnType<typeof governancePolicy>) =>
+      policy.Statement.flatMap((statement) =>
+        typeof statement.Action === 'string' ? [statement.Action] : [...statement.Action],
+      ).sort();
+    const read = governancePolicy();
+    expect(read.Version).toBe('2012-10-17');
+    expect(actions(read)).toEqual([
+      'ce:ListCostAllocationTags',
+      'organizations:ListAccounts',
+      'organizations:ListAccountsForParent',
+      'servicequotas:GetServiceQuota',
+      'servicequotas:ListServiceQuotas',
+    ]);
+    // nothing that changes AWS without its flag
+    for (const action of actions(read))
+      expect(action).not.toMatch(/Update|Request|Create|Attach|GetCostAndUsage/);
+    const all = governancePolicy({
+      partition: 'aws-us-gov',
+      activateTags: true,
+      quotaRequests: true,
+      spend: true,
+    });
+    expect(actions(all)).toEqual(
+      [
+        ...actions(read),
+        'ce:GetCostAndUsage',
+        'ce:UpdateCostAllocationTagsStatus',
+        'servicequotas:RequestServiceQuotaIncrease',
+      ].sort(),
+    );
+    // quota requests only for EC2 quotas
+    expect(all.Statement.find((s) => s.Sid === 'QuotaRequests')!.Resource).toBe(
+      'arn:aws-us-gov:servicequotas:*:*:ec2/*',
+    );
+    expect(() => governancePolicy({ partition: 'aws-xx' as never })).toThrow(/partition/);
+    const { context, json } = harness({ 'quota-requests': true });
+    await awsGovernancePolicyCommand().run(context);
+    expect(json()).toEqual(governancePolicy({ quotaRequests: true }));
   });
 
   it('tag-policy fixes the key spelling and, with --enforce, the managed value', async () => {

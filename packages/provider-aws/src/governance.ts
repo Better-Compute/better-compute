@@ -1,6 +1,6 @@
 import { ComputeError } from '@better-compute/core';
-import { parseArn } from '@better-compute/aws-core';
-import type { AwsCommandContext } from './cli.js';
+import { parseArn, type AwsPartition } from '@better-compute/aws-core';
+import type { AwsCommandContext, IamPolicyDocument, IamStatement } from './cli.js';
 import { awsCliClient, emitJson, type AwsCliOptions } from './finops-cli.js';
 import { tags } from './ids.js';
 
@@ -334,6 +334,123 @@ export function awsBudgetTemplateCommand() {
           ...(typeof context.flags['forecast-pct'] === 'number'
             ? { forecastPct: context.flags['forecast-pct'] }
             : {}),
+        }),
+      );
+    },
+  };
+}
+
+const governancePartitions: readonly AwsPartition[] = ['aws', 'aws-cn', 'aws-us-gov'];
+
+export interface GovernancePolicyOptions {
+  partition?: AwsPartition;
+  /** `aws cost-allocation-tags --activate --yes`: ce:UpdateCostAllocationTagsStatus. */
+  activateTags?: boolean;
+  /** `aws quota-request --yes`: servicequotas:RequestServiceQuotaIncrease, EC2 quotas only. */
+  quotaRequests?: boolean;
+  /** The live suite's spend guard (`awsMonthToDateCost`): ce:GetCostAndUsage. */
+  spend?: boolean;
+}
+
+/**
+ * The IAM policy for the operator's own identity that runs the governance commands (program Appendix B, A11): the
+ * reads of `aws cost-allocation-tags`, `aws organization-accounts` and `aws quotas` always, and each action that
+ * changes AWS (or costs money) only behind its own option. This is never the provider account's role
+ * (`iamPolicy`). Pure.
+ */
+export function governancePolicy(options: GovernancePolicyOptions = {}): IamPolicyDocument {
+  const partition = options.partition ?? 'aws';
+  if (!governancePartitions.includes(partition))
+    throw usage('--partition is aws, aws-cn or aws-us-gov');
+  const statements: IamStatement[] = [
+    {
+      Sid: 'CostAllocationTagsRead',
+      Effect: 'Allow',
+      Action: ['ce:ListCostAllocationTags'],
+      Resource: '*',
+    },
+    {
+      Sid: 'OrganizationAccounts',
+      Effect: 'Allow',
+      Action: ['organizations:ListAccounts', 'organizations:ListAccountsForParent'],
+      Resource: '*',
+    },
+    {
+      Sid: 'QuotasRead',
+      Effect: 'Allow',
+      Action: ['servicequotas:GetServiceQuota', 'servicequotas:ListServiceQuotas'],
+      Resource: '*',
+    },
+  ];
+  if (options.activateTags === true)
+    statements.push({
+      Sid: 'CostAllocationTagsActivate',
+      Effect: 'Allow',
+      Action: ['ce:UpdateCostAllocationTagsStatus'],
+      Resource: '*',
+    });
+  if (options.quotaRequests === true)
+    statements.push({
+      Sid: 'QuotaRequests',
+      Effect: 'Allow',
+      Action: ['servicequotas:RequestServiceQuotaIncrease'],
+      Resource: `arn:${partition}:servicequotas:*:*:ec2/*`,
+    });
+  if (options.spend === true)
+    statements.push({
+      Sid: 'SpendGuard',
+      Effect: 'Allow',
+      Action: ['ce:GetCostAndUsage'],
+      Resource: '*',
+    });
+  return { Version: '2012-10-17', Statement: statements };
+}
+
+/** `better-compute aws governance-policy [--activate-tags] [--quota-requests] [--spend]`: renders, never attaches. */
+export function awsGovernancePolicyCommand() {
+  return {
+    name: 'aws governance-policy' as const,
+    group: 'Providers' as const,
+    summary: 'Print the IAM policy for the operator identity that runs the AWS governance commands',
+    description:
+      "aws governance-policy prints the IAM policy for the operator's own AWS identity that runs aws cost-allocation-tags, aws organization-accounts and aws quotas: ce:ListCostAllocationTags, organizations:ListAccounts and ListAccountsForParent, and servicequotas:GetServiceQuota and ListServiceQuotas. Each action that changes AWS is opt-in: --activate-tags adds ce:UpdateCostAllocationTagsStatus (aws cost-allocation-tags --activate --yes), --quota-requests servicequotas:RequestServiceQuotaIncrease on EC2 quotas only (aws quota-request --yes), and --spend ce:GetCostAndUsage for the live suite's spend guard. It is not the provider account's role policy (aws iam-policy).",
+    target: 'none' as const,
+    output: 'text' as const,
+    flags: {
+      partition: {
+        type: 'string' as const,
+        value: 'PARTITION',
+        choices: governancePartitions,
+        description: 'aws (default), aws-cn or aws-us-gov',
+      },
+      'activate-tags': {
+        type: 'boolean' as const,
+        description: 'Add ce:UpdateCostAllocationTagsStatus (aws cost-allocation-tags --activate)',
+      },
+      'quota-requests': {
+        type: 'boolean' as const,
+        description:
+          'Add servicequotas:RequestServiceQuotaIncrease on EC2 quotas (aws quota-request)',
+      },
+      spend: {
+        type: 'boolean' as const,
+        description: "Add ce:GetCostAndUsage, for the live suite's spend guard",
+      },
+      out: {
+        type: 'string' as const,
+        value: 'PATH',
+        description: 'Write the policy to this new file instead of the output',
+      },
+    },
+    async run(context: AwsCommandContext): Promise<void> {
+      const partition = text(context.flags.partition) as AwsPartition | undefined;
+      await emitJson(
+        context,
+        governancePolicy({
+          ...(partition ? { partition } : {}),
+          ...(context.flags['activate-tags'] === true ? { activateTags: true } : {}),
+          ...(context.flags['quota-requests'] === true ? { quotaRequests: true } : {}),
+          ...(context.flags.spend === true ? { spend: true } : {}),
         }),
       );
     },
