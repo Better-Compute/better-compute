@@ -1,6 +1,7 @@
 import { registerAccount } from './account.js';
 import { registerActions } from './actions.js';
 import { registerAutoscale } from './autoscale.js';
+import { registerBilling } from './billing.js';
 import { registerCatalog } from './catalog.js';
 import { registerDroplets } from './droplets.js';
 import { registerFirewalls } from './firewalls.js';
@@ -272,5 +273,6 @@ export class DoEmulator {
     registerActions(this);
     registerVpcs(this);
     registerFirewalls(this);
+    registerBilling(this);
   }
 }

@@ -37,7 +37,14 @@ const prices: ProviderListPrice[] = [
 
 const flavors = [
   { meter: S2, vcpu: 2, memoryGiB: 4, gpus: 0, offerId: 'nyc3/s-2vcpu-4gb' },
-  { meter: GPU, vcpu: 20, memoryGiB: 240, gpus: 1, gpuModel: 'h100', offerId: 'nyc3/gpu-h100x1-80gb' },
+  {
+    meter: GPU,
+    vcpu: 20,
+    memoryGiB: 240,
+    gpus: 1,
+    gpuModel: 'h100',
+    offerId: 'nyc3/gpu-h100x1-80gb',
+  },
   { meter: MIXED, vcpu: 2, memoryGiB: 4, gpus: 0, offerId: 'nyc3/s-2vcpu-4gb' },
   { meter: MIXED, vcpu: 2, memoryGiB: 4, gpus: 0, offerId: 'sfo3/s-2vcpu-4gb' },
 ];
@@ -80,7 +87,14 @@ describe('proposals from instance prices', () => {
       currency: 'USD',
     });
     expect(eur.unpriced).toContain(S2);
-    const sfo = proposePrices({ catalog, prices, flavors, marginPct: 0, currency: 'USD', region: 'sfo3' });
+    const sfo = proposePrices({
+      catalog,
+      prices,
+      flavors,
+      marginPct: 0,
+      currency: 'USD',
+      region: 'sfo3',
+    });
     expect(sfo.unpriced).toContain(S2);
   });
 

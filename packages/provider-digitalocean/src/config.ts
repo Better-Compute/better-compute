@@ -39,6 +39,12 @@ export const doConfig = manifest({
     .boolean()
     .default(false)
     .describe('Offer products that DigitalOcean still marks as previews'),
+  costs: field
+    .boolean()
+    .default(false)
+    .describe(
+      'Read the invoices into provider costs (vps.costs); the token needs the billing:read scope',
+    ),
 });
 
 /** The validated account configuration. */
@@ -52,6 +58,7 @@ export interface DoConfig {
   allowSpot?: boolean;
   discoverTag?: string;
   previews?: boolean;
+  costs?: boolean;
 }
 
 export interface DoProviderOptions {

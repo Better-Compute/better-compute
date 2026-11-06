@@ -69,7 +69,10 @@ describe('listPrices', () => {
   it('is UNAVAILABLE, not an empty list, when the sizes cannot be read', async () => {
     const emu = new DoEmulator();
     const compute = await build(emu, undefined, {}, { clock: manualClock(1_000_000) });
-    emu.failNext({ method: 'GET', path: /^\/sizes$/ }, 503, { id: 'service_unavailable', message: 'x' });
+    emu.failNext({ method: 'GET', path: /^\/sizes$/ }, 503, {
+      id: 'service_unavailable',
+      message: 'x',
+    });
     await expect(compute.listPrices({}, ctx())).rejects.toMatchObject({ code: 'UNAVAILABLE' });
   });
 });

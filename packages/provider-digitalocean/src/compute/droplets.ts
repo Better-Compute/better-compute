@@ -176,6 +176,8 @@ export class DoCompute implements ProviderImpl {
   protected readonly deploymentTag: string;
   /** Tenant networks: VPCs, Cloud Firewalls and Droplet tags. */
   readonly networks: DoNetworks;
+  /** Provider costs from the invoices (P9); set only when the account turns `costs` on. */
+  costs?: ProviderImpl['costs'];
 
   constructor(
     config: DoConfig,
