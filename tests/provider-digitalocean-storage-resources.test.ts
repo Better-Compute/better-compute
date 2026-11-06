@@ -230,6 +230,7 @@ describe('do.spaces-bucket adopt and release', () => {
       managedBy: 'better-compute',
       deployment: deploymentTag('default'),
       resource: 'crs_01abc',
+      tenant: 'ten_01abc',
     });
     // Again: nothing changes.
     expect((await w.resources.adopt('do.spaces-bucket', 'nyc3/hand-made', labels, w.ctx())).id).toBe(
@@ -244,6 +245,7 @@ describe('do.spaces-bucket adopt and release', () => {
     // An update after adoption names the derived name, but the known id wins: no new bucket.
     const updated = await w.ensure('do.spaces-bucket', 'bc-r-crs01abc', { region: 'nyc3' }, w.ctx(), {
       id: 'nyc3/hand-made',
+      labels,
     });
     expect(updated.outputs?.acl).toBe('private');
     expect(w.spaces.buckets.has('bc-r-crs01abc')).toBe(false);
@@ -252,6 +254,7 @@ describe('do.spaces-bucket adopt and release', () => {
     const moved = await failure(
       w.ensure('do.spaces-bucket', 'bc-r-crs01abc', { region: 'ams3' }, w.ctx(), {
         id: 'nyc3/hand-made',
+        labels,
       }),
     );
     expect(moved.code).toBe('INVALID_STATE');

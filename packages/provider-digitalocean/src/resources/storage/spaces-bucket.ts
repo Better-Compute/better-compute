@@ -15,6 +15,14 @@ import {
 // it (adopt is an explicit operation), and `delete` refuses a bucket without it, or with anything
 // in it besides the marker. Tenant data is never deleted to delete a bucket. `adopt` writes the
 // marker on an unmarked bucket, `release` removes it; neither touches another deployment's.
+//
+// The marker also names the cloud resource and the tenant (`better-compute-resource`, `-tenant`
+// from the request's labels): an ensure carrying another tenant's labels is refused, and
+// `do.spaces-key` grants and `do.cdn-endpoint` origins are checked against it. Only a 404 means a
+// bucket is gone: a 403 (a narrowed or revoked account key) fails closed, so a row is never dropped
+// while its bucket stays up. A delete cut off between the marker delete and the bucket delete (a
+// crash) leaves an empty, unmarked bucket that every retry refuses as `notManaged`: `adopt` then
+// `delete` converges it.
 
 /** The object that marks a bucket as this deployment's. */
 export const bucketMarkerKey = '.better-compute/owner';
@@ -56,13 +64,25 @@ export function parseBucketId(id: string): BucketTarget {
 /** The most bytes of a marker object that are read. */
 const maxMarkerBytes = 4096;
 
+/** What a bucket's marker says: who manages it, and (for this deployment's) its tenant and resource. */
+export interface BucketMarker {
+  owner: 'mine' | 'missing' | 'other';
+  tenant?: string;
+  resource?: string;
+  /** The marker's bytes, to put the same marker back. */
+  body?: Uint8Array;
+}
+
+const tenantLabel = 'better-compute-tenant';
+const resourceLabel = 'better-compute-resource';
+
 /** A bucket's marker: who it names, and its bytes (to put the same marker back). */
-async function readMarker(
+export async function readMarker(
   s3: SpacesClient,
   bucket: string,
   deploymentTag: string,
   signal: AbortSignal,
-): Promise<{ owner: 'mine' | 'missing' | 'other'; body?: Uint8Array }> {
+): Promise<BucketMarker> {
   const response = await s3.request('GET', bucket, bucketMarkerKey, { signal, allow: [404] });
   // Anything in a bucket can be written by its key holders: a marker too big to be one is not read.
   if (Number(response.headers.get('content-length') ?? 0) > maxMarkerBytes) {
@@ -76,10 +96,17 @@ async function readMarker(
     const parsed = JSON.parse(new TextDecoder().decode(body)) as {
       managedBy?: unknown;
       deployment?: unknown;
+      tenant?: unknown;
+      resource?: unknown;
     };
-    return parsed.managedBy === 'better-compute' && parsed.deployment === deploymentTag
-      ? { owner: 'mine', body }
-      : { owner: 'other' };
+    if (parsed.managedBy !== 'better-compute' || parsed.deployment !== deploymentTag)
+      return { owner: 'other' };
+    return {
+      owner: 'mine',
+      body,
+      ...(typeof parsed.tenant === 'string' ? { tenant: parsed.tenant } : {}),
+      ...(typeof parsed.resource === 'string' ? { resource: parsed.resource } : {}),
+    };
   } catch {
     return { owner: 'other' };
   }
@@ -98,6 +125,22 @@ export async function bucketOwnership(
   return (await readMarker(s3, bucket, deploymentTag, signal)).owner;
 }
 
+/**
+ * Whether a marker of this deployment belongs to the caller's tenant: the tenants must be the same
+ * (a marker without one is the operator's, so it matches only a call without one).
+ */
+export function sameTenant(
+  marker: BucketMarker,
+  labels: Readonly<Record<string, string>> | undefined,
+): boolean {
+  return marker.owner === 'mine' && marker.tenant === labels?.[tenantLabel];
+}
+
+/** The refusal of a resource another tenant owns. */
+export function otherTenant(what: string): never {
+  throw storageError('ACCESS_DENIED', `${what} belongs to another tenant`, 'otherTenant');
+}
+
 export function spacesBucketKind(deps: {
   /** The account's S3 client for a region; throws INVALID_CONFIG when the account has no Spaces keys. */
   spaces: (region: string) => SpacesClient;
@@ -111,9 +154,8 @@ export function spacesBucketKind(deps: {
       JSON.stringify({
         managedBy: 'better-compute',
         deployment: deps.deploymentTag,
-        ...(labels?.['better-compute-resource']
-          ? { resource: labels['better-compute-resource'] }
-          : {}),
+        ...(labels?.[resourceLabel] ? { resource: labels[resourceLabel] } : {}),
+        ...(labels?.[tenantLabel] ? { tenant: labels[tenantLabel] } : {}),
       }),
     );
   async function putMarker(
@@ -139,6 +181,25 @@ export function spacesBucketKind(deps: {
 
   const ownership = (s3: SpacesClient, bucket: string, signal: AbortSignal) =>
     bucketOwnership(s3, bucket, deps.deploymentTag, signal);
+
+  /** Whether the bucket is there: only a 404 says no; a 403 or a 301 fails closed. */
+  async function present(
+    s3: SpacesClient,
+    target: BucketTarget,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const status = await head(s3, target.bucket, signal);
+    if (status === 404) return false;
+    if (status === 403)
+      throw storageError(
+        'ACCESS_DENIED',
+        `The account's Spaces key may not read bucket ${target.bucket}`,
+        'spacesAccess',
+      );
+    if (status === 301)
+      throw storageError('INVALID_STATE', `Bucket ${target.bucket} is in another region`, 'region');
+    return true;
+  }
 
   function refuseOwnership(found: 'missing' | 'other', bucket: string): never {
     if (found === 'missing')
@@ -305,16 +366,22 @@ export function spacesBucketKind(deps: {
         if (spec.versioning) await setVersioning(s3, target.bucket, 'Enabled', ctx.signal);
         return ready(target, { acl: spec.acl, versioning: spec.versioning ? 'enabled' : 'off' });
       }
-      const owner = await ownership(s3, target.bucket, ctx.signal);
-      if (owner !== 'mine') refuseOwnership(owner, target.bucket);
+      const marker = await readMarker(s3, target.bucket, deps.deploymentTag, ctx.signal);
+      if (marker.owner !== 'mine') refuseOwnership(marker.owner, target.bucket);
+      // An id or a name reaching another tenant's (or resource's) bucket changes nothing in it.
+      const resource = labels?.[resourceLabel];
+      if (
+        !sameTenant(marker, labels) ||
+        (marker.resource !== undefined && resource !== undefined && marker.resource !== resource)
+      )
+        otherTenant(`Bucket ${target.bucket}`);
       return converge(s3, target, spec, ctx.signal);
     },
 
     async get(id, ctx) {
       const target = parseBucketId(id);
       const s3 = deps.spaces(target.region);
-      const status = await head(s3, target.bucket, ctx.signal);
-      if (status !== 200) return undefined;
+      if (!(await present(s3, target, ctx.signal))) return undefined;
       const seen = await observed(s3, target.bucket, ctx.signal);
       return { ...ready(target, seen), spec: specOf(target, seen) };
     },
@@ -331,8 +398,10 @@ export function spacesBucketKind(deps: {
           `This account has no bucket ${target.bucket} in ${target.region}`,
           'bucket',
         );
-      const owner = await ownership(s3, target.bucket, ctx.signal);
+      const marker = await readMarker(s3, target.bucket, deps.deploymentTag, ctx.signal);
+      const owner = marker.owner;
       if (owner === 'other') refuseOwnership(owner, target.bucket);
+      if (owner === 'mine' && !sameTenant(marker, labels)) otherTenant(`Bucket ${target.bucket}`);
       if (owner === 'missing') {
         await putMarker(s3, target.bucket, markerFor(labels), ctx.signal);
         ctx.log.info('digitalocean.spaces-bucket.adopted', {
@@ -364,8 +433,7 @@ export function spacesBucketKind(deps: {
     async delete(id, ctx) {
       const target = parseBucketId(id);
       const s3 = deps.spaces(target.region);
-      const status = await head(s3, target.bucket, ctx.signal);
-      if (status === 404 || status === 403) return { id, state: 'deleted' };
+      if (!(await present(s3, target, ctx.signal))) return { id, state: 'deleted' };
       const found = await readMarker(s3, target.bucket, deps.deploymentTag, ctx.signal);
       if (found.owner !== 'mine')
         throw notManaged(
@@ -426,9 +494,16 @@ export function spacesBucketKind(deps: {
       try {
         await s3.request('DELETE', target.bucket, undefined, { signal: ctx.signal, allow: [404] });
       } catch (error) {
-        // An object arrived between the listing and the delete: the bucket stays, marked as ours.
-        if (hasCode(error, 'INVALID_STATE'))
-          await putMarker(s3, target.bucket, found.body ?? markerFor(), ctx.signal);
+        // An object arrived between the listing and the delete, or the delete failed: the bucket
+        // stays, marked as ours, so the next delete finds it managed.
+        await putMarker(s3, target.bucket, found.body ?? markerFor(), ctx.signal).catch(
+          (restore: unknown) =>
+            ctx.log.warn('digitalocean.spaces-bucket.marker-restore-failed', {
+              bucket: target.bucket,
+              region: target.region,
+              code: isComputeError(restore) ? restore.code : 'UNKNOWN',
+            }),
+        );
         throw error;
       }
       ctx.log.info('digitalocean.spaces-bucket.deleted', {

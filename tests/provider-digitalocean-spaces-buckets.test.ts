@@ -115,6 +115,32 @@ describe('do.spaces-bucket ensure', () => {
     ).toBe('managedByAnother');
   });
 
+  it("records the tenant in the marker and refuses another tenant's ensure on the bucket", async () => {
+    const w = await storageWorld();
+    const labels = { 'better-compute-tenant': 'ten_a', 'better-compute-resource': 'res_a' };
+    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx(), { labels });
+    const marker = JSON.parse(
+      new TextDecoder().decode(w.spaces.buckets.get('tenant-a-assets')!.objects.get(bucketMarkerKey)!.body),
+    );
+    expect(marker).toEqual({
+      managedBy: 'better-compute',
+      deployment: deploymentTag('default'),
+      resource: 'res_a',
+      tenant: 'ten_a',
+    });
+    const before = w.spaces.requests.length;
+    const refused = await failure(
+      w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3', acl: 'public-read' }, w.ctx(), {
+        id: 'nyc3/tenant-a-assets',
+        labels: { 'better-compute-tenant': 'ten_b', 'better-compute-resource': 'res_b' },
+      }),
+    );
+    expect(refused.code).toBe('ACCESS_DENIED');
+    expect(refused.details?.reason).toBe('otherTenant');
+    expect(w.spaces.requests.slice(before).some((r) => r.method === 'PUT')).toBe(false);
+    expect(w.spaces.buckets.get('tenant-a-assets')!.acl).toBe('private');
+  });
+
   it('removes the bucket it just made when the marker cannot be written, so the next pass starts over', async () => {
     const w = await storageWorld();
     w.spaces.failNext(`PUT /tenant-a-assets/${bucketMarkerKey}`, 503, 'SlowDown');
@@ -296,6 +322,56 @@ describe('do.spaces-bucket get and delete', () => {
     seedCdnEndpoint(w.emu, { origin: 'tenant-a-other.nyc3.digitaloceanspaces.com' });
     await w.ensure('do.spaces-bucket', 'tenant-a-spare', { region: 'nyc3' }, w.ctx());
     expect((await w.resources.delete('do.spaces-bucket', 'nyc3/tenant-a-spare', w.ctx())).state).toBe(
+      'deleted',
+    );
+  });
+
+  it('never reports a bucket deleted or gone when Spaces answers 403 for it', async () => {
+    const w = await storageWorld();
+    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
+    // A rotated or narrowed account key answers 403 for a bucket the account still holds.
+    w.spaces.failNext('HEAD /tenant-a-assets$', 403, 'AccessDenied');
+    const refused = await failure(
+      w.resources.delete('do.spaces-bucket', 'nyc3/tenant-a-assets', w.ctx()),
+    );
+    expect(refused.code).toBe('ACCESS_DENIED');
+    expect(refused.details?.reason).toBe('spacesAccess');
+    expect(w.spaces.buckets.has('tenant-a-assets')).toBe(true);
+    w.spaces.failNext('HEAD /tenant-a-assets$', 403, 'AccessDenied');
+    const unread = await failure(w.resources.get('do.spaces-bucket', 'nyc3/tenant-a-assets', w.ctx()));
+    expect(unread.code).toBe('ACCESS_DENIED');
+    // A bucket in another region is not gone either.
+    w.spaces.seedBucket('elsewhere', { region: 'ams3' });
+    expect(
+      (await failure(w.resources.delete('do.spaces-bucket', 'nyc3/elsewhere', w.ctx()))).details
+        ?.reason,
+    ).toBe('region');
+    expect(w.spaces.buckets.has('elsewhere')).toBe(true);
+  });
+
+  it('puts the marker back when the bucket delete fails, so a retry converges', async () => {
+    const w = await storageWorld();
+    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
+    w.spaces.failNext('DELETE /tenant-a-assets$', 503, 'ServiceUnavailable');
+    await failure(w.resources.delete('do.spaces-bucket', 'nyc3/tenant-a-assets', w.ctx()));
+    expect(w.spaces.buckets.get('tenant-a-assets')!.objects.has(bucketMarkerKey)).toBe(true);
+    expect((await w.resources.delete('do.spaces-bucket', 'nyc3/tenant-a-assets', w.ctx())).state).toBe(
+      'deleted',
+    );
+    expect(w.spaces.buckets.has('tenant-a-assets')).toBe(false);
+  });
+
+  it('recovers a delete cut off after the marker went (a crash) through adopt', async () => {
+    const w = await storageWorld();
+    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
+    // The process died between the marker delete and the bucket delete: empty and unmarked.
+    w.spaces.buckets.get('tenant-a-assets')!.objects.delete(bucketMarkerKey);
+    const refused = await failure(
+      w.resources.delete('do.spaces-bucket', 'nyc3/tenant-a-assets', w.ctx()),
+    );
+    expect(refused.details?.reason).toBe('notManaged');
+    await w.resources.adopt('do.spaces-bucket', 'nyc3/tenant-a-assets', {}, w.ctx());
+    expect((await w.resources.delete('do.spaces-bucket', 'nyc3/tenant-a-assets', w.ctx())).state).toBe(
       'deleted',
     );
   });
