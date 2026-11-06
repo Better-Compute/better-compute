@@ -61,6 +61,10 @@ export class DoState {
   loadBalancers = new Map<string, Json>();
   /** Keyed by uuid. DO certificates. */
   certificates = new Map<string, Json>();
+  /** Keyed by name. DO domains (DNS zones). */
+  domains = new Map<string, Json>();
+  /** Keyed by id. DO domain records; `zone` names the domain. */
+  domainRecords = new Map<number, Json>();
   regions: Json[] = structuredClone(fixture('regions').regions as Json[]);
   sizes: Json[] = structuredClone(fixture('sizes').sizes as Json[]);
 

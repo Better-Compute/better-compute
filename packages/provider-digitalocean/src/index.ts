@@ -12,6 +12,7 @@ export * from './compute/offers.js';
 export * from './compute/types.js';
 export * from './config.js';
 export * from './edge/addresses.js';
+export * from './edge/dns.js';
 export * from './edge/load-balancers.js';
 export * from './ids.js';
 export * from './networks/index.js';

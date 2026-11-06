@@ -3,6 +3,7 @@ import { registerAddresses } from './addresses.js';
 import { registerActions } from './actions.js';
 import { registerAutoscale } from './autoscale.js';
 import { registerCatalog } from './catalog.js';
+import { registerDns } from './dns.js';
 import { registerDroplets } from './droplets.js';
 import { registerFirewalls } from './firewalls.js';
 import { registerKeys } from './keys.js';
@@ -293,5 +294,6 @@ export class DoEmulator {
     registerVolumes(this);
     registerAddresses(this);
     registerLoadBalancers(this);
+    registerDns(this);
   }
 }

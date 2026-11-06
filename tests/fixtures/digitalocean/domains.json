@@ -1,0 +1,21 @@
+{
+  "_provenance": "Shape: OpenAPI domains/models/domain.yml (name, ttl, zone_file) and domains/models/domain_record.yml (id, type, name, data, priority, port, ttl, weight, flags, tag) (spec). Record names are relative to the zone ('@' for the apex); the records list filters by the full name (`name=www.example.com`) and `type` (spec, domains_list_records.yml). A new domain gets DigitalOcean's three NS records and an SOA (docs). Whether record data of host-name types comes back with or without the final dot, and the 422 text for a domain that already exists, are unverified: the provider compares host names without the final dot, and treats the 422 as CONFLICT. Values are illustrative.",
+  "domain": {
+    "name": "example.com",
+    "ttl": 1800,
+    "zone_file": "$ORIGIN example.com.\n$TTL 1800\nexample.com. IN SOA ns1.digitalocean.com. hostmaster.example.com. 1415982609 10800 3600 604800 1800\nexample.com. 1800 IN NS ns1.digitalocean.com.\nexample.com. 1800 IN NS ns2.digitalocean.com.\nexample.com. 1800 IN NS ns3.digitalocean.com.\n"
+  },
+  "domain_record": {
+    "id": 28448429,
+    "type": "A",
+    "name": "www",
+    "data": "162.10.66.0",
+    "priority": null,
+    "port": null,
+    "ttl": 1800,
+    "weight": null,
+    "flags": null,
+    "tag": null
+  },
+  "name_servers": ["ns1.digitalocean.com", "ns2.digitalocean.com", "ns3.digitalocean.com"]
+}

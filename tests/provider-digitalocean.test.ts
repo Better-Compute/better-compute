@@ -2223,6 +2223,8 @@ describe('definition', () => {
         // The volume and address cases attach and assign across regions too (INVALID_INPUT).
         otherRegionOfferId: 'sfo3/s-1vcpu-1gb',
         image: 'ubuntu-24-04-x64',
+        // The DNS case makes and deletes this zone (P4).
+        dnsZone: 'conformance.example',
         context: { secrets, account: platformAccount },
       };
     });
