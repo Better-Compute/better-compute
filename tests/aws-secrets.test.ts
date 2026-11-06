@@ -1,6 +1,19 @@
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { pglite } from '@better-compute/postgres/pglite';
+import { localSealedSecretStore, sealedSecretsMigration } from '@better-compute/pki';
 import { ComputeError, type SecretRef, type SecretStore } from '@better-compute/core';
-import { awsParameterStore, awsSecretsManagerStore, routeSecretStores } from '@better-compute/aws';
+import {
+  awsKmsSealingKeyCommand,
+  awsParameterStore,
+  awsSecretsManagerStore,
+  generateKmsSealingKey,
+  kmsSealingKeys,
+  routeSecretStores,
+} from '@better-compute/aws';
+import { kmsFake } from './support/aws-platform-emulator/kms.js';
 import { AwsEmulator, recordingLogger } from './support/aws-platform-emulator/index.js';
 import { parameterStoreFake, secretsManagerFake } from './support/aws-platform-emulator/secrets.js';
 
@@ -229,5 +242,72 @@ describe('Parameter Store', () => {
     expect(await codeOf(store.resolve('secret://aws-ssm/t1/../t2/x' as SecretRef))).toBe('INVALID_INPUT');
     expect(await codeOf(store.resolve('secret://aws-sm/t1/x', { tenantId: 't1' }))).toBe('INVALID_INPUT');
     expect(emu.requests).toHaveLength(0);
+  });
+});
+
+describe('KMS sealing', () => {
+  function kmsWorld() {
+    const emu = new AwsEmulator();
+    const kms = kmsFake(emu);
+    kms.addSymmetricKey('sealing-key');
+    const base = { region: 'us-east-1', credentials: emu.credentials, fetch: emu.fetch, endpoint: 'http://emu.local', clock: emu.clock };
+    return { emu, kms, base };
+  }
+
+  it('round-trips a wrapped key into SealingKeys', async () => {
+    const { base, emu } = kmsWorld();
+    const k1 = await generateKmsSealingKey({ ...base, keyId: 'sealing-key' });
+    const k2 = await generateKmsSealingKey({ ...base, keyId: 'sealing-key' });
+    const keys = await kmsSealingKeys({ ...base, current: 'k2', wrapped: { k1, k2 } });
+    expect(keys.current).toBe('k2');
+    expect(Object.keys(keys.keys)).toEqual(['k1', 'k2']);
+    expect((keys.keys.k1 as Uint8Array).length).toBe(32);
+    expect(emu.calls('Decrypt')).toHaveLength(2);
+    const db = pglite();
+    await db.migrate([sealedSecretsMigration]);
+    const store = localSealedSecretStore({ sql: db, keys });
+    const ref = await store.put('t1', 'sealed-value');
+    await expect(store.resolve(ref)).resolves.toBe('sealed-value');
+    await db.close?.();
+  });
+
+  it('wrong encryption context is ACCESS_DENIED', async () => {
+    const { base } = kmsWorld();
+    const k1 = await generateKmsSealingKey({ ...base, keyId: 'sealing-key', encryptionContext: { purpose: 'other' } });
+    expect(await codeOf(kmsSealingKeys({ ...base, current: 'k1', wrapped: { k1 } }))).toBe('ACCESS_DENIED');
+    expect(await codeOf(kmsSealingKeys({ ...base, current: 'k9', wrapped: { k1 } }))).toBe('INVALID_CONFIG');
+  });
+
+  it('generate returns only ciphertext', async () => {
+    const { base, kms, emu } = kmsWorld();
+    const wrapped = await generateKmsSealingKey({ ...base, keyId: 'sealing-key' });
+    expect(kms.minted).toHaveLength(1);
+    expect(wrapped).not.toContain(kms.minted[0]);
+    expect(Buffer.from(wrapped, 'base64').includes(Buffer.from(kms.minted[0]!, 'base64'))).toBe(false);
+    expect(emu.calls('GenerateDataKeyWithoutPlaintext')).toHaveLength(1);
+    expect(emu.calls('GenerateDataKey')).toHaveLength(0);
+  });
+
+  it('the CLI never prints plaintext', async () => {
+    const { emu, kms } = kmsWorld();
+    const out: string[] = [];
+    const notes: string[] = [];
+    const command = awsKmsSealingKeyCommand({ credentials: emu.credentials, fetch: emu.fetch, endpoint: 'http://emu.local', clock: emu.clock });
+    expect(command.name).toBe('aws kms-sealing-key');
+    const context = (flags: Record<string, string>) => ({ flags, io: { out: (m: string) => out.push(m) }, note: (m: string) => notes.push(m), path: (p: string) => p });
+    await command.run(context({ 'key-id': 'sealing-key', region: 'us-east-1' }));
+    expect(out).toHaveLength(1);
+    const dir = mkdtempSync(join(tmpdir(), 'bc-aws-'));
+    const file = join(dir, 'wrapped.txt');
+    await command.run(context({ 'key-id': 'sealing-key', region: 'us-east-1', out: file }));
+    expect(readFileSync(file, 'utf8').trim().length).toBeGreaterThan(0);
+    await expect(command.run(context({ 'key-id': 'sealing-key', region: 'us-east-1', out: file }))).rejects.toThrow(/exists/);
+    const printed = [...out, ...notes, readFileSync(file, 'utf8')].join(' ');
+    for (const plaintext of kms.minted) {
+      expect(printed).not.toContain(plaintext);
+      expect(printed).not.toContain(Buffer.from(plaintext, 'base64').toString('hex'));
+    }
+    const keys = await kmsSealingKeys({ region: 'us-east-1', credentials: emu.credentials, fetch: emu.fetch, endpoint: 'http://emu.local', clock: emu.clock, current: 'k1', wrapped: { k1: out[0]! } });
+    expect(Buffer.from(keys.keys.k1 as Uint8Array).toString('base64')).toBe(kms.minted[0]);
   });
 });
