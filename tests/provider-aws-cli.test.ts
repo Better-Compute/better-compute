@@ -236,7 +236,7 @@ describe('provider-aws CLI policies', () => {
       expect(typeof spec.run).toBe('function');
       for (const [name, flag] of Object.entries(spec.flags ?? {})) {
         expect(['url', 'format', 'config', 'query']).not.toContain(name);
-        expect(flag.type).toBe('string');
+        expect(['string', 'boolean']).toContain(flag.type);
         expect(typeof flag.description).toBe('string');
       }
     }

@@ -47,6 +47,10 @@ export function iamPolicy(
     discoverTag?: string;
     /** The customer-managed KMS key ARN of the accounts' `kmsKeyId`: adds EBS's grants on it. */
     kmsKeyArn?: string;
+    /** (A11) Accounts with `costs`: Cost Explorer's GetCostAndUsage (it takes no resource ARNs). */
+    costs?: boolean;
+    /** (A11) List prices: the Price List's GetProducts (commercial partition only; no resource ARNs). */
+    prices?: boolean;
   } = {},
 ): IamPolicyDocument {
   const partition = options.partition ?? 'aws';
@@ -159,6 +163,23 @@ export function iamPolicy(
     },
     { Sid: 'Identity', Effect: 'Allow', Action: 'sts:GetCallerIdentity', Resource: '*' },
   ];
+  if (options.costs === true)
+    statements.push({
+      Sid: 'CostExplorer',
+      Effect: 'Allow',
+      Action: ['ce:GetCostAndUsage'],
+      Resource: '*',
+    });
+  if (options.prices === true) {
+    if (partition !== 'aws')
+      throw usage('--prices needs partition aws: the AWS Price List serves no other partition');
+    statements.push({
+      Sid: 'PriceList',
+      Effect: 'Allow',
+      Action: ['pricing:GetProducts'],
+      Resource: '*',
+    });
+  }
   if (options.kmsKeyArn !== undefined) {
     let key;
     try {
@@ -295,7 +316,7 @@ export function awsIamPolicyCommand() {
     group: 'Providers' as const,
     summary: 'Print the IAM permissions policy an AWS provider account needs',
     description:
-      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId.',
+      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; --costs adds ce:GetCostAndUsage for accounts that set costs, and --prices pricing:GetProducts for list prices.',
     target: 'none' as const,
     output: 'text' as const,
     flags: {
@@ -330,6 +351,14 @@ export function awsIamPolicyCommand() {
         value: 'KEY=VALUE',
         description: 'Attach may tag only instances carrying this tag (the account discoverTag)',
       },
+      costs: {
+        type: 'boolean' as const,
+        description: 'Add ce:GetCostAndUsage, for accounts that read costs (config costs)',
+      },
+      prices: {
+        type: 'boolean' as const,
+        description: 'Add pricing:GetProducts, for list prices (partition aws only)',
+      },
       out: outFlag,
     },
     async run(context: AwsCommandContext): Promise<void> {
@@ -347,6 +376,8 @@ export function awsIamPolicyCommand() {
           ...(text(context.flags['discover-tag'])
             ? { discoverTag: text(context.flags['discover-tag'])! }
             : {}),
+          ...(context.flags.costs === true ? { costs: true } : {}),
+          ...(context.flags.prices === true ? { prices: true } : {}),
         }),
       );
     },
