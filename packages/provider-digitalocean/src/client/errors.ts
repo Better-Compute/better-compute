@@ -40,6 +40,20 @@ export const unprocessablePatterns: readonly {
     reason: 'insufficientCapacity',
   },
   { pattern: /exceed your droplet limit/i, code: 'QUOTA_EXCEEDED', reason: 'dropletLimit' },
+  // Block Storage (P2).
+  {
+    pattern: /attached to another droplet/i,
+    code: 'CONFLICT',
+    reason: 'attachedElsewhere',
+  },
+  {
+    pattern: /maximum number of volumes/i,
+    code: 'QUOTA_EXCEEDED',
+    reason: 'volumesPerDroplet',
+  },
+  { pattern: /exceed your volume limit/i, code: 'QUOTA_EXCEEDED', reason: 'volumeLimit' },
+  { pattern: /must be in the same region/i, code: 'INVALID_INPUT', reason: 'region' },
+  { pattern: /must be larger than the current size/i, code: 'INVALID_INPUT', reason: 'shrink' },
   { pattern: /ssh key is already in use/i, code: 'CONFLICT', reason: 'sshKeyInUse' },
   { pattern: /name is already in use/i, code: 'CONFLICT', reason: 'nameInUse' },
   { pattern: /already exists/i, code: 'CONFLICT', reason: 'alreadyExists' },

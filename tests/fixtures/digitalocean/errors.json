@@ -187,6 +187,72 @@
       }
     },
     {
+      "name": "422-volume-attached-elsewhere",
+      "status": 422,
+      "verified": false,
+      "code": "CONFLICT",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "Volume is attached to another droplet",
+        "request_id": "f2a6c8e4-0030-4b7b-9a51-1c0e7f6c0030"
+      }
+    },
+    {
+      "name": "422-volumes-per-droplet",
+      "status": 422,
+      "verified": false,
+      "code": "QUOTA_EXCEEDED",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "Droplet has reached the maximum number of volumes attached",
+        "request_id": "f2a6c8e4-0031-4b7b-9a51-1c0e7f6c0031"
+      }
+    },
+    {
+      "name": "422-volume-limit",
+      "status": 422,
+      "verified": false,
+      "code": "QUOTA_EXCEEDED",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "creating this volume will exceed your volume limit",
+        "request_id": "f2a6c8e4-0032-4b7b-9a51-1c0e7f6c0032"
+      }
+    },
+    {
+      "name": "422-volume-region",
+      "status": 422,
+      "verified": false,
+      "code": "INVALID_INPUT",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "The volume and the droplet must be in the same region",
+        "request_id": "f2a6c8e4-0033-4b7b-9a51-1c0e7f6c0033"
+      }
+    },
+    {
+      "name": "422-volume-shrink",
+      "status": 422,
+      "verified": false,
+      "code": "INVALID_INPUT",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "New size must be larger than the current size",
+        "request_id": "f2a6c8e4-0034-4b7b-9a51-1c0e7f6c0034"
+      }
+    },
+    {
+      "name": "409-volume-attached",
+      "status": 409,
+      "verified": false,
+      "code": "CONFLICT",
+      "body": {
+        "id": "conflict",
+        "message": "The volume is currently attached to a droplet",
+        "request_id": "f2a6c8e4-0035-4b7b-9a51-1c0e7f6c0035"
+      }
+    },
+    {
       "name": "422-unknown",
       "status": 422,
       "verified": true,

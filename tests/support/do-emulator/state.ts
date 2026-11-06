@@ -49,6 +49,10 @@ export class DoState {
   autoscalePools = new Map<string, Json>();
   /** The members of each autoscale pool, keyed by the pool's uuid. */
   autoscaleMembers = new Map<string, Json[]>();
+  /** Keyed by uuid. DO Block Storage volumes. */
+  volumes = new Map<string, Json>();
+  /** Keyed by id. DO snapshots (volume snapshots; Droplet snapshots are images). */
+  snapshots = new Map<string, Json>();
   regions: Json[] = structuredClone(fixture('regions').regions as Json[]);
   sizes: Json[] = structuredClone(fixture('sizes').sizes as Json[]);
 

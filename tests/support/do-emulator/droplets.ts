@@ -2,6 +2,7 @@ import type { DoEmulator, RouteContext } from './index.js';
 import { isoSeconds, settleAction, startAction } from './actions.js';
 import { fixture, type DoState, type Json } from './state.js';
 import { hasTag, touchTags } from './tags.js';
+import { detachAll } from './volumes.js';
 import { defaultVpc } from './vpcs.js';
 
 // Droplets under `/v2/droplets`. A create answers 202 with the Droplet `new` and a `create`
@@ -256,6 +257,7 @@ export function registerDroplets(emulator: DoEmulator): void {
     const id = Number(context.match[1]);
     if (!context.state.droplets.delete(id)) return emulator.error('not-found');
     progressOf(context.state).delete(id);
+    detachAll(context.state, id);
     return { status: 204 };
   });
 }
