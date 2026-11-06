@@ -1223,6 +1223,43 @@ describe('shared provider volumes (DO P6)', () => {
     });
   });
 
+  it("a subnet in a shared volume's region is not removed while the share lives", async () => {
+    const networkId = await insertNetwork();
+    const subnetOf = async (region: string) =>
+      (
+        await db.query<{ id: string }>(
+          `SELECT id FROM network_subnets WHERE network_id = $1 AND region = $2`,
+          [networkId, region],
+        )
+      ).rows[0]!.id;
+    const nyc = await subnetOf('nyc3');
+    await db.query(
+      `INSERT INTO network_subnets (id, network_id, name, region, cidr, state, desired_state)
+       VALUES ($1, $2, 'west', 'sfo3', '10.30.0.0/24', 'ready', 'present')`,
+      [`snet_01jz${String(++keyCounter).padStart(22, '0')}`, networkId],
+    );
+    const sfo = await subnetOf('sfo3');
+    const shared = await createShared({ networkId });
+    const networks = (api as unknown as Record<string, Record<string, Definition>>).networks!;
+    const remove = (subnetId: string) =>
+      run(networks.removeSubnet!, { tenantId: 'root', networkId, subnetId }, alice);
+    // The share is made in the network's VPC in its region: that subnet is its only path.
+    const refused = await remove(nyc).then(
+      () => undefined,
+      (error: { code?: string; details?: unknown }) => error,
+    );
+    expect(refused).toMatchObject({ code: 'INVALID_STATE', details: { volumeIds: [shared.id] } });
+    // A subnet in another region is not the share's.
+    await remove(sfo);
+    await call('providerVolumes', 'delete', { tenantId: 'root', volumeId: shared.id });
+    await drain();
+    expect((await getVolume(shared.id)).state).toBe('deleted');
+    await remove(nyc);
+    expect(
+      (await db.query(`SELECT desired_state FROM network_subnets WHERE id = $1`, [nyc])).rows[0],
+    ).toEqual({ desired_state: 'deleted' });
+  });
+
   it('a block volume detach naming another instance leaves it attached', async () => {
     const instanceId = await insertInstance();
     const other = await insertInstance();
