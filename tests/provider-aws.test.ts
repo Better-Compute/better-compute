@@ -375,7 +375,9 @@ async function rejection(run: () => Promise<unknown>): Promise<ComputeError> {
 describe('compute', () => {
   it('create sends a hardened RunInstances', async () => {
     const { emu, create } = await providerWorld();
-    const machine = await create('ins_test1', { labels: { team: 'ml', managed: 'false' } });
+    const machine = await create('ins_test1', {
+      labels: { team: 'ml', managed: 'false', tenant: 't_forged', pool: 'p_forged', instance: 'x' },
+    });
     expect(machine.id).toMatch(/^i-[0-9a-f]{17}$/);
     expect(machine.state).toBe('pending');
     expect(machine.offerId).toBe('us-east-1a/t3.micro');

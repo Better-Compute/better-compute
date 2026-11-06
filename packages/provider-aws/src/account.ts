@@ -125,7 +125,9 @@ export function accountCredentials(
       signal: call.signal,
       clock: call.clock,
     };
-    if (!platform) {
+    // A tenant hopping from the platform's own identity must not land in the platform's account.
+    // (A tenant's own key in its own account may assume a role there.)
+    if (!platform && !config.credentials) {
       const caller = await getCallerIdentity(base, sts);
       if (caller.account === role.account)
         throw accessDenied(

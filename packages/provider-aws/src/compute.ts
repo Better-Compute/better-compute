@@ -72,12 +72,20 @@ function terminatedFailure(code: string | undefined): ComputeError | 'error' | u
   return undefined;
 }
 
-/** A tag key for a tenant label: `better-compute:<key>`, only characters EC2 takes. */
+/** The ownership keys (`better-compute:<key>`) a tenant label may never set. */
+const reservedLabels: ReadonlySet<string> = new Set(
+  Object.values(tags)
+    .filter((tag) => tag.startsWith('better-compute:'))
+    .map((tag) => tag.slice('better-compute:'.length)),
+);
+
+/** A tag key for a tenant label: `better-compute:<key>`, only characters EC2 takes; never an ownership key. */
 function labelKey(key: string): string | undefined {
   const clean = Array.from(String(key).replace(/[^\p{L}\p{N} _.:/=+\-@]/gu, ''))
     .slice(0, 100)
     .join('');
-  return clean === '' ? undefined : `better-compute:${clean}`;
+  if (clean === '' || reservedLabels.has(clean.toLowerCase())) return undefined;
+  return `better-compute:${clean}`;
 }
 
 /** One AWS account's EC2 client (`ProviderImpl`). */
