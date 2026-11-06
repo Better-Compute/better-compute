@@ -155,7 +155,8 @@ guardrails do.
 
 DigitalOcean raises signals about harness agents and gateways: a run that failed, an agent asking a human to approve
 something. `cloudResources.signals` reads them for an attention list; it is read-only, and the provider is only asked
-to list.
+to list. DigitalOcean lists signals oldest first, so every page is read and the newest 500 are kept. One answer per
+account is reused for 30 seconds, whichever tenant asks.
 
 ```ts
 const { items } = await compute.api.cloudResources.signals(acme, { tenantId: 'acme', poolId });

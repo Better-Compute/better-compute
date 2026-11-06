@@ -1,6 +1,7 @@
 import {
   ComputeError,
   type MethodContext,
+  type ProviderResources,
   type ProviderResourceSignal,
 } from '@better-compute/core';
 import { poolResources, tenantSecrets, type CloudResourcesDeps } from './store.js';
@@ -11,9 +12,20 @@ import type { ResourceSignalView, SignalsInput } from './types.js';
 // mutation. Whom a signal is shown to: a tenant sees the signals about its own cloud resources; on the tenant's own
 // account (the platform's, for the root tenant) it sees every signal, recorded by a cloud resource or not. A signal
 // about another tenant's resource, or about something no one records, never reaches a tenant of a shared pool.
+//
+// The provider's answer is kept for `signalsTtlMs` per provider account (its `ProviderResources`), whichever tenant
+// asked: every tenant of a shared pool reads the same account, and asking it on each call would let one tenant spend
+// the account's request budget that every tenant's reconcilers need. A refusal is not kept.
 
 /** At most this many signals are returned, newest first. */
 export const maxSignalItems = 500;
+/** How long one answer of a provider account's signals is reused. */
+export const signalsTtlMs = 30_000;
+
+const answers = new WeakMap<
+  ProviderResources,
+  { at: number; signals: readonly ProviderResourceSignal[] }
+>();
 const severities: ReadonlySet<string> = new Set(['critical', 'warning', 'info']);
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
 const kindPattern = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
@@ -55,13 +67,20 @@ export async function listSignals(
       undefined,
       { reason: 'signals' },
     );
-  const raw = await provider.resources.signals({
-    idempotencyKey: `signals:${provider.account.id}`,
-    signal: context.signal ?? new AbortController().signal,
-    clock: deps.clock,
-    secrets: tenantSecrets(deps, input.tenantId),
-    log: deps.log,
-  });
+  const now = deps.clock.now();
+  const kept = answers.get(provider.resources);
+  let raw: readonly ProviderResourceSignal[];
+  if (kept !== undefined && now >= kept.at && now - kept.at < signalsTtlMs) raw = kept.signals;
+  else {
+    raw = await provider.resources.signals({
+      idempotencyKey: `signals:${provider.account.id}`,
+      signal: context.signal ?? new AbortController().signal,
+      clock: deps.clock,
+      secrets: tenantSecrets(deps, input.tenantId),
+      log: deps.log,
+    });
+    answers.set(provider.resources, { at: now, signals: raw });
+  }
   const signals = raw.map(wellFormed).filter((s): s is ProviderResourceSignal => s !== undefined);
   const own = provider.poolOwnerTenantId === input.tenantId;
   const rows = await context.sql.transaction((tx) =>

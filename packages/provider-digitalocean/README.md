@@ -213,8 +213,9 @@ keys, guardrails, the Managed Agents objects; `resources/kinds/named.ts`).
   action gateway, on `runtime` `container` or `microvm`; the attachments are account-wide) and `do.action-gateway`
   (https `upstreams`). Both are `preview: true`: without `previews: true` on the account every call is
   `UNSUPPORTED` (`preview`) and nothing is sent. Meters `do.agent-harness.hours` and `do.action-gateway.hours`.
-- **Signals (preview):** `resources.signals` reads `GET /v2/managed-agents/signals` (read-only, the `observe` budget)
-  into provider-neutral `ProviderResourceSignal`s for harness agents and gateways, at most 500; anything else, or a
+- **Signals (preview):** `resources.signals` reads `GET /v2/managed-agents/signals` (read-only, the `sweep` budget)
+  into provider-neutral `ProviderResourceSignal`s for harness agents and gateways: every page (at most 10 000
+  signals) and the newest 500 kept; anything else, or a
   signal without a valid id or time, is dropped. `cloudResources.signals` shows them per tenant.
 
 Token scopes: read, create, update and delete on the GenAI (Agent Platform) and Dedicated Inference resources, and on

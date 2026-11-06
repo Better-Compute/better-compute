@@ -395,4 +395,27 @@ describe('Managed Agents signals (read-only)', () => {
     expect(signals[2]).toMatchObject({ severity: 'warning', title: 'Human input requested' });
     expect(signals[2]).not.toHaveProperty('detail');
   });
+
+  it('over 500 signals, every page is read and the newest 500 are kept', async () => {
+    const emu = emulator();
+    const harness = seedHarness(emu.state);
+    const base = Date.parse('2026-11-01T00:00:00Z');
+    for (let n = 0; n < 650; n++)
+      seedSignal(emu.state, {
+        uuid: `sig-${n}`,
+        resource_uuid: harness.uuid,
+        type: 'RUN_FAILED',
+        created_at: new Date(base + n * 60_000).toISOString(),
+      });
+    const { resources } = await build(emu, previewAccount);
+    const before = emu.requests.length;
+    const signals = await resources.signals!(ctx());
+    expect(signals).toHaveLength(500);
+    // Oldest first, as DigitalOcean lists them: the 150 oldest are the ones left out.
+    expect(signals[0]!.id).toBe('sig-150');
+    expect(signals.at(-1)!.id).toBe('sig-649');
+    const reads = emu.requests.slice(before);
+    expect(reads.every((r) => r.method === 'GET')).toBe(true);
+    expect(reads.length).toBeGreaterThan(1);
+  });
 });

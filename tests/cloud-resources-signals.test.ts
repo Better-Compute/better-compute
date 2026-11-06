@@ -132,6 +132,32 @@ describe('cloudResources.signals', () => {
     expect(none.items).toEqual([]);
   });
 
+  it('asks the provider at most once per account in 30 seconds, whichever tenant asks', async () => {
+    const asked = () => world.cloud.calls.filter((call) => call === 'signals').length;
+    await world.tick('cloud.resources', 1, 31_000);
+    world.cloud.calls.length = 0;
+    for (const [who, tenantId] of [
+      ['acme', world.acmeTenant],
+      ['other', world.otherTenant],
+      ['root', world.rootTenant],
+      ['acme', world.acmeTenant],
+    ] as const)
+      await world.api.cloudResources.signals(world[who], { tenantId, poolId: world.poolId });
+    expect(asked()).toBe(1);
+    // Each tenant still sees only its own, from the one answer.
+    const other = await world.api.cloudResources.signals(world.other, {
+      tenantId: world.otherTenant,
+      poolId: world.poolId,
+    });
+    expect(other.items.map((item: { id: string }) => item.id)).toEqual(['o-1']);
+    await world.tick('cloud.resources', 1, 31_000);
+    await world.api.cloudResources.signals(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: world.poolId,
+    });
+    expect(asked()).toBe(2);
+  });
+
   it('refuses a provider without signals, a pool the tenant cannot see, and a bad resource id', async () => {
     expect(
       (

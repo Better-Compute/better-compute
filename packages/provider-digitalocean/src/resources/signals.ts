@@ -4,13 +4,17 @@ import { actionGatewayKindName, agentHarnessKindName } from './kinds/managed-age
 
 // Managed Agents Signals (P8 task 6, a DigitalOcean preview): what DigitalOcean raises about a harness agent or an
 // action gateway (a run that failed, an agent asking for a human), read into provider-neutral signals for the
-// operator's attention list. Read-only: GETs on the observe budget, never a mutation. A signal about anything else, or
+// operator's attention list. Read-only: GETs on the sweep budget (they defer before any reconciler's reads and writes),
+// never a mutation. DigitalOcean lists signals oldest first, so every page is read (at most `maxSignalsRead`) and the
+// newest `maxSignals` are kept: those are the ones an attention list is for. A signal about anything else, or
 // with an id or a time that is not one, is dropped; the text is one line without control characters, bounded. The path
 // (/v2/managed-agents/signals) and the shape are assumed, not a recording: the live suite captures real bodies before
 // release.
 
-/** At most this many signals are read per call. */
+/** At most this many signals are returned per call: the newest. */
 export const maxSignals = 500;
+/** At most this many are read per call (50 pages of 200); past it the rest is not read, and a warning is logged. */
+export const maxSignalsRead = 10_000;
 const maxTitle = 120;
 const maxDetail = 500;
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -82,19 +86,27 @@ function signalOf(raw: DoSignal): ProviderResourceSignal | undefined {
   };
 }
 
-/** The account's Managed Agents signals, oldest first as DigitalOcean lists them, at most `maxSignals`. */
+/** The account's newest `maxSignals` Managed Agents signals, oldest first. */
 export async function doSignals(
   client: DoClient,
   context: CallContext,
 ): Promise<ProviderResourceSignal[]> {
-  const out: ProviderResourceSignal[] = [];
+  const all: ProviderResourceSignal[] = [];
+  let read = 0;
   for await (const raw of client.pages<DoSignal>('/managed-agents/signals', 'signals', {
     signal: context.signal,
-    budget: 'observe',
+    budget: 'sweep',
   })) {
+    if (++read > maxSignalsRead) {
+      context.log?.warn('digitalocean: more Managed Agents signals than are read; the newest may be missing', {
+        read: maxSignalsRead,
+      });
+      break;
+    }
     const signal = signalOf(raw);
-    if (signal) out.push(signal);
-    if (out.length >= maxSignals) break;
+    if (signal) all.push(signal);
   }
-  return out;
+  // By time, whatever order the pages came in (a stable sort keeps the listing's order among equal times).
+  all.sort((a, b) => a.at - b.at);
+  return all.slice(-maxSignals);
 }

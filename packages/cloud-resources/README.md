@@ -56,7 +56,8 @@ betterCompute({
   (`ProviderResources.signals`; DigitalOcean's Managed Agents Signals), newest first, at most 500, for an attention
   list. A tenant of a shared pool sees the signals about its own resources only; the pool's owner sees every one,
   recorded or not. The provider is asked with no transaction open and sends no mutation; malformed signals are
-  dropped, and titles and details are one bounded line.
+  dropped, and titles and details are one bounded line. One answer of a provider account is reused for 30 seconds,
+  whichever tenant asked, so no tenant can spend the account's request budget by asking again and again.
 - **IAM** on `cloud-resource/{id}` (`compute:cloud-resources:create|read|update|delete`) with the attributes `kind`,
   `family`, `provider`, `providerAccountId`, `poolId`, `region` and `projectId`: `resource.family == 'data'`
   allows databases without allowing apps.
