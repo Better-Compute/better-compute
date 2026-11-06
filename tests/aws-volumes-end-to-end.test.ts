@@ -17,7 +17,15 @@ import { EbsEmulator, type EmuVolume } from './support/aws-emulator/ebs.js';
 //
 // Lane note (aws-ebs, wf/aws-ebs): the providerVolumes API lands with wf/do-volumes. Until both
 // branches are on one tree this file skips itself; on the integration branch it runs (remove the
-// guard there).
+// guard there). It needs two changes on the vps half as of wf/do-volumes 2b38cc4d, which allows only
+// `config.regions` plus `config.zones.map(zoneRegion)`, so an AWS account (no `regions`) allows only
+// the bare region and refuses `us-east-1a`:
+//   1. assertRegion also accepts `account.config.zones` entries verbatim (an AWS volume's region is
+//      its AZ), and targetInstance compares an AWS volume's zone with the instance offer's zone;
+//   2. volumeSpec passes `zone` (the row region when it is a zone; on a create with instanceId, the
+//      instance offer's zone).
+// The provider half fails closed meanwhile: a bare region on a multi-zone account is INVALID_INPUT
+// (reason zone-required), never a silent first zone.
 const hasProviderVolumes = existsSync(
   new URL('../packages/vps/src/provider-resources.ts', import.meta.url),
 );

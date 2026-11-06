@@ -413,7 +413,16 @@ export class AwsVolumes implements ProviderVolumes {
         );
       return spec.zone;
     }
-    return regionIsZone ? spec.region : zones[0]!;
+    if (regionIsZone) return spec.region;
+    // A bare region with several zones names none: never a silent first zone (an attach to an
+    // instance in another zone would then fail only at reconcile time). Fail closed.
+    if (zones.length !== 1)
+      throw fail(
+        'INVALID_INPUT',
+        `region ${this.config.region} has several zones (${zones.join(', ')}); the volume names one`,
+        'zone-required',
+      );
+    return zones[0]!;
   }
 
   #validate(spec: ProviderVolumeSpec): { zone: string; type: EbsVolumeType; name: string } {

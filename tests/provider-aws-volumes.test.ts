@@ -52,6 +52,8 @@ function world(config: Partial<AwsConfig> & Record<string, unknown> = {}) {
   const spec = (overrides: Partial<ProviderVolumeSpec> = {}): ProviderVolumeSpec => ({
     name: 'bc-v-0001',
     region: 'us-east-1',
+    // Two zones: a bare region names no zone, so the spec names one (vps passes it).
+    zone: 'us-east-1a',
     sizeGiB: 10,
     kind: 'block',
     ...overrides,
@@ -177,7 +179,10 @@ describe('provider-aws volumes: ensure, get, delete', () => {
 
   it('places the volume in the zone the spec names', async () => {
     const { volumes, call, spec, ebs } = world();
-    const byRegion = await volumes.ensureVolume(spec({ name: 'a', region: 'us-east-1b' }), call());
+    const byRegion = await volumes.ensureVolume(
+      spec({ name: 'a', region: 'us-east-1b', zone: undefined }),
+      call(),
+    );
     expect(ebs.volumes.get(byRegion.id)!.zone).toBe('us-east-1b');
     const byZone = await volumes.ensureVolume(spec({ name: 'b', zone: 'us-east-1b' }), call());
     expect(ebs.volumes.get(byZone.id)!.zone).toBe('us-east-1b');
@@ -196,6 +201,23 @@ describe('provider-aws volumes: ensure, get, delete', () => {
       'INVALID_INPUT',
       'zone',
     );
+  });
+
+  it('a bare region with several zones and no zone is refused, never placed in the first zone', async () => {
+    const { volumes, call, spec, emu } = world();
+    await rejects(
+      volumes.ensureVolume(spec({ region: 'us-east-1', zone: undefined }), call()),
+      'INVALID_INPUT',
+      'zone-required',
+    );
+    expect(emu.calls('CreateVolume')).toHaveLength(0);
+    // One zone: the region names it.
+    const single = world({ zones: ['us-east-1b'] });
+    const made = await single.volumes.ensureVolume(
+      single.spec({ region: 'us-east-1', zone: undefined }),
+      single.call(),
+    );
+    expect(single.ebs.volumes.get(made.id)!.zone).toBe('us-east-1b');
   });
 
   it('refuses what EBS cannot be asked for', async () => {

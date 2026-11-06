@@ -1138,9 +1138,9 @@ in one region: a fleet in several regions is several accounts.
   it, turning a lost race into `CONFLICT`; deleting an attached instance detaches it and leaves it running.
 - **EBS volumes.** `volumes` serves the provider volumes contract with EBS: volumes and snapshots tagged
   `better-compute:managed=true` plus their name, always encrypted (the account's `kmsKeyId` or default key), created
-  with a `ClientToken` from the name, in the zone the spec names (else the account's first zone). Types `gp3`
-  (default), `gp2`, `io2`, `io1`, `st1`, `sc1` and `standard`. Attach only to an instance of this deployment in
-  the volume's zone (`INVALID_INPUT`, reason `zone-mismatch`, otherwise), at the next free `/dev/sd[f-p]`; the guest
+  with a `ClientToken` from the name, in the zone the spec names (else the account's only zone: a bare region on an
+  account with several zones is `INVALID_INPUT`, reason `zone-required`). Types `gp3` (default), `gp2`, `io2`,
+  `io1`, `st1`, `sc1` and `standard`. Attach only to an instance of this deployment in the volume's zone (`INVALID_INPUT`, reason `zone-mismatch`, otherwise), at the next free `/dev/sd[f-p]`; the guest
   sees `/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_<volume id without the dash>`. Resize grows only, and inside
   EBS's six-hour modification cooldown it is `RATE_LIMITED` with `retryAfterMs`. Restores use only this deployment's
   completed snapshots. Every change refuses a volume or snapshot without the ownership tags.
