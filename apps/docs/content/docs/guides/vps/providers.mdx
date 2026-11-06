@@ -59,6 +59,11 @@ sources:
     'packages/provider-aws/README.md',
     'packages/provider-aws/src/compute.ts',
     'packages/provider-aws/src/account.ts',
+    'packages/provider-aws/src/federation.ts',
+    'packages/provider-aws/src/onboarding.ts',
+    'packages/vps/src/workload-roles.ts',
+    'tests/aws-account-federation.test.ts',
+    'tests/vps-workload-aws-role.test.ts',
     'packages/provider-digitalocean/src/config.ts',
     'packages/provider-digitalocean/src/compute/droplets.ts',
     'packages/provider-digitalocean/src/networks/index.ts',
@@ -1075,6 +1080,11 @@ in one region: a fleet in several regions is several accounts.
       description:
         "The IAM role to assume, in the region's partition. better-compute sends a platform-assigned ExternalId.",
     },
+    webIdentityRoleArn: {
+      type: 'string',
+      description:
+        "Keyless: the IAM role the account's own workload identity assumes with AssumeRoleWithWebIdentity (audience sts.amazonaws.com). Excludes credentials and assumeRoleArn.",
+    },
     subnetId: {
       type: 'string',
       description: "The subnet create uses (else the zone's default subnet).",
@@ -1116,8 +1126,23 @@ in one region: a fleet in several regions is several accounts.
   identity must be the role's own account.
 - **Onboarding a tenant.** `better-compute aws iam-policy` prints the role's permissions policy and
   `better-compute aws trust-policy --platform-principal <arn> --external-id better-compute:<providerAccountId>` its
-  trust policy. Both commands ship with the provider; add `awsIamPolicyCommand()` and `awsTrustPolicyCommand()` to
-  your configuration's `commands`.
+  trust policy; `better-compute aws onboarding-template --account <providerAccountId> --platform-principal <arn>`
+  renders both as one CloudFormation template. `providerAccounts.get` shows the account's `onboarding`: its `mode`,
+  and for a role the `externalId` and (with `awsProvider({ platformPrincipalArn })`) the principal to trust. The
+  commands ship with the provider; add `awsIamPolicyCommand()`, `awsTrustPolicyCommand()`,
+  `awsOnboardingTemplateCommand()` and `awsWorkloadRoleCommand()` to your configuration's `commands`.
+- **Keyless accounts.** As with GCP's `federationAudience`, `webIdentityRoleArn` signs the account in with no key:
+  its workload identity (subject `compute-account:<tenantId>/aws/<name>`, audience `sts.amazonaws.com`) is exchanged
+  with `AssumeRoleWithWebIdentity`, so it needs a workload issuer but never the platform's AWS identity. Before it is
+  stored, the provider checks that the role refuses a stranger's and a sibling's subject
+  (`federationTrustsAnySubject`), accepts the account's own (`federationRefused`), is in the role's account and can
+  read EC2 (`ec2Access`). `aws onboarding-template --issuer <url> --tenant <id> --name <name>` renders the IAM OIDC
+  provider and that role.
+- **Workload roles.** An instance of a hosted pool with `policy.workloadIdentity: true` may name an IAM role as
+  `workloadIdentity.awsRoleArn`, if the pool lists it in `policy.workloadRoles.aws` (ARN globs; `INVALID_INPUT`,
+  reason `awsRoleNotAllowed`, otherwise). The host gets it as `InstanceSpec.awsRole` while the pool allows it, and bcd
+  serves the role's credentials to the guest from the instance's workload token. `aws workload-role --tenant <id>
+  --issuer <url>` renders the role, trusting `sub` like `t:<tenantId>:instance:*`: the tenant pin is in that trust.
 - **Tags and the guard.** Instances and root volumes are tagged `better-compute:managed=true` and
   `better-compute:instance=<id>`. `delete` needs the first, `power` and `reinstall` the second, and the generated
   policy makes AWS enforce the same rules (ABAC).
@@ -1137,5 +1162,6 @@ in one region: a fleet in several regions is several accounts.
 
 `tests/provider-aws.test.ts`, `tests/provider-aws-credentials.test.ts`, `tests/provider-aws-attach.test.ts` and
 `tests/provider-aws-cli.test.ts` run the conformance cases and the EC2 specifics against an in-process AWS emulator
-passed as `fetch`, and `tests/aws-end-to-end.test.ts` runs the provider through vps. No live AWS suite has been run
+passed as `fetch`, and `tests/aws-end-to-end.test.ts` runs the provider through vps; `tests/aws-account-federation.test.ts`
+and `tests/vps-workload-aws-role.test.ts` cover keyless accounts and workload roles. No live AWS suite has been run
 yet.
