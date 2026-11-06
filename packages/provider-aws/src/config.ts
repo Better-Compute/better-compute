@@ -67,6 +67,18 @@ export const awsConfig = manifest({
     .string({ maxLength: 512 })
     .optional()
     .describe('"key=value": discovery yields only instances carrying this tag'),
+  ipamPoolId: field
+    .string({ pattern: '^ipam-pool-[0-9a-f]{8,17}$' })
+    .optional()
+    .describe(
+      'Networks: allocate each VPC range from this Amazon VPC IPAM pool (the network cidr gives the size)',
+    ),
+  securityGroupsPerInterface: field
+    .int({ min: 1, max: 16 })
+    .optional()
+    .describe(
+      "Networks: the account's security groups per network interface quota (default 5): network tags past it are refused",
+    ),
 });
 
 /** The validated account configuration. */
@@ -84,6 +96,8 @@ export interface AwsConfig {
   metadataHopLimit: number;
   associatePublicIp: boolean;
   discoverTag?: string;
+  ipamPoolId?: string;
+  securityGroupsPerInterface?: number;
 }
 
 export interface AwsProviderOptions {

@@ -178,8 +178,11 @@ export function machineState(state: string | undefined): ExternalMachine['state'
   return state !== undefined && Object.hasOwn(states, state) ? states[state]! : 'unknown';
 }
 
-/** The `better-compute:` security groups (AD10) an interface carries, by name. */
-const managedGroup = /^bc-/;
+/**
+ * The `better-compute:` security groups (AD10) an interface carries, by name: one per network tag.
+ * A network's own group (`bc-net-<network>`, its untargeted rules) is not a tag.
+ */
+const managedGroup = /^bc-(?!net-)/;
 
 /** An EC2 instance (a `DescribeInstances`/`RunInstances` item) as an `ExternalMachine`. */
 export function toMachine(

@@ -16,6 +16,7 @@ import type { AccountCredentials } from './account.js';
 import { parseDiscoverTag, type AwsConfig, type AwsProviderOptions } from './config.js';
 import { clientToken, offerId, parseInstanceId, parseOfferId, tags, tagValue } from './ids.js';
 import { aliasRootDeviceOf, resolveImage, ssmImagePrefixes } from './images.js';
+import { AwsNetworks } from './networks.js';
 import {
   toMachine,
   type InstanceTypeCache,
@@ -127,6 +128,14 @@ function labelKey(key: string): string | undefined {
   return `better-compute:${clean}`;
 }
 
+/** The region of an AWS zone name (the zone itself when it is not one). */
+export function zoneRegionOf(zone: string): string {
+  const match = /^([a-z]{2}(?:-gov)?-[a-z]+-\d{1,2})(?:[a-z]|-[a-z]{2,10}-\d{1,2}[a-z])$/.exec(
+    zone,
+  );
+  return match ? match[1]! : zone;
+}
+
 /** One AWS account's EC2 client (`ProviderImpl`). */
 export class AwsCompute implements ProviderImpl {
   #offerings: { pairs: [string, string][]; at: number } | undefined;
@@ -136,6 +145,8 @@ export class AwsCompute implements ProviderImpl {
   readonly #rootDevices = new Map<string, { device: string | undefined; at: number }>();
   readonly #loggedSsm = new Set<string>();
   readonly #ssmPrefixes: readonly string[];
+  /** Tenant networks on this account's VPCs (AWS A2). */
+  readonly networks: AwsNetworks;
 
   constructor(
     readonly config: AwsConfig,
@@ -144,6 +155,17 @@ export class AwsCompute implements ProviderImpl {
     readonly deps: AwsComputeDeps,
   ) {
     this.#ssmPrefixes = ssmImagePrefixes(options.ssmImagePrefixes);
+    this.networks = new AwsNetworks({
+      config,
+      context,
+      call: (action, params, signal) => this.call(action, params, signal),
+      consistencyWindowMs: () => this.consistencyWindowMs,
+    });
+  }
+
+  /** `us-east-1a` and the Local Zone `us-west-2-lax-1a` are in `us-east-1` and `us-west-2`. */
+  zoneRegion(zone: string): string {
+    return zoneRegionOf(zone);
   }
 
   /** How long EC2 may not yet show what this client just launched or tagged. */
@@ -387,8 +409,12 @@ export class AwsCompute implements ProviderImpl {
     const imageId = resolveImage(request.image, info.arch[0] ?? 'x86_64', this.#ssmPrefixes);
     const rootDevice = await this.#rootDevice(request.image, imageId, signal);
     const userData = packUserData(request.userData, request.sshKeys);
-    const subnet = request.network?.subnet ?? this.config.subnetId;
-    const groups = this.config.securityGroupIds ?? [];
+    // On a tenant network: its subnet in the offer's zone and the groups of its firewall rules.
+    const placement = request.network
+      ? await this.networks.placement(request.network, offer.zone, signal)
+      : undefined;
+    const subnet = placement?.subnetId ?? this.config.subnetId;
+    const groups = placement?.groupIds ?? this.config.securityGroupIds ?? [];
     const params: QueryParams = {
       ClientToken: clientToken(context.idempotencyKey),
       MinCount: 1,
