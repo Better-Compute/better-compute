@@ -43,3 +43,60 @@ export function costExplorerFake(emu: AwsEmulator, state: { results: { amount: s
   });
   return { requests };
 }
+
+/** Resource Groups Tagging API GetResources over `state.resources`, `pageSize` per page. */
+export function taggingFake(emu: AwsEmulator, state: { resources: { arn: string; tags: Record<string, string> }[]; pageSize?: number }) {
+  const requests: Record<string, unknown>[] = [];
+  emu.register('tagging', {
+    protocol: 'json',
+    handle(request) {
+      if (request.operation !== 'GetResources') throw new EmuError('UnknownOperationException', request.operation);
+      const body = json(request);
+      requests.push(body);
+      const filters = (body.TagFilters ?? []) as { Key: string }[];
+      const matching = state.resources.filter((resource) => filters.every((filter) => filter.Key in resource.tags));
+      const size = state.pageSize ?? 100;
+      const start = typeof body.PaginationToken === 'string' && body.PaginationToken !== '' ? Number(body.PaginationToken) : 0;
+      const page = matching.slice(start, start + size);
+      return jsonResponse({
+        ResourceTagMappingList: page.map((resource) => ({
+          ResourceARN: resource.arn,
+          Tags: Object.entries(resource.tags).map(([Key, Value]) => ({ Key, Value })),
+        })),
+        PaginationToken: start + size < matching.length ? String(start + size) : '',
+      });
+    },
+  });
+  return { requests };
+}
+
+export interface RecordedCall {
+  service: string;
+  operation: string;
+  params: Record<string, unknown>;
+}
+
+/**
+ * A service that records every call (in one shared log, to check ordering) and answers success:
+ * query services `<Op>Response`, json services `{}`; `answers` overrides one operation's body.
+ */
+export function recorderFake(
+  emu: AwsEmulator,
+  service: string,
+  protocol: 'json' | 'query',
+  log: RecordedCall[],
+  answers: Record<string, (params: Record<string, unknown>) => string | Record<string, unknown>> = {},
+) {
+  emu.register(service, {
+    protocol,
+    handle(request) {
+      const params: Record<string, unknown> = protocol === 'json' ? json(request) : Object.fromEntries(form(request));
+      log.push({ service, operation: request.operation, params });
+      const answer = answers[request.operation]?.(params);
+      if (protocol === 'json') return jsonResponse(answer ?? {});
+      return xmlResponse(
+        typeof answer === 'string' ? answer : `<${request.operation}Response><return>true</return><requestId>req</requestId></${request.operation}Response>`,
+      );
+    },
+  });
+}
