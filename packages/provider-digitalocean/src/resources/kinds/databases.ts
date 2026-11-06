@@ -50,6 +50,7 @@ export interface DoDatabase {
   size: string;
   num_nodes: number;
   storage_size_mib?: number;
+  private_network_uuid?: string;
   status: string;
   tags?: string[] | null;
   connection?: DoConnection;
@@ -202,6 +203,7 @@ function clusterState(database: DoDatabase): ProviderResourceState {
       size: database.size,
       nodes: database.num_nodes,
       ...(database.storage_size_mib !== undefined ? { storageMiB: database.storage_size_mib } : {}),
+      ...(database.private_network_uuid ? { vpc: database.private_network_uuid } : {}),
     },
   };
 }
@@ -224,6 +226,7 @@ interface ClusterSpec {
   size: string;
   nodes: number;
   storageMiB?: number;
+  vpc?: string;
 }
 
 async function readCluster(
@@ -272,6 +275,10 @@ function clusterKind(info: EngineInfo): DoKind {
       .int({ min: 10_240, max: 16_777_216 })
       .optional()
       .describe('Disk per node in MiB; it can only grow'),
+    vpc: field
+      .string({ pattern: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ })
+      .optional()
+      .describe("A VPC of the tenant's own account (its uuid); refused on a shared account"),
   });
   const what = (id: string) => `${info.name} cluster ${id}`;
 
@@ -284,6 +291,8 @@ function clusterKind(info: EngineInfo): DoKind {
   ): Promise<ProviderResourceState | undefined> {
     if (wanted.region !== undefined && wanted.region !== database.region)
       throw replaceRequired(kind, 'region');
+    if (wanted.vpc !== undefined && wanted.vpc !== database.private_network_uuid)
+      throw replaceRequired(kind, 'vpc');
     if (wanted.version !== undefined && wanted.version !== database.version) {
       if (!info.upgradable)
         throw replaceRequired(kind, 'version', `${info.name} has no in-place upgrade`);
@@ -349,6 +358,13 @@ function clusterKind(info: EngineInfo): DoKind {
       } else database = await byKey(env, info.engine, context);
       if (!database) {
         const full = wanted as ClusterSpec;
+        if (full.vpc !== undefined && request.accountScope !== 'tenant')
+          throw new ComputeError(
+            'INVALID_INPUT',
+            `${kind}: vpc is account-wide; only a cluster on the tenant's own account may name one`,
+            undefined,
+            { provider: 'digitalocean', reason: 'accountWide', fields: ['vpc'] },
+          );
         try {
           const created = await env.client.request<{ database: DoDatabase }>('POST', '/databases', {
             body: {
@@ -359,6 +375,7 @@ function clusterKind(info: EngineInfo): DoKind {
               size: full.size,
               num_nodes: full.nodes,
               ...(full.storageMiB !== undefined ? { storage_size_mib: full.storageMiB } : {}),
+              ...(full.vpc !== undefined ? { private_network_uuid: full.vpc } : {}),
               tags: ownershipTags(env, request.labels, context),
             },
             signal: context.signal,

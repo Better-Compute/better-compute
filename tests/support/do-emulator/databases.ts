@@ -129,6 +129,9 @@ export function registerDatabases(emulator: DoEmulator): void {
       size: input.size,
       num_nodes: input.num_nodes ?? 1,
       ...(input.storage_size_mib !== undefined ? { storage_size_mib: input.storage_size_mib } : {}),
+      ...(input.private_network_uuid !== undefined
+        ? { private_network_uuid: input.private_network_uuid }
+        : {}),
       status: 'creating',
       tags: input.tags ?? [],
     });

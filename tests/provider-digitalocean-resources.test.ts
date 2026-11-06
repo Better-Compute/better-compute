@@ -281,6 +281,45 @@ describe('Managed Database clusters', () => {
     expect(error.details?.reason).toBe('replaceRequired');
   });
 
+  it('a cluster joins a VPC only on the tenant’s own account; the VPC cannot change in place', async () => {
+    const vpc = '5a4981aa-9653-4bd1-bef5-d6bff52042e4';
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const request = { kind: 'do.database.pg', name: 'bc-r-private', spec: { ...pg, vpc }, labels };
+    for (const accountScope of [undefined, 'shared'] as const) {
+      const error = await failure(
+        resources.ensure({ ...request, ...(accountScope ? { accountScope } : {}) }, ctx('crs_p')),
+      );
+      expect(error.code).toBe('INVALID_INPUT');
+      expect(error.details?.reason).toBe('accountWide');
+    }
+    expect(mutations(emu, 'POST', /^\/v2\/databases$/)).toEqual([]);
+    const state = await ready(resources, { ...request, accountScope: 'tenant' }, 'crs_p');
+    expect(mutations(emu, 'POST', /^\/v2\/databases$/)[0]!.body).toMatchObject({
+      private_network_uuid: vpc,
+    });
+    expect(state.spec).toMatchObject({ vpc });
+    const moved = await failure(
+      resources.ensure(
+        {
+          ...request,
+          id: state.id,
+          accountScope: 'tenant',
+          spec: { ...pg, vpc: 'f2b1a3c4-0000-4000-8000-000000000001' },
+        },
+        ctx('crs_p'),
+      ),
+    );
+    expect(moved.details?.reason).toBe('replaceRequired');
+    // A cluster without a VPC in its spec stays where DigitalOcean put it.
+    const plain = await ready(
+      resources,
+      { kind: 'do.database.pg', name: 'bc-r-plain', spec: pg, labels },
+      'crs_q',
+    );
+    expect(plain.state).toBe('ready');
+  });
+
   it('delete refuses an unmanaged or another deployment’s cluster, and sends no DELETE', async () => {
     const emu = emulator();
     const { resources } = await build(emu);

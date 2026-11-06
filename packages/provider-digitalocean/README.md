@@ -157,9 +157,10 @@ DigitalOcean has no network object, so a tenant network is built from a VPC per 
 
 Token scopes: `database:read`, `database:create`, `database:update` and `database:delete`, plus `tag:create` for
 adopt and release; the App Platform, Functions and Add-Ons scopes for those kinds. The App, Functions and Add-Ons
-bodies follow the API reference and are not yet checked against recorded responses. Not modelled yet: Standard and
-Advanced editions, private networking (a tenant network's VPC), Vector Databases, the 1-Click catalog and Partner
-Network Connect.
+bodies follow the API reference and are not yet checked against recorded responses. A cluster's `vpc` (a VPC uuid)
+is accepted only on the tenant's own account and cannot change in place. Not modelled yet: Standard and Advanced
+editions, a tenant network (`net_…`) as a cluster's VPC, Vector Databases, the 1-Click catalog and Partner Network
+Connect.
 
 ## Rate budget
 
