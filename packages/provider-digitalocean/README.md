@@ -14,7 +14,8 @@ An account is data, validated by the provider's manifest:
 
 | Field               | Meaning                                                                                                                                       |
 | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `token`             | A secret reference to a personal access token with the scopes below.                                                                          |
+| `token`             | A secret reference to a personal access token with the scopes below. An account holds exactly one of `token` and `refreshToken`.              |
+| `refreshToken`      | A secret reference to an OAuth refresh token ("Connect a DigitalOcean account"); see [Operations](#operations).                               |
 | `regions`           | At least one region slug. Offers and discovery are limited to these, and so is every create, claim and subnet.                                |
 | `vpc`               | A VPC name or uuid that `create` uses when it gets no tenant network (default: the region's default VPC).                                     |
 | `sshKeyFingerprint` | The MD5 fingerprint of an account SSH key that is added to every Droplet (a fingerprint, not a secret; see below).                            |
@@ -23,6 +24,8 @@ An account is data, validated by the provider's manifest:
 | `allowSpot`         | Accepted, default `false`; reserved for Spot capacity, which P1 does not create (see [Machines](#machines)).                                  |
 | `discoverTag`       | A tag: discovery yields only Droplets that carry it. Lower-case `[a-z0-9:_-]`, at most 255 characters (else `INVALID_CONFIG`, `discoverTag`). |
 | `previews`          | Accepted, default `false`; reserved for products that DigitalOcean still marks as previews. It has no effect yet.                             |
+| `costs`             | Read the invoices into provider costs (`vps.costs`), default `false`; needs `billing:read`. See [Operations](#operations).                    |
+| `projectPerTenant`  | Assign each new Droplet to the project `bc-<tenant>`, default `false`; needs `project:read,create,update`.                                    |
 
 ## Usage
 
@@ -64,7 +67,9 @@ Create the token as a custom-scope token with at least:
 | `vpc:read,create,update,delete`                                            | The VPC behind each tenant subnet.                                                                                                   |
 | `firewall:read,create,update,delete`                                       | The base firewall and the firewall behind each tenant rule.                                                                          |
 
-A token without a scope fails the call that needs it with `ACCESS_DENIED` (`details.reason` `scope`); `probeAccount` names the missing read scopes up front.
+The operations surfaces need more, only when they are used: `billing:read` (costs and the billing summary), `project:read,create,update` (`projectPerTenant`), `monitoring:read` (Droplet metrics) and `security:read` (security findings).
+
+A token without a scope fails the call that needs it with `ACCESS_DENIED` (`details.reason` `scope`); `probeAccount` names the missing read scopes up front, and `probeAccount(config, context, options, { operations: true })` the operations ones too.
 
 ## Tag scheme
 
@@ -117,6 +122,20 @@ DigitalOcean has no network object, so a tenant network is built from a VPC per 
 - **Names are managed by prefix.** The provider replaces and deletes only firewalls whose names have exactly this shape, and only VPCs whose description names a network; a hand-made `bc-r1.prod` or VPC is never touched.
 - **A Droplet joins a network by tag.** `create` on a tenant network puts `bc-net-<net16>` and the tags its rules target on the Droplet from the first boot; `setTags` adds the new tags before it removes old ones and never removes a member tag unless the Droplet's VPC belongs to another network.
 - **An attached Droplet outside the network's VPCs** that a rule targets loses egress: DigitalOcean denies what a firewall doesn't allow, and the rule's firewall allows only what the rule says.
+
+## Operations
+
+Billing, projects, monitoring, security and OAuth (program phase P9). Every read here is a GET with the account's own token, on the `sweep` budget unless noted, and none of them puts a token in a log or an error. Response shapes beyond the research notes are parsed tolerantly: a row it cannot read is left out, never guessed (costs fail the read instead, so a pass is retried rather than wrong).
+
+- **List prices** (`listPrices`). DigitalOcean prices a size as a whole, so each (size, account region) is one `instance` price naming its offer (`nyc3/s-2vcpu-4gb`), in micros of USD per hour, from the offers catalog. No vCPU, memory or GPU part is derived from a size price, and Spot, volume and address prices are not listed. vps proposes a flavor meter whose flavors share an offer at that offer's price plus the margin.
+- **Provider costs** (`costs: true`). The invoices whose month overlaps the window (a closed month from its final invoice, the current one from the month-to-date `invoice_preview`), one record per invoice item. An item is a month aggregate, so it is read by every window it overlaps, and its id leaves out what grows (amount, duration, end): later reads correct the stored row, and the final invoice replaces the preview's. Usage end is clamped to the read. Items carry no tags: a Droplet item is labelled with the instance and tenant tags of this deployment's Droplet of that id, so vps attributes it; a Droplet already deleted labels nothing. `billing.computeSku` names `Droplets` and `GPU Droplets`; `meteredSku` names volumes and reserved IPs.
+- **Billing summary** (`billingSummary(config, context)`): balance, final invoices, the month to date and the newest 50 history entries, in micros of USD.
+- **Projects** (`projectPerTenant`). Each Droplet a create returns is assigned to `bc-<tenantId>` (vps passes the instance's tenant as the create request's `tenantId`), made on first use. It is grouping, never authority, and best effort: a failure is logged (`digitalocean.projectAssignFailed`) and never fails a create that has its Droplet.
+- **Droplet metrics** (`doMetricsSource(config, context)`). An `externalMetrics` source (`@better-compute/observability`) for attached Droplets that run no bcd: CPU utilisation, memory and load by default, the root filesystem and public bandwidth opt-in (`metrics`), over the last ten minutes. Bandwidth is read as megabits per second, which is **unverified**. When the budget runs out it answers what it read, and the next pull starts there.
+- **Security findings** (`readSecurityFindings`, `observe` budget): the latest posture scan's findings, most severe first, and `securityAttention` maps them onto the admin panel's attention items. Read-only. The Security API shapes are **unverified** against a live account.
+- **OAuth** (`refreshToken`). The provider exchanges the refresh token at `https://cloud.digitalocean.com/v1/oauth/token` for a 30-day access token. The refresh token rotates on every exchange, so the host must pass `digitaloceanProvider({ oauth: { clientId, clientSecret, rotate } })`: `rotate` writes the new refresh token over the account's secret (`SecretStore.put(tenantId, value, { ref })`). A host without it refuses OAuth accounts. Every exchange reads the store, and an `invalid_grant` re-reads it once, so a token another process rotated is used; a dead grant is `INVALID_CONFIG` (`oauthGrant`). `exchangeAuthorizationCode` is the connect flow's server side; the console page and the server callback are not built yet.
+
+Not here yet: alert policies, Insights rules and uptime checks (they are `cloudResources` kinds, program phase P7), and the CLI, MCP, console and admin surfaces.
 
 ## Rate budget
 
