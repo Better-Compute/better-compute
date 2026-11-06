@@ -147,7 +147,7 @@ const blobStore = spacesBlobStore({
 
 Requests are path-style (`https://<region>.digitaloceanspaces.com/<bucket>/<key>`) and signed with SigV4 (`spaces/sigv4.ts`). The signer is hand-written on `node:crypto` (DO-D19) and tested against AWS's published vectors. `@better-compute/aws-core` is reserved for the AWS packages (`scripts/check-deps.mjs` rule 5), so this package does not use it.
 
-A key with a `.` or `..` segment, a control character, a leading `/` or more than 1024 bytes is refused before any request, because URL parsing would turn it into another key. The key pair is resolved on first use. The secret key never appears in a URL, a header that is returned, a log line or an error.
+A key with a `.` or `..` segment, a control character, a leading `/` or more than 1024 bytes is refused before any request, because URL parsing would turn it into another key. The key pair is resolved on first use, and again after Spaces refuses it (`spacesKeys`: `InvalidAccessKeyId`, `SignatureDoesNotMatch`), so a pair rotated in the SecretStore takes effect without a restart. The secret key never appears in a URL, a header that is returned, a log line or an error.
 
 The client never follows a redirect, because a request carries signed headers and only the configured endpoint may be reached. A 3xx (`PermanentRedirect`, `TemporaryRedirect`, or one without a body) is `INVALID_CONFIG` with `reason` `bucketRegion`: the bucket is behind another endpoint, usually another region's. The error does not carry the redirect's location.
 
@@ -162,28 +162,36 @@ The client never follows a redirect, because a request carries signed headers an
 
 | Kind | Spec (updatable in **bold**) | Outputs | Ownership |
 | --- | --- | --- | --- |
-| `do.spaces-key` | **`grants`**: `<bucket>:read`, `<bucket>:readwrite` or `*:fullaccess` | `accessKeyId`, `name`, `grants`. Secret output: `secretKey`, returned only by the `ensure` that creates the key | The name is `bc-…` |
-| `do.spaces-bucket` | `region`, **`acl`** (`private` or `public-read`), **`versioning`** | `bucket`, `region`, `endpoint`, `origin`, `acl`, `versioning` | The marker object `.better-compute/owner`, which names the deployment |
-| `do.cdn-endpoint` | `origin` (`<bucket>.<region>.digitaloceanspaces.com`), **`ttl`** (60, 600, 3600, 86400 or 604800), **`customDomain`** with **`certificateId`** | `origin`, `endpoint`, `url`, `ttl`, `customDomain` | The origin is a managed bucket |
-| `do.container-registry` | `region` | `name`, `region`, `endpoint` (`registry.digitalocean.com/<name>`), `storageUsageBytes` | The name is `bc-…` |
-| `do.registry-garbage-collection` | `registry` (a managed one), **`type`**, **`intervalHours`** (default 24) | `registry`, `uuid`, `status`, `blobsDeleted`, `freedBytes` | The registry is managed |
+| `do.spaces-key` | **`grants`**: `<region>/<bucket>:read` or `<region>/<bucket>:readwrite` (a bucket id); `*:fullaccess` only with the operator option `spacesKeyFullAccess` | `accessKeyId`, `name`, `grants` (bucket names, as DigitalOcean records them). Secret output: `secretKey`, returned only by the `ensure` that creates the key | The name is `bc-<deployment hash>-…` |
+| `do.spaces-bucket` | `region`, **`acl`** (`private` or `public-read`), **`versioning`** | `bucket`, `region`, `endpoint`, `origin`, `acl`, `versioning` | The marker object `.better-compute/owner`, which names the deployment, the tenant and the resource |
+| `do.cdn-endpoint` (parent `do.spaces-bucket`) | `origin` (`<bucket>.<region>.digitaloceanspaces.com`), **`ttl`** (60, 600, 3600, 86400 or 604800), **`customDomain`** with **`certificateId`** | `origin`, `endpoint`, `url`, `ttl`, `customDomain` | The origin is a managed bucket of the same tenant, and the request's parent |
+| `do.container-registry` | `region` | `name`, `region`, `endpoint` (`registry.digitalocean.com/<name>`), `storageUsageBytes` | The name is `bc-<deployment hash>-…` |
+| `do.registry-garbage-collection` (parent `do.container-registry`) | `registry` (the parent's id), **`type`**, **`intervalHours`** (default 24) | `registry`, `uuid`, `status`, `blobsDeleted`, `freedBytes` | The registry is this deployment's, and the request's parent |
 
 Buckets, keys, CDN endpoints and registries carry no tags, so each kind proves ownership another way. The last column says how. A resource without that proof is never changed or deleted. It is refused with `INVALID_STATE` and one of these reasons, as the contract names them:
 
-- `notManaged`: this deployment does not manage it. Every refused `delete` uses this reason.
-- `managedByAnother`: another deployment's marker is on the bucket.
+- `notManaged`: no better-compute deployment manages it (an unmarked bucket, a key or registry without a `bc-` name, an endpoint whose origin is not a managed bucket).
+- `managedByAnother`: another deployment's marker is on the bucket, or a key's or registry's name carries another deployment's prefix (or none: a bare `bc-` name).
 - `unmanagedOrigin`: an `ensure` names a CDN origin that is not a managed bucket.
+
+Tenants are kept apart too, with `ACCESS_DENIED` before anything is sent:
+
+- A bucket's marker records the request's `better-compute-tenant` label. An `ensure` or `adopt` that reaches another tenant's bucket (or one marked for another resource) is refused with `otherTenant`.
+- A Spaces key grants only buckets this deployment manages for the request's own tenant: `grantBucket` for an unmarked, missing or other deployment's bucket, `otherTenant` for another tenant's (a bucket without a tenant is the operator's). `*:fullaccess` is refused with `fullAccess` unless the operator sets `spacesKeyFullAccess`.
+- A CDN endpoint and a garbage collection live in their parent (the bucket, the registry). `ensure` requires `parent`, the dispatcher's own tenant-scoped row, and it must be the bucket the origin names, or the registry the spec names (`INVALID_INPUT`, `parent`). A CDN origin's marker must also name the request's tenant.
 
 Adopting and releasing:
 
 - `adopt` on a bucket writes the marker, with the cloud resource id from the `better-compute-resource` label. A bucket another deployment marked is refused.
 - `release` removes the marker and leaves the bucket and its data in place.
 - `adopt` on a CDN endpoint only checks that its origin is a managed bucket: an endpoint has nothing to label.
-- Keys and registries are owned by their `bc-` names, so `adopt` and `release` are `UNSUPPORTED` with `reason` `adopt`. Their discovery reports `managedBy: 'this'` for any `bc-` name, because the name cannot tell two deployments apart.
+- Keys and registries are owned by their names, so `adopt` and `release` are `UNSUPPORTED` with `reason` `adopt`. The provider-side name is `bc-<deployment hash>-<rest>` (`managedNamePrefix(deployment)`, the 12 hex characters of the deployment tag), derived from the requested `bc-` name and hashed down to 63 characters when needed. Discovery reports `managedBy: 'this'` for this deployment's prefix and `'other'` for any other `bc-` name.
+- A key is created whenever the request carries no `id`: a key found by name alone is a create whose answer, and secret, was lost. After every create, every other key with that name is deleted, so the secret always comes back and no duplicate credential stays live. A key records bucket names but not regions, so `get` and discovery return no `spec` for it.
 
 Tenant data is never deleted to delete a resource:
 
-- A bucket is deleted only when it holds nothing but its marker. Otherwise the delete is refused with `bucketNotEmpty`. If an object arrives during the delete, the same marker is put back.
+- A bucket is deleted only when it holds nothing but its marker. Otherwise the delete is refused with `bucketNotEmpty`. If the bucket delete fails (an object arrived meanwhile, or any other error), the same marker is put back. A delete cut off between the marker delete and the bucket delete (a crash) leaves an empty, unmarked bucket that is refused as `notManaged`; `adopt` and then `delete` it.
+- Only a 404 means a bucket is gone. A 403 (a rotated or narrowed account key) is `ACCESS_DENIED` (`spacesAccess`) and a 301 is `INVALID_STATE` (`region`), from `get` and `delete` alike, so a row is never dropped while its bucket stays up.
 - A bucket is not deleted while a CDN endpoint has it as its origin (`cdnEndpointAttached`): the endpoint is managed only through the bucket's marker, so it would be left with nothing able to delete it. Delete the endpoint first.
 - A registry is deleted only when it holds no repositories. Otherwise the delete is refused with `registryNotEmpty`.
 
@@ -197,7 +205,9 @@ A garbage collection means "the registry was collected within the last `interval
 
 ### DOCR images
 
-`docrImageSource({ token, secrets })` is an OCI `ImageSource` (scheme `oci`) for `oci://registry.digitalocean.com/<registry>/<repository>:<tag>` or `@sha256:<digest>`. A tag or a digest is required.
+`docrImageSource({ token, secrets, registries })` is an OCI `ImageSource` (scheme `oci`) for `oci://registry.digitalocean.com/<registry>/<repository>:<tag>` or `@sha256:<digest>`. A tag or a digest is required.
+
+The token and its registry credentials read every registry in the account, and registries are tenant resources, so `registries` (a list of registry names, or a predicate) says which ones resolutions may read. It defaults to none. `resolve(ref, { registries })` narrows one resolution further, to a tenant's own registries for example. A reference to any other registry is `ACCESS_DENIED` (`registry`) before any credential is fetched or request sent.
 
 It resolves a reference this way:
 
@@ -208,7 +218,7 @@ It resolves a reference this way:
 
 It returns that layer's sha256, size, format and compression, together with the registry's own short-lived presigned blob URL. Nodes get only that URL, and they verify the digest.
 
-The source fails closed in two cases:
+The source fails closed in these cases:
 
 - A registry that would serve the bytes itself is refused with `blobRedirect`, because a node would need the control plane's credentials to fetch them.
 - Credentials are never sent to a token realm outside DigitalOcean's hosts. Such a realm is refused with `realm`.
