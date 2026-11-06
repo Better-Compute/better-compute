@@ -16,6 +16,7 @@ import {
   type ModuleContext,
   type Offer,
   type OfferQuery,
+  type ReservationOffering,
   type ProviderDefinition,
   type SecretResolver,
   type WorkloadIssuerPort,
@@ -65,6 +66,24 @@ import {
 } from './estimates.js';
 import { id, int, name, object, optional, tenant } from './input.js';
 import { isRootCaller } from './billing.js';
+import {
+  describePurchase,
+  listPurchases,
+  listReservationOfferings,
+  parseListPurchases,
+  parsePurchaseReservation,
+  parseReservationOfferings,
+  preparePurchase,
+  providerPurchasesReconciler,
+  purchasePoll,
+  purchaseSchemas,
+  requestPurchase,
+  type ListPurchasesInput,
+  type ProviderPurchaseView,
+  type PurchaseDeps,
+  type PurchaseReservationInput,
+  type ReservationOfferingsInput,
+} from './provider-purchases.js';
 import {
   billingApi,
   defaultCurrency,
@@ -452,6 +471,15 @@ export type VpsApi = {
       { items: ProviderMachineView[]; cursor?: string; discoveredAt?: number }
     >;
     discover: MethodDefinition<DiscoverInput, { queued: true; discoveredAt?: number }>;
+    /** (AWS A3) Capacity the account could buy (a provider read). */
+    reservationOfferings: MethodDefinition<
+      ReservationOfferingsInput,
+      { items: ReservationOffering[] }
+    >;
+    /** (AWS A3) Buys an offering: root-only, confirmed, exactly once. */
+    purchaseReservation: MethodDefinition<PurchaseReservationInput, ProviderPurchaseView>;
+    /** (AWS A3) The account's purchases (root-only). */
+    purchases: MethodDefinition<ListPurchasesInput, { items: ProviderPurchaseView[] }>;
   };
   /** Discovered provider machines bound to provider pools (discovery.ts); the rest of the group is capacity's. */
   pools: {
@@ -736,6 +764,17 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     ...rootOf(context),
     ...workloadOf(context),
     ...(options.billing?.gpuModels ? { meterGpuModels: options.billing.gpuModels } : {}),
+  });
+  /** Capacity purchases (AWS A3): the same deps as the reservations worker. */
+  const purchaseDeps = (context: ModuleContext): PurchaseDeps => ({
+    clock: context.clock,
+    events: context.events,
+    work: context.work,
+    log: context.log,
+    secrets: options.secrets ?? context.secrets ?? noSecrets,
+    clients,
+    ...rootOf(context),
+    ...workloadOf(context),
   });
   /** Reservation grants (D7): the API and the `vps.grants` reconciler, which also reopens a grant's instances. */
   const grantDeps = (context: ModuleContext): GrantDeps => ({
@@ -1518,6 +1557,46 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         handler: (context, input) => requestDiscovery(depsOf(context), context.sql, input),
         poll: discoverPoll,
       }),
+      // AWS A3: buying capacity. Reading offerings is a provider read; buying is root-only.
+      reservationOfferings: defineMethod({
+        action: 'compute:providers:read',
+        kind: 'read',
+        resource: accountResource,
+        validate: describedBy(purchaseSchemas.reservationOfferings, parseReservationOfferings),
+        handler: (context, input) =>
+          listReservationOfferings(
+            purchaseDeps(context),
+            context.sql,
+            input,
+            context.signal ?? new AbortController().signal,
+          ),
+      }),
+      purchaseReservation: defineMethod({
+        action: 'compute:providers:purchase',
+        kind: 'mutation',
+        resource: accountResource,
+        validate: describedBy(purchaseSchemas.purchaseReservation, parsePurchaseReservation),
+        admission: {
+          async prepare(context, input, tx) {
+            const existing = await preparePurchase(tx, input, context.caller);
+            return existing
+              ? { status: 'replay' as const, result: existing }
+              : { status: 'decide' as const, resource: accountResource(input) };
+          },
+          describe: describePurchase,
+        },
+        handler: (context, input) =>
+          requestPurchase(purchaseDeps(context), context.sql, input, context.caller),
+        poll: purchasePoll,
+      }),
+      purchases: defineMethod({
+        action: 'compute:providers:read',
+        kind: 'read',
+        resource: accountResource,
+        validate: describedBy(purchaseSchemas.purchases, parseListPurchases),
+        handler: (context, input) =>
+          listPurchases(rootOf(context), context.sql, input, context.caller),
+      }),
     },
     // Pool membership: the platform or the account's tenant binds discovered machines to a provider
     // pool; tenants the pool is offered to list them (pools.machines) and attach them.
@@ -1919,6 +1998,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       },
       // Provider capacity reservations: provider_reservations per account, provider.reservation.* events.
       providerReservationsReconciler(options.reservations ?? {}, reservationDeps),
+      // AWS A3: provider capacity purchases, bought outside any transaction, exactly once.
+      providerPurchasesReconciler(purchaseDeps),
       // R5: provider_machines, listed per provider account (key `all` periodic, then per account).
       discoveryReconciler(options.discovery ?? {}, depsOf),
       // D10: provider_costs per provider account whose client reads costs (key `all` periodic, then per account).
