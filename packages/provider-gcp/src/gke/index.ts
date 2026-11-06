@@ -35,7 +35,7 @@ import {
   clusterState,
   nextClusterUpdate,
 } from './clusters.js';
-import { checkCredentialRequest, mintCredentials } from './credentials.js';
+import { checkCredentialRequest, forgetCredentials, mintCredentials } from './credentials.js';
 import {
   autoscalingChange,
   checkNodePoolImmutable,
@@ -55,7 +55,13 @@ export {
   type GkeOperation,
 } from './client.js';
 export { compareVersion, parseVersion } from './clusters.js';
-export { accessNamespace, clusterRoles } from './credentials.js';
+export {
+  accessGuard,
+  accessManifests,
+  accessNamespace,
+  clusterRoles,
+  guardedNamespaces,
+} from './credentials.js';
 export {
   httpsKubeTransport,
   type KubeRequest,
@@ -97,6 +103,8 @@ export class GcpKubernetes implements ProviderKubernetes {
   readonly #clock: Clock;
   readonly #transport: KubeTransport;
   readonly #operations: Operations;
+  /** Clusters (id, endpoint and CA) this process put the access guard and better-compute:edit on. */
+  readonly #guarded = new Set<string>();
 
   constructor(options: GcpKubernetesOptions) {
     this.#client = options.client;
@@ -472,15 +480,25 @@ export class GcpKubernetes implements ProviderKubernetes {
         reason: 'clusterNotFound',
       });
     const googleToken = await this.#tokens.token({ signal: context.signal, clock: this.#clock });
-    const credentials = await mintCredentials({
-      id: cluster,
-      cluster: found,
-      request,
-      googleToken,
-      transport: this.#transport,
-      signal: context.signal,
-      clock: this.#clock,
-    });
+    // A cluster recreated under the same name has another CA: its guard is written again.
+    const key = `${cluster}|${found.endpoint ?? ''}|${found.masterAuth?.clusterCaCertificate ?? ''}`;
+    let credentials: KubernetesCredentials;
+    try {
+      credentials = await mintCredentials({
+        id: cluster,
+        cluster: found,
+        request,
+        googleToken,
+        transport: this.#transport,
+        signal: context.signal,
+        clock: this.#clock,
+        guarded: this.#guarded.has(key),
+      });
+    } catch (error) {
+      this.#guarded.delete(key);
+      throw error;
+    }
+    this.#guarded.add(key);
     context.log.info('gke.credentials', {
       cluster,
       subject: request.subject,
@@ -488,6 +506,26 @@ export class GcpKubernetes implements ProviderKubernetes {
       expiresAt: credentials.expiresAt,
     });
     return credentials;
+  }
+
+  /**
+   * Removes the service account and binding `credentials` made for `subject` (and `bc-access` once
+   * empty). A cluster that is gone has nothing left to remove.
+   */
+  async forgetCredentials(cluster: string, subject: string, context: CallContext): Promise<void> {
+    const { location, name } = parseClusterId(cluster);
+    const found = await this.#findCluster(location, name, context.signal);
+    if (!found) return;
+    const googleToken = await this.#tokens.token({ signal: context.signal, clock: this.#clock });
+    await forgetCredentials({
+      id: cluster,
+      cluster: found,
+      subject,
+      googleToken,
+      transport: this.#transport,
+      signal: context.signal,
+    });
+    context.log.info('gke.credentials.forget', { cluster, subject });
   }
 
   // --------------------------------------------------------------------------------- versions

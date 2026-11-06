@@ -783,13 +783,18 @@ describe('doks credentials', () => {
     });
     // One service account per subject and role: bc-u-alice-e is alice's edit account.
     expect(s.doks.kube.routes()).toEqual([
+      // The access guard and better-compute:edit come first, before any subject exists.
+      'POST /apis/rbac.authorization.k8s.io/v1/clusterroles',
+      'POST /apis/rbac.authorization.k8s.io/v1/clusterroles',
+      'POST /apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies',
+      'POST /apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings',
       'POST /api/v1/namespaces',
       'POST /api/v1/namespaces/bc-access/serviceaccounts',
       'GET /apis/rbac.authorization.k8s.io/v1/clusterrolebindings/bc-access:bc-u-alice-e',
       'POST /apis/rbac.authorization.k8s.io/v1/clusterrolebindings',
       'POST /api/v1/namespaces/bc-access/serviceaccounts/bc-u-alice-e/token',
     ]);
-    expect(s.doks.kube.calls[1]!.body).toMatchObject({
+    expect(s.doks.kube.calls[5]!.body).toMatchObject({
       metadata: {
         name: 'bc-u-alice-e',
         labels: {
@@ -807,7 +812,7 @@ describe('doks credentials', () => {
       expect(call.url.startsWith(`${server}/`)).toBe(true);
     }
     expect(s.doks.kube.bindings.get('bc-access:bc-u-alice-e')).toMatchObject({
-      roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: 'edit' },
+      roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: 'better-compute:edit' },
       subjects: [{ kind: 'ServiceAccount', name: 'bc-u-alice-e', namespace: 'bc-access' }],
       metadata: { labels: { 'app.kubernetes.io/managed-by': 'better-compute' } },
     });
@@ -865,6 +870,72 @@ describe('doks credentials', () => {
       'POST /api/v1/namespaces/bc-access/serviceaccounts/bc-u-bob-v/token',
     ]);
     expect(s.doks.kube.bindings.get('bc-access:bc-u-bob-v')!.roleRef.name).toBe('view');
+  });
+
+  it('an edit subject cannot reach an admin subject (impersonation, tokens, pods, exec)', async () => {
+    const s = await withCluster();
+    const server = `https://${s.cluster}.k8s.ondigitalocean.com`;
+    const mint = (subject: string, role: 'view' | 'edit' | 'admin') =>
+      s.k8s.credentials(s.cluster, { subject, role, ttlSeconds: 600 }, s.ctx());
+    const admin = await mint('bc-u-root', 'admin');
+    const edit = await mint('bc-u-alice', 'edit');
+    const view = await mint('bc-u-vic', 'view');
+    const can = (token: string, verb: string, resource: string, namespace?: string, group = '') =>
+      s.doks.kube.can(server, token, { verb, resource, group, ...(namespace ? { namespace } : {}) });
+    expect(can(edit.token, 'create', 'deployments', 'default', 'apps')).toBe(true);
+    for (const namespace of ['bc-access', 'kube-system']) {
+      expect(can(edit.token, 'create', 'pods', namespace)).toBe(false);
+      expect(can(edit.token, 'create', 'pods/exec', namespace)).toBe(false);
+      expect(can(edit.token, 'create', 'serviceaccounts/token', namespace)).toBe(false);
+      expect(can(edit.token, 'impersonate', 'serviceaccounts', namespace)).toBe(false);
+      expect(can(admin.token, 'create', 'pods', namespace)).toBe(true);
+    }
+    expect(can(view.token, 'get', 'pods', 'default')).toBe(true);
+    expect(can(view.token, 'create', 'pods', 'default')).toBe(false);
+    // Written once per cluster by this process.
+    const guardWrites = () =>
+      s.doks.kube.routes().filter((route) => route.includes('admissionregistration')).length;
+    expect(guardWrites()).toBe(2);
+    await mint('bc-u-bob', 'edit');
+    expect(guardWrites()).toBe(2);
+    // Before Kubernetes 1.30: no credentials.
+    const t = await withCluster();
+    t.doks.kube.noAdmissionApi = true;
+    const error = await failure(
+      t.k8s.credentials(t.cluster, { subject: 'bc-u-alice', role: 'view', ttlSeconds: 600 }, t.ctx()),
+    );
+    expect(error.code).toBe('INVALID_STATE');
+    expect(error.message).toMatch(/1\.30/);
+  });
+
+  it('forgetCredentials removes every role of the subject, and bc-access once empty', async () => {
+    const s = await withCluster();
+    const server = `https://${s.cluster}.k8s.ondigitalocean.com`;
+    const root = await s.k8s.credentials(
+      s.cluster,
+      { subject: 'bc-u-root', role: 'admin', ttlSeconds: 600 },
+      s.ctx(),
+    );
+    await s.k8s.credentials(s.cluster, { subject: 'bc-u-root', role: 'view', ttlSeconds: 600 }, s.ctx());
+    await s.k8s.credentials(s.cluster, { subject: 'bc-u-bob', role: 'view', ttlSeconds: 600 }, s.ctx());
+    const store = s.doks.kube.clusters.find(server)!;
+    await s.k8s.forgetCredentials!(s.cluster, 'bc-u-root', s.ctx());
+    expect(store.subjectObjects()).toEqual([
+      'ClusterRoleBinding/bc-access:bc-u-bob-v',
+      'Namespace/bc-access',
+      'ServiceAccount/bc-access/bc-u-bob-v',
+    ]);
+    expect(s.doks.kube.can(server, root.token, { verb: 'get', resource: 'pods', namespace: 'default' })).toBe(
+      false,
+    );
+    await s.k8s.forgetCredentials!(s.cluster, 'bc-u-bob', s.ctx());
+    expect(store.subjectObjects()).toEqual([]);
+    await s.k8s.forgetCredentials!(s.cluster, 'bc-u-bob', s.ctx());
+    await s.k8s.forgetCredentials!('0d0c5000-0000-4000-8000-999999999999', 'bc-u-bob', s.ctx());
+    s.doks.kube.failWith = 503;
+    expect((await failure(s.k8s.forgetCredentials!(s.cluster, 'bc-u-bob', s.ctx()))).code).toBe(
+      'UNAVAILABLE',
+    );
   });
 
   it('names the account of a long subject by a hash, distinct per role and from short ones', async () => {

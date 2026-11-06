@@ -610,3 +610,79 @@ export async function mintCredentials(options: {
     expiresAt: Number.isFinite(expiry) ? expiry : options.clock.now() + ttlSeconds * 1000,
   };
 }
+
+/**
+ * Removes what `mintCredentials` made for `subject` (its binding and service account), and the
+ * `bc-access` namespace once no subject's service account is left in it: tokens minted for the
+ * subject stop working with its service account. better-compute:edit and the access guard stay
+ * (they grant nothing on their own), and so does the account principal's access entry. Idempotent:
+ * what is gone already counts as removed; any other failure throws, so a caller that must not leave
+ * access behind tries again.
+ */
+export async function forgetCredentials(options: {
+  id: string;
+  cluster: EksCluster;
+  subject: string;
+  /** The account principal's eksToken. */
+  token: string;
+  /** The access entry was created just now (an authorization failure is then transient). */
+  fresh: boolean;
+  transport: KubeTransport;
+  signal: AbortSignal;
+}): Promise<void> {
+  const { id, subject, transport, signal } = options;
+  if (typeof subject !== 'string' || !subjectPattern.test(subject))
+    throw invalid(`The subject ${JSON.stringify(subject)} is not a DNS-1123 label`);
+  const { server, caPem } = endpointOf(id, options.cluster);
+  const send = async (method: 'GET' | 'DELETE', path: string, what: string): Promise<KubeResponse> => {
+    try {
+      return await transport({ url: `${server}${path}`, method, caPem, token: options.token, signal });
+    } catch (error) {
+      if (signal.aborted) throw error;
+      throw new ComputeError(
+        'UNAVAILABLE',
+        `${what} on cluster ${id}: the Kubernetes API is unreachable`,
+        undefined,
+        { provider: 'aws', service: 'eks', status: 0, reason: 'network' },
+      );
+    }
+  };
+  const expect = (response: KubeResponse, what: string, ...allowed: number[]): KubeResponse => {
+    if ((response.status >= 200 && response.status < 300) || allowed.includes(response.status))
+      return response;
+    throw kubeError(id, what, response, options.fresh);
+  };
+  await forgetAccess(send, expect, [subject]);
+}
+
+/** Deletes the bindings and service accounts of `accounts`, then the namespace once it is empty. */
+async function forgetAccess(
+  send: (method: 'GET' | 'DELETE', path: string, what: string) => Promise<KubeResponse>,
+  expect: (response: KubeResponse, what: string, ...allowed: number[]) => KubeResponse,
+  accounts: readonly string[]): Promise<void> {
+  const bindings = `/apis/${rbacGroup}/v1/clusterrolebindings`;
+  const serviceAccounts = `/api/v1/namespaces/${accessNamespace}/serviceaccounts`;
+  for (const account of accounts) {
+    const bindingName = `${accessNamespace}:${account}`;
+    const unbinding = `Deleting binding ${bindingName}`;
+    expect(await send('DELETE', `${bindings}/${bindingName}`, unbinding), unbinding, 404);
+    const deleting = `Deleting service account ${account}`;
+    expect(await send('DELETE', `${serviceAccounts}/${account}`, deleting), deleting, 404);
+  }
+  const listing = `Listing the service accounts of ${accessNamespace}`;
+  const listed = expect(await send('GET', serviceAccounts, listing), listing, 404);
+  if (listed.status === 404) return;
+  const items = (listed.body as { items?: { metadata?: { name?: string } }[] } | undefined)?.items;
+  // Kubernetes gives every namespace a `default` service account: that one is no subject's.
+  if (!Array.isArray(items) || items.some((item) => item.metadata?.name !== 'default')) return;
+  const namespacePath = `/api/v1/namespaces/${accessNamespace}`;
+  const reading = `Reading namespace ${accessNamespace}`;
+  const namespace = expect(await send('GET', namespacePath, reading), reading, 404);
+  if (namespace.status === 404) return;
+  const labels = (namespace.body as { metadata?: { labels?: Record<string, string> } } | undefined)
+    ?.metadata?.labels;
+  // Only a namespace better-compute made goes.
+  if (labels?.['app.kubernetes.io/managed-by'] !== managedBy['app.kubernetes.io/managed-by']) return;
+  const removing = `Deleting namespace ${accessNamespace}`;
+  expect(await send('DELETE', namespacePath, removing), removing, 404);
+}

@@ -1,6 +1,7 @@
 import { isoSeconds } from './do-emulator/actions.js';
 import { seedDroplet } from './do-emulator/droplets.js';
 import { DoEmulator, type Json, type RouteContext, type RouteResult } from './do-emulator/index.js';
+import { KubeAccessClusters, type KubeAccessRequest } from './kube-access.js';
 
 // An in-memory emulator of the DigitalOcean Kubernetes (DOKS) endpoints of API v2 that
 // provider-digitalocean's managed Kubernetes uses: clusters, node pools, upgrades, the options
@@ -544,10 +545,35 @@ export interface ClusterApiCall {
  */
 export class FakeClusterApis {
   calls: ClusterApiCall[] = [];
-  readonly namespaces = new Set<string>();
-  readonly serviceAccounts = new Set<string>();
-  readonly bindings = new Map<string, Json>();
+  /** Each cluster's access objects, by API host (kube-access.ts). */
+  readonly clusters = new KubeAccessClusters();
   readonly issued: string[] = [];
+  /** A cluster before Kubernetes 1.30: no ValidatingAdmissionPolicy API. */
+  noAdmissionApi = false;
+  /** The access objects of the cluster the last request went to. */
+  get namespaces() {
+    return this.clusters.current.namespaces;
+  }
+  get serviceAccounts() {
+    return this.clusters.current.serviceAccounts;
+  }
+  get bindings() {
+    return this.clusters.current.bindings;
+  }
+  get clusterRoles() {
+    return this.clusters.current.clusterRoles;
+  }
+  get admissionPolicies() {
+    return this.clusters.current.admissionPolicies;
+  }
+  get admissionBindings() {
+    return this.clusters.current.admissionBindings;
+  }
+
+  /** Whether a token minted for the cluster at `server` may do `request` there now. */
+  can(server: string, token: string, request: KubeAccessRequest): boolean {
+    return this.clusters.can(server, token, request);
+  }
   /** Answers every request with this status instead. */
   failWith?: number;
   /** Throws instead of answering (a network failure). */
@@ -583,56 +609,19 @@ export class FakeClusterApis {
       return ok(401, { kind: 'Status', reason: 'Unauthorized', message: 'Unauthorized' });
     if (this.failWith)
       return ok(this.failWith, { kind: 'Status', message: 'forbidden', reason: 'Forbidden' });
-    const path = url.pathname;
-    const body = request.body as Json | undefined;
-    const exists = { kind: 'Status', reason: 'AlreadyExists', message: 'already exists' };
-    const missing = { kind: 'Status', reason: 'NotFound', message: 'not found' };
-    let m: RegExpExecArray | null;
-    if (request.method === 'POST' && path === '/api/v1/namespaces') {
-      if (this.namespaces.has(body!.metadata.name)) return ok(409, exists);
-      this.namespaces.add(body!.metadata.name);
-      return ok(201, body);
-    }
-    if (
-      (m = /^\/api\/v1\/namespaces\/([^/]+)\/serviceaccounts$/.exec(path)) &&
-      request.method === 'POST'
-    ) {
-      if (!this.namespaces.has(m[1]!)) return ok(404, missing);
-      const key = `${m[1]}/${body!.metadata.name}`;
-      if (this.serviceAccounts.has(key)) return ok(409, exists);
-      this.serviceAccounts.add(key);
-      return ok(201, body);
-    }
-    if ((m = /^\/api\/v1\/namespaces\/([^/]+)\/serviceaccounts\/([^/]+)\/token$/.exec(path))) {
-      if (!this.serviceAccounts.has(`${m[1]}/${m[2]}`)) return ok(404, missing);
-      const token = `doks-sa-token-${this.issued.length + 1}`;
-      this.issued.push(token);
-      const ttl = body!.spec.expirationSeconds as number;
-      return ok(201, {
-        ...body,
-        status: {
-          token,
-          expirationTimestamp: new Date(this.doks.now() + ttl * 1000).toISOString(),
+    const answer = this.clusters.of(url.host).handle(
+      { method: request.method, path: url.pathname, ...(request.body !== undefined ? { body: request.body } : {}) },
+      {
+        issue: () => {
+          const token = `doks-sa-token-${this.issued.length + 1}`;
+          this.issued.push(token);
+          return token;
         },
-      });
-    }
-    const bindings = '/apis/rbac.authorization.k8s.io/v1/clusterrolebindings';
-    if (path === bindings && request.method === 'POST') {
-      if (this.bindings.has(body!.metadata.name)) return ok(409, exists);
-      this.bindings.set(body!.metadata.name, body!);
-      return ok(201, body);
-    }
-    if (path.startsWith(`${bindings}/`)) {
-      const name = decodeURIComponent(path.slice(bindings.length + 1));
-      const found = this.bindings.get(name);
-      if (!found) return ok(404, missing);
-      if (request.method === 'GET') return ok(200, found);
-      if (request.method === 'DELETE') {
-        this.bindings.delete(name);
-        return ok(200, { kind: 'Status', status: 'Success' });
-      }
-    }
-    return ok(404, missing);
+        now: () => this.doks.now(),
+        noAdmissionApi: this.noAdmissionApi,
+      },
+    );
+    return answer ?? ok(404, { kind: 'Status', reason: 'NotFound', message: 'not found' });
   };
 
   routes(): string[] {

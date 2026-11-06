@@ -48,6 +48,7 @@ import {
   checkCredentialRequest,
   endpointOf,
   ensureAdminAccess,
+  forgetCredentials,
   mintCredentials,
   principalArnOf,
 } from './credentials.js';
@@ -575,26 +576,7 @@ export class AwsKubernetes implements ProviderKubernetes {
         { provider: 'aws', service: 'eks', reason: 'authenticationMode' },
       );
     const key = found.arn ?? cluster;
-    let fresh = false;
-    if (!this.#admitted.has(key)) {
-      const principalArn = principalArnOf((await this.#identity(context)).arn, this.#principalRoles);
-      fresh = await ensureAdminAccess({
-        client: this.#client,
-        cluster: name,
-        principalArn,
-        partition: partitionOf(this.#region).partition,
-        signal,
-      });
-      this.#admitted.add(key);
-    }
-    const token = await eksToken({
-      cluster: name,
-      credentials: this.#credentials,
-      region: this.#region,
-      signal,
-      clock: this.#clock,
-      ...(this.#stsEndpoint !== undefined ? { stsEndpoint: this.#stsEndpoint } : {}),
-    });
+    const { token, fresh } = await this.#clusterToken(name, key, context);
     let credentials: KubernetesCredentials;
     try {
       credentials = await mintCredentials({
@@ -623,6 +605,68 @@ export class AwsKubernetes implements ProviderKubernetes {
       expiresAt: credentials.expiresAt,
     });
     return credentials;
+  }
+
+  /**
+   * The account principal's eksToken for a cluster, its admin access entry made first when this
+   * process has not seen it yet (`fresh`: just made, so an authorization failure is transient).
+   */
+  async #clusterToken(
+    name: string,
+    key: string,
+    context: CallContext,
+  ): Promise<{ token: string; fresh: boolean }> {
+    const { signal } = context;
+    let fresh = false;
+    if (!this.#admitted.has(key)) {
+      const principalArn = principalArnOf((await this.#identity(context)).arn, this.#principalRoles);
+      fresh = await ensureAdminAccess({
+        client: this.#client,
+        cluster: name,
+        principalArn,
+        partition: partitionOf(this.#region).partition,
+        signal,
+      });
+      this.#admitted.add(key);
+    }
+    const token = await eksToken({
+      cluster: name,
+      credentials: this.#credentials,
+      region: this.#region,
+      signal,
+      clock: this.#clock,
+      ...(this.#stsEndpoint !== undefined ? { stsEndpoint: this.#stsEndpoint } : {}),
+    });
+    return { token, fresh };
+  }
+
+  /**
+   * Removes the service account and binding `credentials` made for `subject` (and `bc-access` once
+   * empty). A cluster that is gone has nothing left to remove; the principal's access entry stays.
+   */
+  async forgetCredentials(cluster: string, subject: string, context: CallContext): Promise<void> {
+    const { name } = parseClusterId(cluster, this.#region);
+    const { signal } = context;
+    const found = await this.#client.cluster(name, signal);
+    if (!found || found.status === 'DELETING') return;
+    const key = found.arn ?? cluster;
+    const { token, fresh } = await this.#clusterToken(name, key, context);
+    try {
+      await forgetCredentials({
+        id: cluster,
+        cluster: found,
+        subject,
+        token,
+        fresh,
+        transport: this.#transport,
+        signal,
+      });
+    } catch (error) {
+      if (isComputeError(error, 'ACCESS_DENIED') || isComputeError(error, 'UNAVAILABLE'))
+        this.#admitted.delete(key);
+      throw error;
+    }
+    context.log.info('eks.credentials.forget', { cluster, subject });
   }
 
   // -------------------------------------------------------------------------------- discovery

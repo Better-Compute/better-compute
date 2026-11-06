@@ -2,6 +2,7 @@ import { presignUrl } from '@better-compute/aws-core';
 import type { KubeRequest, KubeTransport } from '@better-compute/provider-aws';
 import type { AwsEmulator, EmulatorRequest } from './aws-emulator/index.js';
 import { requestId, restJsonError } from './aws-emulator/xml.js';
+import { KubeAccessClusters, type KubeAccessRequest } from './kube-access.js';
 
 // An in-process emulator of the Amazon EKS REST API (rest-json, SigV4 service `eks`) as provider-aws
 // drives it: clusters (CreateCluster, DescribeCluster, ListClusters, UpdateClusterVersion,
@@ -646,12 +647,29 @@ export class EksEmulator {
 /** The clusters' own Kubernetes API: eksToken and access entry checks, then the access calls. */
 export class EksKubeApi {
   calls: KubeRequest[] = [];
-  namespaces = new Set<string>();
-  serviceAccounts = new Set<string>();
-  bindings = new Map<string, Json>();
-  clusterRoles = new Map<string, Json>();
-  admissionPolicies = new Map<string, Json>();
-  admissionBindings = new Map<string, Json>();
+  /** Each cluster's access objects, by API host (kube-access.ts). */
+  readonly clusters = new KubeAccessClusters();
+  /** The eksTokens requests carried (the account principal's bearer: a secret). */
+  readonly bearers = new Set<string>();
+  /** The access objects of the cluster the last request went to. */
+  get namespaces() {
+    return this.clusters.current.namespaces;
+  }
+  get serviceAccounts() {
+    return this.clusters.current.serviceAccounts;
+  }
+  get bindings() {
+    return this.clusters.current.bindings;
+  }
+  get clusterRoles() {
+    return this.clusters.current.clusterRoles;
+  }
+  get admissionPolicies() {
+    return this.clusters.current.admissionPolicies;
+  }
+  get admissionBindings() {
+    return this.clusters.current.admissionBindings;
+  }
   /** A cluster before Kubernetes 1.30: no ValidatingAdmissionPolicy API. */
   noAdmissionApi = false;
   issued: string[] = [];
@@ -673,29 +691,12 @@ export class EksKubeApi {
    * requester may escalate ClusterRoles (`canEscalate`, what RBAC says for its bindings).
    */
   admissionDenies(request: { namespace: string; operation: string; groups: string[]; canEscalate: boolean }): boolean {
-    for (const binding of this.admissionBindings.values()) {
-      if (!binding.spec?.validationActions?.includes('Deny')) continue;
-      const policy = this.admissionPolicies.get(binding.spec.policyName);
-      if (!policy) continue;
-      const constraints = policy.spec.matchConstraints;
-      const selected = (constraints.namespaceSelector?.matchExpressions ?? []).every(
-        (expression: Json) =>
-          expression.key === 'kubernetes.io/metadata.name' &&
-          expression.operator === 'In' &&
-          expression.values.includes(request.namespace),
-      );
-      const operation = constraints.resourceRules.some((rule: Json) => rule.operations.includes(request.operation));
-      const conditions = (policy.spec.matchConditions ?? []).every((condition: Json) => {
-        const group = /g == '([^']+)'/.exec(condition.expression)?.[1];
-        return group !== undefined && request.groups.includes(group);
-      });
-      if (!selected || !operation || !conditions) continue;
-      for (const validation of policy.spec.validations) {
-        const escalate = validation.expression.endsWith(".resource('clusterroles').check('escalate').allowed()");
-        if (!escalate || !request.canEscalate) return true;
-      }
-    }
-    return false;
+    return this.clusters.current.admissionDenies(request);
+  }
+
+  /** Whether a token minted for the cluster at `server` may do `request` there now. */
+  can(server: string, token: string, request: KubeAccessRequest): boolean {
+    return this.clusters.can(server, token, request);
   }
 
   routes(): string[] {
@@ -755,6 +756,7 @@ export class EksKubeApi {
     const cluster = [...this.eks.clusters.values()].find((c) => new URL(c.endpoint).host === host);
     if (!cluster) throw new Error('getaddrinfo ENOTFOUND');
     if (request.caPem !== emulatedEksCaPem) throw new Error('self-signed certificate in chain');
+    this.bearers.add(request.token);
     const proven = this.verify(request.token, cluster.name);
     if ('refused' in proven) return ok(401, { kind: 'Status', reason: 'Unauthorized', message: 'Unauthorized' });
     const entry = this.eks.accessEntries.get(`${cluster.name}|${proven.principal}`);
@@ -763,68 +765,18 @@ export class EksKubeApi {
       return ok(403, { kind: 'Status', reason: 'Forbidden', message: 'forbidden' });
     this.principals.push(proven.principal);
     if (this.failWith) return ok(this.failWith, { kind: 'Status', message: 'refused', reason: 'Forbidden' });
-    const path = new URL(request.url).pathname;
-    const body = request.body as Json;
-    const exists = { kind: 'Status', reason: 'AlreadyExists', message: 'already exists' };
-    const missing = { kind: 'Status', reason: 'NotFound', message: 'not found' };
-    let m: RegExpExecArray | null;
-    if (request.method === 'POST' && path === '/api/v1/namespaces') {
-      if (this.namespaces.has(body.metadata.name)) return ok(409, exists);
-      this.namespaces.add(body.metadata.name);
-      return ok(201, body);
-    }
-    if ((m = /^\/api\/v1\/namespaces\/([^/]+)\/serviceaccounts$/.exec(path)) && request.method === 'POST') {
-      if (!this.namespaces.has(m[1]!)) return ok(404, missing);
-      const key = `${m[1]}/${body.metadata.name}`;
-      if (this.serviceAccounts.has(key)) return ok(409, exists);
-      this.serviceAccounts.add(key);
-      return ok(201, body);
-    }
-    if ((m = /^\/api\/v1\/namespaces\/([^/]+)\/serviceaccounts\/([^/]+)\/token$/.exec(path))) {
-      if (!this.serviceAccounts.has(`${m[1]}/${m[2]}`)) return ok(404, missing);
-      const token = `eks-sa-token-${this.issued.length + 1}`;
-      this.issued.push(token);
-      const ttl = body.spec.expirationSeconds as number;
-      return ok(201, {
-        ...body,
-        status: { token, expirationTimestamp: new Date(this.emu.now() + ttl * 1000).toISOString() },
-      });
-    }
-    for (const [collection, store] of [
-      ['/apis/rbac.authorization.k8s.io/v1/clusterroles', this.clusterRoles],
-      ['/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies', this.admissionPolicies],
-      ['/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings', this.admissionBindings],
-    ] as const) {
-      if (this.noAdmissionApi && collection.includes('admissionregistration') && path.startsWith(collection))
-        return ok(404, { kind: 'Status', reason: 'NotFound', message: 'the server could not find the requested resource' });
-      if (path === collection && request.method === 'POST') {
-        if (store.has(body.metadata.name)) return ok(409, exists);
-        store.set(body.metadata.name, body);
-        return ok(201, body);
-      }
-      if (path.startsWith(`${collection}/`) && request.method === 'PUT') {
-        const name = decodeURIComponent(path.slice(collection.length + 1));
-        if (!store.has(name) || body.metadata.name !== name) return ok(404, missing);
-        store.set(name, body);
-        return ok(200, body);
-      }
-    }
-    const bindings = '/apis/rbac.authorization.k8s.io/v1/clusterrolebindings';
-    if (path === bindings && request.method === 'POST') {
-      if (this.bindings.has(body.metadata.name)) return ok(409, exists);
-      this.bindings.set(body.metadata.name, body);
-      return ok(201, body);
-    }
-    if (path.startsWith(`${bindings}/`)) {
-      const name = decodeURIComponent(path.slice(bindings.length + 1));
-      const found = this.bindings.get(name);
-      if (!found) return ok(404, missing);
-      if (request.method === 'GET') return ok(200, found);
-      if (request.method === 'DELETE') {
-        this.bindings.delete(name);
-        return ok(200, { kind: 'Status', status: 'Success' });
-      }
-    }
-    return ok(404, missing);
+    const answer = this.clusters.of(host).handle(
+      { method: request.method, path: new URL(request.url).pathname, ...(request.body !== undefined ? { body: request.body } : {}) },
+      {
+        issue: () => {
+          const token = `eks-sa-token-${this.issued.length + 1}`;
+          this.issued.push(token);
+          return token;
+        },
+        now: () => this.emu.now(),
+        noAdmissionApi: this.noAdmissionApi,
+      },
+    );
+    return answer ?? ok(404, { kind: 'Status', reason: 'NotFound', message: 'not found' });
   };
 }
