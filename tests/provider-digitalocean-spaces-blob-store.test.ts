@@ -112,6 +112,38 @@ describe('spacesBlobStore', () => {
     expect(emu.buckets.get('bc-ops')!.objects.has('images/big.raw')).toBe(false);
   });
 
+  it('aborts the multipart upload when a part comes back without an ETag', async () => {
+    const emu = new SpacesEmulator({ now: () => t0 });
+    emu.seedBucket('bc-ops');
+    // Part 2 is stored, but its answer loses the ETag.
+    const noEtagOnPart2: typeof fetch = async (input, init) => {
+      const response = await emu.fetch(input, init);
+      const url = new URL(String(input));
+      return init?.method === 'PUT' && url.searchParams.get('partNumber') === '2'
+        ? new Response(null, { status: 200 })
+        : response;
+    };
+    const store = spacesBlobStore({
+      region: 'nyc3',
+      bucket: 'bc-ops',
+      accessKey: 'secret://spaces/access',
+      secretKey: 'secret://spaces/secret',
+      secrets,
+      fetch: noEtagOnPart2,
+      clock: manualClock(t0),
+      partSizeBytes: 5 * mib,
+    });
+    const error = await failure(store.put('images/big.raw', streamOf(11 * mib)));
+    expect(error.code).toBe('PROVIDER_ERROR');
+    expect(error.details?.reason).toBe('noEtag');
+    expect(emu.uploads.size).toBe(0);
+    // No completion was sent with an empty ETag.
+    const completions = emu.requests.filter(
+      (r) => r.method === 'POST' && r.url.searchParams.has('uploadId'),
+    );
+    expect(completions).toHaveLength(0);
+  });
+
   it('presigns GET and PUT URLs that work until they expire', async () => {
     const { emu, store, clock } = setup({ prefix: 'bc/' });
     const put = await store.presign!('uploads/x', { method: 'PUT', expiresInSeconds: 600 });

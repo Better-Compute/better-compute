@@ -121,6 +121,45 @@ describe('spacesClient', () => {
   });
 });
 
+describe('spacesClient redirects', () => {
+  it('never follows a redirect off the configured endpoint, and reports a bucket in another region', async () => {
+    const seen: (RequestRedirect | undefined)[] = [];
+    let calls = 0;
+    const redirecting: typeof fetch = async (_input, init) => {
+      calls++;
+      seen.push(init?.redirect);
+      return new Response(
+        '<Error><Code>PermanentRedirect</Code><Message>use the other endpoint</Message></Error>',
+        { status: 301, headers: { location: 'https://evil.example/bc-ops/k' } },
+      );
+    };
+    const s3 = spacesClient({
+      fetch: redirecting,
+      region: 'nyc3',
+      credentials: async () => creds,
+      clock: manualClock(t0),
+    });
+    const error = await failure(s3.request('GET', 'bc-ops', 'k'));
+    expect(seen).toEqual(['manual']);
+    expect(calls).toBe(1);
+    expect(error.code).toBe('INVALID_CONFIG');
+    expect(error.details).toMatchObject({ reason: 'bucketRegion', s3Code: 'PermanentRedirect', status: 301 });
+    expect(JSON.stringify(error)).not.toContain('evil.example');
+    // A HEAD asking for 301 still gets it back, unfollowed.
+    const head = await s3.request('HEAD', 'bc-ops', undefined, { allow: [301] });
+    expect(head.status).toBe(301);
+    expect(seen).toEqual(['manual', 'manual']);
+  });
+
+  it('maps a bare 3xx (no S3 body) as a region problem too', () => {
+    const h = new Headers();
+    expect(mapS3Error(307, '', h, 'GET b').details?.reason).toBe('bucketRegion');
+    expect(mapS3Error(301, '<Error><Code>TemporaryRedirect</Code></Error>', h, 'GET b').code).toBe(
+      'INVALID_CONFIG',
+    );
+  });
+});
+
 describe('S3 XML and errors', () => {
   it('reads flat values and decodes entities', () => {
     const body =

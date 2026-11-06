@@ -150,8 +150,16 @@ export function spacesBlobStore(options: SpacesBlobStoreOptions): BlobStore {
           query: { partNumber: String(etags.length + 1), uploadId },
           body: part,
         });
-        etags.push(sent.headers.get('etag') ?? '');
+        const etag = sent.headers.get('etag');
         await sent.body?.cancel();
+        // Completion lists every part's ETag: without one the upload cannot be completed.
+        if (!etag)
+          throw new ComputeError('PROVIDER_ERROR', 'Spaces stored a part without an ETag', undefined, {
+            provider: 'digitalocean',
+            service: 'spaces',
+            reason: 'noEtag',
+          });
+        etags.push(etag);
         part = await readPart(reader, carry, partSize);
         if (part.length === 0) break;
       }

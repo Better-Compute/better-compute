@@ -224,8 +224,18 @@ export function mapS3Error(
     case 'EntityTooLarge':
       code = 'PAYLOAD_TOO_LARGE';
       break;
+    case 'PermanentRedirect':
+    case 'TemporaryRedirect':
+      code = 'INVALID_CONFIG';
+      details.reason = 'bucketRegion';
+      break;
     default:
-      if (status === 403) {
+      if (status >= 300 && status < 400) {
+        // A redirect is never followed (only the configured endpoint is reached): the bucket
+        // lives behind another endpoint, usually another region's.
+        code = 'INVALID_CONFIG';
+        details.reason = 'bucketRegion';
+      } else if (status === 403) {
         code = 'ACCESS_DENIED';
         details.reason = 'spacesAccess';
       } else if (status === 404) code = 'NOT_FOUND';
@@ -297,6 +307,8 @@ export function spacesClient(options: SpacesClientOptions): SpacesClient {
       response = await options.fetch(target.toString(), {
         method,
         headers: signed.headers,
+        // A redirect would carry signed headers to whatever host Spaces names: never follow one.
+        redirect: 'manual',
         ...(opts.body ? { body: opts.body as BodyInit } : {}),
         ...(opts.signal ? { signal: opts.signal } : {}),
       });
