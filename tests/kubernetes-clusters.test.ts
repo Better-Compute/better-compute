@@ -412,6 +412,7 @@ describe('kubernetes()', () => {
     expect(module.migrations!.map((migration) => migration.name)).toEqual([
       'kubernetes/0001_clusters',
       'kubernetes/0002_substrates',
+      'kubernetes/0003_substrate_nodes',
     ]);
     expect(module.reconcilers!.map((reconciler) => reconciler.name)).toEqual([
       'kubernetes.clusters',

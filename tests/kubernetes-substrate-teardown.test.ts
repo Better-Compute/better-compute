@@ -70,12 +70,15 @@ describe('substrate: teardown', () => {
     ]);
     expect(token.rows[0].revoked_at).not.toBeNull();
     const { rows } = await world.fixture.database.query<any>(
-      `SELECT cordoned, no_schedule_reasons FROM nodes WHERE id = $1`,
+      `SELECT cordoned, no_schedule_reasons, provision_state FROM nodes WHERE id = $1`,
       [node],
     );
-    expect(rows[0]).toMatchObject({ cordoned: true, no_schedule_reasons: ['substrate-teardown'] });
+    // Its machine left with the cluster: the node is retired, not left provisioned and cordoned for good.
+    expect(rows[0]).toMatchObject({ cordoned: true, no_schedule_reasons: ['substrate-teardown'], provision_state: 'retired' });
     const types = (await world.events('kubernetes.substrate.')).map((event) => event.type);
     expect(types).toEqual(expect.arrayContaining(['kubernetes.substrate.deleting', 'kubernetes.substrate.deleted']));
+    const deleted = (await world.events('kubernetes.substrate.deleted')).map((event) => event.data);
+    expect(deleted).toEqual([expect.objectContaining({ poolId: pool.id, retiredNodes: 1 })]);
   });
 
   it('waits for live bookings to end before anything is deleted (drain semantics)', async () => {

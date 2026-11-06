@@ -2,17 +2,20 @@ import {
   ComputeError,
   isComputeError,
   newId,
+  provisionStateTable,
+  transition,
   type CallContext,
   type Json,
   type KubernetesCredentials,
   type ModuleContext,
   type PkiPort,
+  type ProvisionState,
   type ProviderKubernetes,
   type Reconciler,
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
-import { endNodeReservations } from '@better-compute/capacity';
+import { endNodeReservations, rebuildPoolRollup } from '@better-compute/capacity';
 import { readAccount, zoneRegion } from '@better-compute/vps';
 import { clusterNetwork, markDeleted, reopen } from './clusters.js';
 import { canonical, sha256Hex } from './input.js';
@@ -1004,15 +1007,87 @@ async function joinedNodes(sql: SqlExecutor, poolId: string): Promise<number> {
 
 /** The NoSchedule reason on a pool node whose Kubernetes Node is gone (scale-down, Spot reclaim, repair). */
 export const substrateNodeRemovedReason = 'substrate-node-removed';
+/** Pool nodes looked at per run, for learning their Node and for whether it is gone (oldest look first). */
+const nodesPerRun = 500;
+/** How soon a pool node whose Node could not be told is looked at again (bcd may report its Node name later). */
+const relearnAfter = '1 hour';
 
 /**
- * Pool nodes whose Kubernetes Node is gone. A pool node maps to its Node by the OS hostname bcd reports (inventory
- * `os.hostname`, the Node name on every managed provider). One that is not connected and whose hostname is absent from
- * the cluster's FULL Node list (not only the substrate's selection: a relabelled Node is not gone) gets NoSchedule
- * `substrate-node-removed`, and its reservations end properly (`endNodeReservations`: bound ones released with their
- * quota refunded once, Spot ones as `preempted`; unbound ones placed again elsewhere). A node with the reason that is
- * connected again under a listed Node loses it. Nodes with no reported hostname are never touched (fail closed).
- * Returns false when the Node list could not be read (nothing changed).
+ * The Kubernetes Node a pool node's bcd says it runs on: inventory `kubernetes.nodeName` (the DaemonSet's
+ * NODE_NAME), else the OS hostname (`os.hostname`), which is the Node name on GKE and DOKS but not always on EKS
+ * (Node `ip-10-0-1-2.<region>.compute.internal`, a short kernel hostname on some AMIs). Undefined when neither is
+ * reported.
+ */
+function reportedNodeName(sections: Readonly<Record<string, Json>> | undefined): string | undefined {
+  const field = (section: string, key: string) => {
+    const value = sections?.[section];
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+    const found = (value as Record<string, Json>)[key];
+    return typeof found === 'string' && found.length > 0 && found.length <= 253 ? found : undefined;
+  };
+  return field('kubernetes', 'nodeName') ?? field('os', 'hostname');
+}
+
+/**
+ * Retires a pool node whose machine is gone for good (its Kubernetes Node was deleted, or the substrate was torn
+ * down and bcd left the cluster), once its reservations ended: `retired` through the provision state table, its
+ * certificates revoked (so a bcd that is somehow still running cannot reconnect), its devices unbookable, its hardware
+ * bindings freed, and the pool's rollup rebuilt. The caller holds a transaction in which the node's reservations
+ * already ended (capacity's lock order: reservations, quota, then nodes, devices, rollup). Returns false when the node
+ * cannot be retired from its state (left alone).
+ */
+async function retireNode(
+  tx: SqlTx,
+  input: { nodeId: string; poolId: string; ownerTenantId: string; reason: string },
+): Promise<boolean> {
+  const { rows } = await tx.query<{ provision_state: ProvisionState }>(
+    `SELECT provision_state FROM nodes WHERE id = $1 FOR UPDATE`,
+    [input.nodeId],
+  );
+  const from = rows[0]?.provision_state;
+  if (from === undefined || from === 'retired') return false;
+  let next: ProvisionState;
+  try {
+    next = from === 'retiring' ? from : transition(provisionStateTable, from, 'retire');
+    next = transition(provisionStateTable, next, 'complete');
+  } catch {
+    return false;
+  }
+  await tx.query(
+    `UPDATE nodes SET provision_state = $2, cordoned = true, identity_gen = identity_gen + 1, version = version + 1,
+            no_schedule_reasons = CASE WHEN $3 = ANY(no_schedule_reasons) THEN no_schedule_reasons
+                                       ELSE array_append(no_schedule_reasons, $3) END
+      WHERE id = $1`,
+    [input.nodeId, next, input.reason],
+  );
+  await tx.query(`UPDATE devices SET bookable = false WHERE node_id = $1 AND bookable`, [input.nodeId]);
+  await tx.query(
+    `UPDATE node_certs SET revoked_at = compute_now(), revocation_reason = $2
+      WHERE node_id = $1 AND revoked_at IS NULL`,
+    [input.nodeId, input.reason],
+  );
+  await tx.query(`DELETE FROM node_bindings WHERE node_id = $1`, [input.nodeId]);
+  await tx.query(`DELETE FROM kubernetes_substrate_nodes WHERE node_id = $1`, [input.nodeId]);
+  await rebuildPoolRollup(tx, { id: input.poolId, ownerTenantId: input.ownerTenantId });
+  return true;
+}
+
+/**
+ * Pool nodes whose Kubernetes Node is gone.
+ *
+ * Learning: a CONNECTED pool node is matched to its Node once, by the Node name its bcd reports
+ * (`reportedNodeName`), only when that name is exactly one of the substrate's listed Nodes; the Node's name and uid
+ * are recorded (`kubernetes_substrate_nodes`). A node whose reported name matches no listed Node is never matched
+ * (looked at again hourly): it is never taken for gone, so a hostname that is not its Node name (EKS) cannot make a
+ * mere disconnect (a bcd pod restart, a network blip) end its bookings. A connected node whose Node was re-created
+ * under the same name takes the new uid.
+ *
+ * Gone: a matched node that is NOT connected and whose Node name is absent from the cluster's FULL Node list (not only
+ * the substrate's selection: a relabelled Node is not gone), or listed with another uid (EKS reuses IP-based names
+ * after a Spot reclaim), has its reservations ended properly (`endNodeReservations`: bound ones released with their
+ * quota refunded once, Spot ones as `preempted`; unbound ones placed again elsewhere) and is retired (`retireNode`,
+ * NoSchedule `substrate-node-removed`). Retired nodes leave every later look, so the window of `nodesPerRun` nodes,
+ * oldest look first, always reaches a newly gone one. Returns false when the Node list could not be read.
  */
 async function removeGoneNodes(
   deps: SubstrateDeps,
@@ -1023,73 +1098,99 @@ async function removeGoneNodes(
   signal: AbortSignal,
 ): Promise<boolean> {
   if (!deps.inventory || !deps.desired) return true;
-  const { rows: candidates } = await sql.query<{ id: string; connectivity: string; removed: boolean }>(
-    `SELECT n.id, n.connectivity, ($2 = ANY(n.no_schedule_reasons)) AS removed FROM nodes n
-      WHERE n.pool_id = $1 AND n.provision_state NOT IN ('retiring', 'retired')
-        AND NOT ($3 = ANY(n.no_schedule_reasons))
-        AND (n.connectivity <> 'connected' OR $2 = ANY(n.no_schedule_reasons))
-      ORDER BY n.id LIMIT 500`,
-    [row.pool_id, substrateNodeRemovedReason, substrateTeardownReason],
+  const live = `n.pool_id = $1 AND n.provision_state NOT IN ('retiring', 'retired') AND n.deleted_at IS NULL
+                AND NOT ($2 = ANY(n.no_schedule_reasons))`;
+  const listed = new Map(selected.nodes.map((node) => [node.name, node]));
+
+  // Learn the Node of connected nodes not matched yet.
+  const { rows: unmatched } = await sql.query<{ id: string }>(
+    `SELECT n.id FROM nodes n LEFT JOIN kubernetes_substrate_nodes m ON m.node_id = n.id
+      WHERE ${live} AND n.connectivity = 'connected'
+        AND (m.node_id IS NULL
+             OR (m.kubernetes_node IS NULL AND m.learned_at < compute_now() - interval '${relearnAfter}'))
+      ORDER BY m.learned_at NULLS FIRST, n.id LIMIT ${nodesPerRun}`,
+    [row.pool_id, substrateTeardownReason],
+  );
+  for (const { id } of unmatched) {
+    const snapshot = await deps.inventory.get(id);
+    const name = reportedNodeName(snapshot?.sections);
+    const node = name !== undefined ? listed.get(name) : undefined;
+    await sql.query(
+      `INSERT INTO kubernetes_substrate_nodes (node_id, pool_id, kubernetes_node, kubernetes_uid, learned_at)
+       VALUES ($1, $2, $3, $4, compute_now())
+       ON CONFLICT (node_id) DO UPDATE
+         SET pool_id = excluded.pool_id, kubernetes_node = excluded.kubernetes_node,
+             kubernetes_uid = excluded.kubernetes_uid, learned_at = excluded.learned_at`,
+      [id, row.pool_id, node?.name ?? null, node?.uid ?? null],
+    );
+  }
+  // A connected node's Node re-created under its name: the new uid.
+  const { rows: matched } = await sql.query<{ node_id: string; kubernetes_node: string; kubernetes_uid: string | null }>(
+    `SELECT m.node_id, m.kubernetes_node, m.kubernetes_uid
+       FROM kubernetes_substrate_nodes m JOIN nodes n ON n.id = m.node_id
+      WHERE ${live} AND n.connectivity = 'connected' AND m.kubernetes_node = ANY($3)`,
+    [row.pool_id, substrateTeardownReason, [...listed.keys()]],
+  );
+  for (const entry of matched) {
+    const uid = listed.get(entry.kubernetes_node)?.uid;
+    if (uid !== undefined && uid !== entry.kubernetes_uid)
+      await sql.query(`UPDATE kubernetes_substrate_nodes SET kubernetes_uid = $2 WHERE node_id = $1`, [
+        entry.node_id,
+        uid,
+      ]);
+  }
+
+  // Matched nodes that are not connected: is their Node gone?
+  const { rows: candidates } = await sql.query<{ id: string; kubernetes_node: string; kubernetes_uid: string | null }>(
+    `SELECT n.id, m.kubernetes_node, m.kubernetes_uid
+       FROM nodes n JOIN kubernetes_substrate_nodes m ON m.node_id = n.id
+      WHERE ${live} AND n.connectivity <> 'connected' AND m.kubernetes_node IS NOT NULL
+      ORDER BY m.checked_at NULLS FIRST, n.id LIMIT ${nodesPerRun}`,
+    [row.pool_id, substrateTeardownReason],
   );
   if (candidates.length === 0) return true;
-  const hostnames = new Map<string, string>();
-  for (const candidate of candidates) {
-    const snapshot = await deps.inventory.get(candidate.id);
-    const os = snapshot?.sections.os;
-    const hostname =
-      typeof os === 'object' && os !== null && !Array.isArray(os) ? (os as Record<string, Json>).hostname : undefined;
-    if (typeof hostname === 'string' && hostname.length > 0) hostnames.set(candidate.id, hostname);
-  }
-  if (hostnames.size === 0) return true;
-  let names: Set<string>;
-  if (selected.full) names = new Set(selected.nodes.map((node) => node.name));
+  let all: Map<string, SubstrateNode>;
+  if (selected.full) all = listed;
   else {
-    const listed = await attempt(deps, row.pool_id, signal, () => api.nodes());
-    if (!listed || 'error' in listed) return false;
-    names = new Set(listed.value.map((node) => node.name));
+    const full = await attempt(deps, row.pool_id, signal, () => api.nodes());
+    if (!full || 'error' in full) return false;
+    all = new Map(full.value.map((node) => [node.name, node]));
   }
+  await sql.query(`UPDATE kubernetes_substrate_nodes SET checked_at = compute_now() WHERE node_id = ANY($1)`, [
+    candidates.map((candidate) => candidate.id),
+  ]);
   for (const candidate of candidates) {
-    const hostname = hostnames.get(candidate.id);
-    if (hostname === undefined) continue;
-    const gone = !names.has(hostname);
-    if (candidate.removed && !gone && candidate.connectivity === 'connected') {
-      await sql.query(
-        `UPDATE nodes SET no_schedule_reasons = array_remove(no_schedule_reasons, $2), version = version + 1
-          WHERE id = $1 AND $2 = ANY(no_schedule_reasons)`,
-        [candidate.id, substrateNodeRemovedReason],
-      );
-      continue;
-    }
-    if (candidate.removed || !gone) continue;
+    const node = all.get(candidate.kubernetes_node);
+    const gone =
+      node === undefined ||
+      (candidate.kubernetes_uid !== null && node.uid !== undefined && node.uid !== candidate.kubernetes_uid);
+    if (!gone) continue;
     await sql.transaction(async (tx) => {
       // Re-read: one that reconnected meanwhile is not gone. Capacity's lock order (reservations, quota, then
       // nodes) is kept: the reservations end first, the node row is written last.
       const { rows: still } = await tx.query<{ id: string }>(
-        `SELECT id FROM nodes WHERE id = $1 AND connectivity <> 'connected' AND NOT ($2 = ANY(no_schedule_reasons))`,
-        [candidate.id, substrateNodeRemovedReason],
+        `SELECT n.id FROM nodes n WHERE n.id = $3 AND ${live} AND n.connectivity <> 'connected'`,
+        [row.pool_id, substrateTeardownReason, candidate.id],
       );
       if (still.length === 0) return;
       const ended = await endNodeReservations(
-        {
-          clock: deps.clock,
-          events: deps.events,
-          work: deps.work,
-          desired: deps.desired!,
-        },
+        { clock: deps.clock, events: deps.events, work: deps.work, desired: deps.desired! },
         tx,
         candidate.id,
         'node-removed',
       );
-      await tx.query(
-        `UPDATE nodes SET no_schedule_reasons = array_append(no_schedule_reasons, $2), version = version + 1
-          WHERE id = $1 AND NOT ($2 = ANY(no_schedule_reasons))`,
-        [candidate.id, substrateNodeRemovedReason],
-      );
+      const retired = await retireNode(tx, {
+        nodeId: candidate.id,
+        poolId: row.pool_id,
+        ownerTenantId: row.tenant_id,
+        reason: substrateNodeRemovedReason,
+      });
       await publishSubstrate(deps, tx, row, 'kubernetes.substrate.node-removed', {
         nodeId: candidate.id,
-        kubernetesNode: hostname,
+        kubernetesNode: candidate.kubernetes_node,
         released: ended.released.length,
         requeued: ended.requeued.length,
+        retired,
       });
     });
   }
@@ -1487,6 +1588,9 @@ async function teardown(
     return poll();
   }
   if (cluster && cluster.state !== 'deleted') return poll();
+  // bcd is gone from the cluster (or the cluster is): the pool's nodes are machines that left for good.
+  const retired = await retireTornDownNodes(deps, sql, row);
+  if (retired === undefined) return poll();
   await sql.transaction(async (tx) => {
     const { rows } = await tx.query(
       `UPDATE kubernetes_pool_substrates
@@ -1498,9 +1602,48 @@ async function teardown(
     if (rows.length > 0)
       await publishSubstrate(deps, tx, row, 'kubernetes.substrate.deleted', {
         ...(row.cluster_id !== null ? { clusterId: row.cluster_id } : {}),
+        retiredNodes: retired,
       });
   });
   return undefined;
+}
+
+/**
+ * The last step of a teardown: the pool's nodes cordoned for it (`substrate-teardown`) are retired (`retireNode`), so
+ * none stays provisioned with valid certificates after its machine left; reservations they still hold (ended ones
+ * not released yet: live ones were waited for) end first. Returns how many were retired, or undefined while more
+ * are left for the next run.
+ */
+async function retireTornDownNodes(deps: SubstrateDeps, sql: SqlExecutor, row: SubstrateRow): Promise<number | undefined> {
+  if (!deps.desired) return 0;
+  const { rows } = await sql.query<{ id: string }>(
+    // States the provision table retires from (a hosted node is adopted; nothing else is waited for).
+    `SELECT id FROM nodes WHERE pool_id = $1 AND deleted_at IS NULL
+        AND provision_state IN ('adopting', 'adopted', 'enrolling', 'ready', 'failed', 'retiring')
+        AND $2 = ANY(no_schedule_reasons)
+      ORDER BY id LIMIT ${nodesPerRun}`,
+    [row.pool_id, substrateTeardownReason],
+  );
+  let retired = 0;
+  for (const { id } of rows)
+    await sql.transaction(async (tx) => {
+      await endNodeReservations(
+        { clock: deps.clock, events: deps.events, work: deps.work, desired: deps.desired! },
+        tx,
+        id,
+        'substrate-removed',
+      );
+      if (
+        await retireNode(tx, {
+          nodeId: id,
+          poolId: row.pool_id,
+          ownerTenantId: row.tenant_id,
+          reason: substrateTeardownReason,
+        })
+      )
+        retired++;
+    });
+  return rows.length === nodesPerRun ? undefined : retired;
 }
 
 /**

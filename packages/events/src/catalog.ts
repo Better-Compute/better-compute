@@ -265,7 +265,7 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     subject: 'pool/{id}',
     module: 'kubernetes',
     description:
-      'Pool substrates (policy.substrate: the managed Kubernetes cluster behind a pool): created { providerAccountId, mode }, ready { clusterId, nodes }, error { message }, token-issued { tokenId, maxUses, ttlSeconds } and token-revoked { tokenId, reason } for the hosted join token bcd joins with (never the token itself), node-removed { nodeId, kubernetesNode, released, requeued } when a pool node\'s Kubernetes Node is gone and its reservations ended, draining { version, bookings } and upgrading { version, drained } for upgrades: drain, deleting, deleted; data { poolId, ... }',
+      'Pool substrates (policy.substrate: the managed Kubernetes cluster behind a pool): created { providerAccountId, mode }, ready { clusterId, nodes }, error { message }, token-issued { tokenId, maxUses, ttlSeconds } and token-revoked { tokenId, reason } for the hosted join token bcd joins with (never the token itself), node-removed { nodeId, kubernetesNode, released, requeued, retired } when a pool node\'s Kubernetes Node is gone, its reservations ended and the node was retired, draining { version, bookings } and upgrading { version, drained } for upgrades: drain, deleting, deleted { retiredNodes }; data { poolId, ... }',
   },
   {
     type: 'fleet.*',

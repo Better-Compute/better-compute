@@ -171,7 +171,31 @@ CREATE INDEX kubernetes_pool_substrates_live ON kubernetes_pool_substrates (pool
 `,
 };
 
+/**
+ * Which Kubernetes Node each substrate pool node runs on. A pool node is matched once, while its bcd is connected, by
+ * the Node name bcd reports (inventory `kubernetes.nodeName`, else `os.hostname`) when it is exactly a listed Node's;
+ * `kubernetes_node` stays NULL for one that matched no Node (never taken for gone: fail closed). `kubernetes_uid` is
+ * the Node's `metadata.uid`, so a later Node of the same name (EKS reuses IP-based names) is not taken for it.
+ * `learned_at` is when the match was made or last tried, `checked_at` when the node was last checked for a gone Node
+ * (the oldest are checked first). A retired node's row is deleted.
+ */
+export const kubernetesSubstrateNodesMigration: Migration = {
+  name: 'kubernetes/0003_substrate_nodes',
+  sql: `
+CREATE TABLE kubernetes_substrate_nodes (
+  node_id text PRIMARY KEY,
+  pool_id text NOT NULL,
+  kubernetes_node text,
+  kubernetes_uid text,
+  learned_at timestamptz NOT NULL DEFAULT compute_now(),
+  checked_at timestamptz
+);
+CREATE INDEX kubernetes_substrate_nodes_pool ON kubernetes_substrate_nodes (pool_id);
+`,
+};
+
 export const kubernetesMigrations: readonly Migration[] = Object.freeze([
   kubernetesClustersMigration,
   kubernetesSubstratesMigration,
+  kubernetesSubstrateNodesMigration,
 ]);

@@ -151,6 +151,34 @@ describe('substrate: adopt', () => {
     for (const object of objects) expect(object.metadata.labels[substratePoolLabel]).toBe(pool.id);
   });
 
+  it('takes a Node re-created under the same name (another uid) for a new Node: the old one is gone', async () => {
+    world = await substrateWorld();
+    existingCluster(world);
+    const server = 'https://34.118.9.1';
+    const ec2 = 'ip-10-0-1-2.us-east-1.compute.internal';
+    world.extraNodes.set(server, [{ name: ec2, labels: {}, uid: 'uid-first' }]);
+    const pool = await world.createPool(adopt());
+    await world.converge(pool.id, 6);
+    const [node] = await world.joinNodes(pool.id, 1, [ec2]);
+    await world.converge(pool.id, 3);
+    const state = async () =>
+      (
+        await world!.fixture.database.query<{ provision_state: string }>(`SELECT provision_state FROM nodes WHERE id = $1`, [
+          node,
+        ])
+      ).rows[0]!.provision_state;
+    // A blip: same Node, bcd disconnected. Nothing happens.
+    await world.fixture.database.query(`UPDATE nodes SET connectivity = 'disconnected' WHERE id = $1`, [node]);
+    await world.converge(pool.id, 4);
+    expect(await state()).toBe('adopted');
+    // A Spot reclaim: EKS gives the replacement the same IP-based name, but it is another Node.
+    world.extraNodes.set(server, [{ name: ec2, labels: {}, uid: 'uid-second' }]);
+    await world.converge(pool.id, 4);
+    expect(await state()).toBe('retired');
+    const events = (await world.events('kubernetes.substrate.node-removed')).map((event) => event.data);
+    expect(events).toEqual([expect.objectContaining({ nodeId: node, kubernetesNode: ec2, retired: true })]);
+  });
+
   it('is an error when the cluster does not exist, and one cluster backs one pool only', async () => {
     world = await substrateWorld();
     const missing = await world.createPool(adopt());

@@ -445,20 +445,145 @@ describe('substrate: replaced nodes', () => {
     expect(now.get(joined[2]!)).not.toContain('substrate-node-removed');
     const events = (await world.events('kubernetes.substrate.node-removed')).map((event) => event.data);
     expect(events).toEqual([
-      expect.objectContaining({ poolId: pool.id, nodeId: joined[1], kubernetesNode: names[2], released: 0, requeued: 0 }),
+      expect.objectContaining({
+        poolId: pool.id,
+        nodeId: joined[1],
+        kubernetesNode: names[2],
+        released: 0,
+        requeued: 0,
+        retired: true,
+      }),
     ]);
+    // The removed node is retired (its machine is gone): certificates revoked, out of every later look.
+    const states = async () =>
+      new Map(
+        (
+          await world!.fixture.database.query<{ id: string; provision_state: string }>(
+            `SELECT id, provision_state FROM nodes WHERE pool_id = $1`,
+            [pool.id],
+          )
+        ).rows.map((row) => [row.id, row.provision_state]),
+      );
+    expect(await states()).toEqual(
+      new Map([
+        [joined[0]!, 'adopted'],
+        [joined[1]!, 'retired'],
+        [joined[2]!, 'adopted'],
+      ]),
+    );
     // Running again changes nothing (idempotent).
     await world.converge(pool.id, 2);
     expect(await world.events('kubernetes.substrate.node-removed')).toHaveLength(1);
 
-    // Scale up again: the Node comes back under the same name and its bcd reconnects; the reason goes.
+    // Scale up again: new Nodes (one under the old name) need a token; the retired node stays retired.
     await world.api.pools.update(world.root, {
       tenantId: world.rootTenant,
       poolId: pool.id,
       policy: { ...pool.policy, substrate: { ...pool.policy.substrate, flavors: [{ ...gpu, nodes: 3 }] } },
     });
-    await world.fixture.database.query(`UPDATE nodes SET connectivity = 'connected' WHERE id = ANY($1)`, [joined]);
+    await world.fixture.database.query(`UPDATE nodes SET connectivity = 'connected' WHERE id = ANY($1)`, [
+      [joined[0], joined[2]],
+    ]);
     await world.converge(pool.id, 6);
-    expect((await reasons()).get(joined[1]!)).not.toContain('substrate-node-removed');
+    expect((await states()).get(joined[1]!)).toBe('retired');
+    const row = await world.substrate(pool.id);
+    expect(row).toMatchObject({ nodes_listed: 3, nodes_joined: 2, token_applied: true });
   });
+});
+
+describe('substrate: which Kubernetes Node a pool node is', () => {
+  const nodeRows = async (poolId: string) =>
+    new Map(
+      (
+        await world!.fixture.database.query<{ id: string; provision_state: string; no_schedule_reasons: string[] }>(
+          `SELECT id, provision_state, no_schedule_reasons FROM nodes WHERE pool_id = $1`,
+          [poolId],
+        )
+      ).rows.map((row) => [row.id, row]),
+    );
+
+  it('never takes a node whose hostname is not its Node name (EKS) for gone: a disconnect ends nothing', async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(createSpec([gpu]));
+    await world.converge(pool.id, 6);
+    // Short kernel hostnames, as some EKS AMIs report: no listed Node has that name.
+    const joined = await world.joinNodes(pool.id, 2, ['ip-10-0-1-2', 'ip-10-0-1-3']);
+    await world.converge(pool.id, 3);
+    await world.fixture.database.query(`UPDATE nodes SET connectivity = 'disconnected' WHERE id = $1`, [joined[0]]);
+    await world.converge(pool.id, 6);
+    const rows = await nodeRows(pool.id);
+    expect(rows.get(joined[0]!)).toMatchObject({ provision_state: 'adopted', no_schedule_reasons: [] });
+    expect(await world.events('kubernetes.substrate.node-removed')).toEqual([]);
+  });
+
+  it("matches by the Node name bcd reports (kubernetes.nodeName) when the hostname differs", async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(createSpec([gpu]));
+    await world.converge(pool.id, 6);
+    const names = (await world.nodeNames(pool.id)).sort();
+    const joined = await world.joinNodes(pool.id, 2, ['ip-10-0-1-2', 'ip-10-0-1-3'], [
+      { kubernetes: { nodeName: names[0] } },
+      { kubernetes: { nodeName: names[1] } },
+    ]);
+    await world.converge(pool.id, 3);
+    // Scale down: the last Node goes; both bcds disconnect (only one machine is really gone).
+    await world.api.pools.update(world.root, {
+      tenantId: world.rootTenant,
+      poolId: pool.id,
+      policy: { ...pool.policy, substrate: { ...pool.policy.substrate, flavors: [{ ...gpu, nodes: 1 }] } },
+    });
+    await world.fixture.database.query(`UPDATE nodes SET connectivity = 'disconnected' WHERE id = ANY($1)`, [joined]);
+    await world.converge(pool.id, 6);
+    const rows = await nodeRows(pool.id);
+    expect(rows.get(joined[1]!)).toMatchObject({ provision_state: 'retired' });
+    expect(rows.get(joined[1]!)!.no_schedule_reasons).toContain('substrate-node-removed');
+    expect(rows.get(joined[0]!)).toMatchObject({ provision_state: 'adopted', no_schedule_reasons: [] });
+  });
+
+  it('still reaches a newly gone node after more than 500 removed and 500 merely disconnected nodes', async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(createSpec([{ ...gpu, nodes: 1 }]));
+    await world.converge(pool.id, 6);
+    const server = await world.server(pool.id);
+    const db = world.fixture.database;
+    const { rows: owner } = await db.query<{ site_id: string; owner_tenant_id: string }>(
+      `SELECT site_id, owner_tenant_id FROM pools WHERE id = $1`,
+      [pool.id],
+    );
+    const insert = (prefix: string, state: string, reasons: string[]) =>
+      db.query(
+        `INSERT INTO nodes (id, site_id, pool_id, owner_tenant_id, role, provision_state, maintenance, cordoned,
+                            connectivity, trust, generation, observed_generation, next_cmd_seq, identity_gen, shard,
+                            version, no_schedule_reasons)
+         SELECT $1 || lpad(g::text, 24, '0'), $2, $3, $4, 'host', $5, false, false, 'disconnected', 'platform', 1, 1, 1,
+                1, 0, 1, $6::text[]
+           FROM generate_series(1, 501) g`,
+        [prefix, owner[0]!.site_id, pool.id, owner[0]!.owner_tenant_id, state, reasons],
+      );
+    // Long gone and retired, and merely disconnected (their Nodes are still listed).
+    await insert('node_01', 'retired', ['substrate-node-removed']);
+    await insert('node_00', 'adopted', []);
+    await db.query(
+      `INSERT INTO kubernetes_substrate_nodes (node_id, pool_id, kubernetes_node, kubernetes_uid)
+       SELECT 'node_00' || lpad(g::text, 24, '0'), $1, 'stuck-' || g, 'uid-stuck-' || g FROM generate_series(1, 501) g`,
+      [pool.id],
+    );
+    const extra = Array.from({ length: 501 }, (_, i) => ({ name: `stuck-${i + 1}`, labels: {} }));
+    world.extraNodes.set(server, [...extra, { name: 'ghost-0', labels: { [substratePoolLabel]: pool.id } }]);
+    const [ghost] = await world.joinNodes(pool.id, 1, ['ghost-0']);
+    await world.converge(pool.id, 4);
+    // The ghost's Node is deleted and its bcd goes away.
+    world.extraNodes.set(server, extra);
+    await world.fixture.database.query(`UPDATE nodes SET connectivity = 'disconnected' WHERE id = $1`, [ghost]);
+    await world.converge(pool.id, 20);
+    const { rows } = await db.query<{ provision_state: string }>(`SELECT provision_state FROM nodes WHERE id = $1`, [
+      ghost,
+    ]);
+    expect(rows[0]!.provision_state).toBe('retired');
+    const { rows: stuck } = await db.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM nodes WHERE pool_id = $1 AND id LIKE 'node_00%' AND provision_state = 'adopted'`,
+      [pool.id],
+    );
+    expect(Number(stuck[0]!.count)).toBe(501);
+  }, 60_000);
 });

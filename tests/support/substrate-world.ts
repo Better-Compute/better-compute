@@ -27,9 +27,14 @@ export interface SubstrateWorld extends KubernetesWorld {
   substrate(poolId: string): Promise<any>;
   /**
    * Inserts `count` adopted nodes in the pool, as bcd joining would; with `hostnames`, node `i` reports inventory
-   * `os.hostname` `hostnames[i]` (its Kubernetes Node name).
+   * `os.hostname` `hostnames[i]` (its Kubernetes Node name), plus the inventory sections `sections[i]`.
    */
-  joinNodes(poolId: string, count: number, hostnames?: readonly string[]): Promise<string[]>;
+  joinNodes(
+    poolId: string,
+    count: number,
+    hostnames?: readonly (string | undefined)[],
+    sections?: readonly (Record<string, unknown> | undefined)[],
+  ): Promise<string[]>;
   /** The Node names the fake Kubernetes API lists for the substrate's cluster now. */
   nodeNames(poolId: string): Promise<string[]>;
   /** The API server origin of the substrate's cluster. */
@@ -105,7 +110,12 @@ export async function substrateWorld(
       );
       return kube.nodeList(rows[0]!.endpoint).map((node) => node.name);
     },
-    async joinNodes(poolId: string, count: number, hostnames?: readonly string[]) {
+    async joinNodes(
+      poolId: string,
+      count: number,
+      hostnames?: readonly (string | undefined)[],
+      sections?: readonly (Record<string, unknown> | undefined)[],
+    ) {
       const ids: string[] = [];
       const { rows } = await world.fixture.database.query<{ site_id: string; owner_tenant_id: string }>(
         `SELECT site_id, owner_tenant_id FROM pools WHERE id = $1`,
@@ -125,11 +135,17 @@ export async function substrateWorld(
           [id],
         );
         const hostname = hostnames?.[i];
-        if (hostname !== undefined)
+        const extra = sections?.[i];
+        if (hostname !== undefined || extra !== undefined)
           await world.fixture.database.query(
             `INSERT INTO inventory_snapshots (id, node_id, sha256, section_hashes, sections, collected_at)
              VALUES ($1, $2, decode($3, 'hex'), '{}'::jsonb, $4::jsonb, compute_now())`,
-            [`inv_${id}`, id, 'ab'.repeat(32), JSON.stringify({ os: { hostname } })],
+            [
+              `inv_${id}`,
+              id,
+              'ab'.repeat(32),
+              JSON.stringify({ ...(hostname !== undefined ? { os: { hostname } } : {}), ...(extra ?? {}) }),
+            ],
           );
         ids.push(id);
       }
