@@ -889,7 +889,9 @@ describe('conformance', () => {
       const attachable = ec2emu.addInstance({ tags: { Name: 'legacy' } });
       return {
         provider: awsProvider({ fetch: emu.fetch, credentials: emu.ambient }),
-        config: { region: 'us-east-1', zones: ['us-east-1a', 'us-east-1b'] },
+        // One zone: the contract's volume cases name a bare region, which on an account with
+        // several zones names no zone (INVALID_INPUT, reason zone-required, in provider-aws-volumes).
+        config: { region: 'us-east-1', zones: ['us-east-1a'] },
         offerId: 'us-east-1a/t3.micro',
         image: 'ubuntu-24.04',
         context: {
