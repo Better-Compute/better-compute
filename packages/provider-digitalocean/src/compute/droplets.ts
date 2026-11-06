@@ -227,7 +227,8 @@ export class DoCompute implements ProviderImpl {
   /**
    * This deployment's managed Droplets carrying the key tag, oldest first. A `tag_name` list may
    * omit GPU Droplets and can't be combined with `type` (research S2), so for a GPU size the GPU
-   * list is paged as well and filtered by the tag here.
+   * list is paged as well and filtered by the tag here. An `archive` Droplet (a reclaimed Spot
+   * Droplet DO still lists) is gone: it is never adopted, and never kept over a live one.
    */
   protected async byKey(key: string, gpu: boolean, signal: AbortSignal): Promise<DoDroplet[]> {
     const tag = keyTag(key);
@@ -245,7 +246,9 @@ export class DoCompute implements ProviderImpl {
         budget: 'observe',
       }))
         if (hasTag(droplet, tag)) found.set(droplet.id, droplet);
-    return [...found.values()].filter((droplet) => this.owned(droplet)).sort(byAge);
+    return [...found.values()]
+      .filter((droplet) => this.owned(droplet) && droplet.status !== 'archive')
+      .sort(byAge);
   }
 
   /** The `vpc_uuid` for a create: `config.vpc` as a uuid, or resolved by name; none without it. */

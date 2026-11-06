@@ -1,12 +1,15 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { isComputeError, type ComputeError } from '@better-compute/core';
 import {
+  deploymentTag,
+  keyTag,
   labels,
   spotPriceOf,
   spotShape,
   tagFor,
   type DoSize,
 } from '@better-compute/provider-digitalocean';
+import { seedDroplet } from './support/do-emulator/droplets.js';
 import { DoEmulator } from './support/do-emulator/index.js';
 import { build, ctx, doAccount, freshBudgets } from './support/do-harness.js';
 
@@ -169,5 +172,24 @@ describe('spot creates', () => {
     const refused = await failure(compute.create(spotRequest(), ctx()));
     expect([refused.code, refused.details?.reason]).toEqual(['UNSUPPORTED', 'spotPreview']);
     expect(emu.requests).toHaveLength(0);
+  });
+
+  it('a reclaimed Droplet DO still lists (archive) under the key is never adopted: the create makes a new one', async () => {
+    const emu = spotEmulator();
+    const compute = await build(emu, spotAccount);
+    const archived = seedDroplet(emu.state, {
+      region: 'tor1',
+      size_slug: 'gpu-h100x1-80gb',
+      status: 'archive',
+      created_at: '2026-11-05T09:00:00Z',
+      tags: ['better-compute-managed:true', deploymentTag('default'), keyTag('k'), spotTag],
+    });
+    const machine = await compute.create(spotRequest(), ctx('k'));
+    expect(machine.id).not.toBe(String(archived.id));
+    expect(machine.state).not.toBe('deleted');
+    expect(dropletPosts(emu)).toHaveLength(1);
+    // The archived Droplet is neither kept nor reaped by the converge.
+    expect(emu.requests.some((r) => r.method === 'DELETE')).toBe(false);
+    expect((await compute.create(spotRequest(), ctx('k'))).id).toBe(machine.id);
   });
 });

@@ -35,7 +35,12 @@ import {
   isCatalogImageRef,
   isSecretRef,
   moveInstance,
+  maxPreemptedReplacements,
   preemptedCondition,
+  preemptedReplacementDelay,
+  preemptedReplacementsCondition,
+  preemptedReplacementsOf,
+  providerCallKey,
   publishInstance,
   readInstance,
   renderUserData,
@@ -493,13 +498,40 @@ async function loseMachine(
     ...(row.externalId !== undefined ? { externalId: row.externalId } : {}),
   });
   if (!(await replacePreempted(tx, lost.poolId))) return undefined;
+  // Replacements that never ran are capped: a provider that keeps handing back a reclaimed machine
+  // (or keeps reclaiming at once) leaves the instance lost instead of looping.
+  const { generation, consecutive } = preemptedReplacementsOf(lost.conditions);
+  if (consecutive >= maxPreemptedReplacements) return undefined;
   const again = await moveInstance(tx, lost, 'recreate', 'scheduling', {
     externalId: null,
     addresses: [],
     reportedState: null,
+    conditions: [
+      ...lost.conditions.filter((c) => c.type !== preemptedReplacementsCondition),
+      {
+        type: preemptedReplacementsCondition,
+        status: 'true',
+        reason: 'Recreated',
+        message: `${generation + 1}/${consecutive + 1}`,
+        since: now,
+      },
+    ],
   });
   await publishInstance(deps, tx, again, 'instance.recreating', { reason: 'preempted' });
-  return now;
+  return now + preemptedReplacementDelay(consecutive + 1);
+}
+
+/** Resets the consecutive replacements of a recreated instance that reached `running`. */
+async function ranAfterReplacement(tx: SqlTx, row: InstanceRow): Promise<InstanceRow> {
+  const { generation, consecutive } = preemptedReplacementsOf(row.conditions);
+  if (consecutive === 0) return row;
+  return updateInstance(tx, row, {
+    conditions: row.conditions.map((c) =>
+      c.type === preemptedReplacementsCondition
+        ? { ...c, reason: 'Ran', message: `${generation}/0` }
+        : c,
+    ),
+  });
 }
 
 async function replacePreempted(tx: SqlTx, poolId: string): Promise<boolean> {
@@ -573,6 +605,12 @@ async function reconcileProvider(
   }
   if (!account)
     throw new ComputeError('INVALID_STATE', `Instance ${row.id} has no provider account`);
+  // (P3) A preempted instance recreated in place more than once in a row waits out its backoff.
+  if (action.kind === 'create') {
+    const replaced = preemptedReplacementsOf(row.conditions);
+    const due = replaced.since + preemptedReplacementDelay(replaced.consecutive);
+    if (replaced.consecutive > 0 && now < due) return due;
+  }
 
   let machine: ExternalMachine | undefined;
   let failure: unknown;
@@ -583,7 +621,8 @@ async function reconcileProvider(
   try {
     const client: ProviderImpl = await deps.clients.client(account, deps);
     labelled = typeof client.claim === 'function';
-    const context = callContext(deps, row.id, signal);
+    // A recreated instance's calls carry its generation, so a create never finds the old machine.
+    const context = callContext(deps, providerCallKey(row), signal);
     if (action.kind === 'create') {
       // An attached machine existed before better-compute: it is adopted or lost, never made anew.
       if (row.origin === 'attached')
@@ -846,7 +885,10 @@ async function reconcileProvider(
         return undefined;
       }
       if (reported === 'absent' && current.state !== 'deleting')
-        return await loseMachine(deps, tx, current, current.conditions, now);
+        // Already lost (a machine the provider still lists as deleted): it stays lost.
+        return current.state === 'lost'
+          ? undefined
+          : await loseMachine(deps, tx, current, current.conditions, now);
       if (reported === 'running' || reported === 'stopped') {
         // A machine that booted while `stopped` is wanted gets powered off next round, and vice versa.
         const booting = current.state === 'provisioning' || current.state === 'starting';
@@ -860,6 +902,8 @@ async function reconcileProvider(
         if (next.state !== current.state)
           await publishInstance(deps, tx, next, `instance.${next.state}`);
         current = next;
+        // (P3) A recreated instance that runs ends its run of replacements (its generation stays).
+        if (current.state === 'running') current = await ranAfterReplacement(tx, current);
         // Billed as observed: a requested stop bills on until the provider reports it stopped, and
         // a recovered instance opens a new interval at its recovery (the lost span is not billed).
         if (!unbilledStates.has(current.state))

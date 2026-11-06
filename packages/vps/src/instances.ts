@@ -855,6 +855,50 @@ export const provisionFailedCondition = 'ProvisionFailed';
  */
 export const preemptedCondition = 'Preempted';
 
+/**
+ * (P3) The in-place replacements of a preempted instance: `message` is `<generation>/<consecutive>`,
+ * `since` the last replacement. The generation only grows: a recreated instance's provider calls use
+ * the key `<id>:r<generation>`, so a provider that dedupes creates by key (a GCE requestId, a DO key
+ * tag that still lists the reclaimed Droplet) never hands back the machine that was reclaimed.
+ * `consecutive` counts replacements that never reached `running`; it is reset once one does.
+ */
+export const preemptedReplacementsCondition = 'PreemptedReplacements';
+/** Replacements in a row that never ran; one more preemption leaves the instance lost. */
+export const maxPreemptedReplacements = 3;
+/** The wait before the second replacement in a row, doubled for each one after it. */
+export const preemptedBackoffMs = 30_000;
+
+/** A preempted instance's replacement counters (`preemptedReplacementsCondition`). */
+export function preemptedReplacementsOf(conditions: readonly Condition[]): {
+  generation: number;
+  consecutive: number;
+  since: number;
+} {
+  const found = conditions.find((c) => c.type === preemptedReplacementsCondition);
+  const [generation, consecutive] = (found?.message ?? '0/0').split('/').map(Number);
+  const count = (value: number | undefined) =>
+    Number.isSafeInteger(value) && value! > 0 ? value! : 0;
+  return {
+    generation: count(generation),
+    consecutive: count(consecutive),
+    since: found?.since ?? 0,
+  };
+}
+
+/** How long after the last replacement the next create of a recreated instance may run. */
+export function preemptedReplacementDelay(consecutive: number): number {
+  return consecutive <= 1 ? 0 : preemptedBackoffMs * 2 ** (consecutive - 2);
+}
+
+/**
+ * The idempotency key of an instance's provider calls: its id, or `<id>:r<generation>` once a
+ * preempted instance has been recreated in place (a new machine needs a key the old one never had).
+ */
+export function providerCallKey(row: Pick<InstanceRow, 'id' | 'conditions'>): string {
+  const { generation } = preemptedReplacementsOf(row.conditions);
+  return generation === 0 ? row.id : `${row.id}:r${generation}`;
+}
+
 /** Whether the instance's provider create failed for good (it holds no machine to act on). */
 export function provisionFailed(conditions: readonly Condition[]): boolean {
   return conditions.some(
