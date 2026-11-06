@@ -178,6 +178,8 @@ export class DoCompute implements ProviderImpl {
   readonly networks: DoNetworks;
   /** Provider costs from the invoices (P9); set only when the account turns `costs` on. */
   costs?: ProviderImpl['costs'];
+  /** Droplet metrics from DigitalOcean Monitoring (P9); set unless the account turns `monitoring` off. */
+  readMetrics?: ProviderImpl['readMetrics'];
 
   constructor(
     config: DoConfig,

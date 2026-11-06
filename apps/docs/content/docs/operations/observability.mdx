@@ -12,6 +12,8 @@ sources:
   - packages/observability/src/traceparent.ts
   - packages/observability/src/database.ts
   - packages/observability/src/node-telemetry.ts
+  - packages/observability/src/external.ts
+  - packages/vps/src/external-metrics.ts
   - daemon/internal/agent/telemetry.go
   - daemon/internal/agent/telemetry_host.go
   - daemon/internal/runtime/usage.go
@@ -401,7 +403,22 @@ setInterval(() => void collector.pull(), 5 * 60_000);
   new Droplets) and the token `monitoring:read`. Reads spend the account's `sweep` budget; when it runs out the pull
   answers what it read and the next one starts where it stopped.
 
-The host owns the schedule and the machine list: vps does not yet pull these for its attached instances on its own.
+**Through vps.** A host does not have to build the machine list or the source itself. With
+`vps({ externalMetrics: {} })` (every `5m` by default, at least `1m`; off unless set, since it spends the accounts'
+rate budgets) the `vps.external-metrics` worker asks each provider account whose client reads metrics
+(`ProviderImpl.readMetrics`: DigitalOcean unless the account turns `monitoring` off) about its live instances, and
+keeps the newest sample of each metric in `instance_external_metrics`. Every process then serves the same gauges from
+that table, and the provider is asked once per period, not once per replica:
+
+```ts title="metrics.ts"
+import { externalMetricsCollector, storedExternalMetrics } from '@better-compute/observability';
+
+const collector = externalMetricsCollector(metrics.registry, [storedExternalMetrics(sql, 'digitalocean')]);
+setInterval(() => void collector.pull(), 60_000); // a database read, no provider call
+```
+
+Only the instances asked for, well-formed metric names and finite values are stored; an instance that is no longer
+live loses its rows, and a failed read is logged and waits for the next period while the stored samples go stale.
 
 ## Health and readiness
 

@@ -102,6 +102,8 @@ attention queue.
 
 An attached Droplet runs no bcd. With DigitalOcean's metrics agent on it and `monitoring:read`, `doMetricsSource`
 reads its CPU, memory and load for [host metrics of machines without bcd](/docs/operations/observability#host-metrics-of-machines-without-bcd).
+With `vps({ externalMetrics: {} })` vps reads them for every live instance of the account on a schedule (the
+account's `monitoring` left on), on the `sweep` budget.
 
 ## The live suite
 

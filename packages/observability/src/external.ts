@@ -1,4 +1,4 @@
-import { isComputeError } from '@better-compute/core';
+import { isComputeError, type SqlExecutor } from '@better-compute/core';
 import { labelValue, type MetricsRegistry } from './registry.js';
 
 // External host metrics (DigitalOcean P9, the `externalMetrics` source contract): nodes export their own metrics
@@ -157,6 +157,58 @@ export function externalMetricsCollector(
           }
         }),
       );
+    },
+  };
+}
+
+/**
+ * A binding that serves what vps stored (`vps({ externalMetrics })` reads each provider account's machines into
+ * `instance_external_metrics` once per period): the samples of one source (a provider id) as the provider measured
+ * them, so every process of a deployment serves the same gauges without asking the provider itself. Before vps has
+ * migrated the table it answers nothing.
+ */
+export function storedExternalMetrics(
+  sql: { query: SqlExecutor['query'] },
+  source: string,
+): ExternalMetricsBinding {
+  let present = false;
+  let rows: { instance_id: string; metric: string; value: number; at_ms: number }[] = [];
+  return {
+    async machines() {
+      if (!present) {
+        const { rows: found } = await sql.query<{ found: string | null }>(
+          'SELECT to_regclass($1)::text AS found',
+          ['instance_external_metrics'],
+        );
+        present = Boolean(found[0]?.found);
+        if (!present) return [];
+      }
+      ({ rows } = await sql.query<{ instance_id: string; metric: string; value: number; at_ms: number }>(
+        `SELECT instance_id, metric, value, (extract(epoch FROM at) * 1000)::float8 AS at_ms
+           FROM instance_external_metrics WHERE source = $1 ORDER BY instance_id, metric`,
+        [source],
+      ));
+      return [...new Set(rows.map((row) => row.instance_id))].map((instance) => ({
+        instance,
+        machineId: instance,
+      }));
+    },
+    source: {
+      id: source,
+      async read() {
+        return rows.flatMap((row) =>
+          (externalMetricNames as readonly string[]).includes(row.metric)
+            ? [
+                {
+                  instance: row.instance_id,
+                  metric: row.metric as ExternalMetricName,
+                  value: Number(row.value),
+                  at: Number(row.at_ms),
+                },
+              ]
+            : [],
+        );
+      },
     },
   };
 }

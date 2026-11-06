@@ -195,6 +195,11 @@ import {
   recomputePassable,
   type CostsOptions,
 } from './costs.js';
+import {
+  externalMetricsReconciler,
+  externalMetricsSettings,
+  type ExternalMetricsOptions,
+} from './external-metrics.js';
 import { vpsMigrations } from './migrations.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
 import {
@@ -389,6 +394,12 @@ export interface VpsOptions {
    * back (default 3); costs are counted in the deployment currency (`billing.currency`).
    */
   costs?: CostsOptions;
+  /**
+   * (P9) Reads provider-measured host metrics of the VMs on provider pools (`ProviderImpl.readMetrics`) into
+   * `instance_external_metrics`, each account every `every` (default 5m). Off unless set: it spends the accounts'
+   * rate budgets.
+   */
+  externalMetrics?: ExternalMetricsOptions;
   /**
    * Where sandbox snapshots are stored (§3.7): presigned uploads for `instance.snapshot` and the URL
    * restores fetch. Without it `sandboxes.snapshot` is INVALID_CONFIG.
@@ -689,6 +700,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     );
   // vps.costs' settings (validated again by its reconciler): the lookback a rule change recomputes over.
   const costConfig = costSettings(options.costs ?? {}, currency);
+  if (options.externalMetrics) externalMetricsSettings(options.externalMetrics);
   const runtimes = options.runtimes ?? ['libvirt-kvm'];
   if (runtimes.length === 0 || !runtimes.every((runtime) => /^[a-z][a-z0-9-]{0,63}$/.test(runtime)))
     throw new ComputeError('INVALID_CONFIG', 'vps({ runtimes }) must list runtime driver ids');
@@ -2106,6 +2118,15 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         currency,
         closeGraceHours,
       ),
+      // P9: provider-measured host metrics of provider-pool VMs (opt-in).
+      ...(options.externalMetrics
+        ? [
+            externalMetricsReconciler(options.externalMetrics, (context) => ({
+              ...depsOf(context),
+              providers,
+            })),
+          ]
+        : []),
       {
         // §3.7: sandbox expiry, sandbox.ready/deleted events, and warm pools per template.
         name: sandboxWork,

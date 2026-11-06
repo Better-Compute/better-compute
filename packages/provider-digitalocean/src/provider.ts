@@ -8,6 +8,7 @@ import { doBilling, readInvoiceCosts } from './ops/costs.js';
 import { doConnect } from './ops/oauth.js';
 import { withTenantProjects } from './ops/projects.js';
 import { readFindings } from './ops/security.js';
+import { doMetricsSource } from './ops/monitoring.js';
 import { checkReport, probeAccount } from './probe.js';
 
 const maxInCallWaitMs = 20_000;
@@ -72,6 +73,11 @@ export function digitaloceanProvider(
         compute.costs = (window, call) => readInvoiceCosts(client, tag, window, call);
       }
       if (config.projectPerTenant === true) withTenantProjects(compute, client, context.log);
+      // Host metrics of its Droplets (vps({ externalMetrics })): the metrics agent is on unless monitoring is off.
+      if (config.monitoring !== false) {
+        const source = doMetricsSource(config, context, options);
+        compute.readMetrics = (machines, call) => source.read(machines, call);
+      }
       return compute;
     },
   });

@@ -1067,6 +1067,24 @@ export interface ProviderImpl {
     window: { from: number; to: number },
     context: CallContext,
   ): AsyncIterable<ProviderCostRecord>;
+  /**
+   * (P9, additive) Host metrics of the account's machines that run no bcd, from the provider's monitoring
+   * (DigitalOcean Monitoring): the newest sample of each metric it has for the machines asked, in base units, named
+   * as `@better-compute/observability`'s external metrics (`cpu_utilization_ratio`, `memory_used_bytes`, …). A
+   * machine or metric it cannot read is left out. Read-only, outside any transaction.
+   */
+  readMetrics?(
+    machines: readonly { instance: string; machineId: string }[],
+    context: { signal: AbortSignal },
+  ): Promise<ProviderMetricSample[]>;
+}
+
+/** (P9) One reading of one host metric of one machine (`ProviderImpl.readMetrics`); `at` is epoch ms. */
+export interface ProviderMetricSample {
+  instance: string;
+  metric: string;
+  value: number;
+  at: number;
 }
 
 export interface ProviderContext {
