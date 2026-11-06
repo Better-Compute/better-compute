@@ -37,6 +37,7 @@ import {
   markAllocationFailed,
   markAllocationReleased,
   meterReservations,
+  noticeNodeInterruption,
   readQuotas,
   reservationWork,
   maxStuckCarryMs,
@@ -2078,6 +2079,77 @@ describe('spot reservations (v0.5)', () => {
       expect.arrayContaining([expect.objectContaining({ type: 'Preempted' })]),
     );
     expect(((await call('reservations', 'create', four('r2'))) as Rsv).state).toBe('pending');
+  });
+});
+
+describe('provider interruption notice (AWS A4)', () => {
+  const four = (key: string, extra: Record<string, unknown> = {}) =>
+    create({ devices: [{ class: 'gpu', count: 4 }], duration: '8h', idempotencyKey: key, ...extra });
+  const get = async (id: string) =>
+    (await call('reservations', 'get', { tenantId: 'acme', reservationId: id })) as Rsv;
+  const nodeOf = async (id: string) =>
+    (
+      await db.query<{ node_id: string }>(
+        `SELECT node_id FROM allocations WHERE owner_id = $1 AND released_at IS NULL`,
+        [id],
+      )
+    ).rows[0]?.node_id;
+  const notice = (nodeId: string, deadline: number) =>
+    db.transaction((tx) =>
+      noticeNodeInterruption(moduleContext(db), tx, nodeId, deadline, {
+        reason: 'ProviderInterruption',
+        message: 'the machine is being reclaimed (aws spot interruption)',
+      }),
+    );
+
+  beforeEach(async () => {
+    await db.query(`UPDATE quota_usage SET max = 100`);
+  });
+
+  it('cuts a started reservation back to the deadline, once', async () => {
+    const running = (await call('reservations', 'create', four('r1'))) as Rsv;
+    expect(running.state).toBe('placed');
+    const nodeId = (await nodeOf(running.id))!;
+    recorded.events = [];
+    const deadline = T0 + 2 * 60_000;
+    expect(await notice(nodeId, deadline)).toEqual([running.id]);
+    expect(await get(running.id)).toMatchObject({
+      during: { start: T0, end: deadline },
+      conditions: [expect.objectContaining({ type: 'Preempted', reason: 'ProviderInterruption' })],
+    });
+    expect(recorded.events).toEqual([
+      expect.objectContaining({
+        type: 'reservation.preempting',
+        data: expect.objectContaining({ at: deadline, nodeId }),
+      }),
+    ]);
+    expect(recorded.invalidated).toContain(nodeId);
+    const { rows } = await db.query<{ end_ms: number }>(
+      `SELECT (extract(epoch FROM upper(during)) * 1000)::float8 AS end_ms FROM allocations WHERE owner_id = $1`,
+      [running.id],
+    );
+    expect(rows.map((row) => Number(row.end_ms))).toEqual([deadline]);
+    // A repeated warning for the same machine changes nothing.
+    recorded.events = [];
+    expect(await notice(nodeId, deadline)).toEqual([]);
+    expect(recorded.events).toEqual([]);
+  });
+
+  it('re-queues a reservation that starts after the deadline and leaves other nodes alone', async () => {
+    const later = (await call('reservations', 'create', four('l1', { start: T0 + 3 * HOUR }))) as Rsv;
+    const other = (await call('reservations', 'create', four('o1'))) as Rsv;
+    const nodeId = (await nodeOf(later.id))!;
+    const otherNode = (await nodeOf(other.id))!;
+    expect(otherNode).not.toBe(nodeId);
+    expect(await notice(nodeId, T0 + 2 * 60_000)).toEqual([later.id]);
+    expect(await get(later.id)).toMatchObject({
+      state: 'pending',
+      conditions: [expect.objectContaining({ type: 'Unschedulable', reason: 'ProviderInterruption' })],
+    });
+    expect(await nodeOf(later.id)).toBeUndefined();
+    // Quota is kept for the re-queued request.
+    expect((await readQuotas(db, 'acme', poolId))[0]!.used).toBe(8);
+    expect(await get(other.id)).toMatchObject({ state: 'placed', during: { start: T0 } });
   });
 });
 
