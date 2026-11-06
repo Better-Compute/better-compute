@@ -75,6 +75,35 @@ describe('provider-aws CLI policies', () => {
     }
   });
 
+  it('tag edits outside launch need tag keys in the request', () => {
+    // ForAllValues is vacuously true without aws:TagKeys: a DeleteTags with no Tag parameter (all
+    // tags) would pass it. The Null condition refuses a request that names no keys.
+    const attach = iamPolicy().Statement.find((s) => s.Sid === 'Attach')!;
+    expect(attach.Condition?.Null?.['aws:TagKeys']).toBe('false');
+    expect(attach.Condition?.['ForAllValues:StringEquals']?.['aws:TagKeys']).toEqual([
+      'better-compute:instance',
+      'better-compute:managed',
+    ]);
+    expect(attach.Condition?.StringEquals).toBeUndefined();
+  });
+
+  it('--discover-tag limits attach tag edits to instances carrying the discovery tag', async () => {
+    const attach = iamPolicy({ discoverTag: 'team=ml' }).Statement.find((s) => s.Sid === 'Attach')!;
+    expect(attach.Condition?.StringEquals?.['ec2:ResourceTag/team']).toBe('ml');
+    expect(attach.Condition?.Null?.['aws:TagKeys']).toBe('false');
+    expect(() => iamPolicy({ discoverTag: 'novalue' })).toThrow(
+      expect.objectContaining({ code: 'INVALID_INPUT' }),
+    );
+    const { out, context } = harness({ 'discover-tag': 'team=ml' });
+    await awsIamPolicyCommand().run(context);
+    const printed = JSON.parse(out.join('\n')) as { Statement: IamStatement[] };
+    expect(
+      printed.Statement.find((s) => s.Sid === 'Attach')!.Condition?.StringEquals?.[
+        'ec2:ResourceTag/team'
+      ],
+    ).toBe('ml');
+  });
+
   it('partition flows into ARNs', () => {
     const policy = iamPolicy({
       partition: 'aws-us-gov',

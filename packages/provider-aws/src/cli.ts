@@ -1,6 +1,7 @@
 import { writeFile } from 'node:fs/promises';
 import { ComputeError } from '@better-compute/core';
 import { assertRegion, parseArn, type AwsPartition } from '@better-compute/aws-core';
+import { parseDiscoverTag } from './config.js';
 import { tags } from './ids.js';
 
 // The CLI commands that onboard an AWS account (`aws iam-policy`, `aws trust-policy`). The CLI never
@@ -31,8 +32,10 @@ const usage = (message: string) => new ComputeError('INVALID_INPUT', message);
  * The ABAC permissions policy provider-aws needs (AD6, program Appendix B, phase A1): reads are
  * unconditioned, RunInstances must tag what it creates `better-compute:managed=true`, terminate
  * needs that tag, power and reinstall need the `better-compute:instance` tag, and tag edits
- * outside launch touch only the two ownership keys. AWS then refuses a destructive call on an
- * instance better-compute does not own even if the control plane had a bug.
+ * outside launch touch only the two ownership keys (and must name them: a DeleteTags without tag
+ * keys would delete every tag). AWS then refuses terminate, power and reinstall on an instance
+ * without the ownership tags. Attach writes those tags, so the role can put them on any instance
+ * it can tag: `discoverTag` narrows that to instances carrying the discovery tag.
  */
 export function iamPolicy(
   options: {
@@ -40,6 +43,8 @@ export function iamPolicy(
     region?: string;
     account?: string;
     instanceProfileArn?: string;
+    /** `key=value`: attach may tag only instances carrying this tag (the account's discoverTag). */
+    discoverTag?: string;
   } = {},
 ): IamPolicyDocument {
   const partition = options.partition ?? 'aws';
@@ -49,6 +54,13 @@ export function iamPolicy(
   if (options.account !== undefined && !/^\d{12}$/.test(options.account))
     throw usage('--account is a 12-digit AWS account id');
   const account = options.account ?? '*';
+  let discover: [string, string] | undefined;
+  if (options.discoverTag !== undefined)
+    try {
+      discover = parseDiscoverTag(options.discoverTag);
+    } catch {
+      throw usage('--discover-tag is key=value, as the account config discoverTag');
+    }
   const ec2 = (resource: string, owned = true) =>
     `arn:${partition}:ec2:${region}:${owned ? account : ''}:${resource}`;
   const instances = ec2('instance/*');
@@ -117,7 +129,12 @@ export function iamPolicy(
       Effect: 'Allow',
       Action: ['ec2:CreateTags', 'ec2:DeleteTags'],
       Resource: instances,
-      Condition: { 'ForAllValues:StringEquals': { 'aws:TagKeys': [tags.instance, tags.managed] } },
+      Condition: {
+        'ForAllValues:StringEquals': { 'aws:TagKeys': [tags.instance, tags.managed] },
+        // ForAllValues holds vacuously for a request without tag keys (DeleteTags of every tag).
+        Null: { 'aws:TagKeys': 'false' },
+        ...(discover ? { StringEquals: { [`ec2:ResourceTag/${discover[0]}`]: discover[1] } } : {}),
+      },
     },
     {
       Sid: 'PublicImages',
@@ -224,7 +241,7 @@ export function awsIamPolicyCommand() {
     group: 'Providers' as const,
     summary: 'Print the IAM permissions policy an AWS provider account needs',
     description:
-      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile.',
+      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag.',
     target: 'none' as const,
     output: 'text' as const,
     flags: {
@@ -249,6 +266,11 @@ export function awsIamPolicyCommand() {
         value: 'ARN',
         description: 'The instance profile accounts pass to RunInstances (adds iam:PassRole)',
       },
+      'discover-tag': {
+        type: 'string' as const,
+        value: 'KEY=VALUE',
+        description: 'Attach may tag only instances carrying this tag (the account discoverTag)',
+      },
       out: outFlag,
     },
     async run(context: AwsCommandContext): Promise<void> {
@@ -261,6 +283,9 @@ export function awsIamPolicyCommand() {
           ...(text(context.flags.account) ? { account: text(context.flags.account)! } : {}),
           ...(text(context.flags['instance-profile'])
             ? { instanceProfileArn: text(context.flags['instance-profile'])! }
+            : {}),
+          ...(text(context.flags['discover-tag'])
+            ? { discoverTag: text(context.flags['discover-tag'])! }
             : {}),
         }),
       );
