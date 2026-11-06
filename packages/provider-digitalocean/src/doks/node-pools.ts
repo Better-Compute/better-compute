@@ -110,3 +110,78 @@ export function nodePoolState(id: string, pool: DoksNodePool): ProviderResourceS
     return resourceState(id, 'pending', { outputs });
   return resourceState(id, 'updating', { outputs });
 }
+
+function immutable(id: string, what: string, actual: unknown, desired: unknown) {
+  return fail(
+    'INVALID_STATE',
+    `Node pool ${id} exists with ${what} ${JSON.stringify(actual)}, not ${JSON.stringify(desired)}; ` +
+      'only nodeCount and autoscaling change in place (create a new node pool)',
+    'immutable',
+    { field: what },
+  );
+}
+
+const sortedEntries = (record: Readonly<Record<string, string>> | null | undefined): string =>
+  JSON.stringify(Object.entries(record ?? {}).sort(([a], [b]) => a.localeCompare(b)));
+
+const taintsKey = (taints: readonly { key: string; value?: string; effect: string }[]): string =>
+  JSON.stringify(
+    taints
+      .map((taint) => [taint.key, taint.value ?? '', taint.effect])
+      .sort((a, b) => a.join('\u0000').localeCompare(b.join('\u0000'))),
+  );
+
+/** Refuses a difference that cannot change in place: the size, Spot, the labels and the taints. */
+export function checkNodePoolImmutable(
+  id: string,
+  spec: KubernetesNodePoolSpec,
+  pool: DoksNodePool,
+): void {
+  if (pool.size !== spec.machineType)
+    throw immutable(id, 'machineType', pool.size, spec.machineType);
+  if ((pool.spot === true) !== (spec.spot === true))
+    throw immutable(id, 'spot', pool.spot === true, spec.spot === true);
+  if (sortedEntries(pool.labels) !== sortedEntries(spec.labels))
+    throw immutable(id, 'labels', pool.labels ?? {}, spec.labels ?? {});
+  if (taintsKey(pool.taints ?? []) !== taintsKey(spec.taints ?? []))
+    throw immutable(id, 'taints', pool.taints ?? [], spec.taints ?? []);
+}
+
+/** The pool's own tags, without the ones DOKS adds (`k8s`, `k8s-worker`, `k8s:<uuid>`). */
+export function ownPoolTags(pool: DoksNodePool): string[] {
+  return (pool.tags ?? []).filter(
+    (tag) => tag !== 'k8s' && tag !== 'k8s-worker' && !tag.startsWith('k8s:'),
+  );
+}
+
+/**
+ * The `PUT …/node_pools/{id}` a pool needs, or undefined when it is as wanted. Only the size and
+ * the autoscaling bounds change; with autoscaling the autoscaler owns the count (it is only kept
+ * within the bounds). The PUT carries the pool's name, tags, labels and taints as they are, so a
+ * field it leaves out is never cleared.
+ */
+export function nodePoolUpdate(
+  spec: KubernetesNodePoolSpec,
+  pool: DoksNodePool,
+): Record<string, unknown> | undefined {
+  const scaling = spec.autoscaling;
+  const autoscaled = pool.auto_scale === true;
+  const boundsDiffer =
+    autoscaled !== (scaling !== undefined) ||
+    (scaling !== undefined &&
+      (pool.min_nodes !== scaling.minNodes || pool.max_nodes !== scaling.maxNodes));
+  const count = scaling
+    ? Math.min(Math.max(pool.count, scaling.minNodes), scaling.maxNodes)
+    : spec.nodeCount;
+  if (!boundsDiffer && count === pool.count) return undefined;
+  return {
+    name: pool.name,
+    count,
+    tags: ownPoolTags(pool),
+    labels: { ...(pool.labels ?? {}) },
+    taints: [...(pool.taints ?? [])],
+    ...(scaling
+      ? { auto_scale: true, min_nodes: scaling.minNodes, max_nodes: scaling.maxNodes }
+      : { auto_scale: false }),
+  };
+}

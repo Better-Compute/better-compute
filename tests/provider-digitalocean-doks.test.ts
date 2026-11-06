@@ -400,3 +400,212 @@ describe('doks clusters', () => {
     expect(await s.k8s.getCluster('0d0c5000-0000-4000-8000-999999999999', s.ctx())).toBeUndefined();
   });
 });
+
+describe('doks node pools', () => {
+  const gpuPool: KubernetesNodePoolSpec = {
+    name: 'gpu',
+    machineType: 'gpu-h100x1-80gb',
+    nodeCount: 1,
+    accelerators: { type: 'nvidia-h100', count: 1 },
+    taints: [{ key: 'nvidia.com/gpu', effect: 'NoSchedule' }],
+  };
+  const torCluster: KubernetesClusterSpec = { ...standard, name: 'bc-k-tor', location: 'tor1' };
+  const poolPath = (s: Setup, cluster: string, name: string): string =>
+    `/kubernetes/clusters/${cluster}/node_pools/${
+      s.doks.clusters.get(cluster)!.node_pools.find((p: Json) => p.name === name).id
+    }`;
+
+  it('creates, resizes, autoscales and deletes a node pool', async () => {
+    const s = await setup();
+    const cluster = await readyCluster(s);
+    const extra: KubernetesNodePoolSpec = {
+      name: 'extra',
+      machineType: 's-1vcpu-1gb',
+      nodeCount: 1,
+    };
+    const created = await s.k8s.ensureNodePool(cluster, extra, s.ctx());
+    expect(created).toMatchObject({ id: `${cluster}/extra`, state: 'pending' });
+    expect(posted(s, `/kubernetes/clusters/${cluster}/node_pools`)).toEqual([
+      { name: 'extra', size: 's-1vcpu-1gb', count: 1, tags: ours, auto_scale: false },
+    ]);
+    const { last } = await settle(() => s.k8s.ensureNodePool(cluster, extra, s.ctx()), 'ready');
+    expect(last.outputs).toEqual({ nodes: '1' });
+
+    // A resize, in place.
+    const path = poolPath(s, cluster, 'extra');
+    const bigger = { ...extra, nodeCount: 3 };
+    expect((await s.k8s.ensureNodePool(cluster, bigger, s.ctx())).state).toBe('updating');
+    expect(posted(s, path, 'PUT')).toEqual([
+      { name: 'extra', count: 3, tags: ours, labels: {}, taints: [], auto_scale: false },
+    ]);
+    const resized = await settle(() => s.k8s.ensureNodePool(cluster, bigger, s.ctx()), 'ready');
+    expect(resized.last.outputs).toEqual({ nodes: '3' });
+
+    // Autoscaling: the bounds change in place, the autoscaler owns the count.
+    const scaled = { ...bigger, autoscaling: { minNodes: 1, maxNodes: 4 } };
+    expect((await s.k8s.ensureNodePool(cluster, scaled, s.ctx())).state).toBe('updating');
+    expect(posted(s, path, 'PUT').at(-1)).toMatchObject({
+      count: 3,
+      auto_scale: true,
+      min_nodes: 1,
+      max_nodes: 4,
+    });
+    await settle(() => s.k8s.ensureNodePool(cluster, scaled, s.ctx()), 'ready');
+    const puts = posted(s, path, 'PUT').length;
+    // The DO autoscaler scales the pool down: its nodes go away, nothing is sent back.
+    s.doks.transitionReads = 2;
+    s.doks.autoscale(cluster, 'extra', 1);
+    const { states } = await settle(() => s.k8s.ensureNodePool(cluster, scaled, s.ctx()), 'ready');
+    expect(states[0]).toBe('updating');
+    expect(posted(s, path, 'PUT')).toHaveLength(puts);
+    s.doks.transitionReads = 1;
+
+    // Back to a fixed size.
+    await s.k8s.ensureNodePool(cluster, { ...extra, nodeCount: 2 }, s.ctx());
+    expect(posted(s, path, 'PUT').at(-1)).toMatchObject({ count: 2, auto_scale: false });
+
+    // Deleted: deleting until it is gone.
+    const gone = await settle(() => s.k8s.deleteNodePool(cluster, 'extra', s.ctx()), 'deleted');
+    expect(gone.states).toEqual(['deleting', 'deleted']);
+    expect(mutations(s).filter((m) => m.startsWith('DELETE'))).toEqual([`DELETE ${path}`]);
+  });
+
+  it('creates GPU pools whose size carries the accelerators, and refuses a mismatch', async () => {
+    const s = await setup();
+    const cluster = await readyCluster(s, torCluster);
+    const { last } = await settle(() => s.k8s.ensureNodePool(cluster, gpuPool, s.ctx()), 'ready');
+    expect(last.id).toBe(`${cluster}/gpu`);
+    expect(posted(s, `/kubernetes/clusters/${cluster}/node_pools`).at(-1)).toMatchObject({
+      size: 'gpu-h100x1-80gb',
+      taints: [{ key: 'nvidia.com/gpu', effect: 'NoSchedule' }],
+    });
+    // The inventory's model name works too, and a GPU size needs no accelerators.
+    await s.k8s.ensureNodePool(
+      cluster,
+      {
+        ...gpuPool,
+        name: 'gpu8',
+        machineType: 'gpu-h100x8-640gb',
+        accelerators: { type: 'H100', count: 8 },
+      },
+      s.ctx(),
+    );
+    await s.k8s.ensureNodePool(
+      cluster,
+      { name: 'l40s', machineType: 'gpu-l40sx1-48gb', nodeCount: 1 },
+      s.ctx(),
+    );
+    const mismatches: KubernetesNodePoolSpec[] = [
+      { ...gpuPool, name: 'two', accelerators: { type: 'nvidia-h100', count: 2 } },
+      { ...gpuPool, name: 'model', accelerators: { type: 'nvidia-l40s', count: 1 } },
+      { ...cpuPool, name: 'cpu', accelerators: { type: 'nvidia-h100', count: 1 } },
+      { ...gpuPool, name: 'nosize', machineType: 'gpu-nonexistent' },
+    ];
+    for (const spec of mismatches) {
+      const error = await failure(s.k8s.ensureNodePool(cluster, spec, s.ctx()));
+      expect([spec.name, error.code, error.details?.reason]).toEqual([
+        spec.name,
+        'INVALID_INPUT',
+        spec.name === 'nosize' ? 'size' : 'accelerators',
+      ]);
+    }
+    expect(posted(s, `/kubernetes/clusters/${cluster}/node_pools`)).toHaveLength(3);
+  });
+
+  it('creates Spot GPU pools only when the account allows Spot and previews', async () => {
+    const spot = { ...gpuPool, name: 'spot', spot: true };
+    const plain = await setup();
+    const cluster = await readyCluster(plain, torCluster);
+    const refused = await failure(plain.k8s.ensureNodePool(cluster, spot, plain.ctx()));
+    expect([refused.code, refused.details?.reason]).toEqual(['UNSUPPORTED', 'spotDisabled']);
+    const noPreview = await setup(
+      { ...doAccount, regions: ['nyc3', 'tor1'], allowSpot: true },
+      {},
+      plain.doks,
+    );
+    expect(
+      (await failure(noPreview.k8s.ensureNodePool(cluster, spot, noPreview.ctx()))).details,
+    ).toMatchObject({ reason: 'spotDisabled' });
+    const s = await setup(
+      { ...doAccount, regions: ['nyc3', 'tor1'], allowSpot: true, previews: true },
+      {},
+      plain.doks,
+    );
+    const cpuSpot = await failure(
+      s.k8s.ensureNodePool(cluster, { ...cpuPool, name: 'cpuspot', spot: true }, s.ctx()),
+    );
+    expect([cpuSpot.code, cpuSpot.details?.reason]).toEqual(['INVALID_INPUT', 'spot']);
+    await settle(() => s.k8s.ensureNodePool(cluster, spot, s.ctx()), 'ready');
+    expect(posted(s, `/kubernetes/clusters/${cluster}/node_pools`).at(-1)).toMatchObject({
+      name: 'spot',
+      spot: true,
+    });
+    // Spot cannot be switched in place.
+    const switched = await failure(
+      s.k8s.ensureNodePool(cluster, { ...spot, spot: false }, s.ctx()),
+    );
+    expect(switched.details).toMatchObject({ reason: 'immutable', field: 'spot' });
+  });
+
+  it('refuses differences that cannot change in place with INVALID_STATE', async () => {
+    const s = await setup();
+    const cluster = await readyCluster(s);
+    const changes: [Partial<KubernetesNodePoolSpec>, string][] = [
+      [{ machineType: 's-1vcpu-1gb' }, 'machineType'],
+      [{ labels: { workload: 'batch' } }, 'labels'],
+      [{ taints: [] }, 'taints'],
+    ];
+    for (const [change, field] of changes) {
+      const error = await failure(
+        s.k8s.ensureNodePool(cluster, { ...cpuPool, ...change }, s.ctx()),
+      );
+      expect([error.code, error.details?.field]).toEqual(['INVALID_STATE', field]);
+    }
+  });
+
+  it('refuses a pool on a cluster that does not exist, and malformed pools', async () => {
+    const s = await setup();
+    const missing = '0d0c5000-0000-4000-8000-999999999999';
+    expect((await failure(s.k8s.ensureNodePool(missing, cpuPool, s.ctx()))).code).toBe('NOT_FOUND');
+    expect(await s.k8s.deleteNodePool(missing, 'general', s.ctx())).toMatchObject({
+      id: `${missing}/general`,
+      state: 'deleted',
+    });
+    const cluster = await readyCluster(s);
+    for (const spec of [
+      { ...cpuPool, name: 'Bad' },
+      { ...cpuPool, nodeCount: 0 },
+      { ...cpuPool, autoscaling: { minNodes: 3, maxNodes: 2 } },
+      { ...cpuPool, machineType: 'S 2' },
+      { ...cpuPool, taints: [{ key: 'a', effect: 'Never' as 'NoSchedule' }] },
+    ])
+      expect((await failure(s.k8s.ensureNodePool(cluster, spec, s.ctx()))).code).toBe(
+        'INVALID_INPUT',
+      );
+    expect((await failure(s.k8s.ensureNodePool('nope', cpuPool, s.ctx()))).code).toBe(
+      'INVALID_INPUT',
+    );
+    expect(await s.k8s.deleteNodePool(cluster, 'never-made', s.ctx())).toMatchObject({
+      state: 'deleted',
+    });
+  });
+
+  it('adds pools to a cluster it does not own, but never changes or deletes a pool not its own', async () => {
+    const s = await setup();
+    const adopted = s.doks.seedCluster({
+      name: 'team-cluster',
+      region: 'nyc3',
+      nodePool: { name: 'team', size: 's-2vcpu-4gb', count: 1 },
+    });
+    const team = { name: 'team', machineType: 's-2vcpu-4gb', nodeCount: 5 };
+    const conflict = await failure(s.k8s.ensureNodePool(adopted.id, team, s.ctx()));
+    expect([conflict.code, conflict.details?.reason]).toEqual(['CONFLICT', 'notOwned']);
+    const refused = await failure(s.k8s.deleteNodePool(adopted.id, 'team', s.ctx()));
+    expect([refused.code, refused.details?.reason]).toEqual(['INVALID_STATE', 'notOwned']);
+    expect(mutations(s)).toEqual([]);
+    const mine = { name: 'bc-extra', machineType: 's-2vcpu-4gb', nodeCount: 1 };
+    await settle(() => s.k8s.ensureNodePool(adopted.id, mine, s.ctx()), 'ready');
+    await settle(() => s.k8s.deleteNodePool(adopted.id, 'bc-extra', s.ctx()), 'deleted');
+    expect(s.doks.clusters.get(adopted.id)!.node_pools.map((p: Json) => p.name)).toEqual(['team']);
+  });
+});

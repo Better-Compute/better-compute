@@ -73,6 +73,7 @@ export class DoksEmulator {
 
   #seq = 0;
   readonly #transitions = new Map<string, Map<string, Transition>>();
+  readonly #deletingPools = new Set<string>();
 
   constructor(emulator: DoEmulator = new DoEmulator()) {
     this.do = emulator;
@@ -457,6 +458,9 @@ export class DoksEmulator {
       const p = found && pool(found, context.match[2]!);
       if (!found || !p) return notFound();
       for (const node of p.nodes as Json[]) node.status = { state: 'deleting' };
+      // Asked again while it goes: nothing changes.
+      if (this.#deletingPools.has(p.id as string)) return { status: 204 };
+      this.#deletingPools.add(p.id as string);
       this.later(found.id as string, `pool:${p.id}:delete`, () => {
         found.node_pools = (found.node_pools as Json[]).filter((x) => x.id !== p.id);
       });

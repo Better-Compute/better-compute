@@ -11,7 +11,7 @@ import {
   type ProviderResourceState,
 } from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
-import type { DoVpc } from '../compute/types.js';
+import type { DoSize, DoVpc } from '../compute/types.js';
 import type { DoConfig } from '../config.js';
 import { deploymentTag } from '../ids.js';
 import { accountVpcs, networkOfVpc, vpcForNetwork, vpcLookup } from '../networks/vpcs.js';
@@ -29,10 +29,25 @@ import {
   ownTags,
   pluginsOff,
 } from './clusters.js';
-import { checkRegion, fail, invalid, parseClusterId, resourceState } from './common.js';
-import { nodePoolBody } from './node-pools.js';
+import {
+  checkName,
+  checkRegion,
+  clusterNotFound,
+  fail,
+  invalid,
+  nodePoolId,
+  parseClusterId,
+  resourceState,
+} from './common.js';
+import {
+  checkNodePoolImmutable,
+  checkNodePoolSpec,
+  nodePoolBody,
+  nodePoolState,
+  nodePoolUpdate,
+} from './node-pools.js';
 import { httpsKubeTransport, type KubeTransport } from './transport.js';
-import type { DoksCluster } from './types.js';
+import type { DoksCluster, DoksNodePool } from './types.js';
 import { byNewest, pickVersion, readOptions, readVersions } from './versions.js';
 
 export { kubernetesTag } from './clusters.js';
@@ -251,6 +266,7 @@ export class DoKubernetes implements ProviderKubernetes {
           : 'DigitalOcean lists no Kubernetes versions',
         'version',
       );
+    for (const pool of spec.initialNodePools ?? []) await this.#checkCapacity(pool, signal);
     const vpc = await this.#vpcFor(spec, signal);
     const owned = ownershipTags(this.#deploymentTag);
     const body = {
@@ -309,20 +325,159 @@ export class DoKubernetes implements ProviderKubernetes {
 
   // -------------------------------------------------------------------------------- node pools
 
-  ensureNodePool(
-    _cluster: string,
-    _spec: KubernetesNodePoolSpec,
-    _context: CallContext,
-  ): Promise<ProviderResourceState> {
-    return Promise.resolve(this.#notYet());
+  /**
+   * Spot and GPU sizes, checked before a create: Spot only with the account's `allowSpot` and
+   * `previews` (Spot GPU is a DO preview, DO-D14/DO-D23) and only on GPU sizes; `accelerators`
+   * must be what the size carries (DO sizes come with their GPUs).
+   */
+  async #checkCapacity(spec: KubernetesNodePoolSpec, signal: AbortSignal): Promise<void> {
+    if (spec.spot && !(this.#config.allowSpot && this.#config.previews))
+      throw fail(
+        'UNSUPPORTED',
+        `Node pool ${spec.name}: Spot node pools need the account's allowSpot and previews (Spot GPU is a DigitalOcean preview)`,
+        'spotDisabled',
+      );
+    if (!spec.accelerators && !spec.spot && !spec.machineType.startsWith('gpu-')) return;
+    let size: DoSize | undefined;
+    for await (const candidate of this.#client.pages<DoSize>('/sizes', 'sizes', {
+      signal,
+      budget: 'observe',
+    }))
+      if (candidate.slug === spec.machineType) {
+        size = candidate;
+        break;
+      }
+    if (!size) throw invalid(`DigitalOcean has no size ${spec.machineType}`, 'size');
+    const gpu = size.gpu_info;
+    if (spec.spot && !gpu)
+      throw invalid(`Node pool ${spec.name}: Spot node pools are GPU sizes only`, 'spot');
+    if (!spec.accelerators) return;
+    const model = (gpu?.model ?? '').toLowerCase();
+    const wanted = spec.accelerators.type.toLowerCase().replaceAll('-', '_');
+    const sameModel = wanted === model || wanted === model.replace(/^(nvidia|amd)_/, '');
+    if (!gpu || !sameModel || gpu.count !== spec.accelerators.count)
+      throw invalid(
+        `Size ${size.slug} carries ${gpu ? `${gpu.count} ${gpu.model}` : 'no GPUs'}, not ${spec.accelerators.count} ${spec.accelerators.type}`,
+        'accelerators',
+      );
   }
 
-  deleteNodePool(
-    _cluster: string,
-    _name: string,
-    _context: CallContext,
+  /** The cluster a node pool call names, and the pool of that name in it. */
+  async #pool(
+    cluster: string,
+    name: string,
+    signal: AbortSignal,
+  ): Promise<{ parent?: DoksCluster; pool?: DoksNodePool }> {
+    const parent = await this.#read(cluster, signal);
+    return parent
+      ? { parent, pool: (parent.node_pools ?? []).find((pool) => pool.name === name) }
+      : {};
+  }
+
+  #notOwnedPool(id: string) {
+    return fail(
+      'CONFLICT',
+      `Node pool ${id} exists and is not this deployment's: it is never changed`,
+      'notOwned',
+    );
+  }
+
+  /**
+   * A node pool of a cluster. A cluster that is not this deployment's (an adopted one) may get
+   * pools of ours; a pool that is not ours is never changed (CONFLICT).
+   */
+  async ensureNodePool(
+    cluster: string,
+    spec: KubernetesNodePoolSpec,
+    context: CallContext,
   ): Promise<ProviderResourceState> {
-    return Promise.resolve(this.#notYet());
+    const clusterId = parseClusterId(cluster);
+    checkNodePoolSpec(spec);
+    const { signal, log } = context;
+    const id = nodePoolId(clusterId, spec.name);
+    const { parent, pool } = await this.#pool(clusterId, spec.name, signal);
+    if (!parent) throw clusterNotFound(clusterId);
+    const serving = parent.status?.state === 'running' || parent.status?.state === 'degraded';
+    if (!pool) {
+      if (parent.status?.state === 'deleting')
+        throw fail(
+          'INVALID_STATE',
+          `DOKS cluster ${clusterId} is being deleted`,
+          'clusterDeleting',
+        );
+      // A pool is added once the control plane serves (not while it provisions or upgrades).
+      if (!serving) return resourceState(id, 'pending');
+      await this.#checkCapacity(spec, signal);
+      log.info('doks.nodePool.create', { nodePool: id, size: spec.machineType });
+      try {
+        const created = (
+          await this.#client.request<{ node_pool?: DoksNodePool }>(
+            'POST',
+            `/kubernetes/clusters/${clusterId}/node_pools`,
+            {
+              body: nodePoolBody(spec, ownershipTags(this.#deploymentTag)),
+              signal,
+              budget: 'mutate',
+            },
+          )
+        ).node_pool;
+        return created ? nodePoolState(id, created) : resourceState(id, 'pending');
+      } catch (error) {
+        // Created meanwhile: what is there is the answer, if it is ours.
+        if (!isComputeError(error, 'CONFLICT')) throw error;
+        const again = (await this.#pool(clusterId, spec.name, signal)).pool;
+        if (!again) throw error;
+        if (!this.#owned(again)) throw this.#notOwnedPool(id);
+        return nodePoolState(id, again);
+      }
+    }
+    if (!this.#owned(pool)) throw this.#notOwnedPool(id);
+    checkNodePoolImmutable(id, spec, pool);
+    if (!serving) return nodePoolState(id, pool);
+    const update = nodePoolUpdate(spec, pool);
+    if (!update) return nodePoolState(id, pool);
+    log.info('doks.nodePool.update', { nodePool: id, count: update.count });
+    await this.#client.request('PUT', `/kubernetes/clusters/${clusterId}/node_pools/${pool.id}`, {
+      body: update,
+      signal,
+      budget: 'mutate',
+    });
+    return resourceState(id, 'updating');
+  }
+
+  /** Deletes one of this deployment's node pools (a pool that is not ours is INVALID_STATE). */
+  async deleteNodePool(
+    cluster: string,
+    name: string,
+    context: CallContext,
+  ): Promise<ProviderResourceState> {
+    const clusterId = parseClusterId(cluster);
+    checkName(name, 'The node pool name');
+    const { signal, log } = context;
+    const id = nodePoolId(clusterId, name);
+    const { pool } = await this.#pool(clusterId, name, signal);
+    if (!pool) return resourceState(id, 'deleted');
+    if (!this.#owned(pool))
+      throw fail(
+        'INVALID_STATE',
+        `Node pool ${id} is not this deployment's: it is never deleted`,
+        'notOwned',
+      );
+    const nodes = pool.nodes ?? [];
+    if (nodes.length > 0 && nodes.every((node) => node.status?.state === 'deleting'))
+      return resourceState(id, 'deleting');
+    log.info('doks.nodePool.delete', { nodePool: id });
+    try {
+      await this.#client.request(
+        'DELETE',
+        `/kubernetes/clusters/${clusterId}/node_pools/${pool.id}`,
+        { signal, budget: 'mutate' },
+      );
+    } catch (error) {
+      if (isComputeError(error, 'NOT_FOUND')) return resourceState(id, 'deleted');
+      throw error;
+    }
+    return resourceState(id, 'deleting');
   }
 
   // ------------------------------------------------------------------------------ credentials
