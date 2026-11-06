@@ -118,6 +118,31 @@ DigitalOcean has no network object, so a tenant network is built from a VPC per 
 - **A Droplet joins a network by tag.** `create` on a tenant network puts `bc-net-<net16>` and the tags its rules target on the Droplet from the first boot; `setTags` adds the new tags before it removes old ones and never removes a member tag unless the Droplet's VPC belongs to another network.
 - **An attached Droplet outside the network's VPCs** that a rule targets loses egress: DigitalOcean denies what a firewall doesn't allow, and the rule's firewall allows only what the rule says.
 
+## Managed services (cloud resources)
+
+`resources` serves DigitalOcean's long tail through the provider-neutral `ProviderResources` contract, which the
+`@better-compute/cloud-resources` module drives (`cloudResources({ providers: [digitalocean] })`, next to
+`vps({ providers })`). Pass the same provider definition to both.
+
+- **Managed Databases:** a cluster kind per engine, `do.database.{pg,mysql,valkey,mongodb,kafka,opensearch}` (spec:
+  `region`, `version`, `size`, `nodes`, `storageMiB`), and what lives in a cluster: `.user` (PostgreSQL, MySQL,
+  MongoDB, Kafka, OpenSearch), `do.database.pg.pool` (PgBouncer), `.replica` (PostgreSQL, MySQL) and `.firewall`
+  (trusted addresses, Droplet tags and Droplet ids). Size, nodes and storage resize in place; PostgreSQL and MySQL
+  upgrade in place; a downgrade, a region change or a storage shrink is `INVALID_STATE` (`replaceRequired`).
+- **Ownership.** A cluster carries `better-compute-managed:true`, this deployment's tag, the idempotency key's tag and
+  the module's `better-compute-resource:<id>` and `better-compute-tenant:<t>` tags. A create first looks the key's tag
+  up, and the account-unique name settles a race. `delete` and `release` refuse (`notManaged`, nothing sent) a
+  cluster without the managed and deployment tags, and so does anything living in such a cluster. Users, pools and
+  firewalls have no tags: they are owned through their cluster.
+- **Secrets.** Passwords and connection URIs (which embed the password) are only ever `secretOutputs`; the module
+  seals them in the run that received them. They never reach `outputs`, a log line or an error.
+- **Discover, adopt, release** by engine: adopt tags a cluster no deployment manages (`managedByAnother` otherwise);
+  release takes every `better-compute-*` tag off and leaves it running.
+
+Token scopes: `database:read`, `database:create`, `database:update` and `database:delete`, plus `tag:create` for
+adopt and release. Not modelled yet: Standard and Advanced editions, private networking (a tenant network's VPC),
+Vector Databases, App Platform, Functions, Add-Ons, 1-Click apps and Partner Network Connect.
+
 ## Rate budget
 
 DigitalOcean allows 250 requests a minute and 5 000 an hour per token, over sliding windows, and the limits are shared by everything that uses the token: every reconciler of every account that names it, in every process. The provider keeps each token's requests (found by a hash of the token, which is never kept) under both limits, and re-seeds from the `ratelimit-*` headers of each response, so traffic from other processes counts. Requests have a class: a `mutate` (create, delete, action, tag write) may spend whatever is left, an `observe` (a read of one Droplet, an action, a firewall list) at most 30 % of a window (network reconciles reuse the firewall list for ten seconds, and drop it on each firewall write of their own; deletes read it afresh), and a `sweep` (discovery, `list`, the catalogs) at most 20 %. So discovery defers first, and at least half of every window stays free for the calls that change something. A request over its share is `RATE_LIMITED` with `retryAfterMs` (`details.reason` `budget`); a 429 from DigitalOcean is `RATE_LIMITED` with `retryAfterMs` from `ratelimit-reset`. `digitaloceanProvider({ budget: { perMinute, perHour } })` lowers the limits of an account that shares its token with other tools.
