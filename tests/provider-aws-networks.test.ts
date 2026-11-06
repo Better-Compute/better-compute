@@ -86,6 +86,9 @@ describe('networks: VPC', () => {
       destination: '0.0.0.0/0',
       gatewayId: igw.id,
     });
+    // Tagged before its route changes, so the IAM policy can scope route edits to it.
+    expect(vpc.mainRouteTable(made.id).tags.get('better-compute:network')).toBe('bc-net-1');
+    expect(vpc.defaultNacl(made.id).tags.get('better-compute:network')).toBe('bc-net-1');
     // The default ACL's allow-all moves to the end, so deny entries can come before it.
     const entries = vpc.defaultNacl(made.id).entries.map((entry) => [entry.number, entry.egress]);
     expect(entries).toEqual([
@@ -847,6 +850,38 @@ describe('networks: machines', () => {
     );
   });
 
+  it('setTags on a multi-interface machine changes its primary interface, tagged at launch', async () => {
+    const { create, networks, ec2, emu, groupId, call } = await onNetwork();
+    const machine = await create('ins_1');
+    const instance = ec2.instances.get(machine.id)!;
+    // RunInstances tagged the interface with the ownership tag the IAM condition checks.
+    expect(instance.eniTags.get('better-compute:instance')).toBe('ins_1');
+    instance.interfaces = 2;
+    await networks.setTags(machine.id, [tagB], call('ins_1'), 'ins_1');
+    expect(emu.calls('ModifyNetworkInterfaceAttribute')).toHaveLength(1);
+    expect(emu.calls('ModifyInstanceAttribute')).toHaveLength(0);
+    expect(instance.groups.map((g) => g.id)).toEqual([groupId('bc-net-bc-net-1'), groupId(tagB)]);
+    // Already carries the tag: no tag write on the interface.
+    expect(emu.calls('CreateTags').filter((r) => r.params.get('ResourceId.1')?.startsWith('eni-')))
+      .toHaveLength(0);
+  });
+
+  it('setTags tags the primary interface of a claimed multi-interface machine before changing it', async () => {
+    const { networks, ec2, emu, vpcId, subnetId, groupId, call } = await onNetwork();
+    const claimed = ec2.addInstance({ tags: { 'better-compute:instance': 'ins_9' } });
+    claimed.vpcId = vpcId;
+    claimed.subnetId = subnetId;
+    claimed.groups = [];
+    claimed.interfaces = 2;
+    await networks.setTags(claimed.id, [tagB], call('ins_9'), 'ins_9');
+    expect(claimed.eniTags.get('better-compute:instance')).toBe('ins_9');
+    const ops = emu.requests.map((r) => r.operation);
+    expect(ops.lastIndexOf('CreateTags')).toBeLessThan(
+      ops.lastIndexOf('ModifyNetworkInterfaceAttribute'),
+    );
+    expect(claimed.groups.map((g) => g.id)).toEqual([groupId('bc-net-bc-net-1'), groupId(tagB)]);
+  });
+
   it('a firewall rule targeting a tag reaches the machine that carries it', async () => {
     const { create, networks, call, vpc, ec2 } = await onNetwork();
     const machine = await create('ins_1');
@@ -912,6 +947,37 @@ describe('networks: IAM policy', () => {
         },
       },
     });
+    // Routes and ACL entries change only on tables and ACLs of a better-compute network.
+    const routes = bySid.get('NetworkRoutes')!;
+    expect(routes).toMatchObject({
+      Action: ['ec2:CreateRoute', 'ec2:ReplaceRoute'],
+      Resource: 'arn:aws:ec2:us-east-1:222222222222:route-table/*',
+      Condition: { Null: { 'ec2:ResourceTag/better-compute:network': 'false' } },
+    });
+    expect(bySid.get('NetworkAclEntries')).toMatchObject({
+      Action: ['ec2:CreateNetworkAclEntry', 'ec2:DeleteNetworkAclEntry'],
+      Resource: 'arn:aws:ec2:us-east-1:222222222222:network-acl/*',
+      Condition: { Null: { 'ec2:ResourceTag/better-compute:network': 'false' } },
+    });
+    expect(bySid.get('NetworkRouteGateways')).toMatchObject({
+      Resource: 'arn:aws:ec2:us-east-1:222222222222:internet-gateway/*',
+      Condition: { StringEquals: { 'ec2:ResourceTag/better-compute:managed': 'true' } },
+    });
+    expect(bySid.has('NetworkRoutesAndAcls')).toBe(false);
+    for (const statement of policy.Statement)
+      if (
+        [statement.Action]
+          .flat()
+          .some((a) =>
+            [
+              'ec2:CreateRoute',
+              'ec2:ReplaceRoute',
+              'ec2:CreateNetworkAclEntry',
+              'ec2:DeleteNetworkAclEntry',
+            ].includes(a),
+          )
+      )
+        expect(statement.Condition, statement.Sid).toBeDefined();
     // Every action the networks module calls is in the policy.
     const actions = new Set(policy.Statement.flatMap((s) => [s.Action].flat()));
     for (const action of [
@@ -942,6 +1008,117 @@ describe('networks: IAM policy', () => {
       'DeleteVpc',
     ])
       expect(actions.has(`ec2:${action}`), action).toBe(true);
+  });
+});
+
+describe('networks: IAM policy against the calls the code makes', () => {
+  /** `arn:aws:ec2:us-east-1:222222222222:route-table/*` → `route-table`. */
+  const arnType = (arn: string) => arn.slice(arn.lastIndexOf(':') + 1).split('/')[0]!;
+  const idTypes: [string, string][] = [
+    ['rtb-', 'route-table'],
+    ['acl-', 'network-acl'],
+    ['eni-', 'network-interface'],
+    ['igw-', 'internet-gateway'],
+    ['vpce-', 'vpc-endpoint'],
+    ['sgr-', 'security-group-rule'],
+    ['sg-', 'security-group'],
+    ['subnet-', 'subnet'],
+    ['vpc-', 'vpc'],
+    ['i-', 'instance'],
+  ];
+
+  it('every tag the code writes is allowed, and every tag a condition checks is written', async () => {
+    const w = await world();
+    await w.settle(() => w.networks.ensureNetwork({ name: 'bc-net-1' }, w.call()));
+    await w.settle(() =>
+      w.networks.ensureSubnet(
+        {
+          network: 'bc-net-1',
+          name: 'bc-sub-1',
+          region: 'us-east-1',
+          cidr: '10.64.1.0/24',
+          zone: 'us-east-1a',
+          privateGoogleAccess: true,
+        },
+        w.call(),
+      ),
+    );
+    const base = {
+      network: 'bc-net-1',
+      direction: 'ingress',
+      priority: 1000,
+      rules: [{ protocol: 'tcp', ports: ['22'] }],
+    } as const;
+    await w.networks.ensureFirewall(
+      { ...base, name: 'bc-fw-a', action: 'allow', targetTags: ['bc-0123456789abcdef'] },
+      w.call(),
+    );
+    await w.networks.ensureFirewall({ ...base, name: 'bc-fw-d', action: 'deny' }, w.call());
+    const machine = await w.impl.create(
+      {
+        offerId: 'us-east-1a/t3.micro',
+        image: 'ubuntu-24.04',
+        userData: '#cloud-config\n',
+        name: 'vm-ins_1',
+        network: { network: 'bc-net-1', subnet: 'bc-sub-1', tags: ['bc-0123456789abcdef'] },
+      },
+      w.call('ins_1'),
+    );
+    w.ec2.instances.get(machine.id)!.interfaces = 2;
+    await w.networks.setTags(machine.id, ['bc-fedcba9876543210'], w.call('ins_1'), 'ins_1');
+
+    const policy = iamPolicy({ networks: true, region: 'us-east-1', account: '222222222222' });
+    const allows = (action: string, type: string) =>
+      policy.Statement.filter(
+        (s) =>
+          [s.Action].flat().includes(action) &&
+          [s.Resource].flat().some((r) => r === '*' || arnType(r) === type),
+      );
+    // What the code tags, and with which keys: tag-on-create specs and CreateTags by id.
+    const written = new Map<string, Set<string>>();
+    const write = (type: string, key: string) =>
+      written.set(type, (written.get(type) ?? new Set()).add(key));
+    for (const request of w.emu.requests) {
+      const p = request.params;
+      for (let n = 1; p.has(`TagSpecification.${n}.ResourceType`); n++) {
+        const type = p.get(`TagSpecification.${n}.ResourceType`)!;
+        // The create itself, and tagging on create, are allowed for that resource type.
+        expect(allows(`ec2:${request.operation}`, type).length, `${request.operation} ${type}`)
+          .toBeGreaterThan(0);
+        const onCreate = allows('ec2:CreateTags', type).filter((s) =>
+          [s.Condition?.StringEquals?.['ec2:CreateAction'] ?? []]
+            .flat()
+            .includes(request.operation),
+        );
+        expect(onCreate.length, `CreateTags on ${request.operation} of ${type}`).toBeGreaterThan(0);
+        for (let m = 1; p.has(`TagSpecification.${n}.Tag.${m}.Key`); m++)
+          write(type, p.get(`TagSpecification.${n}.Tag.${m}.Key`)!);
+      }
+      if (request.operation === 'CreateTags') {
+        const id = p.get('ResourceId.1')!;
+        const type = idTypes.find(([prefix]) => id.startsWith(prefix))![1];
+        expect(allows('ec2:CreateTags', type).length, `CreateTags on ${type}`).toBeGreaterThan(0);
+        for (let m = 1; p.has(`Tag.${m}.Key`); m++) write(type, p.get(`Tag.${m}.Key`)!);
+      }
+    }
+    expect([...written.keys()]).toEqual(
+      expect.arrayContaining(['network-interface', 'route-table', 'network-acl']),
+    );
+    // Every resource-tag condition on a resource type the code writes names a tag it writes there.
+    for (const statement of policy.Statement) {
+      const keys = [
+        ...Object.keys(statement.Condition?.Null ?? {}),
+        ...Object.keys(statement.Condition?.StringEquals ?? {}),
+      ]
+        .filter((k) => k.startsWith('ec2:ResourceTag/'))
+        .map((k) => k.slice('ec2:ResourceTag/'.length));
+      for (const resource of [statement.Resource].flat()) {
+        const type = arnType(resource);
+        if (!written.has(type)) continue;
+        for (const key of keys)
+          expect(written.get(type)!.has(key), `${statement.Sid}: ${key} on ${type}`).toBe(true);
+      }
+    }
   });
 });
 

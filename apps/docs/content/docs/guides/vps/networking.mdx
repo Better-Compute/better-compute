@@ -288,7 +288,8 @@ nothing depends on remembered ids. The tenant-facing behaviour above holds; thes
   of instances' tags are removed with the network; on an adopted VPC they stay.
 - **IAM.** `better-compute aws iam-policy --phases A1,A2` adds the network permissions: creates must tag what they make
   `better-compute:managed=true`, and changes and deletes need that tag. AWS creates a VPC's main route table and
-  default ACL untagged, so route and ACL entry edits are not tag-scoped.
+  default ACL untagged, so better-compute tags both with `better-compute:network` first, and routes and ACL entries
+  change only where that tag is. A machine's network interface carries `better-compute:instance`, as the instance does.
 
 What is not there at all: IPv6 ranges, more than one range or lease per instance, and an API to manage ranges. Tunnels
 give you exec, SSH and single-port TCP access without routing to the instance network; see [tunnels](/docs/guides/access/tunnels).

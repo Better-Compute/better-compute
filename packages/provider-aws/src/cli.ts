@@ -106,7 +106,7 @@ export function iamPolicy(
       Sid: 'TagOnCreate',
       Effect: 'Allow',
       Action: 'ec2:CreateTags',
-      Resource: [instances, ec2('volume/*')],
+      Resource: [instances, ec2('volume/*'), ec2('network-interface/*')],
       Condition: { StringEquals: { 'ec2:CreateAction': 'RunInstances' } },
     },
     {

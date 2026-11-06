@@ -404,7 +404,7 @@ export class AwsNetworks implements ProviderNetworks {
     }
 
     const igw = await this.#ensureGateway(spec.name, vpc.id, signal);
-    await this.#ensureDefaultRoute(vpc.id, igw, signal);
+    await this.#ensureDefaultRoute(spec.name, vpc.id, igw, signal);
     await this.#ensureAclBaseline(spec.name, vpc.id, signal);
     return state(vpc.id, 'ready');
   }
@@ -463,7 +463,12 @@ export class AwsNetworks implements ProviderNetworks {
     return doc.items('routeTableSet')[0];
   }
 
-  async #ensureDefaultRoute(vpcId: string, igw: string, signal: AbortSignal): Promise<void> {
+  async #ensureDefaultRoute(
+    network: string,
+    vpcId: string,
+    igw: string,
+    signal: AbortSignal,
+  ): Promise<void> {
     const table = await this.#mainRouteTable(vpcId, signal);
     const tableId = table?.textOf('routeTableId');
     if (!table || !tableId)
@@ -475,6 +480,13 @@ export class AwsNetworks implements ProviderNetworks {
           provider: 'aws',
           reason: 'route-table',
         },
+      );
+    // Tagged before any route edit: the IAM policy lets routes change only on a network's table.
+    if (tagMap(table).get(networkTags.network) !== network)
+      await this.#call(
+        'CreateTags',
+        { ResourceId: [tableId], Tag: [{ Key: networkTags.network, Value: network }] },
+        signal,
       );
     const route = table
       .items('routeSet')
@@ -1570,13 +1582,28 @@ export class AwsNetworks implements ProviderNetworks {
         undefined,
         { provider: 'aws', reason: 'security-groups-per-interface', limit },
       );
-    if (interfaces.length > 1)
-      await this.#call(
-        'ModifyNetworkInterfaceAttribute',
-        { NetworkInterfaceId: primary.textOf('networkInterfaceId') ?? '', SecurityGroupId: next },
+    if (interfaces.length > 1) {
+      const eniId = primary.textOf('networkInterfaceId') ?? '';
+      // The IAM policy changes an interface's groups only when it carries the ownership tag:
+      // RunInstances puts it there; a claimed machine's interface gets it now.
+      const eni = await this.#call(
+        'DescribeNetworkInterfaces',
+        { NetworkInterfaceId: [eniId] },
         signal,
       );
-    else
+      const eniTags = eni.items('networkInterfaceSet')[0];
+      if (!eniTags || tagMap(eniTags).get(tags.instance) !== claimedBy)
+        await this.#call(
+          'CreateTags',
+          { ResourceId: [eniId], Tag: [{ Key: tags.instance, Value: claimedBy }] },
+          signal,
+        );
+      await this.#call(
+        'ModifyNetworkInterfaceAttribute',
+        { NetworkInterfaceId: eniId, SecurityGroupId: next },
+        signal,
+      );
+    } else
       await this.#call('ModifyInstanceAttribute', { InstanceId: machineId, GroupId: next }, signal);
   }
 }
@@ -1636,13 +1663,17 @@ function ownedEntries(acl: XmlElement): { number: number; egress: boolean; firew
  *   by those creates (and the security group rule authorizations).
  * - Changes and deletes of VPCs, gateways, subnets, security groups and endpoints need that tag on
  *   the resource.
- * - Routes and network ACL entries cannot be scoped by tag: AWS makes a VPC's main route table and
- *   default network ACL untagged. Their edits are unconditioned; the ACL's own tags are limited to
- *   the network and deny-owner keys.
- * - A machine's groups change only on instances carrying `better-compute:instance` (claimed ones).
+ * - AWS makes a VPC's main route table and default network ACL itself, untagged: ensureNetwork tags
+ *   both with `better-compute:network` before it edits them, and routes and ACL entries change only
+ *   where that tag is (the tags these may get are limited to the network and deny-owner keys). A
+ *   route may only point at a managed internet gateway.
+ * - A machine's groups change only on instances carrying `better-compute:instance` (claimed ones),
+ *   and on network interfaces carrying it (RunInstances tags the interface; setTags tags a claimed
+ *   multi-interface machine's primary interface, a write limited to that key).
  */
 export function networksIamStatements(ec2: (resource: string) => string): IamStatement[] {
   const managed = { StringEquals: { [`ec2:ResourceTag/${tags.managed}`]: 'true' } };
+  const networkTagged = { Null: { [`ec2:ResourceTag/${networkTags.network}`]: 'false' } };
   const made = [
     ec2('vpc/*'),
     ec2('internet-gateway/*'),
@@ -1663,6 +1694,7 @@ export function networksIamStatements(ec2: (resource: string) => string): IamSta
         'ec2:DescribeSecurityGroupRules',
         'ec2:DescribeNetworkAcls',
         'ec2:DescribeVpcEndpoints',
+        'ec2:DescribeNetworkInterfaces',
       ],
       Resource: '*',
     },
@@ -1744,15 +1776,36 @@ export function networksIamStatements(ec2: (resource: string) => string): IamSta
       },
     },
     {
-      Sid: 'NetworkRoutesAndAcls',
+      Sid: 'NetworkRoutes',
       Effect: 'Allow',
-      Action: [
-        'ec2:CreateRoute',
-        'ec2:ReplaceRoute',
-        'ec2:CreateNetworkAclEntry',
-        'ec2:DeleteNetworkAclEntry',
-      ],
-      Resource: [ec2('route-table/*'), ec2('network-acl/*'), ec2('internet-gateway/*')],
+      Action: ['ec2:CreateRoute', 'ec2:ReplaceRoute'],
+      Resource: ec2('route-table/*'),
+      Condition: networkTagged,
+    },
+    {
+      // The gateway a route names is a resource of the call too: only a managed one.
+      Sid: 'NetworkRouteGateways',
+      Effect: 'Allow',
+      Action: ['ec2:CreateRoute', 'ec2:ReplaceRoute'],
+      Resource: ec2('internet-gateway/*'),
+      Condition: managed,
+    },
+    {
+      Sid: 'NetworkAclEntries',
+      Effect: 'Allow',
+      Action: ['ec2:CreateNetworkAclEntry', 'ec2:DeleteNetworkAclEntry'],
+      Resource: ec2('network-acl/*'),
+      Condition: networkTagged,
+    },
+    {
+      Sid: 'NetworkRouteTableTags',
+      Effect: 'Allow',
+      Action: 'ec2:CreateTags',
+      Resource: ec2('route-table/*'),
+      Condition: {
+        'ForAllValues:StringEquals': { 'aws:TagKeys': [networkTags.network] },
+        Null: { 'aws:TagKeys': 'false' },
+      },
     },
     {
       Sid: 'NetworkAclTags',
@@ -1781,6 +1834,17 @@ export function networksIamStatements(ec2: (resource: string) => string): IamSta
       Action: 'ec2:ModifyNetworkInterfaceAttribute',
       Resource: ec2('network-interface/*'),
       Condition: { Null: { [`ec2:ResourceTag/${tags.instance}`]: 'false' } },
+    },
+    {
+      // A claimed multi-interface machine's primary interface gets the ownership tag (only that key).
+      Sid: 'NetworkInterfaceOwnerTag',
+      Effect: 'Allow',
+      Action: 'ec2:CreateTags',
+      Resource: ec2('network-interface/*'),
+      Condition: {
+        'ForAllValues:StringEquals': { 'aws:TagKeys': [tags.instance] },
+        Null: { 'aws:TagKeys': 'false' },
+      },
     },
     {
       Sid: 'NetworkMachineGroupResources',

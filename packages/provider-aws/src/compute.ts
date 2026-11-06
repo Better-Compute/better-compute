@@ -369,6 +369,9 @@ export class AwsCompute implements ProviderImpl {
     return [
       { ResourceType: 'instance', Tag: tagList },
       { ResourceType: 'volume', Tag: tagList },
+      // The primary interface carries the ownership tag too: a multi-interface machine's groups
+      // change on it, and the IAM policy checks the tag there (AWS A2).
+      { ResourceType: 'network-interface', Tag: tagList },
     ];
   }
 

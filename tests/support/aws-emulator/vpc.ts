@@ -4,7 +4,9 @@ import { ec2Error, ec2Response, el, items } from './xml.js';
 
 // Amazon VPC as provider-aws networks use it (AWS A2): VPCs with secondary CIDR blocks, internet
 // gateways, route tables, subnets, security groups and their tagged rules, network ACLs and their
-// entries, gateway endpoints, and the security groups of an instance. It wraps the EC2 emulator on
+// entries, gateway endpoints, and the security groups and tags of an instance's primary network
+// interface (DescribeNetworkInterfaces, ModifyNetworkInterfaceAttribute; ModifyInstanceAttribute
+// refuses groups on a multi-interface instance, as EC2 does). It wraps the EC2 emulator on
 // the same host: every other action (and the instance half of CreateTags/DeleteTags) goes to it, and
 // RunInstances is patched with the VPC and security groups of its subnet. Like EC2, deletes refuse
 // a resource still in use with DependencyViolation. Knobs: associating (CIDR associations stay
@@ -233,8 +235,17 @@ export class VpcEmulator {
       this.groups.get(id)?.tags ??
       this.rules.get(id)?.tags ??
       this.nacls.get(id)?.tags ??
-      this.endpoints.get(id)?.tags
+      this.endpoints.get(id)?.tags ??
+      this.#enis().find((eni) => eni.id === id)?.instance.eniTags
     );
+  }
+
+  /** The primary network interface of every live instance (the only ones the emulator models). */
+  #enis() {
+    return this.#liveInstances().map((instance) => ({
+      id: `eni-${instance.id.slice(2)}`,
+      instance,
+    }));
   }
 
   /** The VPC by tag value (test helper). */
@@ -1030,30 +1041,59 @@ export class VpcEmulator {
       }
 
       // --- Instances -----------------------------------------------------------------------------
+      case 'DescribeNetworkInterfaces': {
+        const ids = listOf(p, 'NetworkInterfaceId');
+        const found = this.#enis().filter(
+          ({ id, instance }) =>
+            (ids.length === 0 || ids.includes(id)) &&
+            matches(instance.eniTags, filters, (name) =>
+              name === 'network-interface-id'
+                ? [id]
+                : name === 'group-id'
+                  ? instance.groups.map((g) => g.id)
+                  : name === 'vpc-id'
+                    ? [instance.vpcId]
+                    : name === 'attachment.instance-id'
+                      ? [instance.id]
+                      : undefined,
+            ),
+        );
+        for (const id of ids)
+          if (!found.some((eni) => eni.id === id))
+            return ec2Error(
+              'InvalidNetworkInterfaceID.NotFound',
+              `The networkInterface ID '${id}' does not exist`,
+            );
+        return ec2Response(
+          action,
+          items(
+            'networkInterfaceSet',
+            found.map(
+              ({ id, instance }) =>
+                `${el('networkInterfaceId', id)}${el('vpcId', instance.vpcId)}${el('subnetId', instance.subnetId)}<attachment>${el('instanceId', instance.id)}${el('deviceIndex', 0)}</attachment>${items(
+                  'groupSet',
+                  instance.groups.map((g) => `${el('groupId', g.id)}${el('groupName', g.name)}`),
+                )}${tagSet(instance.eniTags)}`,
+            ),
+          ),
+        );
+      }
+      case 'ModifyNetworkInterfaceAttribute': {
+        const eni = this.#enis().find(({ id }) => id === p.get('NetworkInterfaceId'));
+        if (!eni) return ec2Error('InvalidNetworkInterfaceID.NotFound', 'no such interface');
+        return this.#setGroups(eni.instance, listOf(p, 'SecurityGroupId'), action);
+      }
       case 'ModifyInstanceAttribute': {
         const instance = this.ec2.instances.get(p.get('InstanceId') ?? '');
         if (!instance) return ec2Error('InvalidInstanceID.NotFound', 'no such instance');
         const ids = listOf(p, 'GroupId');
         if (ids.length === 0) return this.#inner.handle(request);
-        if (ids.length > this.groupsPerInterface)
+        if ((instance.interfaces ?? 1) > 1)
           return ec2Error(
-            'SecurityGroupsPerInstanceLimitExceeded',
-            'The maximum number of security groups per interface has been reached.',
+            'InvalidInstanceID',
+            `There are multiple interfaces attached to instance '${instance.id}'. Please specify an interface ID for the operation instead.`,
           );
-        const groups = [];
-        for (const id of ids) {
-          const group = this.groups.get(id);
-          if (!group)
-            return ec2Error('InvalidGroup.NotFound', `The security group '${id}' does not exist`);
-          if (group.vpcId !== instance.vpcId)
-            return ec2Error(
-              'InvalidGroup.NotFound',
-              `The security group '${id}' does not exist in VPC '${instance.vpcId}'`,
-            );
-          groups.push({ id: group.id, name: group.name });
-        }
-        instance.groups = groups;
-        return ec2Response(action, el('return', true));
+        return this.#setGroups(instance, ids, action);
       }
       case 'RunInstances':
         return this.#run(request);
@@ -1079,6 +1119,33 @@ export class VpcEmulator {
       default:
         return this.#inner.handle(request);
     }
+  }
+
+  /** The security groups of an instance's primary interface (ModifyInstanceAttribute or the ENI's). */
+  #setGroups(
+    instance: { vpcId: string; groups: { id: string; name: string }[] },
+    ids: string[],
+    action: string,
+  ): Response {
+    if (ids.length > this.groupsPerInterface)
+      return ec2Error(
+        'SecurityGroupsPerInstanceLimitExceeded',
+        'The maximum number of security groups per interface has been reached.',
+      );
+    const groups = [];
+    for (const id of ids) {
+      const group = this.groups.get(id);
+      if (!group)
+        return ec2Error('InvalidGroup.NotFound', `The security group '${id}' does not exist`);
+      if (group.vpcId !== instance.vpcId)
+        return ec2Error(
+          'InvalidGroup.NotFound',
+          `The security group '${id}' does not exist in VPC '${instance.vpcId}'`,
+        );
+      groups.push({ id: group.id, name: group.name });
+    }
+    instance.groups = groups;
+    return ec2Response(action, el('return', true));
   }
 
   #endpointXml(endpoint: EmuEndpoint): string {
