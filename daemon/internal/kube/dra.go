@@ -246,7 +246,7 @@ func (d *draDriver) prepare(ctx context.Context, claims []Claim) *PrepareRespons
 }
 
 func (d *draDriver) prepareClaim(ctx context.Context, c Claim, node string, devices map[string]atom) ClaimResult {
-	raw, err := d.m.Sys.Run(ctx, kubectl("get", "resourceclaim", "--namespace", c.Namespace, c.Name, "-o", "json"))
+	raw, err := d.m.Sys.Run(ctx, kubectl(d.m.Sys, "get", "resourceclaim", "--namespace", c.Namespace, c.Name, "-o", "json"))
 	if err != nil {
 		return ClaimResult{Error: fmt.Sprintf("read ResourceClaim %s/%s: %v", c.Namespace, c.Name, err)}
 	}
@@ -425,7 +425,7 @@ func (d *draDriver) sliceAPI(ctx context.Context) (string, error) {
 	if cached != "" {
 		return cached, nil
 	}
-	out, err := d.m.Sys.Run(ctx, kubectl("api-versions"))
+	out, err := d.m.Sys.Run(ctx, kubectl(d.m.Sys, "api-versions"))
 	if err != nil {
 		return "", fmt.Errorf("kubectl api-versions: %w", err)
 	}
@@ -527,9 +527,9 @@ func (d *draDriver) publish(ctx context.Context, want map[string]map[string]atom
 		}
 	}
 	if empty {
-		_, err = d.m.Sys.Run(ctx, kubectl("delete", "resourceslice", sliceName(node), "--ignore-not-found", "--wait=false"))
+		_, err = d.m.Sys.Run(ctx, kubectl(d.m.Sys, "delete", "resourceslice", sliceName(node), "--ignore-not-found", "--wait=false"))
 	} else {
-		cmd := kubectl("apply", "--server-side", "--field-manager=bcd", "--force-conflicts", "-f", "-")
+		cmd := kubectl(d.m.Sys, "apply", "--server-side", "--field-manager=bcd", "--force-conflicts", "-f", "-")
 		cmd.Stdin = body
 		_, err = d.m.Sys.Run(ctx, cmd)
 	}

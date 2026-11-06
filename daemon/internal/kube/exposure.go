@@ -177,7 +177,7 @@ var gpuDriverName = regexp.MustCompile(`(?i)(^|[.-])(gpu|nvidia)([.-]|$)`)
 // (security review 2 #3a), read with the kubelet's credentials. An API server without
 // resource.k8s.io, or one that refuses the list, is an error: no evidence either way.
 func ForeignDRADrivers(ctx context.Context, sys hostconfig.System, node string) ([]string, error) {
-	out, err := sys.Run(ctx, kubectl("get", "resourceslices", "--field-selector", "spec.nodeName="+node, "-o", "json"))
+	out, err := sys.Run(ctx, kubectl(sys, "get", "resourceslices", "--field-selector", "spec.nodeName="+node, "-o", "json"))
 	if err != nil {
 		return nil, err
 	}

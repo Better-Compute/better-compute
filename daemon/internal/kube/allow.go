@@ -61,7 +61,8 @@ func (u JoinUnit) allowedCluster(p *parsed) error {
 	}
 	want := normalServer(server)
 	for _, c := range u.Allowed {
-		if c.Server == want && c.CaCertSha256 == p.CaCertSha256 {
+		// Host names compare without case (DNS and TLS ignore it; EKS endpoints carry an upper-case id).
+		if strings.EqualFold(c.Server, want) && c.CaCertSha256 == p.CaCertSha256 {
 			return nil
 		}
 	}

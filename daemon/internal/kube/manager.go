@@ -134,7 +134,7 @@ func (m *Manager) init() {
 				if force {
 					args = append(args[:len(args)-1], "--grace-period=0", "--force")
 				}
-				_, err := m.Sys.Run(ctx, kubectl(args...))
+				_, err := m.Sys.Run(ctx, kubectl(m.Sys, args...))
 				return err
 			}
 		}
