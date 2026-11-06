@@ -854,6 +854,44 @@ describe('provider-aws volumes: snapshots and restores', () => {
     );
   });
 
+  it('a second snapshot of one name (a restart inside the tag-read lag) is deleted, the oldest kept', async () => {
+    const { volumes, fresh, call, ebs, emu, managed } = world();
+    const volume = ebs.addVolume({ tags: managed });
+    const first = await volumes.snapshotVolume(volume.id, 'bc-s-0001', call());
+    // The control plane restarts before vps records the id, and the tag reads lag.
+    ebs.hideFromFilters = new Set([first.id]);
+    emu.clock.advance(1_000);
+    const restarted = fresh();
+    const second = await restarted.snapshotVolume(volume.id, 'bc-s-0001', call());
+    expect(second.id).not.toBe(first.id);
+    expect(ebs.snapshots.size).toBe(2);
+    ebs.hideFromFilters.clear();
+    // The next call sees both: it keeps the oldest and deletes the other.
+    const kept = await restarted.snapshotVolume(volume.id, 'bc-s-0001', call());
+    expect(kept.id).toBe(first.id);
+    expect([...ebs.snapshots.keys()]).toEqual([first.id]);
+    expect(emu.calls('DeleteSnapshot').map((c) => c.params.get('SnapshotId'))).toEqual([second.id]);
+    expect(emu.calls('CreateSnapshot')).toHaveLength(2);
+  });
+
+  it('deleting a snapshot also deletes the other snapshots of its name', async () => {
+    const { volumes, fresh, call, ebs, emu, managed } = world();
+    const volume = ebs.addVolume({ tags: managed });
+    const first = await volumes.snapshotVolume(volume.id, 'bc-s-0002', call());
+    ebs.hideFromFilters = new Set([first.id]);
+    emu.clock.advance(1_000);
+    // vps holds the second one's id and never asks again before deleting it.
+    const held = await fresh().snapshotVolume(volume.id, 'bc-s-0002', call());
+    ebs.hideFromFilters.clear();
+    const other = ebs.addSnapshot({
+      tags: { 'better-compute:managed': 'true', 'better-compute:snapshot': 'bc-s-other' },
+    });
+    expect((await fresh().deleteSnapshot(held.id, call())).state).toBe('deleted');
+    expect(ebs.snapshots.has(first.id)).toBe(false);
+    expect(ebs.snapshots.has(held.id)).toBe(false);
+    expect(ebs.snapshots.has(other.id)).toBe(true);
+  });
+
   it('deletes only its own snapshots, idempotently', async () => {
     const { volumes, call, ebs, emu, managed } = world();
     const foreign = ebs.addSnapshot({ tags: { Name: 'theirs' } });

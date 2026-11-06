@@ -229,6 +229,8 @@ interface EbsSnapshot {
   volumeId: string;
   status: string;
   volumeSize: number;
+  /** Epoch ms; Infinity when EBS does not say. */
+  startTime: number;
   tags: Map<string, string>;
 }
 
@@ -240,6 +242,7 @@ function parseSnapshot(item: XmlElement): EbsSnapshot | undefined {
     volumeId: item.textOf('volumeId') ?? '',
     status: item.textOf('status') ?? '',
     volumeSize: Number(item.textOf('volumeSize') ?? '0'),
+    startTime: Date.parse(item.textOf('startTime') ?? '') || Infinity,
     tags: tagsOf(item),
   };
 }
@@ -1007,7 +1010,9 @@ export class AwsVolumes implements ProviderVolumes {
     }
   }
 
-  async #snapshotByName(name: string, signal: AbortSignal): Promise<EbsSnapshot | undefined> {
+  /** This account's managed snapshots named `name`, oldest first. */
+  async #snapshotsByName(name: string, signal: AbortSignal): Promise<EbsSnapshot[]> {
+    const found: EbsSnapshot[] = [];
     const seen = new Set<string>();
     let token: string | undefined;
     do {
@@ -1026,14 +1031,37 @@ export class AwsVolumes implements ProviderVolumes {
       );
       for (const item of doc.items('snapshotSet')) {
         const snapshot = parseSnapshot(item);
-        if (snapshot && snapshot.tags.get(tags.snapshot) === name) return snapshot;
+        if (snapshot && snapshot.tags.get(tags.snapshot) === name) found.push(snapshot);
       }
       token = doc.textOf('nextToken') || undefined;
       if (token && seen.has(token))
         throw fail('PROVIDER_ERROR', 'AWS returned a pagination token twice', 'pagination-loop');
       if (token) seen.add(token);
     } while (token);
-    return undefined;
+    return found.sort(
+      (a, b) => a.startTime - b.startTime || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    );
+  }
+
+  /**
+   * Deletes extra snapshots of one name. CreateSnapshot takes no ClientToken, so a control-plane
+   * restart inside the tag-read lag can take a second one; it would be orphaned and billed for good.
+   * Best effort: a failure is logged and the next call tries again.
+   */
+  async #deleteExtraSnapshots(extra: EbsSnapshot[], signal: AbortSignal): Promise<void> {
+    for (const snapshot of extra) {
+      try {
+        this.#refuseForeignSnapshot(snapshot);
+        await this.deps.call('DeleteSnapshot', { SnapshotId: snapshot.id }, signal);
+        this.#forget(snapshot.id);
+      } catch (error) {
+        if (isComputeError(error, 'NOT_FOUND')) continue;
+        this.context.log.warn('aws: an extra EBS snapshot of one name was not deleted yet', {
+          snapshot: snapshot.id,
+          code: error instanceof ComputeError ? error.code : 'unknown',
+        });
+      }
+    }
   }
 
   #refuseForeignSnapshot(snapshot: EbsSnapshot): void {
@@ -1059,7 +1087,14 @@ export class AwsVolumes implements ProviderVolumes {
       );
     const volume = await this.owned(volumeId, signal);
     const region = this.config.region;
-    let existing = await this.#snapshotByName(name, signal);
+    const named = await this.#snapshotsByName(name, signal);
+    let existing = named[0];
+    // A second snapshot of this name of this volume: keep the oldest, delete the rest.
+    if (existing?.volumeId === volume.id && named.length > 1)
+      await this.#deleteExtraSnapshots(
+        named.slice(1).filter((snapshot) => snapshot.volumeId === volume.id),
+        signal,
+      );
     const known = this.#createdSnapshots.get(name);
     if (!existing && known && this.#recent(known.at)) {
       existing = await this.snapshot(known.id, signal);
@@ -1126,7 +1161,10 @@ export class AwsVolumes implements ProviderVolumes {
       await this.deps.call('DeleteSnapshot', { SnapshotId: snapshotId }, signal);
       this.#forget(snapshotId);
     } catch (error) {
-      if (isComputeError(error, 'NOT_FOUND')) return state(snapshotId, 'deleted');
+      if (isComputeError(error, 'NOT_FOUND')) {
+        await this.#deleteSiblings(snapshot, signal);
+        return state(snapshotId, 'deleted');
+      }
       if (error instanceof ComputeError && error.details?.code === 'InvalidSnapshot.InUse')
         throw fail(
           'INVALID_STATE',
@@ -1135,7 +1173,21 @@ export class AwsVolumes implements ProviderVolumes {
         );
       throw error;
     }
+    await this.#deleteSiblings(snapshot, signal);
     return state(snapshotId, 'deleted');
+  }
+
+  /** The other snapshots of a deleted snapshot's name (taken twice, see #deleteExtraSnapshots). */
+  async #deleteSiblings(snapshot: EbsSnapshot, signal: AbortSignal): Promise<void> {
+    const name = snapshot.tags.get(tags.snapshot);
+    if (!name) return;
+    const siblings = await this.#snapshotsByName(name, signal);
+    await this.#deleteExtraSnapshots(
+      siblings.filter(
+        (sibling) => sibling.id !== snapshot.id && sibling.volumeId === snapshot.volumeId,
+      ),
+      signal,
+    );
   }
 }
 
