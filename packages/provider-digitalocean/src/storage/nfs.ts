@@ -130,9 +130,22 @@ export function parseShareSnapshotId(id: string): { region: string; uuid: string
     : undefined;
 }
 
-/** What a mount source may hold: an address or host name, and an absolute export path. */
-const hostPattern = /^[A-Za-z0-9.-]{1,253}$/;
-const mountPathPattern = /^\/[A-Za-z0-9._/-]{0,1023}$/;
+/**
+ * What a mount source may hold: an IPv4 address or host name (labels that start and end alphanumeric, the grammar
+ * vps's `sharedVolumeMount` reads), and an absolute export path with no empty, `.` or `..` segment.
+ */
+const hostPattern =
+  /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
+const mountPathPattern = /^\/[A-Za-z0-9._/-]{0,254}$/;
+
+function plainMountPath(path: string): boolean {
+  if (!mountPathPattern.test(path)) return false;
+  if (path === '/') return true;
+  return path
+    .slice(1)
+    .split('/')
+    .every((segment) => segment !== '' && segment !== '.' && segment !== '..');
+}
 
 const state = (
   id: string,
@@ -155,9 +168,7 @@ export function shareOutputs(share: DoShare): Record<string, string> {
   const host =
     typeof share.host === 'string' && hostPattern.test(share.host) ? share.host : undefined;
   const path =
-    typeof share.mount_path === 'string' &&
-    mountPathPattern.test(share.mount_path) &&
-    !share.mount_path.split('/').includes('..')
+    typeof share.mount_path === 'string' && plainMountPath(share.mount_path)
       ? share.mount_path
       : undefined;
   return {

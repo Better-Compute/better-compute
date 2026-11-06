@@ -597,6 +597,11 @@ describe('provider-digitalocean NFS shares: the mount source', () => {
       device: '10.0.0.2:/1/abc',
       vpcs: 'v1,v2',
     });
+    // A host name in labels, and an export path with dots inside a segment.
+    expect(
+      shareOutputs({ ...base, host: 'nfs-1.nyc3.example', mount_path: '/a.b/c_d-e' }).device,
+    ).toBe('nfs-1.nyc3.example:/a.b/c_d-e');
+    expect(shareOutputs({ ...base, host: '10.0.0.2', mount_path: '/' }).device).toBe('10.0.0.2:/');
     for (const [host, path] of [
       ['10.0.0.2 nfs4', '/1/abc'],
       ['10.0.0.2', '/1/abc defaults'],
@@ -604,6 +609,13 @@ describe('provider-digitalocean NFS shares: the mount source', () => {
       ['10.0.0.2', 'relative/path'],
       ['10.0.0.2', '/1/../../etc'],
       ['$(reboot)', '/1/abc'],
+      ['-oexec', '/1/abc'],
+      ['.10.0.0.2', '/1/abc'],
+      ['a..b', '/1/abc'],
+      ['host-', '/1/abc'],
+      ['10.0.0.2', '/x//y'],
+      ['10.0.0.2', '/./x'],
+      ['10.0.0.2', '/x/.'],
     ]) {
       const outputs = shareOutputs({ ...base, host, mount_path: path });
       expect(outputs.device, `${host} ${path}`).toBe(undefined);
