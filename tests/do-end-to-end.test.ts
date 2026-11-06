@@ -615,6 +615,40 @@ describe('provider-digitalocean through vps, end to end', () => {
     for (const instance of [first, second])
       expect(dropletOf(w, instance.id)!.tags).toContain(tag);
 
+    // An instance in a second subnet (VPC) of the network adds that VPC to the share; deleting the instance takes it
+    // off again (the detach finds the Droplet gone and prunes the VPC no tagged Droplet is in).
+    const withTwo = await w.api.networks.addSubnet(w.acme, {
+      tenantId,
+      networkId: network.id,
+      name: 'batch',
+      region: REGION,
+      cidr: '10.31.0.0/24',
+    });
+    const batch = withTwo.subnets.find((s: { name: string }) => s.name === 'batch')!;
+    for (let round = 0; round < 8; round++) {
+      const view = await w.api.networks.get(w.acme, { tenantId, networkId: network.id });
+      if (view.subnets.every((s: { state: string }) => s.state === 'ready')) break;
+      await w.tick('vps.networks', 5_000);
+    }
+    const third = await w.api.instances.create(
+      w.acme,
+      createInput(w, { networkId: network.id, subnetId: batch.id, idempotencyKey: 'nfs-3' }),
+    );
+    expect(await settle(w, third.id, 'running')).toMatchObject({ state: 'running' });
+    await w.api.providerVolumes.attach(w.acme, { tenantId, volumeId: volume.id, instanceId: third.id });
+    await converge(4);
+    const batchVpc = [...w.emu.state.vpcs.values()].find((v) => v.name === providerResourceName(batch.id))!;
+    expect(shares()[0]!.vpc_ids).toEqual([vpc.id, batchVpc.id]);
+    await w.api.instances.delete(w.acme, { tenantId, instanceId: third.id });
+    expect(await settle(w, third.id, 'deleted')).toMatchObject({ state: 'deleted' });
+    await converge(6);
+    expect(shares()[0]!.vpc_ids).toEqual([vpc.id]);
+    expect(
+      (await w.api.providerVolumes.get(w.acme, { tenantId, volumeId: volume.id })).attachments.map(
+        (a: { instanceId: string }) => a.instanceId,
+      ).sort(),
+    ).toEqual([first.id, second.id].sort());
+
     // Detach one: its Droplet loses the tag, the other keeps the share; the share keeps its VPC.
     await w.api.providerVolumes.detach(w.acme, { tenantId, volumeId: volume.id, instanceId: first.id });
     await converge(4);
