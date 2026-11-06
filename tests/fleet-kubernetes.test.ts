@@ -880,3 +880,96 @@ describe('fleet.apply of new clusters (composable admission)', () => {
     ]);
   });
 });
+
+describe('tenant isolation of the Kubernetes part of fleet', () => {
+  // Fleet is the platform operator's (a fleet-wide resource, decided in the root tenant): the root
+  // caller works on tenant B (acme) by its tenantId, and acme's own token is refused outright.
+  const acmeExport = async (): Promise<FleetConfig> =>
+    (await world.api.fleet.export(world.root, { tenantId: world.acmeTenant })).config;
+  const acmePlan = (config: FleetConfig, prune = false): Promise<PlanResult> =>
+    world.api.fleet.plan(world.root, { tenantId: world.acmeTenant, config, prune });
+
+  it("another tenant's export and plan show none of the first tenant's clusters, and prune none", async () => {
+    const training = await created('training', { description: 'root only' });
+    await world.fixture.database.query(
+      `UPDATE kubernetes_clusters SET state = 'deleted', desired_state = 'deleted' WHERE id = $1`,
+      [training.id],
+    );
+    const live = await created('serve');
+    await expect(
+      world.api.fleet.export(world.acme, { tenantId: world.acmeTenant }),
+    ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    await expect(
+      world.api.fleet.export(world.acme, { tenantId: world.rootTenant }),
+    ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    const document = await acmeExport();
+    expect(document.kubernetesClusters).toBeUndefined();
+    const text = JSON.stringify(document);
+    for (const secret of [live.id, 'serve', 'training', 'root only'])
+      expect(text).not.toContain(secret);
+
+    const pruned = await acmePlan({ version: 1 }, true);
+    expect(pruned.calls.filter((call) => call.path.startsWith('kubernetes'))).toEqual([]);
+    expect(pruned.changes.filter((change) => change.kind.startsWith('kubernetes'))).toEqual([]);
+    expect(JSON.stringify(pruned)).not.toContain(live.id);
+
+    // Names and incarnation counts are per tenant: acme's first 'training' and 'serve' are new.
+    const own = await acmePlan({
+      version: 1,
+      kubernetesClusters: [
+        { name: 'training', pool: world.poolId, location: 'us-central1', nodePools: [system] },
+        { name: 'serve', pool: world.poolId, location: 'us-central1', nodePools: [system] },
+      ],
+    });
+    expect(own.blocked).toBe(false);
+    expect(own.calls.map((call) => call.input.idempotencyKey)).toEqual([
+      fleetCreateKey(world.acmeTenant, 'kubernetesCluster', 'training', 0),
+      fleetCreateKey(world.acmeTenant, 'kubernetesCluster', 'serve', 0),
+    ]);
+  });
+
+  it("refuses a cluster on another tenant's pool that is not offered, writing nothing", async () => {
+    const hidden = await world.api.pools.create(world.root, {
+      tenantId: world.rootTenant,
+      siteId: world.siteId,
+      class: 'provider',
+      providerAccountId: world.accountId,
+      idempotencyKey: 'isolation-hidden-pool',
+    });
+    try {
+      const document: FleetConfig = {
+        version: 1,
+        kubernetesClusters: [
+          { name: 'sneak', pool: hidden.id, location: 'us-central1', nodePools: [system] },
+        ],
+      };
+      const error = await world.api.fleet
+        .apply(world.root, { tenantId: world.acmeTenant, config: document })
+        .then(
+          () => undefined,
+          (thrown: { code?: string }) => thrown,
+        );
+      expect(['NOT_FOUND', 'ACCESS_DENIED']).toContain(error?.code);
+      const { rows } = await world.fixture.database.query(
+        `SELECT 1 FROM kubernetes_clusters WHERE name = 'sneak' OR pool_id = $1`,
+        [hidden.id],
+      );
+      expect(rows).toEqual([]);
+      const rootIdentity = world.fixture.tenants.root.caller.identityId;
+      const clusterId = await draftId(
+        'kcl',
+        world.acmeTenant,
+        rootIdentity,
+        fleetCreateKey(world.acmeTenant, 'kubernetesCluster', 'sneak', 0),
+      );
+      for (const tenant of [world.acmeTenant, world.rootTenant])
+        expect(
+          await world.fixture.compute.authz.get('kubernetes-cluster', clusterId, tenant),
+        ).toBeUndefined();
+      // Nothing reached the provider either.
+      expect(world.cloud.calls).toEqual([]);
+    } finally {
+      await world.api.pools.archive(world.root, { tenantId: world.rootTenant, poolId: hidden.id });
+    }
+  });
+});
