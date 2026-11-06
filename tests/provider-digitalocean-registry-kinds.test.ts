@@ -157,6 +157,22 @@ describe('do.registry-garbage-collection', () => {
     );
   });
 
+  it('never cancels a collection on a registry it does not manage', async () => {
+    const w = await world();
+    seedRegistry(w.emu, { name: 'acme' });
+    const uuid = 'aaaaaaaa-0000-4000-8000-000000000002';
+    registryWorld(w.emu).collections.set('acme', [
+      { uuid, registry_name: 'acme', status: 'scanning manifests', created_at: '2026-11-05T09:00:00Z' },
+    ]);
+    const refused = await failure(
+      w.resources.delete('do.registry-garbage-collection', `acme/${uuid}`, w.ctx()),
+    );
+    expect(refused.code).toBe('INVALID_STATE');
+    expect(refused.details?.reason).toBe('notManaged');
+    expect(registryWorld(w.emu).collections.get('acme')![0]!.status).toBe('scanning manifests');
+    expect(w.emu.requests.some((r) => r.method === 'PUT')).toBe(false);
+  });
+
   it('adopts a collection someone else started meanwhile', async () => {
     const w = await world();
     seedRegistry(w.emu, { name: 'bc-tenant-a' });

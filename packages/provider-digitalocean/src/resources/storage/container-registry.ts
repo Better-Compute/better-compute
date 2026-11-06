@@ -320,6 +320,8 @@ export function registryGcKind(client: DoClient): DoResourceKind<RegistryGcSpec>
 
     async delete(id, ctx) {
       const { registry, uuid } = parseGcId(id);
+      // A collection is this deployment's only on a registry it manages (a bc- name).
+      refuseUnmanaged(registry);
       const gc = await find(registry, ctx.signal, (entry) => entry.uuid === uuid);
       if (!gc || finished.has(gc.status)) return { id, state: 'deleted' };
       await client.request('PUT', `/registry/${registry}/garbage-collection/${uuid}`, {
