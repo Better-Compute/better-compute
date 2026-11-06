@@ -35,10 +35,12 @@ import {
   parseKinds,
   parseList,
   parseRef,
+  parseSignals,
   parseUpdate,
 } from './parse.js';
 import { resourcesReconciler } from './reconciler.js';
 import { listCatalog } from './catalog.js';
+import { listSignals } from './signals.js';
 import { meterResources, resourceHoursMeter, usageSourceAccepted } from './usage.js';
 
 import {
@@ -65,6 +67,8 @@ import type {
   KindsInput,
   ListResourcesInput,
   ResourceRef,
+  ResourceSignalView,
+  SignalsInput,
   UpdateResourceInput,
 } from './types.js';
 
@@ -108,6 +112,11 @@ export type CloudResourcesApi = {
     kinds: MethodDefinition<KindsInput, { items: CloudResourceKindView[] }>;
     /** The installable applications (1-Click apps) the pool's provider lists; installed through other surfaces. */
     catalog: MethodDefinition<CatalogInput, { items: CatalogEntryView[] }>;
+    /**
+     * Read-only signals the pool's provider raises about resources (Managed Agents asking for a human, failed runs):
+     * a tenant's own resources, or everything on its own account.
+     */
+    signals: MethodDefinition<SignalsInput, { items: ResourceSignalView[] }>;
     create: MethodDefinition<CreateResourceInput, CloudResourceView>;
     list: MethodDefinition<ListResourcesInput, { items: CloudResourceView[] }>;
     get: MethodDefinition<ResourceRef, CloudResourceView>;
@@ -238,6 +247,15 @@ export function cloudResources(
         transaction: 'manual',
         validate: describedBy(cloudResourcesSchemas.catalog, parseCatalog),
         handler: (context, input) => listCatalog(depsOf(context), context, input),
+      }),
+      // The provider is listed with no transaction open.
+      signals: defineMethod({
+        action: 'compute:cloud-resources:read',
+        kind: 'read',
+        resource: tenantResource,
+        transaction: 'manual',
+        validate: describedBy(cloudResourcesSchemas.signals, parseSignals),
+        handler: (context, input) => listSignals(depsOf(context), context, input),
       }),
       create: defineMethod({
         action: 'compute:cloud-resources:create',

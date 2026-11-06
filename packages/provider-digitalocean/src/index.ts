@@ -45,3 +45,4 @@ export {
   type ActionGatewaySpec,
   type AgentHarnessSpec,
 } from './resources/kinds/managed-agents.js';
+export { maxSignals } from './resources/signals.js';

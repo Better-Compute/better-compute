@@ -64,7 +64,28 @@ export function seedActionGateway(state: DoState, fields: Json = {}): Json {
   return gateway;
 }
 
+/**
+ * Seeds a Signal (read-only: DigitalOcean raises them about a harness or a gateway; nothing writes them through the
+ * API). Shape assumed: `resource_type` HARNESS or ACTION_GATEWAY, a `type`, an optional `severity`, a `message`.
+ */
+export function seedSignal(state: DoState, fields: Json = {}): Json {
+  const signal: Json = {
+    uuid: randomUUID(),
+    resource_type: 'HARNESS',
+    resource_uuid: randomUUID(),
+    type: 'HUMAN_INPUT_REQUESTED',
+    message: 'The agent asks a human to approve a refund.',
+    created_at: new Date(state.now()).toISOString(),
+    ...fields,
+  };
+  state.agentSignals.push(signal);
+  return signal;
+}
+
 export function registerManagedAgents(emulator: DoEmulator): void {
+  emulator.route('GET', /^\/managed-agents\/signals$/, (context) =>
+    emulator.paged(context, 'signals', structuredClone(context.state.agentSignals)),
+  );
   const harnesses = /^\/managed-agents\/harnesses$/;
   const harness = /^\/managed-agents\/harnesses\/([^/]+)$/;
   const gateways = /^\/managed-agents\/action-gateways$/;

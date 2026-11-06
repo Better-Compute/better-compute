@@ -4,6 +4,7 @@ import { digitaloceanProvider, resetBudgets } from '@better-compute/provider-dig
 import { closeFixtures, computeFixture } from '@better-compute/testing';
 import { vps } from '@better-compute/vps';
 import { DoEmulator } from './support/do-emulator/index.js';
+import { seedHarness, seedSignal } from './support/do-emulator/managed-agents.js';
 
 // DigitalOcean's AI platform (P8) through betterCompute() on PGlite: a root DO account backs a provider pool offered
 // to acme with a GPU quota, and acme runs a Dedicated Inference endpoint on it. Its GPUs are booked against that
@@ -15,7 +16,7 @@ beforeEach(() => resetBudgets());
 
 type Api = any;
 
-async function world(gpuQuota = 2) {
+async function world(gpuQuota = 2, config: Record<string, unknown> = {}) {
   const emu = new DoEmulator();
   emu.validTokens = new Set(['root-do-token']);
   const provider = digitaloceanProvider({ fetch: emu.fetch });
@@ -44,7 +45,7 @@ async function world(gpuQuota = 2) {
     tenantId: tenants.root.id,
     provider: 'digitalocean',
     name: 'do-main',
-    config: { token: ref, regions: ['nyc3'] },
+    config: { token: ref, regions: ['nyc3'], ...config },
   });
   const site = await api.sites.create(root, {
     tenantId: tenants.root.id,
@@ -240,5 +241,55 @@ describe('DigitalOcean Managed Agents (preview) through cloudResources', () => {
     expect(
       w.emu.requests.slice(before).filter((r) => r.url.pathname.includes('managed-agents')),
     ).toEqual([]);
+  });
+});
+
+describe('DigitalOcean Managed Agents signals through cloudResources', () => {
+  it('shows acme the signals about its own harness agent, read-only; refused where previews are off', async () => {
+    const w = await world(2, { previews: true });
+    const created = await w.api.cloudResources.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      kind: 'do.agent-harness',
+      name: 'helper',
+      spec: { region: 'nyc3', model: 'llama3.3-70b-instruct', instructions: 'Help.' },
+      idempotencyKey: 'helper',
+    });
+    await w.until(created.id, 'ready');
+    const ready = await w.get(created.id);
+    const byHand = seedHarness(w.emu.state);
+    seedSignal(w.emu.state, {
+      uuid: 'sig-acme',
+      resource_uuid: ready.providerId,
+      type: 'HUMAN_INPUT_REQUESTED',
+      message: 'Approve a refund of 40 USD?',
+    });
+    seedSignal(w.emu.state, { uuid: 'sig-hand', resource_uuid: byHand.uuid, type: 'RUN_FAILED' });
+    const before = w.emu.requests.length;
+    const { items } = await w.api.cloudResources.signals(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+    });
+    expect(items).toEqual([
+      expect.objectContaining({
+        id: 'sig-acme',
+        severity: 'warning',
+        title: 'Human input requested',
+        detail: 'Approve a refund of 40 USD?',
+        kind: 'do.agent-harness',
+        providerId: ready.providerId,
+        resourceId: created.id,
+      }),
+    ]);
+    expect(w.emu.requests.slice(before).every((r) => r.method === 'GET')).toBe(true);
+
+    const off = await world(2);
+    const error = await off.api.cloudResources
+      .signals(off.acme, { tenantId: off.acmeTenant, poolId: off.poolId })
+      .then(
+        () => undefined,
+        (failure: unknown) => failure,
+      );
+    expect(error).toMatchObject({ code: 'UNSUPPORTED', details: { reason: 'preview' } });
   });
 });

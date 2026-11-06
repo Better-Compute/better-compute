@@ -5,7 +5,11 @@ import {
   type ProviderResourcesConformanceSubject,
 } from '@better-compute/vps';
 import { deploymentTag, digitaloceanProvider } from '@better-compute/provider-digitalocean';
-import { seedActionGateway, seedHarness } from './support/do-emulator/managed-agents.js';
+import {
+  seedActionGateway,
+  seedHarness,
+  seedSignal,
+} from './support/do-emulator/managed-agents.js';
 import { DoEmulator, type RecordedRequest } from './support/do-emulator/index.js';
 import {
   build,
@@ -327,5 +331,68 @@ describe('do.action-gateway', () => {
       expect(
         (await kind.spec['~standard'].validate({ ...gatewaySpec, upstreams })).issues,
       ).toBeDefined();
+  });
+});
+
+describe('Managed Agents signals (read-only)', () => {
+  it('are refused with nothing sent unless the account enables previews', async () => {
+    const emu = emulator();
+    seedSignal(emu.state);
+    const { resources } = await build(emu);
+    const before = emu.requests.length;
+    const error = await failure(resources.signals!(ctx()));
+    expect(error).toMatchObject({ code: 'UNSUPPORTED', details: { reason: 'preview' } });
+    expect(emu.requests.slice(before)).toEqual([]);
+  });
+
+  it('map to provider-neutral signals with GETs only; malformed and unknown ones are dropped', async () => {
+    const emu = emulator();
+    const harness = seedHarness(emu.state);
+    const gateway = seedActionGateway(emu.state);
+    seedSignal(emu.state, {
+      uuid: 'sig-1',
+      resource_uuid: harness.uuid,
+      type: 'RUN_FAILED',
+      message: 'The run stopped: the model timed out.',
+      created_at: '2026-11-05T09:00:00Z',
+    });
+    seedSignal(emu.state, {
+      uuid: 'sig-2',
+      resource_type: 'ACTION_GATEWAY',
+      resource_uuid: gateway.uuid,
+      type: 'UPSTREAM_UNREACHABLE',
+      severity: 'WARNING',
+      message: `line one\u0000\u001b[31m${'x'.repeat(2000)}`,
+      created_at: '2026-11-05T09:30:00Z',
+    });
+    seedSignal(emu.state, { uuid: 'sig-3', type: 'HUMAN_INPUT_REQUESTED', message: undefined });
+    // Dropped: an unknown resource type, an id that is not one, a time that is not one.
+    seedSignal(emu.state, { uuid: 'sig-4', resource_type: 'DATABASE' });
+    seedSignal(emu.state, { uuid: 'bad id with spaces' });
+    seedSignal(emu.state, { uuid: 'sig-6', created_at: 'yesterday' });
+    const { resources } = await build(emu, previewAccount);
+    const before = emu.requests.length;
+    const signals = await resources.signals!(ctx());
+    expect(emu.requests.slice(before).every((r) => r.method === 'GET')).toBe(true);
+    expect(signals.map((s) => s.id)).toEqual(['sig-1', 'sig-2', 'sig-3']);
+    expect(signals[0]).toEqual({
+      id: 'sig-1',
+      kind: 'do.agent-harness',
+      resourceId: harness.uuid,
+      severity: 'critical',
+      title: 'Run failed',
+      detail: 'The run stopped: the model timed out.',
+      at: Date.parse('2026-11-05T09:00:00Z'),
+    });
+    expect(signals[1]).toMatchObject({
+      kind: 'do.action-gateway',
+      resourceId: gateway.uuid,
+      severity: 'warning',
+      title: 'Upstream unreachable',
+    });
+    expect(signals[1]!.detail).toHaveLength(500);
+    expect(signals[1]!.detail).not.toMatch(/[\u0000-\u001f]/);
+    expect(signals[2]).toMatchObject({ severity: 'warning', title: 'Human input requested' });
+    expect(signals[2]).not.toHaveProperty('detail');
   });
 });

@@ -6,6 +6,7 @@ import {
   type ProviderResourceKind,
   type ProviderResourceRequest,
   type ProviderResources,
+  type ProviderResourceSignal,
   type ProviderResourceState,
 } from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
@@ -22,6 +23,7 @@ import { knowledgeBaseKind } from './kinds/knowledge-bases.js';
 import { actionGatewayKind, agentHarnessKind } from './kinds/managed-agents.js';
 import { partnerKind } from './kinds/partner.js';
 import { oneClickCatalog } from './one-clicks.js';
+import { doSignals } from './signals.js';
 import type { DoKind, DoKindEnv } from './kind.js';
 
 // The `ProviderResources` dispatcher: every long-tail DigitalOcean kind, by name. The cloud-resources module
@@ -140,6 +142,18 @@ export class DoResources implements ProviderResources {
         reason: 'release',
       });
     await found.release(this.#env, id, context);
+  }
+
+  /** Managed Agents signals (a preview): read-only, refused with nothing sent unless the account enables previews. */
+  async signals(context: CallContext): Promise<ProviderResourceSignal[]> {
+    if (!this.#env.previews)
+      throw new ComputeError(
+        'UNSUPPORTED',
+        'Managed Agents signals are a DigitalOcean preview; the account must enable previews',
+        undefined,
+        { provider: 'digitalocean', reason: 'preview' },
+      );
+    return doSignals(this.#env.client, context);
   }
 
   /** The 1-Click applications: Droplet images and DOKS add-ons, installed through those surfaces. */

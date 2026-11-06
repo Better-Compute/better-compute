@@ -941,6 +941,28 @@ export interface ProviderResources {
    * `kubernetes` one as an add-on of a managed cluster.
    */
   catalog?(context: CallContext): Promise<readonly ProviderCatalogEntry[]>;
+  /**
+   * Read-only signals the provider raises about the account's resources (a managed agent asking for a human, a run
+   * that failed): what an operator's attention list shows. Listing them sends no mutation. A provider that holds them
+   * behind previews refuses (`UNSUPPORTED`, `reason 'preview'`) on an account that does not enable previews.
+   */
+  signals?(context: CallContext): Promise<readonly ProviderResourceSignal[]>;
+}
+
+/** (cloud-resources) One read-only signal about a provider resource (`ProviderResources.signals`). */
+export interface ProviderResourceSignal {
+  /** The provider's id of the signal. */
+  id: string;
+  /** The kind of the resource it is about (`do.agent-harness`). */
+  kind: string;
+  /** The provider's id of that resource. */
+  resourceId: string;
+  severity: 'critical' | 'warning' | 'info';
+  /** One line. */
+  title: string;
+  detail?: string;
+  /** When it was raised (epoch ms). */
+  at: number;
 }
 
 /** (cloud-resources) One installable application of a provider's catalog (`ProviderResources.catalog`). */

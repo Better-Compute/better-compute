@@ -67,6 +67,8 @@ export class DoState {
   harnesses = new Map<string, Json>();
   /** Keyed by uuid. DO Managed Agents action gateways (preview). */
   actionGateways = new Map<string, Json>();
+  /** DO Managed Agents signals (preview), oldest first. */
+  agentSignals: Json[] = [];
   /** Keyed by uuid. DO autoscale pool resources. */
   autoscalePools = new Map<string, Json>();
   /** The members of each autoscale pool, keyed by the pool's uuid. */
