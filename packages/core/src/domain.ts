@@ -114,7 +114,9 @@ export interface PoolPolicy {
   /**
    * (AWS A7) Cloud roles an instance of this pool may name for its workloads (`instances.create`
    * `workloadIdentity`): `aws` lists IAM role ARN globs (`*`, `?` in the path and name; the account
-   * literal), at most 64. Needs `workloadIdentity: true`. The role's own trust still pins the tenant.
+   * literal), at most 8 `*` each, at most 64. A non-empty list needs `workloadIdentity: true`
+   * (pools.create/update refuse it otherwise). The role's own trust pins only the tenant; the workload
+   * broker mints `sts.amazonaws.com` tokens only for an instance whose role the pool allows.
    */
   workloadRoles?: { aws?: string[] };
   /**

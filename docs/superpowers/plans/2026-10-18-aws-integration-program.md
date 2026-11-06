@@ -556,6 +556,12 @@ export interface ProviderImpl { /* existing */ volumes?: ProviderVolumes }
 - **Workload identity to AWS IAM:**
   - **InstanceSpec:** the additive core field `InstanceSpec.awsRole?: string`, set by vps from the instance's
     `workloadIdentity.awsRoleArn`, which must match pool policy `workloadIdentity.aws.roleArns` (ARN glob list).
+    *As built:* the field is `policy.workloadRoles.aws`, because `policy.workloadIdentity` was already the pool's
+    boolean switch; a non-empty list needs `workloadIdentity: true`, and an entry holds at most 8 `*` (matched in
+    linear time). The trust pins only the tenant, so the workload broker also enforces the allow-list: it mints
+    `aud sts.amazonaws.com` only for an instance whose pool allows its role. bcd's guest-facing
+    `/latest/identity-token` must refuse that audience (Go half), or a guest of a role-bearing instance can assume
+    the tenant's other workload roles.
   - **bcd IMDS** (`daemon/internal/imds`) gains AWS-compatible endpoints:
     - `PUT /latest/api/token`: accepts `X-aws-ec2-metadata-token-ttl-seconds`; the session token is valid under
       `X-aws-ec2-metadata-token` as well as `x-bc-metadata-token`.
@@ -568,7 +574,10 @@ export interface ProviderImpl { /* existing */ volumes?: ProviderVolumes }
   - **CLI:** `aws workload-role --tenant <id> --issuer <url>` renders the IAM OIDC provider plus a role trust policy
     (`<issuer>:aud = sts.amazonaws.com`, `<issuer>:sub StringLike t:<tenantId>:instance:*`).
 - **Optional:** **IAM Roles Anywhere** for non-AWS bcd nodes. The node CA becomes the trust anchor, and bcd signs
-  `CreateSession` with its node key (`AWS4-X509-ECDSA-SHA256`). It is deferred behind AQ9.
+  `CreateSession` with its node key (`AWS4-X509-ECDSA-SHA256`). It is deferred behind AQ9. *As built:* deferred (the
+  AQ9 default), recorded in the provider-aws README.
+- *As built:* `providerAccounts.get` shows `platformPrincipalArn` only when the host passes
+  `awsProvider({ platformPrincipalArn })` (validated at start, never derived: that would need a network call).
 
 **Tests:**
 - `tests/vps-workload-aws-role.test.ts`:

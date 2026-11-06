@@ -677,7 +677,13 @@ function checkPolicy(policy: unknown): PoolPolicy {
   const singleTenant = (policy as Record<string, unknown>).singleTenant;
   if (singleTenant !== undefined && typeof singleTenant !== 'boolean')
     fail('policy.singleTenant must be true or false');
-  checkWorkloadRoles((policy as Record<string, unknown>).workloadRoles);
+  const workloadRoles = (policy as Record<string, unknown>).workloadRoles;
+  checkWorkloadRoles(workloadRoles);
+  // Roles a pool lists only matter with workload identity on: refuse them otherwise rather than
+  // store a list that silently allows nothing.
+  const listed = (workloadRoles as { aws?: unknown[] } | undefined)?.aws;
+  if (listed?.length && (policy as Record<string, unknown>).workloadIdentity !== true)
+    fail('policy.workloadRoles.aws needs policy.workloadIdentity: true');
   const billing = (policy as Record<string, unknown>).billing;
   if (billing !== undefined) {
     if (typeof billing !== 'object' || billing === null || Array.isArray(billing))

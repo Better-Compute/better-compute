@@ -214,10 +214,13 @@ beforeAll(async () => {
     },
     NODE,
   );
-  offPoolId = await hostedPool(
-    { workloadRoles: { aws: [ALLOWED] } },
-    'node_01jz0000000000000000000a72',
-  );
+  // pools.create refuses roles without workload identity on; a row stored around it (or before
+  // that check) still allows nothing.
+  offPoolId = await hostedPool({}, 'node_01jz0000000000000000000a72');
+  await db.query(`UPDATE pools SET policy = $2::jsonb WHERE id = $1`, [
+    offPoolId,
+    JSON.stringify({ workloadRoles: { aws: [ALLOWED] } }),
+  ]);
 });
 afterAll(async () => {
   await db.close();
@@ -361,10 +364,122 @@ describe('instance AWS workload roles (A7)', () => {
       [poolId],
     );
     expect((await read()).find((spec) => spec.id === id)?.awsRole).toBeUndefined();
+    // Roles listed but workload identity absent (not just false): no role either.
+    await db.query(`UPDATE pools SET policy = policy - 'workloadIdentity' WHERE id = $1`, [poolId]);
+    expect((await read()).find((spec) => spec.id === id)?.awsRole).toBeUndefined();
     await db.query(
       `UPDATE pools SET policy = jsonb_set(policy, '{workloadIdentity}', 'true') WHERE id = $1`,
       [poolId],
     );
+    expect((await read()).find((spec) => spec.id === id)?.awsRole).toBe(ALLOWED);
+  });
+
+  it('an idempotency key reused with another role is CONFLICT', async () => {
+    const first = (await call('instances', 'create', {
+      ...base,
+      poolId,
+      idempotencyKey: 'role-key',
+      workloadIdentity: { awsRoleArn: ALLOWED },
+    })) as { id: string };
+    await expect(
+      call('instances', 'create', {
+        ...base,
+        poolId,
+        idempotencyKey: 'role-key',
+        workloadIdentity: { awsRoleArn: 'arn:aws:iam::333333333333:role/team-a/reader' },
+      }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    await expect(
+      call('instances', 'create', { ...base, poolId, idempotencyKey: 'role-key' }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    const replay = (await call('instances', 'create', {
+      ...base,
+      poolId,
+      idempotencyKey: 'role-key',
+      workloadIdentity: { awsRoleArn: ALLOWED },
+    })) as { id: string; workloadIdentity?: unknown };
+    expect(replay.id).toBe(first.id);
+    expect(replay.workloadIdentity).toEqual({ awsRoleArn: ALLOWED });
+  });
+
+  it('refuses workloadIdentity on a provider pool', async () => {
+    const account = 'pacct_01jz0000000000000000000a71';
+    await db.query(
+      `INSERT INTO provider_accounts (id, tenant_id, provider, name, config, version)
+       VALUES ($1, 'root', 'aws', 'aws-a7', '{}'::jsonb, 1)`,
+      [account],
+    );
+    const pool = (await run(
+      capacityApi.pools!.create!,
+      {
+        tenantId: 'root',
+        siteId: SITE,
+        class: 'provider',
+        providerAccountId: account,
+        policy: { workloadIdentity: true, workloadRoles: { aws: [ALLOWED] } },
+      },
+      root,
+    )) as { id: string };
+    await run(
+      capacityApi.pools!.offer!,
+      {
+        tenantId: 'root',
+        poolId: pool.id,
+        toTenantId: 'acme',
+        quota: { vcpu: 64, memoryGiB: 256, diskGiB: 4000 },
+      },
+      root,
+    );
+    await db.query(
+      `INSERT INTO flavors (id, pool_id, name, vcpu, memory_gib, disk_gib, offer_id, version)
+       VALUES ('flv_a7_provider', $1, 's', 2, 4, 40, 'us-east-1a/m7i.large', 1)`,
+      [pool.id],
+    );
+    await expect(
+      call('instances', 'create', {
+        ...base,
+        poolId: pool.id,
+        idempotencyKey: 'provider-role',
+        workloadIdentity: { awsRoleArn: ALLOWED },
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      details: { reason: 'workloadIdentityHostedOnly' },
+    });
+    const { rows } = await db.query(
+      `SELECT id FROM instances WHERE idempotency_key = 'provider-role'`,
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  it('pools refuse workload roles without workload identity on', async () => {
+    for (const policy of [
+      { workloadRoles: { aws: [ALLOWED] } },
+      { workloadIdentity: false, workloadRoles: { aws: [ALLOWED] } },
+    ])
+      await expect(
+        run(
+          capacityApi.pools!.create!,
+          { tenantId: 'root', siteId: SITE, class: 'vps-host', policy },
+          root,
+        ),
+        JSON.stringify(policy),
+      ).rejects.toMatchObject({
+        code: 'INVALID_INPUT',
+        message: expect.stringContaining('workloadIdentity'),
+      });
+    await expect(
+      run(capacityApi.pools!.update!, { tenantId: 'root', poolId, policy: { workloadRoles: { aws: [ALLOWED] } } }, root),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    // An empty list, or no aws key, needs nothing.
+    for (const policy of [{ workloadRoles: { aws: [] } }, { workloadRoles: {} }])
+      await expect(
+        run(
+          capacityApi.pools!.create!,
+          { tenantId: 'root', siteId: SITE, class: 'vps-host', policy },
+          root,
+        ),
+      ).resolves.toMatchObject({ id: expect.any(String) });
   });
 
   it('pools refuse a malformed allow-list', async () => {
