@@ -11,6 +11,8 @@ export interface FakeKubeNode {
   labels: Record<string, string>;
   ready?: boolean;
   unschedulable?: boolean;
+  /** `metadata.uid` (default: derived from the name, so a re-created Node needs another one set). */
+  uid?: string;
 }
 
 export interface FakeKubeCall {
@@ -31,6 +33,8 @@ export class FakeKubeApi {
   failWith?: number;
   /** Throws (no answer) instead. */
   unreachable = false;
+  /** NodeList pages answered. */
+  nodePages = 0;
 
   constructor(
     private readonly options: {
@@ -86,15 +90,24 @@ export class FakeKubeApi {
       const wanted = selector
         ? selector.split(',').map((term) => term.split('=') as [string, string])
         : [];
-      const items = this.options
+      const all = this.options
         .nodes(url.origin)
         .filter((node) => wanted.every(([key, value]) => node.labels[key] === value))
         .map((node) => ({
-          metadata: { name: node.name, labels: node.labels },
+          metadata: { name: node.name, labels: node.labels, uid: node.uid ?? `uid-${node.name}` },
           spec: node.unschedulable ? { unschedulable: true } : {},
           status: { conditions: [{ type: 'Ready', status: node.ready === false ? 'False' : 'True' }] },
         }));
-      return { status: 200, body: { kind: 'NodeList', items } };
+      // Paged as the API server pages: `limit`, and `continue` (here the offset) until it is empty.
+      const limit = Number(url.searchParams.get('limit') ?? 0);
+      const from = Number(url.searchParams.get('continue') ?? 0);
+      const items = limit > 0 ? all.slice(from, from + limit) : all;
+      const more = limit > 0 && from + limit < all.length;
+      this.nodePages++;
+      return {
+        status: 200,
+        body: { kind: 'NodeList', metadata: more ? { continue: String(from + limit) } : {}, items },
+      };
     }
     if (request.method === 'PATCH') {
       if (request.contentType !== 'application/apply-patch+yaml')

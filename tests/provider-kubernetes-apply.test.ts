@@ -141,6 +141,39 @@ describe('kubernetesApiClient', () => {
     ]);
   });
 
+  it('pages through a large Node list (limit and continue), with each Node uid and provider id', async () => {
+    const pages: Record<string, { items: unknown[]; next?: string }> = {
+      '': { items: [{ metadata: { name: 'n-0', uid: 'u-0' }, spec: { providerID: 'gce://p/z/n-0' } }], next: 'c1' },
+      c1: { items: [{ metadata: { name: 'n-1', uid: 'u-1' } }], next: 'c2' },
+      c2: { items: [{ metadata: { name: 'n-2' } }] },
+    };
+    const kube = recorder((request) => {
+      const page = pages[new URL(request.url).searchParams.get('continue') ?? '']!;
+      return {
+        status: 200,
+        body: { kind: 'NodeList', metadata: page.next ? { continue: page.next } : {}, items: page.items },
+      };
+    });
+    const nodes = await kubernetesApiClient(access, { transport: kube.transport }).nodes('a=b');
+    expect(nodes.map((node) => node.name)).toEqual(['n-0', 'n-1', 'n-2']);
+    expect(nodes[0]).toMatchObject({ uid: 'u-0', providerId: 'gce://p/z/n-0' });
+    expect(nodes[2]!.uid).toBeUndefined();
+    const queries = kube.calls.map((call) => new URL(call.url).searchParams);
+    expect(queries.map((query) => query.get('continue'))).toEqual([null, 'c1', 'c2']);
+    expect(queries.every((query) => query.get('limit') === '100' && query.get('labelSelector') === 'a=b')).toBe(true);
+  });
+
+  it('stops a Node list that never ends (a bounded number of pages) with an error, not a retry', async () => {
+    let n = 0;
+    const kube = recorder(() => ({
+      status: 200,
+      body: { kind: 'NodeList', metadata: { continue: `c${++n}` }, items: [{ metadata: { name: `n-${n}` } }] },
+    }));
+    const error = await rejection(kubernetesApiClient(access, { transport: kube.transport }).nodes());
+    expect(isComputeError(error, 'PROVIDER_ERROR')).toBe(true);
+    expect(kube.calls.length).toBeLessThanOrEqual(500);
+  });
+
   it('maps failures to codes and never puts the token or a Secret value in an error', async () => {
     const secret = {
       apiVersion: 'v1',

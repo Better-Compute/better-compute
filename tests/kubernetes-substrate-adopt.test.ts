@@ -61,6 +61,19 @@ describe('substrate: adopt', () => {
     expect(rows[0].uses_left).toBe(2);
   });
 
+  it('lists a large cluster page by page (no answer holds every Node)', async () => {
+    world = await substrateWorld();
+    existingCluster(world);
+    world.extraNodes.set(
+      'https://34.118.9.1',
+      Array.from({ length: 248 }, (_, i) => ({ name: `big-${i}`, labels: {} })),
+    );
+    const pool = await world.createPool(adopt());
+    await world.converge(pool.id, 6);
+    expect(await world.substrate(pool.id)).toMatchObject({ state: 'ready', nodes_listed: 250 });
+    expect(world.kube.nodePages).toBeGreaterThanOrEqual(3);
+  });
+
   it("adds the flavors' node pools to it, and selects only their nodes", async () => {
     world = await substrateWorld();
     existingCluster(world);

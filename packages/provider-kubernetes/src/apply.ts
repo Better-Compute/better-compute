@@ -56,6 +56,10 @@ export interface KubernetesNode {
   ready: boolean;
   /** Cordoned (`spec.unschedulable`). */
   unschedulable: boolean;
+  /** `metadata.uid`: tells a Node apart from a later one of the same name (EKS reuses IP-based names). */
+  uid?: string;
+  /** `spec.providerID` (`gce://…`, `aws:///…`, `digitalocean://…`). */
+  providerId?: string;
 }
 
 /** An object's identity: enough to address it. */
@@ -81,6 +85,9 @@ export interface KubernetesApiClientOptions {
 }
 
 const maxResponseBytes = 4 << 20;
+/** Nodes per page of a Node list, and the most pages one list reads (50 000 Nodes). */
+const nodePageSize = 100;
+const maxNodePages = 500;
 const timeoutMs = 30_000;
 
 /** The default transport: `node:https` with `ca` set to the cluster's CA only (no public roots). */
@@ -228,6 +235,32 @@ const caPemOf = (data: string): string => {
   return pem;
 };
 
+/** A Node of a NodeList answer, as the substrate reads it. */
+function nodeOf(item: unknown): KubernetesNode {
+  const node = item as {
+    metadata?: { name?: unknown; labels?: unknown; uid?: unknown };
+    spec?: { unschedulable?: unknown; providerID?: unknown };
+    status?: { conditions?: unknown };
+  };
+  const labels: Record<string, string> = {};
+  if (node.metadata?.labels && typeof node.metadata.labels === 'object')
+    for (const [key, value] of Object.entries(node.metadata.labels as Record<string, unknown>))
+      if (typeof value === 'string') labels[key] = value;
+  const conditions = Array.isArray(node.status?.conditions) ? node.status.conditions : [];
+  const uid = node.metadata?.uid;
+  const providerId = node.spec?.providerID;
+  return {
+    name: String(node.metadata?.name ?? ''),
+    labels,
+    ready: conditions.some(
+      (condition: { type?: unknown; status?: unknown }) => condition?.type === 'Ready' && condition?.status === 'True',
+    ),
+    unschedulable: node.spec?.unschedulable === true,
+    ...(typeof uid === 'string' && uid.length > 0 && uid.length <= 128 ? { uid } : {}),
+    ...(typeof providerId === 'string' && providerId.length > 0 && providerId.length <= 512 ? { providerId } : {}),
+  };
+}
+
 /** A client for one cluster's API with one short-lived credential. */
 export function kubernetesApiClient(
   access: KubernetesAccess,
@@ -306,33 +339,34 @@ export function kubernetesApiClient(
     },
     async nodes(labelSelector) {
       const what = 'Listing nodes';
-      const query = labelSelector ? `?${new URLSearchParams({ labelSelector })}` : '';
-      const response = await send(what, [], { url: `${origin}/api/v1/nodes${query}`, method: 'GET' });
-      if (response.status !== 200) throw failure(what, response, []);
-      const items = (response.body as { items?: unknown })?.items;
-      if (!Array.isArray(items))
-        throw new ComputeError('PROVIDER_ERROR', `${what}: the Kubernetes API answered no NodeList`);
-      return items.map((item) => {
-        const node = item as {
-          metadata?: { name?: unknown; labels?: unknown };
-          spec?: { unschedulable?: unknown };
-          status?: { conditions?: unknown };
-        };
-        const labels: Record<string, string> = {};
-        if (node.metadata?.labels && typeof node.metadata.labels === 'object')
-          for (const [key, value] of Object.entries(node.metadata.labels as Record<string, unknown>))
-            if (typeof value === 'string') labels[key] = value;
-        const conditions = Array.isArray(node.status?.conditions) ? node.status.conditions : [];
-        return {
-          name: String(node.metadata?.name ?? ''),
-          labels,
-          ready: conditions.some(
-            (condition: { type?: unknown; status?: unknown }) =>
-              condition?.type === 'Ready' && condition?.status === 'True',
-          ),
-          unschedulable: node.spec?.unschedulable === true,
-        };
-      });
+      // Paged (a full Node is 5-15 KB: a few hundred of them exceed one answer's size cap), with a bound on the
+      // pages so a server that never stops answering `continue` is an error, not a loop.
+      const out: KubernetesNode[] = [];
+      let next: string | undefined;
+      for (let page = 0; ; page++) {
+        if (page >= maxNodePages)
+          throw new ComputeError(
+            'PROVIDER_ERROR',
+            `${what}: the Kubernetes API listed more than ${maxNodePages * nodePageSize} Nodes`,
+          );
+        const query = new URLSearchParams({
+          ...(labelSelector ? { labelSelector } : {}),
+          limit: String(nodePageSize),
+          ...(next ? { continue: next } : {}),
+        });
+        const response = await send(what, [], { url: `${origin}/api/v1/nodes?${query}`, method: 'GET' });
+        if (response.status !== 200) throw failure(what, response, []);
+        const body = response.body as { items?: unknown; metadata?: { continue?: unknown } } | undefined;
+        const items = body?.items;
+        if (!Array.isArray(items))
+          throw new ComputeError('PROVIDER_ERROR', `${what}: the Kubernetes API answered no NodeList`);
+        for (const item of items) out.push(nodeOf(item));
+        const token = body?.metadata?.continue;
+        if (typeof token !== 'string' || token.length === 0) return out;
+        if (token.length > 4096)
+          throw new ComputeError('PROVIDER_ERROR', `${what}: the Kubernetes API answered a malformed continue token`);
+        next = token;
+      }
     },
   };
   Object.defineProperty(client, 'toString', { value: () => `[KubernetesApiClient ${origin}]` });
