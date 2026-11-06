@@ -242,6 +242,47 @@ describe('catalog image import', () => {
     expect(imagePosts(emu)).toHaveLength(2);
   });
 
+  it('a failed older import is deleted and the available newer one boots', async () => {
+    const emu = new DoEmulator({ now: () => t0 });
+    const failed = seedImage(emu.state, {
+      tags: ourImageTags,
+      regions: ['nyc3'],
+      created_at: '2026-11-05T08:00:00Z',
+    });
+    failImport(emu.state, failed.id);
+    const good = seedImage(emu.state, {
+      tags: ourImageTags,
+      regions: ['nyc3'],
+      created_at: '2026-11-05T09:00:00Z',
+    });
+    const { source } = catalogSource();
+    const compute = await build(emu, doAccount, { catalogImages: source });
+    await compute.create(request({ image: catalogRef, catalogImage: pinned }), ctx('k'));
+    expect((dropletPosts(emu)[0]!.body as { image: unknown }).image).toBe(good.id);
+    expect(importsOf(emu).map((i) => i.id)).toEqual([good.id]);
+    expect(imagePosts(emu)).toHaveLength(0);
+  });
+
+  it('only failed imports: all are deleted and the create fails', async () => {
+    const emu = new DoEmulator({ now: () => t0 });
+    const ids = [8, 9].map((hour) => {
+      const image = seedImage(emu.state, {
+        tags: ourImageTags,
+        created_at: `2026-11-05T0${hour}:00:00Z`,
+      });
+      failImport(emu.state, image.id);
+      return image.id;
+    });
+    const { source } = catalogSource();
+    const compute = await build(emu, doAccount, { catalogImages: source });
+    const error = await failure(
+      compute.create(request({ image: catalogRef, catalogImage: pinned }), ctx('k')),
+    );
+    expect([error.code, error.details?.reason]).toEqual(['INVALID_STATE', 'imageImportFailed']);
+    for (const id of ids) expect(emu.state.images.has(id)).toBe(false);
+    expect(dropletPosts(emu)).toHaveLength(0);
+  });
+
   it('refuses what DigitalOcean cannot import, and an unknown ref, before any import', async () => {
     const cases: [Partial<CatalogImageLocation> | null, string, string][] = [
       [null, 'INVALID_CONFIG', 'catalogImage'],
@@ -458,6 +499,79 @@ describe('catalog image region transfer, failing', () => {
     expect([failed.code, failed.details?.reason]).toEqual(['INVALID_STATE', 'imageTransferFailed']);
     expect(transfers()).toHaveLength(3);
     expect(dropletPosts(emu)).toHaveLength(0);
+  });
+});
+
+describe('catalog image region transfer, stale state', () => {
+  const iso = (ms: number) => new Date(ms).toISOString().replace(/.d{3}Z$/, 'Z');
+  const sfo = request({ offerId: 'sfo3/s-1vcpu-1gb', image: catalogRef, catalogImage: pinned });
+  const setup = async (now = t0) => {
+    const emu = new DoEmulator({ now: () => now });
+    const imported = seedImage(emu.state, { tags: ourImageTags, regions: ['nyc3'] });
+    const { source, calls } = catalogSource();
+    const compute = await build(
+      emu,
+      { ...doAccount, regions: ['nyc3', 'sfo3'] },
+      { catalogImages: source },
+      { clock: manualClock(now) },
+    );
+    const transfers = () =>
+      emu.requests.filter(
+        (r) => r.method === 'POST' && r.url.pathname === `/v2/images/${imported.id}/actions`,
+      );
+    /** A transfer action of the image, as DO lists it. */
+    const action = (status: 'in-progress' | 'completed', startedAt: number) => {
+      const id = emu.state.nextId();
+      emu.state.actions.set(id, {
+        id,
+        status,
+        type: 'transfer',
+        started_at: iso(startedAt),
+        completed_at: status === 'completed' ? iso(startedAt + 600_000) : null,
+        resource_id: imported.id,
+        resource_type: 'image',
+        region_slug: 'sfo3',
+      });
+    };
+    return { emu, imported, compute, transfers, action, calls };
+  };
+
+  it('a transfer in progress for over a day fails the create instead of waiting forever', async () => {
+    const { compute, transfers, action, emu } = await setup();
+    action('in-progress', t0 - 25 * 3600_000);
+    const error = await failure(compute.create(sfo, ctx('k')));
+    expect([error.code, error.details?.reason]).toEqual(['INVALID_STATE', 'imageTransferFailed']);
+    expect(transfers()).toHaveLength(0);
+    expect(dropletPosts(emu)).toHaveLength(0);
+  });
+
+  it('a recent transfer in progress still waits', async () => {
+    const { compute, transfers, action } = await setup();
+    action('in-progress', t0 - 3600_000);
+    const error = await failure(compute.create(sfo, ctx('k')));
+    expect(error.details).toMatchObject({ reason: 'imageTransferring', retryAfterMs: 30_000 });
+    expect(transfers()).toHaveLength(0);
+  });
+
+  it('a completed transfer the list does not show yet is re-read, never posted again', async () => {
+    const { compute, transfers, action, emu, imported } = await setup();
+    action('completed', t0 - 3600_000);
+    // The single-image read is current; the list lagged.
+    emu.beforeAction(`GET /images/${imported.id}`, (context) => {
+      const image = context.state.images.get(imported.id)!;
+      if (!(image.regions as string[]).includes('sfo3')) (image.regions as string[]).push('sfo3');
+    });
+    await compute.create(sfo, ctx('k'));
+    expect(transfers()).toHaveLength(0);
+    expect(dropletPosts(emu)[0]!.body).toMatchObject({ image: imported.id, region: 'sfo3' });
+  });
+
+  it('a completed transfer that no read shows yet waits rather than transferring again', async () => {
+    const { compute, transfers, action } = await setup();
+    action('completed', t0 - 600_000);
+    const error = await failure(compute.create(sfo, ctx('k')));
+    expect(error.details).toMatchObject({ reason: 'imageTransferring' });
+    expect(transfers()).toHaveLength(0);
   });
 });
 

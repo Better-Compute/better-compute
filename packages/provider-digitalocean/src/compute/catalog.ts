@@ -57,6 +57,11 @@ export const imageRetryAfterMs = 30_000;
 export const maxImageTransferAttempts = 3;
 /** An import still not available this long after it started never will be: it goes, the create fails. */
 export const importStuckMs = 24 * 3600_000;
+/**
+ * A transfer still in progress this long after it started is stuck, and a completed one whose
+ * region the image still doesn't list this long after is lost: either fails the create.
+ */
+export const transferStuckMs = 24 * 3600_000;
 
 const formats = new Set(['raw', 'qcow2', 'vhdx', 'vdi', 'vmdk']);
 const compressions = new Set(['none', 'gzip', 'bzip2']);
@@ -111,6 +116,18 @@ export function distributionOf(ref: string, given?: string): string {
 function byAge(a: DoImage, b: DoImage): number {
   const at = Date.parse(a.created_at) - Date.parse(b.created_at);
   return Number.isFinite(at) && at !== 0 ? at : a.id - b.id;
+}
+
+/** An import DO gave up on: it can never boot. */
+function failedImport(image: DoImage): boolean {
+  const status = image.status ?? 'available';
+  return status === 'deleted' || status === 'retired' || Boolean(image.error_message);
+}
+
+/** How long ago `at` (an ISO time) was; undefined when DO sent none or a malformed one. */
+function ageOf(at: string | null | undefined, now: number): number | undefined {
+  const ms = at ? Date.parse(at) : Number.NaN;
+  return Number.isFinite(ms) ? now - ms : undefined;
 }
 
 function tagged(image: DoImage, tag: string): boolean {
@@ -217,9 +234,25 @@ export class DoCatalogImages {
     }
   }
 
-  /** Keeps the oldest import and deletes the others: each carries our tags. */
-  protected async converge(images: DoImage[], signal: AbortSignal): Promise<DoImage> {
-    const [oldest, ...others] = images.sort(byAge);
+  /**
+   * Deletes the failed imports, keeps the oldest of the rest and deletes the others: each carries
+   * our tags. The survivor is the oldest, not the first available, so every racing create picks
+   * the same one. When every import failed, they all go and the create fails.
+   */
+  protected async converge(images: DoImage[], ref: string, signal: AbortSignal): Promise<DoImage> {
+    for (const image of images.filter(failedImport)) {
+      // A failed import is ours: it goes, so a usable duplicate (or the next create) wins.
+      this.#log.warn('digitalocean.imageImportFailed', { ref, image: image.id });
+      await this.destroy(image.id, signal);
+    }
+    const live = images.filter((image) => !failedImport(image));
+    if (live.length === 0)
+      throw fail(
+        'INVALID_STATE',
+        `the import of catalog image ${ref} into DigitalOcean failed`,
+        'imageImportFailed',
+      );
+    const [oldest, ...others] = live.sort(byAge);
     for (const duplicate of others) {
       this.#log.info('digitalocean.duplicateImageReaped', {
         kept: oldest!.id,
@@ -290,7 +323,7 @@ export class DoCatalogImages {
       images = await this.byTag(tag, signal);
       if (images.length === 0) throw importing(ref, 'imageImporting');
     }
-    const image = await this.converge(images, signal);
+    const image = await this.converge(images, ref, signal);
     return this.usable(image, ref, region, signal);
   }
 
@@ -301,17 +334,8 @@ export class DoCatalogImages {
     region: string,
     signal: AbortSignal,
   ): Promise<number> {
+    // converge has removed failed imports.
     const status = image.status ?? 'available';
-    if (status === 'deleted' || status === 'retired' || image.error_message) {
-      // A failed import is ours: it goes, so the next create imports afresh.
-      this.#log.warn('digitalocean.imageImportFailed', { ref, image: image.id });
-      await this.destroy(image.id, signal);
-      throw fail(
-        'INVALID_STATE',
-        `the import of catalog image ${ref} into DigitalOcean failed`,
-        'imageImportFailed',
-      );
-    }
     if (status !== 'available') {
       const startedAt = Date.parse(image.created_at);
       if (Number.isFinite(startedAt) && this.#client.clock.now() - startedAt > importStuckMs) {
@@ -327,32 +351,66 @@ export class DoCatalogImages {
       throw importing(ref, 'imageImporting');
     }
     if (image.regions.includes(region)) return image.id;
-    await this.transfer(image, ref, region, signal);
+    if (await this.transfer(image, ref, region, signal)) return image.id;
     throw importing(ref, 'imageTransferring');
   }
 
   /**
-   * Copies an import into another region, unless a copy there is already running (a retried
-   * create finds the transfer its first attempt started). A transfer that errored is started
-   * again, up to `maxImageTransferAttempts`; then the create fails (`INVALID_STATE`,
-   * `imageTransferFailed`) rather than retrying forever into a region that can't take the image.
-   * Only an image of ours is ever transferred (`byTag` returns no other).
+   * Copies an import into another region; true when the region turns out to hold it already.
+   *
+   * - A copy there that is running is waited for (a retried create finds the transfer its first
+   *   attempt started), unless it started more than `transferStuckMs` ago: then the create fails.
+   * - A copy that completed is never posted again: the image is re-read, since the list can lag
+   *   behind the action. Until that read shows the region the create waits, and past
+   *   `transferStuckMs` after completion it fails.
+   * - A transfer that errored is started again, up to `maxImageTransferAttempts`; then the create
+   *   fails rather than retrying forever into a region that can't take the image.
+   *
+   * Every failure is `INVALID_STATE` (`imageTransferFailed`). Only an image of ours is ever
+   * transferred (`byTag` returns no other).
    */
   protected async transfer(
     image: DoImage,
     ref: string,
     region: string,
     signal: AbortSignal,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    const now = this.#client.clock.now();
     let errored = 0;
+    let running: DoAction | undefined;
+    let completed: DoAction | undefined;
     for await (const action of this.#client.pages<DoAction>(
       `/images/${image.id}/actions`,
       'actions',
       { signal, budget: 'observe' },
     )) {
       if (action.type !== 'transfer' || action.region_slug !== region) continue;
-      if (action.status === 'in-progress') return;
-      if (action.status === 'errored') errored++;
+      if (action.status === 'in-progress') running = action;
+      else if (action.status === 'completed') completed = action;
+      else if (action.status === 'errored') errored++;
+    }
+    const stuck = (): ComputeError => {
+      this.#log.warn('digitalocean.imageTransferStuck', { ref, image: image.id, region });
+      return fail(
+        'INVALID_STATE',
+        `catalog image ${ref} could not be copied to ${region}: the transfer did not finish`,
+        'imageTransferFailed',
+      );
+    };
+    if (running) {
+      if ((ageOf(running.started_at, now) ?? 0) > transferStuckMs) throw stuck();
+      return false;
+    }
+    if (completed) {
+      const current = await this.#client.request<{ image: DoImage }>(
+        'GET',
+        `/images/${image.id}`,
+        { signal, budget: 'observe' },
+      );
+      if (current.image.regions.includes(region)) return true;
+      const since = ageOf(completed.completed_at ?? completed.started_at, now) ?? 0;
+      if (since > transferStuckMs) throw stuck();
+      return false;
     }
     if (errored >= maxImageTransferAttempts)
       throw fail(
@@ -366,6 +424,7 @@ export class DoCatalogImages {
       budget: 'mutate',
     });
     this.#log.info('digitalocean.imageTransfer', { ref, image: image.id, region });
+    return false;
   }
 }
 

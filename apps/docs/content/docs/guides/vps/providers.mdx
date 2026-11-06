@@ -1020,8 +1020,9 @@ The token needs the custom scopes `account:read`, `regions:read`, `sizes:read`, 
   A catalog ref is unique only within a tenant: vps resolves it for the instance's tenant (`vps({ images })`), refuses one
   the tenant can't see (`NOT_FOUND`), and passes the resolution (`catalogImage: { tenantId, sha256 }`) to the provider,
   whose source must look the image up by it. While it imports or copies, the create is `UNAVAILABLE` (`imageImporting`,
-  `imageTransferring`) and vps retries it; a copy that errors three times, or an import still pending a day later, fails
-  it (`INVALID_STATE`).
+  `imageTransferring`) and vps retries it; a copy that errors three times or is still running a day later, or an import
+  still pending a day later, fails it (`INVALID_STATE`). A failed import is deleted before the survivor is chosen, so an
+  available duplicate still boots.
   An AI/ML image (`gpu-…`) on a size without GPUs or of the other GPU vendor is `INVALID_INPUT` (`gpuImage`).
 - **Spot.** With `allowSpot` (and, while the wire shape is unverified, `previews`), a size that reports a Spot price
   gets a `region/size@spot` offer at that price; its Droplets carry `better-compute-capacity:spot`. Without `allowSpot`
