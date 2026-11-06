@@ -36,7 +36,8 @@ import type { DoShare, DoShareAction, DoShareSnapshot } from './types.js';
 // there yet. That VPC must be a better-compute network's (never a default or hand-made VPC) and
 // of the same network as the share's VPCs. Detaching untags the Droplet and takes its VPC off the
 // share once no tagged Droplet is left in it; the share's last VPC, its home in the tenant
-// network, stays. A share some Droplet still carries the tag of is not deleted.
+// network, stays. A detach of a Droplet that is gone (its tag went with it) takes off every VPC no tagged Droplet is
+// in (`prune`). A share some Droplet still carries the tag of is not deleted; a deleted share's tag goes with it.
 //
 // Ids. Every share call names the region (`?region=`), so a share's provider id is
 // `nfs:<region>:<uuid>`; nothing else in the provider has that shape, which is how `DoVolumes`
@@ -494,7 +495,29 @@ export class DoShares {
       if (!isComputeError(error, 'NOT_FOUND')) throw error;
     }
     this.log.info('digitalocean.shareDeleted', { share: share.id });
+    await this.dropTag(share.id, signal);
     return state(shareId(share.region, share.id), 'deleted');
+  }
+
+  /**
+   * The share's Droplet tag (`bc-nfs-…`), once the share is gone: no Droplet carries it (a share some Droplet carries
+   * the tag of is not deleted). Best effort: a tag left behind holds nothing, so a failure is logged, never thrown.
+   */
+  protected async dropTag(uuid: string, signal: AbortSignal): Promise<void> {
+    const tag = shareTag(uuid);
+    try {
+      await this.client.request('DELETE', `/tags/${encodeURIComponent(tag)}`, {
+        signal,
+        budget: 'mutate',
+      });
+    } catch (error) {
+      if (isComputeError(error, 'NOT_FOUND')) return;
+      if (signal.aborted) throw error;
+      this.log.warn('digitalocean.shareTagLeft', {
+        tag,
+        code: isComputeError(error) ? error.code : 'unknown',
+      });
+    }
   }
 
   // ----------------------------------------------------------------------- attach and detach
@@ -617,6 +640,33 @@ export class DoShares {
     return after.state === 'ready' ? { ...after, outputs: on(after.outputs) } : after;
   }
 
+  /**
+   * (D4) A Droplet that had the share is gone: its tag went with it, but nothing took its VPC off the share. Each VPC
+   * on the share that no tagged Droplet is in leaves it, one VPC action per call (`deleting` while one runs or more
+   * are left); the share's home (its first VPC) always stays, and only a better-compute network's VPC is taken off.
+   */
+  protected async prune(share: DoShare, signal: AbortSignal): Promise<ProviderResourceState> {
+    const sid = shareId(share.region, share.id);
+    if (!this.owned(share)) return state(sid, 'deleted');
+    const [home, ...rest] = share.vpc_ids ?? [];
+    if (home === undefined || rest.length === 0) return state(sid, 'deleted');
+    const held = new Set((await this.holders(share, signal)).map((droplet) => droplet.vpc_uuid));
+    const lookup = vpcLookup(this.client, signal);
+    const stale: string[] = [];
+    for (const vpcId of rest) {
+      if (held.has(vpcId)) continue;
+      const vpc = await lookup(vpcId);
+      if (vpc && !vpc.default && networkOfVpc(vpc) !== undefined) stale.push(vpcId);
+    }
+    if (stale.length === 0) return state(sid, 'deleted');
+    if (share.status !== 'ACTIVE') return state(sid, 'deleting', shareOutputs(share));
+    this.log.info('digitalocean.shareVpcPruned', { share: share.id, vpc: stale[0] });
+    const action = await this.act(share, 'detach', { vpc_id: stale[0] }, signal);
+    const after = await this.after(share, action, 'deleting', signal);
+    if (after.state !== 'ready') return after;
+    return stale.length > 1 ? state(sid, 'deleting', shareOutputs(share)) : state(sid, 'deleted');
+  }
+
   async detach(id: string, machineId: string, ctx: CallContext): Promise<ProviderResourceState> {
     const ref = this.parse(id);
     const dropletId = parseMachineId(machineId);
@@ -625,8 +675,8 @@ export class DoShares {
     const share = await this.share(ref, signal);
     if (!share) return state(sid, 'deleted');
     const droplet = await this.droplet(dropletId, signal);
-    // A Droplet that is gone took its tag with it.
-    if (!droplet) return state(sid, 'deleted');
+    // A Droplet that is gone took its tag with it, but not its VPC off the share.
+    if (!droplet) return this.prune(share, signal);
     const tag = shareTag(share.id);
     if (hasTag(droplet, tag)) {
       this.refuseForeign(share);

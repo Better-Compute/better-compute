@@ -479,6 +479,40 @@ describe('provider-digitalocean NFS shares: attach and detach', () => {
     expect(writes(emu)).toHaveLength(before);
   });
 
+  it("detaching a Droplet that is gone takes off every VPC no tagged Droplet is in, keeping the share's home", async () => {
+    const { emu, impl, vpc } = await setup();
+    const other = subnet(emu, 'net-a-nyc3-b');
+    const third = subnet(emu, 'net-a-nyc3-c');
+    const kept = subnet(emu, 'net-a-nyc3-d');
+    const home = host(emu, vpc);
+    const gone = [host(emu, other), host(emu, third, { instance: 'ins_2' })];
+    const stays = host(emu, kept, { instance: 'ins_3' });
+    const { id } = await impl.volumes.ensureVolume(spec, ctx());
+    for (const droplet of [home, ...gone, stays])
+      expect((await impl.volumes.attachVolume(id, String(droplet.id), ctx())).state).toBe('ready');
+    expect(shareOf(emu, id).vpc_ids).toEqual([vpc.id, other.id, third.id, kept.id]);
+    // The Droplets are deleted (their tags go with them), with no detach: their VPCs stay on the share.
+    for (const droplet of gone) emu.state.droplets.delete(droplet.id);
+    expect(shareOf(emu, id).vpc_ids).toHaveLength(4);
+    // A detach of one of them prunes each VPC without a tagged Droplet, one action per call.
+    const seen: string[] = [];
+    for (let i = 0; i < 4 && seen.at(-1) !== 'deleted'; i++)
+      seen.push((await impl.volumes.detachVolume(id, String(gone[0]!.id), ctx())).state);
+    expect(seen.at(-1)).toBe('deleted');
+    expect(shareOf(emu, id).vpc_ids).toEqual([vpc.id, kept.id]);
+    expect(shareActions(emu, 'detach').map((r) => (r.body as Json).params.vpc_id).sort()).toEqual(
+      [other.id, third.id].sort(),
+    );
+    // Nothing left to prune: no writes.
+    const before = writes(emu).length;
+    expect((await impl.volumes.detachVolume(id, String(gone[1]!.id), ctx())).state).toBe('deleted');
+    expect(writes(emu)).toHaveLength(before);
+    // The home VPC stays even with no Droplet in it.
+    emu.state.droplets.delete(home.id);
+    expect((await impl.volumes.detachVolume(id, String(home.id), ctx())).state).toBe('deleted');
+    expect(shareOf(emu, id).vpc_ids).toEqual([vpc.id, kept.id]);
+  });
+
   it('a VPC detach that runs is deleting until it completes', async () => {
     const emu = emulator();
     const { impl, vpc } = await setup(emu);
@@ -505,6 +539,10 @@ describe('provider-digitalocean NFS shares: attach and detach', () => {
     expect([error.code, error.details?.reason]).toEqual(['INVALID_STATE', 'attached']);
     expect(emu.state.nfsShares.size).toBe(1);
     await impl.volumes.detachVolume(id, String(droplet.id), ctx());
+    expect(emu.state.tags.has(shareTag(uuidOf(id)))).toBe(true);
+    expect((await impl.volumes.deleteVolume(id, ctx())).state).toBe('deleted');
+    // The share's Droplet tag goes with it; a tag already gone is fine.
+    expect(emu.state.tags.has(shareTag(uuidOf(id)))).toBe(false);
     expect((await impl.volumes.deleteVolume(id, ctx())).state).toBe('deleted');
   });
 });

@@ -142,8 +142,9 @@ How it differs from a block volume:
 
 On DigitalOcean, attaching tags the Droplet `bc-nfs-<16 hex>` (the record of which Droplets have the share) and adds
 the Droplet's VPC to the share when it is not there yet; that VPC must be one of the same network. Detaching removes
-the tag and takes the VPC off the share once no tagged Droplet is left in it; the share's last VPC stays. A share whose
-Droplet was deleted keeps that Droplet's VPC until a later detach in the VPC. The hourly drift pass asks every ready
+the tag and takes the VPC off the share once no tagged Droplet is left in it; the share's last VPC stays. When an
+instance on the share is deleted, the detach that follows finds its Droplet gone and takes off every VPC no tagged
+Droplet is left in; deleting the share removes its tag. The hourly drift pass asks every ready
 attachment of a settled shared volume again (an attach is idempotent), which puts back a VPC a racing detach took off.
 
 ### Mounting a shared volume

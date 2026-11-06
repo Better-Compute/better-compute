@@ -817,8 +817,9 @@ Spending stays under the test account's cap; the sweeper leaves no `better-compu
   - **D4 Attach.** The Droplet must be an instance of this deployment, in the share's region, in a VPC of the same
     network (vps checks `instances.network_id` first). The provider tags it `bc-nfs-<16 hex>` and adds its VPC to the
     share when missing. Detach untags, and takes the VPC off once no tagged Droplet is left in it (the share's last
-    VPC stays). A share any Droplet carries the tag of is not deleted. Known limitation: a deleted Droplet's VPC stays
-    on the share until a later detach in that VPC.
+    VPC stays). A share any Droplet carries the tag of is not deleted. A detach of a Droplet that is gone prunes every
+    VPC of a better-compute network no tagged Droplet is in (never the share's first VPC), and a share delete removes
+    its `bc-nfs-*` tag (best effort), so a deleted Droplet's VPC no longer stays on the share.
   - **D5 Limits.** 50..16384 GiB (minimum unverified), grows only, no filesystem, no labels (no tags on shares),
     restore from a share snapshot `UNSUPPORTED` (`sharedRestore`, in the provider and in vps).
   - **D6 Outputs.** `region`, `sizeGiB`, `kind: shared`, `host`, `mountPath`, `device = <host>:<mountPath>` (the NFS
