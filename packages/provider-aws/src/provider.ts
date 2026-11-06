@@ -3,6 +3,8 @@ import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 import { accountCredentials } from './account.js';
 import { AwsCompute } from './compute.js';
 import { awsConfig, validateAwsConfig, type AwsConfig, type AwsProviderOptions } from './config.js';
+import { awsBilling } from './costs.js';
+import { finopsMembers } from './finops.js';
 import { instanceTypeCache, zoneCache } from './shapes.js';
 
 /**
@@ -17,6 +19,7 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
     provides: ['vps'],
     config: awsConfig as unknown as ProviderDefinition<AwsConfig>['config'],
     capabilities: ['power', 'reinstall', 'list', 'discover', 'claim'],
+    billing: awsBilling,
     create: (config, context) => {
       validateAwsConfig(config);
       const account = accountCredentials(config, context, options);
@@ -29,12 +32,14 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
         ...(options.endpoints?.ec2 !== undefined ? { endpoint: options.endpoints.ec2 } : {}),
         ...(options.rateLimit ? { rateLimit: options.rateLimit } : {}),
       });
-      return new AwsCompute(config, context, options, {
+      const compute = new AwsCompute(config, context, options, {
         ec2,
         account,
         types: instanceTypeCache(ec2, { clock: context.clock }),
         zones: zoneCache(ec2, { clock: context.clock }),
       });
+      // A11: costs (and list prices) beside the EC2 client, present only when the account has them.
+      return Object.assign(compute, finopsMembers(config, context, options, account));
     },
   });
 }

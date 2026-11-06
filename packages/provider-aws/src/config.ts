@@ -67,6 +67,12 @@ export const awsConfig = manifest({
     .string({ maxLength: 512 })
     .optional()
     .describe('"key=value": discovery yields only instances carrying this tag'),
+  costs: field
+    .option(['off', 'region', 'account'])
+    .optional()
+    .describe(
+      "Read this account's costs from Cost Explorer (charged per request): region (only this region, for several regional accounts on one AWS account), account (every region), or off (default)",
+    ),
 });
 
 /** The validated account configuration. */
@@ -84,12 +90,14 @@ export interface AwsConfig {
   metadataHopLimit: number;
   associatePublicIp: boolean;
   discoverTag?: string;
+  /** Cost Explorer reads (A11): absent or 'off' reads none. */
+  costs?: 'off' | 'region' | 'account';
 }
 
 export interface AwsProviderOptions {
   fetch?: typeof fetch;
   /** Tests and VPC endpoints; host options, never account config. */
-  endpoints?: Partial<Record<'ec2' | 'sts', string>>;
+  endpoints?: Partial<Record<'ec2' | 'sts' | 'ce' | 'pricing', string>>;
   /** Ambient identity for platform accounts (default `ambientCredentials()`). */
   credentials?: CredentialSource;
   /** ExternalId prefix: `${externalIdPrefix}:${providerAccountId}` (default 'better-compute'). */
@@ -108,6 +116,8 @@ export interface AwsProviderOptions {
    * private parameters are refused unless listed here.
    */
   ssmImagePrefixes?: readonly string[];
+  /** Cost Explorer reads (A11): how long a day read stays cached (default 24 h). */
+  costsCacheMs?: number;
 }
 
 function invalid(message: string, reason: string): ComputeError {
