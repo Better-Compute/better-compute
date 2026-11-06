@@ -1013,6 +1013,12 @@ export interface ProviderImpl {
        * provider that can install keys without cloud-init (Compute Engine's `ssh-keys`) does.
        */
       sshKeys?: readonly string[];
+      /**
+       * (AWS A9) The machine is a node of the account's EKS cluster (its user data carries nodeadm's
+       * NodeConfig; vps sets this only for the pool owner's instances): the provider launches it with
+       * its EKS node identity, which no other launch of the account ever gets.
+       */
+      kubernetesNode?: 'eks';
     },
     context: CallContext,
   ): Promise<ExternalMachine>;

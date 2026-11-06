@@ -43,7 +43,15 @@ export const awsConfig = manifest({
   instanceProfile: field
     .string({ maxLength: 2048 })
     .optional()
-    .describe('Instance profile ARN passed to RunInstances'),
+    .describe(
+      'Instance profile ARN passed to RunInstances (never one whose role has an EKS access entry: see eksNodeInstanceProfile)',
+    ),
+  eksNodeInstanceProfile: field
+    .string({ maxLength: 2048 })
+    .optional()
+    .describe(
+      '(kubernetes) Instance profile ARN of EC2 machines a pool with policy.kubernetes.eks launches as nodes of the cluster (its role has an EC2_LINUX access entry); no other launch gets it',
+    ),
   rootVolumeGiB: field
     .int({ min: 8, max: 16384 })
     .default(100)
@@ -93,6 +101,7 @@ export interface AwsConfig {
   subnetId?: string;
   securityGroupIds?: string[];
   instanceProfile?: string;
+  eksNodeInstanceProfile?: string;
   rootVolumeGiB: number;
   rootVolumeType: 'gp3' | 'gp2' | 'io2';
   kmsKeyId?: string;
@@ -182,16 +191,27 @@ export function validateAwsConfig(config: AwsConfig): void {
       );
   roleArnOf(config);
   if (config.discoverTag !== undefined) parseDiscoverTag(config.discoverTag);
-  if (config.instanceProfile !== undefined) {
+  for (const key of ['instanceProfile', 'eksNodeInstanceProfile'] as const) {
+    const value = config[key];
+    if (value === undefined) continue;
     let arn;
     try {
-      arn = parseArn(config.instanceProfile);
+      arn = parseArn(value);
     } catch {
-      throw invalid('instanceProfile is not an instance profile ARN', 'instanceProfile');
+      throw invalid(`${key} is not an instance profile ARN`, key);
     }
     if (arn.service !== 'iam' || !arn.resource.startsWith('instance-profile/'))
-      throw invalid('instanceProfile is not an instance profile ARN', 'instanceProfile');
+      throw invalid(`${key} is not an instance profile ARN`, key);
   }
+  // The account-wide profile goes on every launch: it must never carry the EKS node identity.
+  if (
+    config.eksNodeInstanceProfile !== undefined &&
+    config.instanceProfile === config.eksNodeInstanceProfile
+  )
+    throw invalid(
+      'instanceProfile must not be eksNodeInstanceProfile: every machine of the account gets instanceProfile, only EKS nodes the node identity',
+      'eksNodeInstanceProfile',
+    );
   for (const key of ['eksClusterRoleArn', 'eksNodeRoleArn'] as const) {
     const value = config[key];
     if (value === undefined) continue;

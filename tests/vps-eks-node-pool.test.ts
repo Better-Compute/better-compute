@@ -20,7 +20,12 @@ const ZONE = 'us-east-1a';
 const ENDPOINT = 'https://ABCDEF0123456789ABCDEF0123456789.gr7.us-east-1.eks.amazonaws.com';
 const SSH_KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEksNodePoolTestKey0000000000000000000 alice@laptop';
 
-async function world(policy?: Record<string, unknown>) {
+const eksNodes = 'arn:aws:iam::111111111111:instance-profile/eks-nodes';
+
+async function world(
+  policy?: Record<string, unknown>,
+  accountConfig: Record<string, unknown> = { eksNodeInstanceProfile: eksNodes },
+) {
   const emu = new AwsEmulator();
   const ec2 = new Ec2Emulator(emu);
   const aws = awsProvider({ fetch: emu.fetch, credentials: emu.ambient });
@@ -37,7 +42,7 @@ async function world(policy?: Record<string, unknown>) {
     tenantId: tenants.root.id,
     provider: 'aws',
     name: 'aws-use1',
-    config: { region: 'us-east-1', zones: [ZONE] },
+    config: { region: 'us-east-1', zones: [ZONE], ...accountConfig },
   });
   const site = await api.sites.create(root, {
     tenantId: tenants.root.id,
@@ -145,7 +150,42 @@ function parts(text: string): { type: string; body: string }[] {
     });
 }
 
+const profiles = {
+  instanceProfile: 'arn:aws:iam::111111111111:instance-profile/tenant-machines',
+  eksNodeInstanceProfile: eksNodes,
+};
+const profileOf = (w: { emu: AwsEmulator }) =>
+  w.emu.calls('RunInstances').at(-1)?.params.get('IamInstanceProfile.Arn') ?? undefined;
+
 describe('vps on a provider pool that joins an EKS cluster', () => {
+  it("launches EKS nodes with the account's eksNodeInstanceProfile, never its instanceProfile", async () => {
+    const w = await world(eksPolicy, profiles);
+    const { vm, view } = await w.launch();
+    expect(vm, JSON.stringify(view)).toBeDefined();
+    expect(profileOf(w)).toBe(profiles.eksNodeInstanceProfile);
+  });
+
+  it('never gives the EKS node profile to an instance of a pool without policy.kubernetes.eks', async () => {
+    // The same account: its other pools launch with instanceProfile only (the node role would let
+    // the instance's tenant register a Node in the operator's cluster).
+    const w = await world(undefined, profiles);
+    const { vm } = await w.launch({ imageId: 'ubuntu-24.04' }, 'acme');
+    expect(vm).toBeDefined();
+    expect(profileOf(w)).toBe(profiles.instanceProfile);
+    const bare = await world(undefined, { eksNodeInstanceProfile: profiles.eksNodeInstanceProfile });
+    await bare.launch({ imageId: 'ubuntu-24.04' });
+    expect(bare.emu.calls('RunInstances')).toHaveLength(1);
+    expect(profileOf(bare)).toBeUndefined();
+  });
+
+  it('fails an EKS node launch closed when the account has no eksNodeInstanceProfile', async () => {
+    const w = await world(eksPolicy, { instanceProfile: profiles.instanceProfile });
+    const { vm, view } = await w.launch();
+    expect(vm).toBeUndefined();
+    expect(w.emu.calls('RunInstances')).toHaveLength(0);
+    expect(JSON.stringify(view)).toMatch(/eksNodeInstanceProfile/);
+  });
+
   it('refuses an EKS pool on a platform site unless the platform operates the cluster', async () => {
     const w = await world();
     const { platformOperated: _, ...kubernetes } = eksPolicy.kubernetes;

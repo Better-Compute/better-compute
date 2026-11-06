@@ -54,6 +54,8 @@ export function iamPolicy(
      */
     eksClusterRoleArn?: string;
     eksNodeRoleArn?: string;
+    /** (kubernetes) The accounts' `eksNodeInstanceProfile`: iam:PassRole of its role to EC2. */
+    eksNodeInstanceProfileArn?: string;
   } = {},
 ): IamPolicyDocument {
   const partition = options.partition ?? 'aws';
@@ -207,17 +209,24 @@ export function iamPolicy(
   }
   if (options.eksClusterRoleArn !== undefined || options.eksNodeRoleArn !== undefined)
     statements.push(...eksStatements(partition, region, account, options));
-  if (options.instanceProfileArn !== undefined) {
-    const profile = parseArn(options.instanceProfileArn);
-    if (profile.service !== 'iam' || !profile.resource.startsWith('instance-profile/'))
-      throw usage(
-        '--instance-profile is an instance profile ARN (arn:…:iam::<account>:instance-profile/<name>)',
-      );
+  for (const [sid, flag, value] of [
+    ['PassProfile', '--instance-profile', options.instanceProfileArn],
+    ['PassEksNodeProfile', '--eks-node-instance-profile', options.eksNodeInstanceProfileArn],
+  ] as const) {
+    if (value === undefined) continue;
+    let profile;
+    try {
+      profile = parseArn(value);
+    } catch {
+      profile = undefined;
+    }
+    if (!profile || profile.service !== 'iam' || !profile.resource.startsWith('instance-profile/'))
+      throw usage(`${flag} is an instance profile ARN (arn:…:iam::<account>:instance-profile/<name>)`);
     if (profile.partition !== partition)
-      throw usage(`--instance-profile is in partition ${profile.partition}, not ${partition}`);
+      throw usage(`${flag} is in partition ${profile.partition}, not ${partition}`);
     // The role of the same path and name as the profile (the console's convention); edit it if yours differs.
     statements.push({
-      Sid: 'PassProfile',
+      Sid: sid,
       Effect: 'Allow',
       Action: 'iam:PassRole',
       Resource: `arn:${partition}:iam::${profile.account}:role/${profile.resource.slice('instance-profile/'.length)}`,
@@ -472,6 +481,11 @@ export function awsIamPolicyCommand() {
         value: 'ARN',
         description: 'The accounts eksNodeRoleArn (adds managed Kubernetes on EKS)',
       },
+      'eks-node-instance-profile': {
+        type: 'string' as const,
+        value: 'ARN',
+        description: 'The accounts eksNodeInstanceProfile (EC2 machines that join an EKS cluster)',
+      },
       out: outFlag,
     },
     async run(context: AwsCommandContext): Promise<void> {
@@ -494,6 +508,9 @@ export function awsIamPolicyCommand() {
             : {}),
           ...(text(context.flags['eks-node-role'])
             ? { eksNodeRoleArn: text(context.flags['eks-node-role'])! }
+            : {}),
+          ...(text(context.flags['eks-node-instance-profile'])
+            ? { eksNodeInstanceProfileArn: text(context.flags['eks-node-instance-profile'])! }
             : {}),
         }),
       );

@@ -40,6 +40,8 @@ export interface AwsCreateRequest {
   network?: NetworkRef;
   labels?: Readonly<Record<string, string>>;
   sshKeys?: readonly string[];
+  /** (A9) A node of an EKS cluster: launched with `eksNodeInstanceProfile`, never `instanceProfile`. */
+  kubernetesNode?: 'eks';
 }
 
 const offeringsTtlMs = 3_600_000;
@@ -355,6 +357,25 @@ export class AwsCompute implements ProviderImpl {
 
   async create(request: AwsCreateRequest, context: CallContext): Promise<ExternalMachine> {
     const offer = parseOfferId(request.offerId);
+    // The EKS node identity goes only on EKS node launches, and an EKS node never falls back to the
+    // account-wide profile: a role with an EC2_LINUX access entry on any other machine would let its
+    // tenant register a Node in the operator's cluster.
+    let instanceProfile = this.config.instanceProfile;
+    if (request.kubernetesNode !== undefined) {
+      if (request.kubernetesNode !== 'eks')
+        throw new ComputeError('INVALID_INPUT', 'kubernetesNode is eks or absent', undefined, {
+          provider: 'aws',
+          reason: 'kubernetesNode',
+        });
+      if (!this.config.eksNodeInstanceProfile)
+        throw new ComputeError(
+          'INVALID_CONFIG',
+          'The AWS account needs eksNodeInstanceProfile (an instance profile whose role has an EC2_LINUX access entry on the cluster) to launch EKS nodes',
+          undefined,
+          { provider: 'aws', reason: 'eksNodeInstanceProfile' },
+        );
+      instanceProfile = this.config.eksNodeInstanceProfile;
+    }
     if (offer.reservation !== undefined || offer.market === 'spot')
       throw new ComputeError(
         'UNSUPPORTED',
@@ -432,9 +453,7 @@ export class AwsCompute implements ProviderImpl {
           ]
         : undefined,
       SecurityGroupId: !subnet && groups.length ? groups : undefined,
-      IamInstanceProfile: this.config.instanceProfile
-        ? { Arn: this.config.instanceProfile }
-        : undefined,
+      IamInstanceProfile: instanceProfile ? { Arn: instanceProfile } : undefined,
       InstanceInitiatedShutdownBehavior: 'stop',
       TagSpecification: this.#tagSpecifications(request, context),
     };

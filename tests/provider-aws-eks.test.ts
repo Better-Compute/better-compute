@@ -664,6 +664,34 @@ describe('eks IAM policy', () => {
   });
 });
 
+describe('eks node instance profile', () => {
+  const eksNodes = 'arn:aws:iam::111111111111:instance-profile/eks-nodes';
+  it('is its own account field, never the account-wide instanceProfile', async () => {
+    await expect(setup({ eksNodeInstanceProfile: eksNodes })).resolves.toBeDefined();
+    for (const config of [
+      { eksNodeInstanceProfile: 'arn:aws:iam::111111111111:role/eks-node' },
+      { instanceProfile: eksNodes, eksNodeInstanceProfile: eksNodes },
+    ]) {
+      const error = await rejection(setup(config));
+      expect(isComputeError(error, 'INVALID_CONFIG'), String(error)).toBe(true);
+    }
+  });
+
+  it('the IAM policy passes its role to EC2', () => {
+    const policy = iamPolicy({ account: '111111111111', eksNodeInstanceProfileArn: eksNodes });
+    expect(policy.Statement.find((statement) => statement.Sid === 'PassEksNodeProfile')).toEqual({
+      Sid: 'PassEksNodeProfile',
+      Effect: 'Allow',
+      Action: 'iam:PassRole',
+      Resource: 'arn:aws:iam::111111111111:role/eks-nodes',
+      Condition: { StringEquals: { 'iam:PassedToService': 'ec2.amazonaws.com' } },
+    });
+    expect(() => iamPolicy({ eksNodeInstanceProfileArn: 'arn:aws:iam::111111111111:role/x' })).toThrow(
+      /--eks-node-instance-profile/,
+    );
+  });
+});
+
 describe('eks cluster discovery (providerAccounts.clusters)', () => {
   it('lists every cluster with the nodeadm settings k8s-join mode eks takes', async () => {
     const s = await setup();

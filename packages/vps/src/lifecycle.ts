@@ -546,6 +546,8 @@ async function reconcileProvider(
           ),
           name: row.id,
           ...(row.sshKeys.length ? { sshKeys: row.sshKeys } : {}),
+          // Only an EKS node launch gets the account's EKS node identity (eksNodeInstanceProfile).
+          ...(eks ? { kubernetesNode: 'eks' as const } : {}),
           // The tenant's labels; the provider's own ownership labels win over them.
           ...(row.labels !== undefined ? { labels: row.labels } : {}),
           // (v1.0) On a tenant network: its subnet, and the tag the firewall rules target.
