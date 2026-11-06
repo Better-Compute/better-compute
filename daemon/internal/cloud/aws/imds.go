@@ -181,8 +181,11 @@ func (e *statusError) Error() string {
 	return fmt.Sprintf("aws: metadata %s %s: HTTP %d", e.method, e.path, e.status)
 }
 
+// Is makes only a 404 on a GET of the requested path ErrNotFound. A 404 on the token PUT is not AWS
+// answering on the address (bcd's own guest metadata service bound there answers one) and must never
+// read as "this path does not exist": a spot watch would withdraw a standing notice.
 func (e *statusError) Is(target error) bool {
-	return target == ErrNotFound && e.status == http.StatusNotFound
+	return target == ErrNotFound && e.method == http.MethodGet && e.status == http.StatusNotFound
 }
 
 // do sends one request with the per-request timeout and reads at most maxAnswer bytes.
@@ -239,6 +242,11 @@ func (c *Client) tokenLocked(ctx context.Context) (string, error) {
 		var ne net.Error
 		if ctx.Err() == nil && (errors.Is(err, context.DeadlineExceeded) || errors.As(err, &ne) && ne.Timeout()) {
 			return "", fmt.Errorf("%w (%v)", ErrNoToken, err)
+		}
+		var se *statusError
+		if errors.As(err, &se) {
+			// Never a statusError a caller could match: no answer from the token PUT is a path's.
+			return "", fmt.Errorf("aws: metadata token: HTTP %d (is something other than the EC2 metadata service answering on its address?)", se.status)
 		}
 		return "", err
 	}

@@ -30,6 +30,8 @@ type fakeIMDS struct {
 	// expireNext answers the next GET with 401 (the token expired).
 	expireNext bool
 	token      string
+	// tokenStatus, when set, answers every token PUT with that status (not AWS on the address).
+	tokenStatus int
 }
 
 func newFakeIMDS(t *testing.T) (*fakeIMDS, *httptest.Server) {
@@ -57,6 +59,10 @@ func (f *fakeIMDS) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		if r.Header.Get("X-aws-ec2-metadata-token-ttl-seconds") != "21600" {
 			http.Error(w, "ttl", http.StatusBadRequest)
+			return
+		}
+		if f.tokenStatus != 0 {
+			http.Error(w, "No such instance on this host", f.tokenStatus)
 			return
 		}
 		f.tokens++
@@ -264,6 +270,24 @@ func TestNotFoundIsErrNotFound(t *testing.T) {
 	_, err := c.Get(context.Background(), "/latest/meta-data/spot/instance-action")
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err %v", err)
+	}
+}
+
+// A 404 on the token PUT is not AWS answering (bcd's own guest metadata service bound on the address
+// answers one): it must never read as "this path does not exist".
+func TestTokenNotFoundIsNotErrNotFound(t *testing.T) {
+	f, srv := newFakeIMDS(t)
+	f.tokenStatus = http.StatusNotFound
+	c := ec2Client(t, srv)
+	_, err := c.Get(context.Background(), "/latest/meta-data/instance-life-cycle")
+	if err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("err %v, want a token failure that is not ErrNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "token") || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("err %q names neither the token nor the status", err)
+	}
+	if _, err := c.optional(context.Background(), "/latest/meta-data/instance-life-cycle"); err == nil {
+		t.Fatal("optional() turned a token 404 into an empty value")
 	}
 }
 

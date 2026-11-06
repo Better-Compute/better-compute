@@ -2,6 +2,7 @@ package aws
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -167,5 +168,63 @@ func TestWatchSpotReportsAMalformedNoticeOnce(t *testing.T) {
 	defer mu.Unlock()
 	if len(seen) != 1 || seen[0] == nil || seen[0].Action != "stop" || seen[0].Unparsed == nil {
 		t.Fatalf("notices %v, want one estimated stop", seen)
+	}
+}
+
+// A token PUT that answers 404 is a failed read, not "no notice": SpotAction errs and WatchSpot
+// keeps the standing notice (fail closed; withdrawing it would clear NoSchedule on a node about to
+// be terminated).
+func TestSpotTokenNotFoundKeepsTheNotice(t *testing.T) {
+	f, srv := newFakeIMDS(t)
+	c := ec2Client(t, srv)
+	f.paths[spotPath] = `{"action":"terminate","time":"2026-11-05T10:02:00Z"}`
+	if n, err := c.SpotAction(context.Background()); err != nil || n == nil {
+		t.Fatalf("notice %v %v", n, err)
+	}
+	f.mu.Lock()
+	f.expireNext, f.tokenStatus = true, http.StatusNotFound
+	f.mu.Unlock()
+	if n, err := c.SpotAction(context.Background()); err == nil || n != nil {
+		t.Fatalf("after a token 404: notice %v, error %v; want an error", n, err)
+	}
+
+	f2, srv2 := newFakeIMDS(t)
+	c2 := ec2Client(t, srv2)
+	f2.paths[spotPath] = `{"action":"terminate","time":"2026-11-05T10:02:00Z"}`
+	var mu sync.Mutex
+	var seen []*SpotNotice
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		c2.WatchSpot(ctx, 5*time.Millisecond, func(n *SpotNotice) {
+			mu.Lock()
+			seen = append(seen, n)
+			mu.Unlock()
+		})
+		close(done)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		got := len(seen)
+		mu.Unlock()
+		if got >= 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no notice")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	f2.mu.Lock()
+	f2.expireNext, f2.tokenStatus = true, http.StatusNotFound
+	f2.mu.Unlock()
+	time.Sleep(60 * time.Millisecond)
+	cancel()
+	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 1 || seen[0] == nil || seen[0].Action != "terminate" {
+		t.Fatalf("notices %v, want the terminate notice kept", seen)
 	}
 }
