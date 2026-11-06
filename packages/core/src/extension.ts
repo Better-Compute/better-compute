@@ -917,6 +917,189 @@ export interface ProviderAddresses {
   ): Promise<ProviderResourceState>;
 }
 
+/** (edge) One forwarding rule of a load balancer: traffic arriving on `entry*` goes to each target's `target*`. */
+export interface ProviderLoadBalancerRule {
+  entryProtocol: 'http' | 'https' | 'http2' | 'tcp' | 'udp';
+  entryPort: number;
+  targetProtocol: 'http' | 'https' | 'http2' | 'tcp' | 'udp';
+  targetPort: number;
+  /** An `https`/`http2` entry terminates TLS with this certificate (an id `ProviderCertificates` returned). */
+  certificate?: string;
+  /** An `https` entry passes TLS through to the targets untouched (no certificate). */
+  tlsPassthrough?: boolean;
+}
+
+/** (edge) How a load balancer checks its targets. Absent fields take the provider's defaults. */
+export interface ProviderLoadBalancerHealthCheck {
+  protocol: 'http' | 'https' | 'tcp';
+  port: number;
+  /** `http`/`https` only: the path asked for (default `/`). */
+  path?: string;
+  intervalSeconds?: number;
+  timeoutSeconds?: number;
+  healthyThreshold?: number;
+  unhealthyThreshold?: number;
+}
+
+/**
+ * (edge) A load balancer as vps asks for it. `name` is the provider-side name vps derives; a retried ensure finds
+ * the load balancer its first attempt made by it (or by `id`).
+ *
+ * Targets are explicit: `machines` (a `regional` load balancer's machine ids, all in its region) or `loadBalancers`
+ * (a `global` one's regional load balancers, by the ids `ensureLoadBalancer` returned). vps re-ensures with the new
+ * list when a pool's membership changes. A provider only targets machines that belong to an instance of this
+ * deployment, and load balancers it made, so a load balancer never reaches another tenant's machines.
+ */
+export interface ProviderLoadBalancerSpec {
+  name: string;
+  /** `regional`: in `region`, in front of machines. `global`: anycast, in front of regional load balancers. */
+  scope: 'regional' | 'global';
+  /** `regional` only, and required there. */
+  region?: string;
+  /** At least one. */
+  forwarding: readonly ProviderLoadBalancerRule[];
+  healthCheck?: ProviderLoadBalancerHealthCheck;
+  targets: { machines?: readonly string[]; loadBalancers?: readonly string[] };
+  /** Pins a client to one target by a cookie. Absent: none. */
+  stickySessions?: { cookieName: string; ttlSeconds: number };
+  /** Source CIDRs. With `allow`, only those connect; `deny` always wins. */
+  sourceRanges?: { allow?: readonly string[]; deny?: readonly string[] };
+  /** Answers plain `http` with a redirect to `https`. */
+  redirectHttpToHttps?: boolean;
+  /** `regional` only: the provider network and subnet the load balancer and its targets are on. */
+  network?: { network: string; subnet?: string };
+  /** `regional` only: an address reachable only on `network`. */
+  internal?: boolean;
+  /** `global` only: the host names it serves, each with the certificate it terminates TLS with. */
+  domains?: readonly { name: string; certificate?: string }[];
+  /**
+   * The id an earlier ensure of this load balancer returned. A provider whose names are not unique finds it by this
+   * first; a load balancer at that id that is not this one is `INVALID_STATE` (reason `notManaged`).
+   */
+  id?: string;
+}
+
+/**
+ * (edge) Load balancers on a provider account, idempotent and non-blocking like `ProviderVolumes`: `ensure` reports
+ * `pending` while the provider provisions one and `ready` once it serves. Outputs: `scope`, `region` (regional),
+ * `address` (its public or internal IPv4, once assigned) and `addressV6` (where it has one). `ensureLoadBalancer`
+ * changes `forwarding`, `healthCheck`, `targets`, `stickySessions`, `sourceRanges`, `redirectHttpToHttps` and
+ * `domains` in place (`updating` while the provider applies it); a different `scope`, `region`, `network` or
+ * `internal` is `INVALID_STATE` (reason `replace`). A target machine in another region is `INVALID_INPUT`; one that
+ * is not an instance of this deployment, or a load balancer the provider did not make, is `INVALID_STATE`. A provider
+ * only deletes load balancers it made for this deployment (`INVALID_STATE`, reason `notManaged`).
+ */
+export interface ProviderLoadBalancers {
+  ensureLoadBalancer(
+    spec: ProviderLoadBalancerSpec,
+    context: CallContext,
+  ): Promise<ProviderResourceState>;
+  /** The load balancer as it is; undefined when it does not exist. */
+  getLoadBalancer(id: string, context: CallContext): Promise<ProviderResourceState | undefined>;
+  /** The load balancer named `name` this deployment made, without creating one (as `ProviderVolumes.findVolume`). */
+  findLoadBalancer?(name: string, context: CallContext): Promise<ProviderResourceState | undefined>;
+  deleteLoadBalancer(id: string, context: CallContext): Promise<ProviderResourceState>;
+}
+
+/** (edge) A DNS zone as vps asks for it: `name` is the domain (`example.com`), lowercase, without a final dot. */
+export interface ProviderDnsZoneSpec {
+  name: string;
+  /**
+   * Takes over a zone that already exists on the account and was not made by this deployment. An adopted zone's
+   * records are changed only where vps made them, and the zone itself is never deleted by `deleteZone`. Without it, a
+   * foreign zone is `CONFLICT` (reason `zoneExists`).
+   */
+  adopt?: boolean;
+}
+
+/** (edge) One DNS record in a zone. */
+export interface ProviderDnsRecordSpec {
+  /** Relative to the zone: `@` is the apex, `www` is `www.<zone>`. */
+  name: string;
+  type: 'A' | 'AAAA' | 'CNAME' | 'TXT' | 'MX' | 'SRV' | 'CAA' | 'NS';
+  /** An address (`A`/`AAAA`), a host name (`CNAME`/`MX`/`SRV`/`NS`, absolute with a final dot), text (`TXT`/`CAA`). */
+  data: string;
+  ttlSeconds?: number;
+  /** `MX` and `SRV`. */
+  priority?: number;
+  /** `SRV`. */
+  port?: number;
+  /** `SRV`. */
+  weight?: number;
+  /** `CAA`: the flags byte. */
+  flags?: number;
+  /** `CAA`: `issue`, `issuewild` or `iodef`. */
+  tag?: string;
+  /** The id an earlier `ensureRecord` of this record returned. */
+  id?: string;
+}
+
+/**
+ * (edge) DNS zones and records on a provider account. Every call is idempotent; DNS changes take effect when the call
+ * returns, so states are `ready` and `deleted`. A zone's id is its name; its outputs: `nameServers` (comma-separated)
+ * and `adopted` (`true` for a zone `adopt` took over). A record's outputs: `name`, `type`, `data`, `fqdn` and
+ * `ttlSeconds`. `ensureRecord` without `id` returns an existing record with the same name, type and data instead of
+ * making a second one; with `id`, it changes `data`, `ttlSeconds` and the type's own fields in place, and a record at
+ * that id with another name or type is `INVALID_STATE`. A provider never deletes a zone it did not make
+ * (`INVALID_STATE`, reason `notManaged`), and never touches the records it keeps for itself.
+ */
+export interface ProviderDns {
+  ensureZone(spec: ProviderDnsZoneSpec, context: CallContext): Promise<ProviderResourceState>;
+  getZone(zone: string, context: CallContext): Promise<ProviderResourceState | undefined>;
+  deleteZone(zone: string, context: CallContext): Promise<ProviderResourceState>;
+  ensureRecord(
+    zone: string,
+    spec: ProviderDnsRecordSpec,
+    context: CallContext,
+  ): Promise<ProviderResourceState>;
+  getRecord(
+    zone: string,
+    id: string,
+    context: CallContext,
+  ): Promise<ProviderResourceState | undefined>;
+  /** With `expected`, a record at `id` with another name or type is refused (`INVALID_STATE`), never deleted. */
+  deleteRecord(
+    zone: string,
+    id: string,
+    context: CallContext,
+    expected?: { name: string; type: ProviderDnsRecordSpec['type'] },
+  ): Promise<ProviderResourceState>;
+}
+
+/**
+ * (edge) A TLS certificate as vps asks for it. `managed`: the provider issues and renews it for `domains` (on
+ * DigitalOcean, only names in a zone it hosts). `custom`: PEMs the tenant uploads, as secret references resolved
+ * just in time and never stored or returned by the provider.
+ */
+export interface ProviderCertificateSpec {
+  name: string;
+  kind: 'managed' | 'custom';
+  /** `managed`: the names it covers (at least one; `*.example.com` for a wildcard). */
+  domains?: readonly string[];
+  /** `custom`: the leaf certificate, PEM. */
+  certificate?: SecretRef;
+  /** `custom`: its private key, PEM. */
+  privateKey?: SecretRef;
+  /** `custom`: the intermediate chain, PEM. */
+  chain?: SecretRef;
+}
+
+/**
+ * (edge) TLS certificates on a provider account, for load balancers. A certificate is immutable: `ensureCertificate`
+ * returns the one named `name` when it matches the spec and is `INVALID_STATE` (reason `replace`) when its kind or
+ * names differ. A `managed` certificate is `pending` until issued. Outputs: `kind`, `domains` (comma-separated),
+ * `notAfter` (ISO 8601, once issued) and `fingerprint` (SHA-1, hex). A provider only deletes certificates it made for
+ * this deployment (`INVALID_STATE`, reason `notManaged`); one a load balancer still uses is `CONFLICT`.
+ */
+export interface ProviderCertificates {
+  ensureCertificate(
+    spec: ProviderCertificateSpec,
+    context: CallContext,
+  ): Promise<ProviderResourceState>;
+  getCertificate(id: string, context: CallContext): Promise<ProviderResourceState | undefined>;
+  deleteCertificate(id: string, context: CallContext): Promise<ProviderResourceState>;
+}
+
 /**
  * (kubernetes) A managed Kubernetes cluster as the kubernetes module asks for it. The provider runs the control plane
  * (GKE, DOKS); better-compute never does. `name` is the provider-side name the module derives (`bc-k-…`).
@@ -1198,6 +1381,12 @@ export interface ProviderImpl {
   volumes?: ProviderVolumes;
   /** (provider addresses) Reserved public addresses on this account. */
   addresses?: ProviderAddresses;
+  /** (edge) Load balancers on this account. */
+  loadBalancers?: ProviderLoadBalancers;
+  /** (edge) DNS zones and records on this account. */
+  dns?: ProviderDns;
+  /** (edge) TLS certificates on this account, for load balancers. */
+  certificates?: ProviderCertificates;
   /**
    * (v1.0, D10) The account's billed cost rows whose usage started in `[window.from, window.to)`.
    * Read outside any transaction. A provider whose export is not configured leaves it absent.

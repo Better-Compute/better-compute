@@ -9,6 +9,7 @@ import {
   type ProviderDefinition,
   type ProviderImpl,
   type ProviderResourceState,
+  type SecretRef,
 } from '@better-compute/core';
 import {
   check,
@@ -57,6 +58,16 @@ export interface ProviderConformanceSubject {
    * `attempts` times (default 30), `intervalMs` apart (default 0; a live run sets a few seconds).
    */
   settle?: { attempts?: number; intervalMs?: number };
+  /**
+   * (edge) A DNS zone the subject may create and delete (a test domain the account can host). The DNS case is
+   * skipped without it.
+   */
+  dnsZone?: string;
+  /**
+   * (edge) Secret references to a PEM certificate and key `context.secrets` resolves, for the custom certificate
+   * case; it is skipped without them.
+   */
+  certificate?: { certificate: SecretRef; privateKey: SecretRef; chain?: SecretRef };
 }
 
 const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -734,6 +745,301 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
             await addresses.deleteAddress(addressId, call('addr-cleanup')).catch(() => {});
           }
           await cleanUp(impl, call, machine.id);
+        }
+      },
+    },
+    {
+      name: 'load balancers (when offered): a regional one in front of a machine, changed in place, deleted',
+      async run(subject) {
+        const probe = await client(subject);
+        if (!probe.impl.loadBalancers) return;
+        const { impl, call, machine } = await create(subject, key(subject, 'lb-host'));
+        const lbs = impl.loadBalancers!;
+        let lbId: string | undefined;
+        try {
+          const region = regionOf(subject, machine);
+          const spec = {
+            name: key(subject, 'lb'),
+            scope: 'regional' as const,
+            region,
+            forwarding: [
+              { entryProtocol: 'http', entryPort: 80, targetProtocol: 'http', targetPort: 80 },
+            ] as const,
+            healthCheck: { protocol: 'tcp' as const, port: 80 },
+            targets: { machines: [machine.id] },
+          };
+          const made = await settle(
+            subject,
+            () => lbs.ensureLoadBalancer(spec, call('lb-ensure')),
+            ['ready'],
+            'ensureLoadBalancer',
+          );
+          const id = made.id;
+          lbId = id;
+          checkEqual(made.outputs?.scope, 'regional', 'a load balancer reports its scope');
+          checkEqual(made.outputs?.region, region, 'a regional load balancer reports its region');
+          const again = await lbs.ensureLoadBalancer({ ...spec, id }, call('lb-ensure-again'));
+          checkEqual(again.id, id, 'ensuring again returns the same load balancer');
+          const byName = await lbs.ensureLoadBalancer(spec, call('lb-ensure-by-name'));
+          checkEqual(byName.id, id, 'ensuring by name alone returns the same load balancer');
+          const changed = await settle(
+            subject,
+            () =>
+              lbs.ensureLoadBalancer(
+                {
+                  ...spec,
+                  id,
+                  forwarding: [
+                    {
+                      entryProtocol: 'http',
+                      entryPort: 8080,
+                      targetProtocol: 'http',
+                      targetPort: 80,
+                    },
+                  ],
+                },
+                call('lb-change'),
+              ),
+            ['ready'],
+            'ensureLoadBalancer (changed forwarding)',
+          );
+          checkEqual(changed.id, id, 'a forwarding change keeps the load balancer');
+          await checkRejects(
+            () =>
+              lbs.ensureLoadBalancer(
+                { ...spec, id, internal: true },
+                call('lb-change-internal'),
+              ),
+            'INVALID_STATE',
+            'making a public load balancer internal in place',
+          );
+          checkResource(await lbs.getLoadBalancer(id, call('lb-get')), 'getLoadBalancer');
+          await settle(
+            subject,
+            () => lbs.deleteLoadBalancer(id, call('lb-delete')),
+            ['deleted'],
+            'deleteLoadBalancer',
+          );
+          lbId = undefined;
+          checkEqual(
+            (await lbs.deleteLoadBalancer(id, call('lb-delete-again'))).state,
+            'deleted',
+            'deleting a deleted load balancer counts as deleted',
+          );
+          const gone = await lbs.getLoadBalancer(id, call('lb-get-deleted'));
+          check(
+            gone === undefined || gone.state === 'deleting' || gone.state === 'deleted',
+            'getLoadBalancer after delete finds nothing live',
+          );
+        } finally {
+          if (lbId !== undefined)
+            await lbs.deleteLoadBalancer(lbId, call('lb-cleanup')).catch(() => {});
+          await cleanUp(impl, call, machine.id);
+        }
+      },
+    },
+    {
+      name: 'load balancers (when offered): a target machine in another region is INVALID_INPUT',
+      async run(subject) {
+        const probe = await client(subject);
+        if (!probe.impl.loadBalancers || subject.otherRegionOfferId === undefined) return;
+        const { impl, call, machine } = await create(subject, key(subject, 'lb-region-host'));
+        const lbs = impl.loadBalancers!;
+        let foreign: ExternalMachine | undefined;
+        try {
+          foreign = await impl.create(
+            {
+              offerId: subject.otherRegionOfferId,
+              image: subject.image,
+              userData: '#cloud-config\n',
+              name: key(subject, 'lb-region-foreign'),
+            },
+            call(key(subject, 'lb-region-foreign')),
+          );
+          const region = regionOf(subject, machine);
+          const other = foreign;
+          check(
+            other.region === undefined || other.region !== region,
+            'the other-region offer made a machine in another region',
+          );
+          await checkRejects(
+            () =>
+              lbs.ensureLoadBalancer(
+                {
+                  name: key(subject, 'lb-region'),
+                  scope: 'regional',
+                  region,
+                  forwarding: [
+                    { entryProtocol: 'tcp', entryPort: 80, targetProtocol: 'tcp', targetPort: 80 },
+                  ],
+                  targets: { machines: [other.id] },
+                },
+                call('lb-region-ensure'),
+              ),
+            'INVALID_INPUT',
+            'a load balancer targeting a machine in another region',
+          );
+        } finally {
+          if (foreign) await cleanUp(impl, call, foreign.id);
+          await cleanUp(impl, call, machine.id);
+        }
+      },
+    },
+    {
+      name: 'dns (when offered): a zone, a record found by name, type and data, changed in place, deleted',
+      async run(subject) {
+        const probe = await client(subject);
+        if (!probe.impl.dns || subject.dnsZone === undefined) return;
+        const { impl, call } = probe;
+        const dns = impl.dns!;
+        const zoneName = subject.dnsZone;
+        let zone: string | undefined;
+        let recordId: string | undefined;
+        try {
+          const made = await dns.ensureZone({ name: zoneName }, call('dns-zone'));
+          checkResource(made, 'ensureZone');
+          checkEqual(made.state, 'ready', 'a zone is ready when ensureZone returns');
+          zone = made.id;
+          checkEqual(
+            (await dns.ensureZone({ name: zoneName }, call('dns-zone-again'))).id,
+            zone,
+            'ensuring a zone again returns the same zone',
+          );
+          const spec = {
+            name: key(subject, 'rec'),
+            type: 'A' as const,
+            data: '192.0.2.10',
+            ttlSeconds: 300,
+          };
+          const record = await dns.ensureRecord(zone, spec, call('dns-record'));
+          checkResource(record, 'ensureRecord');
+          checkEqual(record.state, 'ready', 'a record is ready when ensureRecord returns');
+          const id = record.id;
+          recordId = id;
+          checkEqual(record.outputs?.data, '192.0.2.10', 'a record reports its data');
+          checkEqual(
+            (await dns.ensureRecord(zone, spec, call('dns-record-again'))).id,
+            id,
+            'ensuring the same name, type and data again returns the same record',
+          );
+          const changed = await dns.ensureRecord(
+            zone,
+            { ...spec, id, data: '192.0.2.11' },
+            call('dns-record-change'),
+          );
+          checkEqual(changed.id, id, 'a data change keeps the record');
+          checkEqual(
+            (await dns.getRecord(zone, id, call('dns-record-get')))?.outputs?.data,
+            '192.0.2.11',
+            'the record reports its new data',
+          );
+          await checkRejects(
+            () =>
+              dns.ensureRecord(
+                zone!,
+                { ...spec, id, name: key(subject, 'rec-other') },
+                call('dns-record-rename'),
+              ),
+            'INVALID_STATE',
+            'ensuring a record id under another name',
+          );
+          await checkRejects(
+            () =>
+              dns.deleteRecord(zone!, id, call('dns-record-delete-other'), {
+                name: spec.name,
+                type: 'AAAA',
+              }),
+            'INVALID_STATE',
+            'deleting a record that is not the one expected',
+          );
+          checkEqual(
+            (
+              await dns.deleteRecord(zone, id, call('dns-record-delete'), {
+                name: spec.name,
+                type: 'A',
+              })
+            ).state,
+            'deleted',
+            'deleteRecord',
+          );
+          recordId = undefined;
+          checkEqual(
+            (await dns.deleteRecord(zone, id, call('dns-record-delete-again'))).state,
+            'deleted',
+            'deleting a deleted record counts as deleted',
+          );
+          checkEqual(
+            (await dns.deleteZone(zone, call('dns-zone-delete'))).state,
+            'deleted',
+            'deleteZone',
+          );
+          zone = undefined;
+          checkEqual(
+            (await dns.deleteZone(zoneName, call('dns-zone-delete-again'))).state,
+            'deleted',
+            'deleting a deleted zone counts as deleted',
+          );
+        } finally {
+          if (zone !== undefined) {
+            if (recordId !== undefined)
+              await dns.deleteRecord(zone, recordId, call('dns-cleanup-record')).catch(() => {});
+            await dns.deleteZone(zone, call('dns-cleanup-zone')).catch(() => {});
+          }
+        }
+      },
+    },
+    {
+      name: 'certificates (when offered): a custom certificate by name, deleted idempotently',
+      async run(subject) {
+        const probe = await client(subject);
+        if (!probe.impl.certificates || subject.certificate === undefined) return;
+        const { impl, call } = probe;
+        const certificates = impl.certificates!;
+        const spec = {
+          name: key(subject, 'cert'),
+          kind: 'custom' as const,
+          certificate: subject.certificate.certificate,
+          privateKey: subject.certificate.privateKey,
+          ...(subject.certificate.chain !== undefined ? { chain: subject.certificate.chain } : {}),
+        };
+        let certId: string | undefined;
+        try {
+          const made = await settle(
+            subject,
+            () => certificates.ensureCertificate(spec, call('cert-ensure')),
+            ['ready'],
+            'ensureCertificate',
+          );
+          certId = made.id;
+          checkEqual(made.outputs?.kind, 'custom', 'a certificate reports its kind');
+          check(
+            typeof made.outputs?.fingerprint === 'string' && made.outputs.fingerprint !== '',
+            'a certificate reports its fingerprint',
+          );
+          check(
+            !Object.values(made.outputs ?? {}).some((value) => value.includes('PRIVATE KEY')),
+            'a certificate never reports its key',
+          );
+          checkEqual(
+            (await certificates.ensureCertificate(spec, call('cert-ensure-again'))).id,
+            made.id,
+            'ensuring the same certificate again returns it',
+          );
+          await settle(
+            subject,
+            () => certificates.deleteCertificate(made.id, call('cert-delete')),
+            ['deleted'],
+            'deleteCertificate',
+          );
+          certId = undefined;
+          checkEqual(
+            (await certificates.deleteCertificate(made.id, call('cert-delete-again'))).state,
+            'deleted',
+            'deleting a deleted certificate counts as deleted',
+          );
+        } finally {
+          if (certId !== undefined)
+            await certificates.deleteCertificate(certId, call('cert-cleanup')).catch(() => {});
         }
       },
     },
