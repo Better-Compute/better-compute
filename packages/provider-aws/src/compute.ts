@@ -31,6 +31,7 @@ import {
   reservationOffer,
   toReservation,
   usable,
+  unusableReservation,
   type CapacityReservationInfo,
 } from './markets/reservations.js';
 
@@ -493,16 +494,17 @@ export class AwsCompute implements ProviderImpl {
 
   async create(request: AwsCreateRequest, context: CallContext): Promise<ExternalMachine> {
     const offer = parseOfferId(request.offerId);
-    if (offer.reservation !== undefined || offer.market === 'spot')
-      throw new ComputeError(
-        'UNSUPPORTED',
-        'capacity reservation and spot offers arrive with AWS phase A3',
-        undefined,
-        {
-          provider: 'aws',
-          reason: 'phase-a3',
-        },
+    if (offer.market === 'spot' && offer.reservation !== undefined)
+      throw unusableReservation(
+        offer.reservation,
+        'cannot take a Spot launch',
+        'capacity-reservation',
       );
+    if (offer.market === 'spot')
+      throw new ComputeError('UNSUPPORTED', 'spot offers arrive with AWS phase A3', undefined, {
+        provider: 'aws',
+        reason: 'phase-a3',
+      });
     if (!this.config.zones.includes(offer.zone))
       throw new ComputeError(
         'INVALID_INPUT',
@@ -514,6 +516,10 @@ export class AwsCompute implements ProviderImpl {
         },
       );
     const { signal } = context;
+    const target =
+      offer.reservation === undefined
+        ? undefined
+        : await this.#launchTarget(offer.reservation, offer, signal);
     const info = (await this.#types([offer.instanceType], signal)).get(offer.instanceType);
     if (!info)
       throw new ComputeError(
@@ -575,6 +581,14 @@ export class AwsCompute implements ProviderImpl {
         : undefined,
       InstanceInitiatedShutdownBehavior: 'stop',
       TagSpecification: this.#tagSpecifications(request, context),
+      ...(target
+        ? {
+            CapacityReservationSpecification: {
+              CapacityReservationTarget: { CapacityReservationId: target.capacityReservationId },
+            },
+            ...(target.block ? { InstanceMarketOptions: { MarketType: 'capacity-block' } } : {}),
+          }
+        : {}),
     };
     const doc = await this.call('RunInstances', params, signal);
     const instance = doc.items('instancesSet')[0];
@@ -585,6 +599,52 @@ export class AwsCompute implements ProviderImpl {
       });
     if (!this.recent(this.#created, id)) this.#created.set(id, this.context.clock.now());
     return this.machine(instance, signal);
+  }
+
+  /**
+   * The reservation an `@cr-…` offer launches into, read fresh: it must exist, be usable, active,
+   * and hold the offer's type in the offer's zone. A Capacity Block launch needs
+   * MarketType=capacity-block, which only the read can tell.
+   */
+  async #launchTarget(
+    id: string,
+    offer: { zone: string; instanceType: string; market: 'on-demand' | 'spot' },
+    signal: AbortSignal,
+  ): Promise<CapacityReservationInfo> {
+    if (offer.market === 'spot')
+      throw unusableReservation(id, 'cannot take a Spot launch', 'capacity-reservation');
+    let found: CapacityReservationInfo | undefined;
+    try {
+      [found] = await this.capacityReservations(signal, [id]);
+    } catch (error) {
+      if (!isComputeError(error, 'NOT_FOUND')) throw error;
+    }
+    if (!found || found.capacityReservationId !== id)
+      throw unusableReservation(
+        id,
+        `does not exist in ${this.config.region}`,
+        'capacity-reservation',
+      );
+    if (!usable(found, this.config.zones))
+      throw unusableReservation(
+        id,
+        'is not a Linux/UNIX, default-tenancy reservation in one of the account zones',
+        'capacity-reservation',
+      );
+    if (found.instanceType !== offer.instanceType || found.zone !== offer.zone)
+      throw unusableReservation(
+        id,
+        `holds ${found.instanceType} in ${found.zone}, not ${offer.instanceType} in ${offer.zone}`,
+        'capacity-reservation',
+      );
+    if (found.state !== 'active')
+      throw new ComputeError(
+        'CAPACITY_UNAVAILABLE',
+        `capacity reservation ${id} is ${found.state}, not active`,
+        undefined,
+        { provider: 'aws', reason: 'reservation-not-active', state: found.state },
+      );
+    return found;
   }
 
   /** The instance item by id; undefined when EC2 says it does not exist. */

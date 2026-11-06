@@ -207,7 +207,8 @@ export class CapacityEmulator {
       'CapacityReservationSpecification.CapacityReservationTarget.CapacityReservationId',
     );
     if (target) instance.capacityReservationId = target;
-    if (p.get('InstanceMarketOptions.MarketType') === 'spot') instance.lifecycle = 'spot';
+    const market = p.get('InstanceMarketOptions.MarketType');
+    if (market === 'spot' || market === 'capacity-block') instance.lifecycle = market;
   }
 
   /** The time the emulator sees (for reservations relative to now). */

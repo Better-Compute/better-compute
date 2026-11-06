@@ -193,3 +193,99 @@ describe('capacity reservations', () => {
     ).toBe(true);
   });
 });
+
+const createRequest = (offerId: string) => ({
+  offerId,
+  image: 'ami-0123456789abcdef0',
+  userData: '#!/bin/sh\ntrue\n',
+  name: 'vm-1',
+});
+
+describe('launches into reservations', () => {
+  it('reservation offers set the capacity reservation target', async () => {
+    const w = world();
+    w.capacity.add({ id: 'cr-0aaaaaaaaaaaaaaa1', type: 'm7i.large', total: 1 });
+    const machine = await w.compute.create(
+      createRequest('us-east-1a/m7i.large@cr-0aaaaaaaaaaaaaaa1'),
+      w.call('ins_1'),
+    );
+    const run = w.emu.calls('RunInstances')[0]!.params;
+    expect(
+      run.get('CapacityReservationSpecification.CapacityReservationTarget.CapacityReservationId'),
+    ).toBe('cr-0aaaaaaaaaaaaaaa1');
+    expect(run.get('InstanceMarketOptions.MarketType')).toBeNull();
+    expect(machine).toMatchObject({
+      reservation: 'cr-0aaaaaaaaaaaaaaa1',
+      market: 'reserved',
+      offerId: 'us-east-1a/m7i.large@cr-0aaaaaaaaaaaaaaa1',
+    });
+    // A retried create is the same launch (same ClientToken and parameters).
+    await w.compute.create(
+      createRequest('us-east-1a/m7i.large@cr-0aaaaaaaaaaaaaaa1'),
+      w.call('ins_1'),
+    );
+    expect(w.ec2emu.instances.size).toBe(1);
+    // The reservation is full now: EC2 refuses, and that is CAPACITY_UNAVAILABLE.
+    await expect(
+      w.compute.create(createRequest('us-east-1a/m7i.large@cr-0aaaaaaaaaaaaaaa1'), w.call('ins_2')),
+    ).rejects.toMatchObject({ code: 'CAPACITY_UNAVAILABLE' });
+  });
+
+  it('capacity block launches set the market type', async () => {
+    const w = world();
+    w.capacity.add({
+      id: 'cr-0bbbbbbbbbbbbbbb2',
+      type: 'p5.48xlarge',
+      reservationType: 'capacity-block',
+      total: 1,
+      end: w.emu.now() + 24 * HOUR,
+    });
+    const machine = await w.compute.create(
+      createRequest('us-east-1a/p5.48xlarge@cr-0bbbbbbbbbbbbbbb2'),
+      w.call('ins_1'),
+    );
+    const run = w.emu.calls('RunInstances')[0]!.params;
+    expect(run.get('InstanceMarketOptions.MarketType')).toBe('capacity-block');
+    expect(
+      run.get('CapacityReservationSpecification.CapacityReservationTarget.CapacityReservationId'),
+    ).toBe('cr-0bbbbbbbbbbbbbbb2');
+    expect(machine).toMatchObject({
+      reservation: 'cb:cr-0bbbbbbbbbbbbbbb2',
+      market: 'capacity-block',
+    });
+    const read = await w.compute.get(machine.id, w.call('ins_1'));
+    expect(read).toMatchObject({
+      reservation: 'cb:cr-0bbbbbbbbbbbbbbb2',
+      market: 'capacity-block',
+    });
+  });
+
+  it('refuses a reservation it cannot launch into, before RunInstances', async () => {
+    const w = world();
+    w.capacity.add({ id: 'cr-0aaaaaaaaaaaaaaa1', type: 'm7i.large', state: 'scheduled' });
+    w.capacity.add({ id: 'cr-0bbbbbbbbbbbbbbb2', type: 'm7i.large', platform: 'Windows' });
+    w.capacity.add({ id: 'cr-0ccccccccccccccc3', type: 'g6.xlarge' });
+    const attempt = (offer: string) => w.compute.create(createRequest(offer), w.call('ins_x'));
+    await expect(attempt('us-east-1a/m7i.large@cr-0aaaaaaaaaaaaaaa1')).rejects.toMatchObject({
+      code: 'CAPACITY_UNAVAILABLE',
+      details: { reason: 'reservation-not-active' },
+    });
+    await expect(attempt('us-east-1a/m7i.large@cr-0bbbbbbbbbbbbbbb2')).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      details: { reason: 'capacity-reservation' },
+    });
+    // The offer names another type than the reservation holds.
+    await expect(attempt('us-east-1a/m7i.large@cr-0ccccccccccccccc3')).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      details: { reason: 'capacity-reservation' },
+    });
+    await expect(attempt('us-east-1a/m7i.large@cr-0ddddddddddddddd4')).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      details: { reason: 'capacity-reservation' },
+    });
+    await expect(attempt('us-east-1a/m7i.large@cr-0ccccccccccccccc3:spot')).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+    expect(w.emu.calls('RunInstances')).toHaveLength(0);
+  });
+});

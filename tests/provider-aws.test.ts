@@ -493,12 +493,10 @@ describe('compute', () => {
     expect(error.code).toBe('INVALID_INPUT');
   });
 
-  it('reservation and spot offers are UNSUPPORTED until A3', async () => {
+  // Reservation launches: tests/provider-aws-capacity.test.ts.
+  it('spot offers are UNSUPPORTED until A3', async () => {
     const { create, emu } = await providerWorld();
-    for (const offerId of [
-      'us-east-1a/p5.48xlarge@cr-0123456789abcdef0',
-      'us-east-1a/t3.micro:spot',
-    ]) {
+    for (const offerId of ['us-east-1a/t3.micro:spot']) {
       const error = await rejection(() => create('ins_a3', { offerId }));
       expect(error.code).toBe('UNSUPPORTED');
       expect(error.details?.reason).toBe('phase-a3');

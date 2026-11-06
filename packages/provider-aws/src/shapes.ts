@@ -193,8 +193,20 @@ export function toMachine(
   const id = instance.textOf('instanceId') ?? '';
   const type = instance.textOf('instanceType');
   const zone = instance.child('placement')?.textOf('availabilityZone');
-  const reservation = instance.textOf('capacityReservationId');
-  const spot = instance.textOf('instanceLifecycle') === 'spot';
+  const capacityReservation = instance.textOf('capacityReservationId');
+  const lifecycle = instance.textOf('instanceLifecycle');
+  const spot = lifecycle === 'spot';
+  const block = lifecycle === 'capacity-block';
+  // vps knows a Capacity Block as cb:cr-… (markets/reservations.ts); the offer id names the cr-… itself.
+  const reservation =
+    capacityReservation && block ? `cb:${capacityReservation}` : capacityReservation;
+  const market = spot
+    ? 'spot'
+    : block
+      ? 'capacity-block'
+      : capacityReservation
+        ? 'reserved'
+        : undefined;
   const tags: Record<string, string> = {};
   for (const item of instance.items('tagSet')) {
     const key = item.textOf('key');
@@ -237,7 +249,9 @@ export function toMachine(
     ...(name ? { name } : {}),
     state: machineState(instance.child('instanceState')?.textOf('name')),
     ...(zone && type
-      ? { offerId: `${zone}/${type}${reservation ? `@${reservation}` : ''}${spot ? ':spot' : ''}` }
+      ? {
+          offerId: `${zone}/${type}${capacityReservation ? `@${capacityReservation}` : ''}${spot ? ':spot' : ''}`,
+        }
       : {}),
     region: info.region,
     addresses,
@@ -250,5 +264,6 @@ export function toMachine(
     ...(reservation ? { reservation } : {}),
     ...(Number.isFinite(launched) ? { createdAt: launched } : {}),
     ...(claimedBy ? { claimedBy } : {}),
+    ...(market ? { market } : {}),
   };
 }

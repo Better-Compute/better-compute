@@ -39,7 +39,7 @@ export interface EmuInstance {
   groups: { id: string; name: string }[];
   terminationProtected: boolean;
   capacityReservationId?: string;
-  lifecycle?: 'spot';
+  lifecycle?: 'spot' | 'capacity-block';
   notFoundById: number;
   notFoundByToken: number;
   rootDevice: string;
