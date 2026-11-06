@@ -1,0 +1,247 @@
+---
+title: Kubernetes fleet pools
+metaTitle: GPU pools on GKE, EKS or DOKS from one FleetConfig document
+description: Back a GPU pool with a managed Kubernetes cluster on GKE, EKS or DOKS. The same FleetConfig document works on each; swap the provider account and keep the rest.
+icon: Kubernetes
+status: experimental
+packages: ['@better-compute/kubernetes', '@better-compute/fleet', '@better-compute/provider-kubernetes', '@better-compute/testing']
+sources:
+  - packages/kubernetes/README.md
+  - packages/kubernetes/src/substrate-policy.ts
+  - packages/kubernetes/src/substrates.ts
+  - packages/core/src/extension.ts
+  - packages/provider-gcp/src/gke/node-pools.ts
+  - packages/provider-aws/src/eks/node-groups.ts
+  - packages/provider-digitalocean/src/doks/node-pools.ts
+  - packages/testing/src/kubernetes-conformance.ts
+  - tests/support/fleet-pool-scenario.ts
+  - tests/kubernetes-provider-conformance.test.ts
+---
+
+A Kubernetes fleet pool is a GPU pool whose machines are the nodes of a managed Kubernetes cluster. The pool's
+`policy.substrate` names one of the owner's provider accounts and the node shapes it wants (flavors). The
+`kubernetes.substrates` reconciler then creates the cluster and its node pools at the provider, or adopts a cluster
+that already exists. It runs bcd on the nodes as a DaemonSet, and those nodes join the pool. From that point compute
+books their GPUs like any other pool's, with `binding: 'kubernetes'` reservations that bcd's device plugin hands to the
+kubelet.
+
+The provider runs the control plane. better-compute never runs one; it orchestrates GKE, EKS or DOKS through
+`ProviderImpl.kubernetes`. The pool substrate is provider-neutral: nothing in it is specific to Google, AWS or
+DigitalOcean. Only the provider account changes, along with the names that account uses for a region, a machine type
+and an accelerator.
+
+## Turn it on
+
+The substrate needs the vps and kubernetes modules, built with the same provider definitions, and an agent that says
+what to run on the cluster. Add `fleetModule()` to manage the pool as FleetConfig.
+
+```ts title="compute.ts"
+import { betterCompute } from 'better-compute/server';
+import { vps } from 'better-compute/vps';
+import { fleetModule } from 'better-compute/fleet';
+import { kubernetes } from '@better-compute/kubernetes';
+import { kubernetesSubstrateAgent } from '@better-compute/provider-kubernetes';
+import { awsProvider } from '@better-compute/provider-aws';
+import { digitaloceanProvider } from '@better-compute/provider-digitalocean';
+import { gcpProvider } from '@better-compute/provider-gcp';
+
+const providers = [gcpProvider(), awsProvider(), digitaloceanProvider()];
+
+export const compute = betterCompute({
+  // database, secret, baseURL, iam, ...
+  modules: [
+    vps({ providers }),
+    kubernetes({
+      providers,
+      // What runs bcd on the cluster: the DaemonSet options, except what the pool decides.
+      substrate: { agent: kubernetesSubstrateAgent({ image, gatewayUrl, pins, controlPlaneUrl }) },
+    }),
+    fleetModule(),
+  ],
+});
+```
+
+Without `substrate`, pools that declare `policy.substrate` stay in `error`, and `selfCheck` reports
+`kubernetes.substrate-agent-missing`.
+
+## One document, three providers
+
+The pool below asks for an 8 x H100 node pool of two nodes. Only `providerAccounts`, and what that account calls a
+region, a machine type and an accelerator, differ between providers.
+
+```json title="fleet.json"
+{
+  "version": 1,
+  "sites": [{ "name": "k8s", "kind": "shared", "region": "us-east-1" }],
+  "providerAccounts": [
+    {
+      "name": "managed-k8s",
+      "provider": "aws",
+      "config": {
+        "region": "us-east-1",
+        "zones": ["us-east-1a", "us-east-1b"],
+        "eksClusterRoleArn": "arn:aws:iam::111111111111:role/eks-cluster",
+        "eksNodeRoleArn": "arn:aws:iam::111111111111:role/eks-node",
+        "eksSubnetIds": ["subnet-0000000000000000a", "subnet-0000000000000000b"]
+      }
+    }
+  ],
+  "pools": [
+    {
+      "name": "gpu-fleet",
+      "site": "k8s",
+      "class": "metal-host",
+      "gpuModel": "H100",
+      "policy": {
+        "kubernetes": { "platformOperated": true },
+        "substrate": {
+          "kind": "kubernetes",
+          "account": "managed-k8s",
+          "cluster": { "create": { "location": "us-east-1" } },
+          "flavors": [
+            { "name": "h100", "machineType": "p5.48xlarge", "nodes": 2, "gpus": { "type": "nvidia-h100", "count": 8 } }
+          ]
+        }
+      }
+    }
+  ]
+}
+```
+
+<Tabs items={['GKE', 'EKS', 'DOKS']}>
+<Tab value="GKE">
+
+```json
+{ "name": "managed-k8s", "provider": "gcp", "config": { "projectId": "my-project", "zones": ["us-central1-a"] } }
+```
+
+Site region and `cluster.create.location`: `us-central1`. Flavor: `"machineType": "a3-highgpu-8g"`,
+`"gpus": { "type": "nvidia-h100-80gb", "count": 8 }`.
+
+</Tab>
+<Tab value="EKS">
+
+```json
+{
+  "name": "managed-k8s",
+  "provider": "aws",
+  "config": {
+    "region": "us-east-1",
+    "zones": ["us-east-1a", "us-east-1b"],
+    "eksClusterRoleArn": "arn:aws:iam::111111111111:role/eks-cluster",
+    "eksNodeRoleArn": "arn:aws:iam::111111111111:role/eks-node",
+    "eksSubnetIds": ["subnet-0000000000000000a", "subnet-0000000000000000b"]
+  }
+}
+```
+
+Site region and `cluster.create.location`: `us-east-1` (EKS clusters are regional; a zone is refused). Flavor:
+`"machineType": "p5.48xlarge"`, `"gpus": { "type": "nvidia-h100", "count": 8 }`. The accelerator must match the GPUs
+of the instance type, which EKS reads from EC2.
+
+</Tab>
+<Tab value="DOKS">
+
+```json
+{ "name": "managed-k8s", "provider": "digitalocean", "config": { "token": "secret://<tenant>/<id>", "regions": ["tor1"] } }
+```
+
+Site region and `cluster.create.location`: `tor1`. Flavor: `"machineType": "gpu-h100x8-640gb"`,
+`"gpus": { "type": "nvidia-h100", "count": 8 }`. The API token is a secret reference, never a value.
+
+</Tab>
+</Tabs>
+
+Apply it as any FleetConfig document (see [Fleet configuration](/docs/guides/fleet-config)):
+
+```sh
+better-compute fleet plan fleet.json
+better-compute fleet apply fleet.json
+```
+
+The account and the cluster's place (location, private nodes, or the adopted cluster's id) are the substrate's
+identity: a plan that changes them is blocked, so create a new pool instead. Sizing changes in place.
+
+## What happens
+
+1. **Cluster.** The substrate records an ordinary `kubernetesClusters` cluster (`substratePoolId` set) with one node
+   pool per flavor. Each node pool is labelled `better-compute.dev/substrate-pool=<pool id>`, and a Spot flavor's is
+   also labelled `better-compute.dev/capacity=spot`. The clusters reconciler creates them at the provider.
+2. **bcd.** Once the cluster is ready, each run mints a 600 s admin credential through the provider
+   (`ProviderKubernetes.credentials`), lists the substrate's Nodes and server-side applies bcd: a Namespace, a
+   ConfigMap and a DaemonSet that selects exactly the labelled Nodes. The credential is held in memory for that run
+   only. It is never stored, sealed, logged or published.
+3. **Join.** While Nodes are still to join, a hosted `kubernetes` join token sits in a Secret, with one use per Node
+   whose bcd is not connected. bcd's join container reads it, and each node joins the pool. Once every Node has
+   joined, the token is revoked and the Secret deleted.
+4. **Book.** Reservations with `binding: 'kubernetes'` book the nodes' GPUs. bcd's device plugin advertises only the
+   devices a reservation holds.
+5. **Scale.** Change a flavor's `nodes` in the document and apply. The provider removes Nodes. Each pool node is
+   matched to its Kubernetes Node by the Node name bcd reports. When a matched node is disconnected and its Node is
+   gone, its reservations end: bound ones are released with their quota refunded once, and Spot ones end as
+   `preempted`. Then the node is retired.
+6. **Teardown.** Remove the pool from the document and apply with `prune`, or archive the pool. The token is revoked
+   and the nodes are cordoned. The substrate waits for their bookings to end; nothing is force-released. Then it
+   removes bcd from the cluster (only objects carrying its label), deletes a created cluster and its node pools, and
+   retires the nodes. Nothing is left at the provider or in compute.
+
+Read the state with `kubernetesSubstrates.get({ tenantId, poolId })`: mode, cluster, state and message, Nodes listed
+and joined, and a drain's upgrade. It never returns a token or a credential.
+
+## Adopt a cluster you already run
+
+Use `"cluster": { "adopt": "<provider cluster id>" }` instead of `create`. The cluster is read and never created,
+changed or deleted. Each flavor adds a node pool named `bc-<last 6 of the pool id>-<flavor>`, so it can never take
+over a node pool of your own with the same name. On teardown only those node pools and bcd's labelled objects go;
+the cluster and its own node pools stay. If bcd cannot be removed from an adopted cluster (a refused credential, a
+failed delete), the substrate stays `deleting` and retries every 2 minutes. It never leaves a privileged DaemonSet
+behind unannounced.
+
+| Provider | Adopt id                    | What the cluster needs                                                                                                                                  |
+| -------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GKE      | `<location>/<cluster name>` | Nothing more: the account's Google identity reaches the cluster API.                                                                                    |
+| EKS      | `<region>/<cluster name>`   | An access entry granting the account's principal `AmazonEKSClusterAdminPolicy`: better-compute grants itself admin only on clusters it created.         |
+| DOKS     | the cluster's UUID          | Nothing more: DigitalOcean issues the cluster credential to the account token.                                                                          |
+
+## Provider differences
+
+Everything above behaves the same on each provider. These are the places where providers differ:
+
+| | GKE | EKS | DOKS |
+| --- | --- | --- | --- |
+| Cluster location | A region or a zone | A region only | A region |
+| A flavor's `nodes` | Per zone of the node pool: the flavor's `zones`, else the cluster's default node zones (often three for a regional cluster) | Per Availability Zone of the account's subnets: two subnets in two zones double it | The total (DOKS node pools have no zones) |
+| `nodes: 0` | Yes | Yes | Only with `autoscaling: { minNodes: 0, … }`; a fixed-size pool has at least one node |
+| `zones`, `diskGiB` | Yes | Yes (no disk type) | No: node pools are regional and take their size's disk |
+| Spot flavors | Yes | Yes (Spot capacity) | A DigitalOcean preview: the account needs `allowSpot` and `previews` |
+| Kubernetes Node names | The VM hostname | Instance DNS names; bcd reports the Node name it runs on | `<node pool>-<suffix>` |
+
+To get the same node count everywhere, pin each flavor to one zone on GKE and EKS. Otherwise, size each flavor with
+its account's zone count in mind.
+
+## Check your own provider
+
+`@better-compute/testing` exports `kubernetesProviderConformanceCases()`: what the clusters and substrate reconcilers
+need of any `ProviderImpl.kubernetes`, as cases shaped like vps' `providerConformanceCases()`. GKE, EKS and DOKS pass
+them against their emulators. The subject gives your provider's vocabulary, and the cases do the rest. They create a
+cluster idempotently and check its ready outputs (`endpoint`, `version`, `location`, `nodeVersion`). They check that
+the mode never changes in place, and that an upgrade happens in place. They add a labelled GPU node pool and a Spot
+one, resize them in place, and check that a node pool never changes shape. They mint credentials for the cluster
+endpoint, delete twice, and read and extend an adoptable cluster.
+
+```ts
+import { runConformance } from '@better-compute/core/conformance';
+import { kubernetesProviderConformanceCases } from '@better-compute/testing';
+
+const report = await runConformance(kubernetesProviderConformanceCases(), () => ({
+  provider: myProvider({ fetch: emulator.fetch }),
+  config: { region: 'us-east-1' },
+  location: 'us-east-1',
+  nodePool: { machineType: 'm7i.large', nodeCount: 1 },
+  gpuNodePool: { machineType: 'g6.xlarge', nodeCount: 1, accelerators: { type: 'nvidia-l4', count: 1 } },
+  accepts: (credentials) => emulator.issued.includes(credentials.token),
+}));
+```
+
+Set `zeroNodes: false` if a fixed-size node pool needs at least one node; `nodeCount: 0` must then be refused as
+`INVALID_INPUT`. Set `spot: false` if the provider has no Spot node pools.
