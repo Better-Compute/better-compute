@@ -189,7 +189,7 @@ The token is a password: it is never logged. IAM: `rds-db:connect` on `arn:aws:r
 
 ## Deployment templates
 
-`deploymentTemplates(options)` renders the reference deployment of the control plane on AWS as three CloudFormation JSON templates, and `better-compute aws deploy-templates --out <dir>` (`awsDeployTemplatesCommand`) writes them as new files. It makes no AWS call. Deploy them in order; each imports the stacks before it through `${NetworkStack}-…` and `${DataStack}-…` exports:
+`deploymentTemplates(options)` renders the reference deployment of the control plane on AWS as three CloudFormation JSON templates, and `better-compute aws deploy-templates --out <dir>` (`awsDeployTemplatesCommand`) writes them as new files. The CLI does not build the `aws` commands in: export them from the configuration module (`export const commands = [awsDeployTemplatesCommand()]`). It makes no AWS call. Deploy them in order; each imports the stacks before it through `${NetworkStack}-…` and `${DataStack}-…` exports:
 
 | Stack | Renderer | What it creates |
 | --- | --- | --- |

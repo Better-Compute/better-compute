@@ -15,6 +15,14 @@ runs them.
 
 ## 0. Render
 
+The CLI does not build the `aws` commands in yet. Add the one you need to your configuration module's `commands`
+(the same `better-compute.config.ts` as in step 1; rendering reads nothing else from it):
+
+```ts
+import { awsDeployTemplatesCommand } from '@better-compute/aws';
+export const commands = [awsDeployTemplatesCommand()];
+```
+
 ```sh
 better-compute aws deploy-templates --out cfn --name "$NAME"      # --zones 2 --nat single --readers 0 for staging
 ```
@@ -24,7 +32,7 @@ better-compute aws deploy-templates --out cfn --name "$NAME"      # --zones 2 --
 
 ## 1. Image and certificate
 
-Build an image whose entrypoint is the `better-compute` CLI, with your `better-compute.config.mjs` (see the docs
+Build an image whose entrypoint is the `better-compute` CLI, with your `better-compute.config.ts` (see the docs
 page for an AWS configuration) and the RDS certificate bundle in it, push it to ECR and note the digest:
 
 ```sh
@@ -71,8 +79,19 @@ aws cloudformation deploy --stack-name "$NAME-control-plane" --template-file cfn
 
 ## 5. The PKI bundle
 
-Create the bundle with `better-compute pki init` on an operator machine, sealed with the deployment secret
-(`aws secretsmanager get-secret-value --secret-id <DeploymentSecretArn>`), and put it:
+Create the bundle with `better-compute pki init` on an operator machine, sealed with the deployment secret. The
+secret goes into `pki init`'s environment only, inside a subshell: never echo it, print it or write it to a file,
+so it stays out of terminal scrollback and logs.
+
+```sh
+(
+  export BETTER_COMPUTE_SECRET="$(aws secretsmanager get-secret-value --secret-id <DeploymentSecretArn> \
+    --query SecretString --output text)"
+  better-compute pki init --trust-domain compute.example.com
+)
+```
+
+Then put it:
 
 ```sh
 aws secretsmanager put-secret-value --secret-id <PkiBundleSecretArn> --secret-string file://.better-compute/pki.json
@@ -87,9 +106,12 @@ aws ecs run-task --cluster "$NAME" --launch-type FARGATE --task-definition <Migr
   --network-configuration "awsvpcConfiguration={subnets=[<TaskSubnetIds>],securityGroups=[<MigrateSecurityGroupIds>],assignPublicIp=DISABLED}"
 aws ecs wait tasks-stopped --cluster "$NAME" --tasks <task arn>     # exit code 0 in describe-tasks
 aws cloudformation deploy --stack-name "$NAME-control-plane" --template-file cfn/control-plane.json \
-  --s3-bucket <bucket> --capabilities CAPABILITY_IAM --use-previous-template \
+  --s3-bucket <bucket> --capabilities CAPABILITY_IAM \
   --parameter-overrides ApiCount=3 WorkerCount=2 GatewayCount=3
 ```
+
+`aws cloudformation deploy` keeps the previous value of every parameter `--parameter-overrides` does not name, so
+the image, domains and certificate stay as step 4 set them. Pass the same `cfn/control-plane.json` you deployed.
 
 Without `HostedZoneId`, point the API domain at `ApiLoadBalancerDnsName` and the gateway domain at
 `GatewayLoadBalancerDnsName`. Publish bcd binaries to `DownloadsBucketName`; they are served at `DownloadsUrl`.
@@ -98,8 +120,8 @@ Without `HostedZoneId`, point the API domain at `ApiLoadBalancerDnsName` and the
 
 A release is a new image digest, and its expand migrations run before any process of it:
 
-1. Update the stack with `MigrateImage=<new digest>` and every other parameter unchanged
-   (`UsePreviousValue`). Only the migrate task definition changes.
+1. Update the stack with `--parameter-overrides MigrateImage=<new digest>` alone (`aws cloudformation deploy`
+   keeps every other parameter's previous value). Only the migrate task definition changes.
 2. Run the migrate task (step 6) and wait for exit code 0.
 3. Update with `Image=<new digest>` and `MigrateImage=` (empty). The services roll with the deployment circuit
    breaker, which rolls back a release whose tasks do not become healthy.

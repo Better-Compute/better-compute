@@ -191,7 +191,9 @@ export default defineConfig(({ env = process.env } = {}) => {
 ```
 
 `ambientCredentials` (from `@better-compute/aws-core`) reads the task role through the ECS container credentials
-endpoint. The `host` export's `gateway` should advertise each task's own address as its internal URL (from the
+endpoint. It ships with the aws-core credential sources of the AWS foundation phase (A0); `@better-compute/aws`'s
+own `envCredentialSource` reads only `AWS_ACCESS_KEY_ID` and its siblings, so it cannot use a task role. Name the
+file `better-compute.config.ts` (the example is TypeScript), or drop the `!` and `as const` for a `.mjs` file. The `host` export's `gateway` should advertise each task's own address as its internal URL (from the
 ECS task metadata endpoint), listen on `BC_GATEWAY_INTERNAL_PORT`, and name `BC_GATEWAY_PUBLIC_HOST`. The
 [observability on AWS](/docs/operations/aws) page covers CloudWatch metrics through EMF: the task logs already go
 to CloudWatch Logs, so `emfMetricsExporter` needs no extra permission.
@@ -221,5 +223,12 @@ is yours and deleting the stack never deletes the evidence.
 - One set of stacks is one region. Gateways in further regions (daemons dial the gateways of their own region)
   need a network of their own and a gateway-only variant of the control-plane stack, which the templates do not
   render yet; every region keeps writing to the one database.
+- Not rendered: AWS App Runner (an alternative to ECS for the API), AWS Global Accelerator in front of the
+  gateways, RDS Proxy, and an AWS Budgets action. The first three are optional; the processes connect to the
+  Aurora endpoint directly, and running them behind RDS Proxy is not verified (the migrator and some reconcilers
+  take advisory locks, which pin proxy sessions). The live suite's README recommends a Budgets action for its
+  sandbox account, set up by hand.
+- The templates are checked by `lintTemplate` and unit tests only. CloudFormation's own `ValidateTemplate` runs
+  in the AWS live suite (`tests/live/aws/templates.live.test.ts`), which needs sandbox credentials.
 - Deletion protection is on for the database and both load balancers. Turn it off on purpose before deleting a
   stack.

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { awsDeployTemplatesCommand, deploymentTemplates, lintTemplate } from '@better-compute/aws';
+import { createCli } from '@better-compute/cli';
 
 // `better-compute aws deploy-templates --out <dir>`: writes the three A12 stacks as new
 // CloudFormation JSON files and prints the order to deploy them in. It makes no AWS call.
@@ -76,6 +77,25 @@ describe('aws deploy-templates', () => {
     expect(size).toBeLessThanOrEqual(51_200);
   });
 
+  it('runs as a CLI command a configuration module exports (export const commands = [awsDeployTemplatesCommand()])', async () => {
+    // The CLI does not build the aws commands in; a configuration module's `commands` export adds them, which
+    // is the same as passing them to createCli. The flags parse with the CLI's own rules.
+    const dir = await mkdtemp(join(tmpdir(), 'bc-aws-deploy-'));
+    dirs.push(dir);
+    const out: string[] = [];
+    const err: string[] = [];
+    const cli = createCli({ commands: [awsDeployTemplatesCommand()] });
+    await cli.run(['aws', 'deploy-templates', '--out', 'cfn', '--name', 'bc-cli', '--zones', '2', '--nat', 'single', '--compact'], {
+      out: (line) => out.push(line),
+      err: (line) => err.push(line),
+      env: {},
+      cwd: dir,
+    });
+    expect((await readdir(join(dir, 'cfn'))).sort()).toEqual(['control-plane.json', 'data.json', 'network.json']);
+    expect(JSON.parse(await readFile(join(dir, 'cfn', 'network.json'), 'utf8')).Description).toContain('bc-cli');
+    expect(cli.help('aws deploy-templates')).toContain('--out');
+  });
+
   it('never overwrites an existing file', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'bc-aws-deploy-'));
     dirs.push(dir);
@@ -93,5 +113,35 @@ describe('aws deploy-templates', () => {
     await expect(run({ out: 'x', zones: 5 })).rejects.toThrow(/zones/);
     await expect(run({ out: 'x', nat: 'none' })).rejects.toThrow(/natGateways|--nat/);
     await expect(run({})).rejects.toThrow(/--out/);
+  });
+});
+
+describe('deploy/aws/README.md', () => {
+  // The runbook's commands are never run by the suite; this keeps their options to what the AWS CLI accepts.
+  const commands = async () => {
+    const text = await readFile(join(import.meta.dirname, '..', 'deploy', 'aws', 'README.md'), 'utf8');
+    const blocks = [...text.matchAll(/```sh\n([\s\S]*?)```/g)].map((match) => match[1]!);
+    return blocks.flatMap((block) => block.replace(/\\\n\s*/g, ' ').split('\n')).map((line) => line.replace(/#.*$/, '').trim());
+  };
+  const deployOptions = new Set([
+    '--template-file', '--stack-name', '--s3-bucket', '--s3-prefix', '--force-upload', '--kms-key-id', '--parameter-overrides',
+    '--capabilities', '--no-execute-changeset', '--disable-rollback', '--role-arn', '--notification-arns', '--tags',
+    '--fail-on-empty-changeset', '--no-fail-on-empty-changeset', '--region', '--profile',
+  ]);
+
+  it('passes aws cloudformation deploy only options it has (no --use-previous-template)', async () => {
+    const deploys = (await commands()).filter((line) => line.startsWith('aws cloudformation deploy'));
+    expect(deploys.length).toBeGreaterThanOrEqual(4);
+    for (const line of deploys)
+      for (const option of line.match(/(?<=\s)--[a-z0-9-]+/g) ?? []) expect(deployOptions.has(option), `${option} in: ${line}`).toBe(true);
+  });
+
+  it('never prints the deployment secret: it goes straight into an environment variable', async () => {
+    const reads = (await commands()).filter((line) => line.includes('get-secret-value'));
+    expect(reads.length).toBeGreaterThan(0);
+    for (const line of reads) {
+      expect(line, line).toMatch(/^export BETTER_COMPUTE_SECRET="\$\(aws secretsmanager get-secret-value /);
+      expect(line, line).toContain('--query SecretString --output text)"');
+    }
   });
 });

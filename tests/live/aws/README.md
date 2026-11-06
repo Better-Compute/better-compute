@@ -44,7 +44,6 @@ Enabled but misconfigured is an error, not a skip.
 | --- | --- | --- |
 | `templates.live.test.ts` | CloudFormation `ValidateTemplate` on the three deployment templates | nothing |
 | `platform.live.test.ts` | `s3BlobStore` (single and multipart put, get, presigned GET, delete), `awsSecretsManagerStore` (put, resolve, tenant check, rotate, delete), `eventBridgeSink` through a real rule to SQS, `sqsSink` | an S3 bucket, a secret, an event bus and rule, two SQS queues, for minutes |
-
 | `ec2.live.test.ts` | provider-aws: the A1 `providerConformanceCases`, A2 network/subnet/firewall create and delete, A4 EC2 state changes through a real EventBridge rule on the default bus, and a Spot interruption sent by FIS (`aws:ec2:send-spot-instance-interruptions`) | `t4g.nano`/`t3.micro` instances for minutes, a VPC, an SQS queue and a rule, a FIS template |
 
 `ec2.live.test.ts` skips when `@better-compute/provider-aws` is not in the checkout, and each case skips when the
