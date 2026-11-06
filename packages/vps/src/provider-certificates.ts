@@ -432,6 +432,8 @@ export async function createProviderCertificate(
   const provider = await resourceProvider(deps, tx, input.tenantId, input.poolId, 'certificates');
   await lockTenant(tx, input.tenantId);
   await assertNameFree(tx, 'provider_certificates', input.tenantId, input.name);
+  if (input.kind === 'managed')
+    await assertOwnDomains(tx, input.tenantId, provider.accountId, input.domains ?? []);
   const live = await tx.query<{ count: string }>(
     `SELECT count(*)::text AS count FROM provider_certificates WHERE tenant_id = $1 AND state <> 'deleted'`,
     [input.tenantId],
@@ -492,6 +494,35 @@ export async function createProviderCertificate(
     kind: input.kind,
   });
   return providerCertificateView((await readCertificate(tx, certificateId))!);
+}
+
+/**
+ * A managed certificate covers only names in the tenant's own DNS zones on the same provider account (DigitalOcean
+ * issues one for any domain the account hosts, which may be another tenant's): INVALID_INPUT before anything is
+ * written, naming the first name that is not.
+ */
+async function assertOwnDomains(
+  tx: SqlTx,
+  tenantId: string,
+  accountId: string,
+  domains: readonly string[],
+): Promise<void> {
+  const { rows } = await tx.query<{ zone: string }>(
+    `SELECT zone FROM provider_dns_zones
+      WHERE tenant_id = $1 AND provider_account_id = $2 AND desired_state = 'present' AND state <> 'deleted'`,
+    [tenantId, accountId],
+  );
+  const zones = rows.map((row) => row.zone);
+  for (const domain of domains) {
+    const name = domain.startsWith('*.') ? domain.slice(2) : domain;
+    if (!zones.some((zone) => name === zone || name.endsWith(`.${zone}`)))
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `${domain} is not in a DNS zone of the tenant on this provider account (dnsZones.create)`,
+        undefined,
+        { reason: 'domainNotOwned' },
+      );
+  }
 }
 
 /** The reconciler's work kind (as `providerResourcesWork`; repeated here so this file needs no import cycle). */

@@ -2,7 +2,7 @@ DNS zones on a provider account (DigitalOcean Domains first), with their [record
 
 ## create
 
-Makes the zone for a domain (`zone`, lower case, without a final dot) and returns it `pending`. A domain has one live zone per provider account, so two tenants never share one: a second is `CONFLICT`, without saying whose it is. A zone the account already holds and vps did not make goes to `error` unless the account's owner tenant adopts it with `adopt: true`; any other tenant asking to adopt is `ACCESS_DENIED` (reason `adoptNotOwner`). Publishes `providerDnsZone.created`, then `providerDnsZone.ready` or `providerDnsZone.error`.
+Makes the zone for a domain (`zone`, lower case, without a final dot) and returns it `pending`. A domain has one live zone per provider account, so two tenants never share one: a second is `CONFLICT`, without saying whose it is, and so is a zone inside or above another tenant's (`shop.example.com` next to `example.com`), which the provider's shared name servers could answer for. A zone the account already holds and vps did not make goes to `error` unless the account's owner tenant adopts it with `adopt: true`; any other tenant asking to adopt is `ACCESS_DENIED` (reason `adoptNotOwner`). Publishes `providerDnsZone.created`, then `providerDnsZone.ready` or `providerDnsZone.error`.
 
 ## list
 

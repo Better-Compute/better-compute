@@ -603,6 +603,17 @@ export async function createProviderDnsZone(
   }
   const provider = await zoneProvider(deps, tx, input);
   await lockTenant(tx, input.tenantId);
+  // A zone inside or above another tenant's on the same account could answer for that tenant's names (the provider's
+  // name servers serve every zone of every account): refused, without saying whose it is.
+  await tx.query("SELECT pg_advisory_xact_lock(hashtext('better-compute:dns-zones:' || $1))", [provider.accountId]);
+  const nested = await tx.query(
+    `SELECT 1 FROM provider_dns_zones
+      WHERE provider_account_id = $1 AND tenant_id <> $2 AND state <> 'deleted'
+        AND ($3 LIKE '%.' || zone OR zone LIKE '%.' || $3) LIMIT 1`,
+    [provider.accountId, input.tenantId, input.zone],
+  );
+  if (nested.rows.length > 0)
+    throw new ComputeError('CONFLICT', `Zone ${input.zone} overlaps a zone that already exists`);
   const live = await tx.query<{ count: string }>(
     `SELECT count(*)::text AS count FROM provider_dns_zones WHERE tenant_id = $1 AND state <> 'deleted'`,
     [input.tenantId],

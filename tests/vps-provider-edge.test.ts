@@ -361,7 +361,7 @@ const createCertificate = (raw: Record<string, unknown> = {}, who: Caller = alic
       poolId: pool,
       name: `cert-${++keyCounter}`,
       kind: 'managed',
-      domains: ['www.example.com'],
+      domains: ['www.example.net'],
       idempotencyKey: `k-${keyCounter}`,
       ...raw,
     },
@@ -471,6 +471,13 @@ beforeEach(async () => {
   await db.query(`DELETE FROM provider_load_balancers`);
   await db.query(`DELETE FROM provider_dns_records`);
   await db.query(`DELETE FROM provider_dns_zones`);
+  // The tenant's own zone, which its managed certificates may name.
+  await db.query(
+    `INSERT INTO provider_dns_zones (id, tenant_id, pool_id, provider_account_id, zone, state, desired_state, created_by,
+                                     idempotency_key, request_hash, version)
+     VALUES ('pdz_seed', 'root', $1, $2, 'example.net', 'ready', 'present', 'usr_alice', 'seed', decode('00', 'hex'), 1)`,
+    [pool, account],
+  );
   await db.query(`DELETE FROM provider_certificates`);
   await db.query(`DELETE FROM instance_usage_intervals`);
   await db.query(`DELETE FROM instances`);
@@ -503,7 +510,7 @@ describe('certificates', () => {
   it('a managed certificate is pending until issued, then ready with its expiry', async () => {
     cloud.pendingTicks = 1;
     const created = await createCertificate({ name: 'www', idempotencyKey: 'www-1' });
-    expect(created).toMatchObject({ name: 'www', kind: 'managed', domains: ['www.example.com'], state: 'pending' });
+    expect(created).toMatchObject({ name: 'www', kind: 'managed', domains: ['www.example.net'], state: 'pending' });
     expect(await createCertificate({ name: 'www', idempotencyKey: 'www-1' })).toMatchObject({ id: created.id });
     expect(await codeOf(createCertificate({ name: 'www', idempotencyKey: 'www-2' }))).toBe('CONFLICT');
     await drain();
@@ -823,5 +830,19 @@ describe('metering', () => {
     expect(windows[0]).toMatchObject({ meter: 'vps.load-balancer.hours', tags: { source: 'provider-load-balancer', region: 'nyc3' } });
     expect(windows[1]!.quantity).toBe(1);
     expect((await rows(global.id))[0]).toMatchObject({ tags: { region: 'global' } });
+  });
+});
+
+describe('cross-tenant names', () => {
+  it("a managed certificate names only the tenant's own zones; a zone never nests in another tenant's", async () => {
+    expect(await codeOf(createCertificate({ domains: ['www.example.org'] }))).toBe('INVALID_INPUT');
+    expect(await codeOf(createCertificate({ domains: ['*.example.net', 'example.net'] }))).toBe('resolved');
+    // Another tenant cannot have a certificate issued for the first tenant's domain, nor a zone inside or above it.
+    expect(await codeOf(createCertificate({ domains: ['www.example.net'] }, mallory))).toBe('INVALID_INPUT');
+    const zone = (raw: Record<string, unknown>) =>
+      call('dnsZones', 'create', { tenantId: 'other', poolId: pool, idempotencyKey: `z-${++keyCounter}`, ...raw }, mallory);
+    expect(await codeOf(zone({ zone: 'shop.example.net' }))).toBe('CONFLICT');
+    expect(await codeOf(zone({ zone: 'example.net' }))).toBe('CONFLICT');
+    expect(await codeOf(zone({ zone: 'example.org' }))).toBe('resolved');
   });
 });
