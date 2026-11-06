@@ -45,6 +45,12 @@ export const doConfig = manifest({
     .describe(
       'Read the invoices into provider costs (vps.costs); the token needs the billing:read scope',
     ),
+  projectPerTenant: field
+    .boolean()
+    .default(false)
+    .describe(
+      'Assign each new Droplet to the project bc-<tenant>, made on first use (project:read, project:create, project:update)',
+    ),
 });
 
 /** The validated account configuration. */
@@ -59,6 +65,7 @@ export interface DoConfig {
   discoverTag?: string;
   previews?: boolean;
   costs?: boolean;
+  projectPerTenant?: boolean;
 }
 
 export interface DoProviderOptions {

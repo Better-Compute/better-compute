@@ -15,5 +15,6 @@ export * from './networks/index.js';
 export * from './ops/billing.js';
 export * from './ops/costs.js';
 export * from './ops/prices.js';
+export * from './ops/projects.js';
 export * from './probe.js';
 export * from './provider.js';

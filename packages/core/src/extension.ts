@@ -994,6 +994,11 @@ export interface ProviderImpl {
        * provider that can install keys without cloud-init (Compute Engine's `ssh-keys`) does.
        */
       sshKeys?: readonly string[];
+      /**
+       * (additive, DigitalOcean P9) The tenant the instance belongs to, for provider-side grouping a provider may
+       * do (a DigitalOcean project per tenant). Never an authority: ownership stays in the provider's labels.
+       */
+      tenantId?: string;
     },
     context: CallContext,
   ): Promise<ExternalMachine>;

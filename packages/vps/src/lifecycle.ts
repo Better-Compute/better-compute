@@ -541,6 +541,8 @@ async function reconcileProvider(
             ? await deps.secrets.resolve(row.userData)
             : renderUserData(row),
           name: row.id,
+          // For provider-side grouping only (a DigitalOcean project per tenant).
+          tenantId: row.tenantId,
           ...(row.sshKeys.length ? { sshKeys: row.sshKeys } : {}),
           // The tenant's labels; the provider's own ownership labels win over them.
           ...(row.labels !== undefined ? { labels: row.labels } : {}),

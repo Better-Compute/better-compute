@@ -5,6 +5,7 @@ import { DoCompute } from './compute/droplets.js';
 import { doConfig, type DoConfig, type DoProviderOptions } from './config.js';
 import { deploymentTag } from './ids.js';
 import { doBilling, readInvoiceCosts } from './ops/costs.js';
+import { withTenantProjects } from './ops/projects.js';
 
 const maxInCallWaitMs = 20_000;
 const discoverTagPattern = /^[a-z0-9:_-]{1,255}$/;
@@ -57,6 +58,7 @@ export function digitaloceanProvider(
         const tag = deploymentTag(deployment);
         compute.costs = (window, call) => readInvoiceCosts(client, tag, window, call);
       }
+      if (config.projectPerTenant === true) withTenantProjects(compute, client, context.log);
       return compute;
     },
   });

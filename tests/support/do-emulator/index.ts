@@ -6,6 +6,7 @@ import { registerCatalog } from './catalog.js';
 import { registerDroplets } from './droplets.js';
 import { registerFirewalls } from './firewalls.js';
 import { registerKeys } from './keys.js';
+import { registerProjects } from './projects.js';
 import { registerTags } from './tags.js';
 import { registerVpcs } from './vpcs.js';
 import { DoState, errorFixtures, type Json } from './state.js';
@@ -274,5 +275,6 @@ export class DoEmulator {
     registerVpcs(this);
     registerFirewalls(this);
     registerBilling(this);
+    registerProjects(this);
   }
 }
