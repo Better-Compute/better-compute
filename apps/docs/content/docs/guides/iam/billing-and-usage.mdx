@@ -123,6 +123,7 @@ defines one catalog, `meterCatalog`, on the root tenant. Every meter is a `rate-
 | `vm.grant.usage.hours` | Informational: one per running VM inside a grant (price it at 0) |
 | `vm.managed.hours` | One per running VM in a `platform-fee` pool: the platform's management fee |
 | `network.vpc.hours` | One per provisioned tenant network |
+| `vps.share.gib.hours` | A shared [provider volume](/docs/guides/vps/provider-volumes#shared-nfs-volumes)'s GiB (a network file share, such as DigitalOcean NFS) |
 | `ip.public.hours` | One per running provider VM with a public address |
 | `disk.<type>.gib.hours` | A provider VM's disks in GiB, running or stopped: `pd-standard`, `pd-balanced`, `pd-ssd`, `hyperdisk-balanced`, `local-ssd` |
 | `snapshot.gib.hours` | A sandbox snapshot's size in GiB |

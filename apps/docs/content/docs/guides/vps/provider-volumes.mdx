@@ -123,7 +123,9 @@ How it differs from a block volume:
   subnet in the volume's region (`INVALID_INPUT` otherwise; `INVALID_STATE` while the network or that subnet is not
   ready yet, or the network is being deleted). The share is made in that subnet, never in the region's default VPC.
   `networkId` on a block volume is `INVALID_INPUT`. A network a shared volume is on is not deleted
-  (`networks.delete` answers `INVALID_STATE` until the volume is deleted).
+  (`networks.delete` answers `INVALID_STATE` until the volume is deleted), and neither is a subnet of it in the
+  volume's region (`networks.removeSubnet` answers `INVALID_STATE`, with the volumes in `details.volumeIds`).
+  A provider that makes no shared volumes is `UNSUPPORTED` (`reason: 'sharedVolumes'`).
 - **Many instances.** `attach` adds the instance (attaching one it is on returns the volume); the instance must be on
   the volume's network (`INVALID_INPUT` otherwise). The view lists every attachment in `attachments` (a block volume
   keeps the single `attachment`). `detach` names the instance, `{ volumeId, instanceId }` (`INVALID_INPUT` without
@@ -132,14 +134,17 @@ How it differs from a block volume:
   ignored). `deleteWithInstance` is always `false`: deleting an instance detaches it from the share and keeps the
   share.
 - **Size.** It grows like a block volume and books `diskGiB` quota the same way. DigitalOcean shares are 50 to 16384
-  GiB: a smaller size ends in `error` with the provider's message.
+  GiB: a smaller size is `INVALID_INPUT` (`reason: 'size'`) at create, before any quota is booked.
+- **Billing.** A shared volume bills `vps.share.gib.hours` (its GiB), not `vps.volume.gib.hours`, so a rate card
+  prices shares apart from block storage.
 - **Snapshots.** `snapshot` works as for a block volume; `providerSnapshots.restore` of a shared volume's snapshot is
   `UNSUPPORTED` (`reason: 'sharedRestore'`) for now.
 
 On DigitalOcean, attaching tags the Droplet `bc-nfs-<16 hex>` (the record of which Droplets have the share) and adds
 the Droplet's VPC to the share when it is not there yet; that VPC must be one of the same network. Detaching removes
 the tag and takes the VPC off the share once no tagged Droplet is left in it; the share's last VPC stays. A share whose
-Droplet was deleted keeps that Droplet's VPC until a later detach in the VPC.
+Droplet was deleted keeps that Droplet's VPC until a later detach in the VPC. The hourly drift pass asks every ready
+attachment of a settled shared volume again (an attach is idempotent), which puts back a VPC a racing detach took off.
 
 ### Mounting a shared volume
 
@@ -243,8 +248,8 @@ is gone) leaves its machine running. Its volumes are only detached, `deleteWithI
   gets nothing (`QUOTA_EXCEEDED`, fail closed). The booking is refunded once the provider has deleted the resource.
   Snapshots book no quota.
 - On a metered pool, each resource bills from the moment it was `ready` until it is deleted, in whole-hour usage
-  windows written by `vps.ancillary-usage`: a snapshot `vps.snapshot.gib.hours` (its GiB), a volume
-  `vps.volume.gib.hours` (its GiB) and an address `vps.address.hours` (one per hour). One that never became ready never
+  windows written by `vps.ancillary-usage`: a snapshot `vps.snapshot.gib.hours` (its GiB), a block volume
+  `vps.volume.gib.hours` (its GiB), a shared volume `vps.share.gib.hours` (its GiB) and an address `vps.address.hours` (one per hour). One that never became ready never
   bills; a BYO account's pool (platform fee) bills none of them. Volumes, snapshots and addresses are all metered by
   the `vps.ancillary-usage` pass (usage source kinds `volume`, `snapshot` and `address`).
 - Events: `providerVolume.*` (created, updated, ready, attached, detached, resized, error, deleting, deleted),
