@@ -1,0 +1,55 @@
+{
+  "name": "@better-compute/cloud-resources",
+  "version": "0.3.0",
+  "description": "Managed data and platform services (databases, apps, functions) on provider accounts for better-compute: one governed, audited, metered resource API.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "better-compute contributors",
+  "homepage": "https://github.com/better-compute/better-compute/tree/main/packages/cloud-resources#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/better-compute/better-compute.git",
+    "directory": "packages/cloud-resources"
+  },
+  "bugs": {
+    "url": "https://github.com/better-compute/better-compute/issues"
+  },
+  "keywords": [
+    "better-compute",
+    "cloud-resources",
+    "managed-databases",
+    "app-platform",
+    "functions",
+    "digitalocean",
+    "multi-tenant"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-compute/capacity": "workspace:*",
+    "@better-compute/core": "workspace:*",
+    "@better-compute/vps": "workspace:*"
+  }
+}

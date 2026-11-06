@@ -781,7 +781,105 @@ export interface ProviderResourceState {
   id: string;
   state: 'pending' | 'ready' | 'updating' | 'deleting' | 'deleted' | 'error';
   outputs?: Readonly<Record<string, string>>;
+  /**
+   * (cloud-resources) Secret values the provider handed back (a database password, an access key), by the kind's
+   * `secretOutputs` names. The caller seals them into the SecretStore in the run that received them and keeps only
+   * the refs: never stored, logged, published or put in an error.
+   */
+  secretOutputs?: Readonly<Record<string, string>>;
   message?: string;
+}
+
+/** (cloud-resources) What a long-tail provider resource is, for IAM attributes and policies. */
+export type ProviderResourceFamily =
+  | 'storage'
+  | 'network'
+  | 'edge'
+  | 'data'
+  | 'platform'
+  | 'ai'
+  | 'observability';
+
+/**
+ * (cloud-resources) One kind of provider resource served through the generic `ProviderResources` contract: a managed
+ * database, an app, a functions namespace. Provider-neutral: `do.database.pg`, later `aws.rds.postgres`,
+ * `gcp.sql.postgres`.
+ */
+export interface ProviderResourceKind {
+  /** Provider-prefixed, `[a-z0-9.-]`, at most 64 characters: `do.database.pg`. */
+  kind: string;
+  family: ProviderResourceFamily;
+  description?: string;
+  /** Validated before any provider call. A regional kind's spec has a `region` string. */
+  spec: Manifest<unknown>;
+  /** Plain outputs `ensure`/`get` report once ready (host, port, urn). */
+  outputs: readonly string[];
+  /** Secret outputs (passwords, keys): sealed by the caller, returned to tenants as SecretRefs only. */
+  secretOutputs?: readonly string[];
+  regional: boolean;
+  /** Spec fields `ensure` changes in place; a change to any other is refused (`INVALID_STATE`, `replaceRequired`). */
+  updatable: readonly string[];
+  meters?: readonly { meter: string; unit: string }[];
+  /** A provider preview: refused unless the account enables previews. */
+  preview?: boolean;
+  /** Another kind this one lives in (a database user in its cluster): its spec names the parent's provider id. */
+  parent?: string;
+}
+
+/** (cloud-resources) What `ProviderResources.ensure` is asked for. */
+export interface ProviderResourceRequest {
+  kind: string;
+  /** The provider-side name the caller derives (`bc-r-…`); stable across calls. */
+  name: string;
+  /** The spec, already validated by the kind's manifest. */
+  spec: unknown;
+  /** The provider id an earlier `ensure` answered; absent until the provider accepted the resource once. */
+  id?: string;
+  /** Ownership labels (`better-compute-managed`, `-resource`, `-tenant`), written as the provider writes labels. */
+  labels?: Readonly<Record<string, string>>;
+}
+
+/** (cloud-resources) A resource the account can see, managed by better-compute or not. */
+export interface ProviderDiscoveredResource {
+  id: string;
+  name: string;
+  region?: string;
+  /** `this`: this deployment manages it; `other`: another deployment does; absent: no one does. */
+  managedBy?: 'this' | 'other';
+  /** The plain outputs, when the listing has them. */
+  outputs?: Readonly<Record<string, string>>;
+  /** The spec as the provider reports it, in the kind's spec shape where it can be read back. */
+  spec?: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * (cloud-resources) The long tail of provider services through one desired-state interface. `ensure` and `delete`
+ * are idempotent and non-blocking, like `ProviderNetworks`: they return `pending`, `updating` or `deleting` while the
+ * provider works, and the caller calls again. `ensure` is idempotent by `CallContext.idempotencyKey` (the resource
+ * id) and changes the kind's `updatable` fields in place; any other difference is `INVALID_STATE` with
+ * `details.reason 'replaceRequired'`. `delete` refuses (`INVALID_STATE`, `reason 'notManaged'`) a resource this
+ * deployment does not manage, and sends nothing then.
+ */
+export interface ProviderResources {
+  kinds(): readonly ProviderResourceKind[];
+  ensure(request: ProviderResourceRequest, context: CallContext): Promise<ProviderResourceState>;
+  /** The resource as it is; undefined when it does not exist. */
+  get(kind: string, id: string, context: CallContext): Promise<ProviderResourceState | undefined>;
+  delete(kind: string, id: string, context: CallContext): Promise<ProviderResourceState>;
+  /** Every resource of the kind the account can see. */
+  discover?(kind: string, context: CallContext): AsyncIterable<ProviderDiscoveredResource>;
+  /**
+   * Takes over an unmanaged resource: writes the ownership labels. A resource another deployment manages is
+   * `INVALID_STATE` (`reason 'managedByAnother'`).
+   */
+  adopt?(
+    kind: string,
+    id: string,
+    labels: Readonly<Record<string, string>>,
+    context: CallContext,
+  ): Promise<ProviderResourceState>;
+  /** Removes the ownership labels and leaves the resource running. */
+  release?(kind: string, id: string, context: CallContext): Promise<void>;
 }
 
 /**
@@ -1050,6 +1148,8 @@ export interface ProviderImpl {
   networks?: ProviderNetworks;
   /** (kubernetes) Managed Kubernetes clusters and node pools on this account. */
   kubernetes?: ProviderKubernetes;
+  /** (cloud-resources) Managed data and platform services through the generic resource contract. */
+  resources?: ProviderResources;
   /**
    * (v1.0, D10) The account's billed cost rows whose usage started in `[window.from, window.to)`.
    * Read outside any transaction. A provider whose export is not configured leaves it absent.
