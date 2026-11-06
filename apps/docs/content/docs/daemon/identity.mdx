@@ -17,6 +17,8 @@ sources:
   - daemon/internal/tpm/tpm.go
   - daemon/internal/tpm/nodekey.go
   - daemon/internal/tpm/attest.go
+  - daemon/internal/cloud/aws/imds.go
+  - daemon/internal/cloud/aws/attestor.go
   - daemon/internal/helper/tpmkeys.go
   - daemon/internal/helper/intent.go
   - daemon/cmd/bcd/agent.go
@@ -105,13 +107,15 @@ command-line argument (a positional argument is refused without being echoed).
 | A token file | `--token-file PATH`: a regular file, mode 0600 or 0400, at most 4 KiB; deleted once the join succeeds or the machine had already joined (a read-only mount logs a warning instead) | `join-token` |
 | A provisioned token | `--node-id <node>` with a token: the OS a deploy installed joins as that node, and the join fails unless the issued identity is that node | `provisioned` |
 | The TPM | `--attestor tpm`: no token is read or sent (`BCD_JOIN_TOKEN` is dropped; `--token-file` is a usage error) | `tpm` |
+| The EC2 instance identity | `--attestor cloud-iid` on EC2: the instance identity document and its RSA-SHA256 signature from IMDSv2, sent as `{"provider":"aws","document","signature"}`; no token is read or sent | `cloud-iid` |
 | The kernel command line | `bcd ramdisk` only: the `bc.token` and the site agent's `bc.assertion` | `discovery` |
 
 `--role site` joins a site agent with a site token; the token decides what is allowed. `--server`, the three pin flags
 and `--data-dir` bootstrap a machine that has no `config.toml` from the control plane's well-known document (see
 [joining from the well-known document](/docs/daemon/install#joining-from-the-well-known-document)). bcd produces no
-`x509pop` or `cloud-iid` evidence: those attestors exist in `@better-compute/pki`, but a bcd node whose certificate
-expired offline re-joins with a token, the TPM or `--reset` instead.
+`x509pop` evidence, and `cloud-iid` evidence only on AWS EC2 (the GCP variant, whose token must name the CSR, is not
+implemented in bcd). A bcd node whose certificate expired offline re-joins with a token, the TPM or `--reset`;
+`cloud-iid` admits an instance once, within 30 minutes of its first boot, so it is a first join only.
 
 ### What the join does
 
