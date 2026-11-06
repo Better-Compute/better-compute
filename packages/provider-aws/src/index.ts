@@ -10,3 +10,4 @@ export * from './cli.js';
 export * from './markets/reservations.js';
 export * from './markets/quotas.js';
 export * from './markets/pricing.js';
+export * from './markets/purchases.js';

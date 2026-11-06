@@ -85,6 +85,12 @@ export const awsConfig = manifest({
     .describe(
       'Offer prices: on-demand from the AWS Price List (cached a day), all adds Spot prices (cached 10 minutes)',
     ),
+  allowPurchases: field
+    .boolean()
+    .default(false)
+    .describe(
+      'Allow buying capacity (Capacity Blocks, new ODCRs) in this platform account; spends money, root-only and confirmed',
+    ),
 });
 
 /** The validated account configuration. */
@@ -108,6 +114,8 @@ export interface AwsConfig {
   quotas: boolean;
   /** (A3) Which offer prices to read. */
   pricing: 'off' | 'on-demand' | 'all';
+  /** (A3) Allow purchaseReservation (spends money). */
+  allowPurchases: boolean;
 }
 
 export interface AwsProviderOptions {

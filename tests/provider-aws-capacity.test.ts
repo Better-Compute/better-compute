@@ -524,3 +524,217 @@ describe('pricing', () => {
     expect(later.find((offer) => offer.id === 'us-east-1a/m7i.large')?.pricePerHour).toBe(0.1008);
   });
 });
+
+describe('purchases', () => {
+  const DAY = 24 * HOUR;
+  const offerings = (w: ReturnType<typeof world>) => {
+    const start = w.emu.now() + 2 * DAY;
+    w.capacity.blockOfferings.push(
+      {
+        id: 'cb-0aaaaaaaaaaaaaaa1',
+        type: 'p5.48xlarge',
+        zone: 'us-east-1a',
+        count: 2,
+        start,
+        hours: 24,
+        upfrontFee: 2_359.68,
+      },
+      {
+        id: 'cb-0bbbbbbbbbbbbbbb2',
+        type: 'p5.48xlarge',
+        zone: 'us-east-1c',
+        count: 2,
+        start,
+        hours: 24,
+        upfrontFee: 2_000,
+      },
+      {
+        id: 'cb-0ccccccccccccccc3',
+        type: 'p5.48xlarge',
+        zone: 'us-east-1a',
+        count: 2,
+        start: start + DAY,
+        hours: 24,
+        upfrontFee: 2_100,
+      },
+    );
+    return start;
+  };
+
+  it('lists Capacity Block offerings and ODCRs to create, in the account zones', async () => {
+    const w = world();
+    const start = offerings(w);
+    const found = await w.compute.listReservationOfferings(
+      { instanceType: 'p5.48xlarge', count: 2, durationHours: 24 },
+      w.call(),
+    );
+    expect(found).toEqual([
+      {
+        id: 'odcr:us-east-1a/p5.48xlarge/2/24',
+        instanceType: 'p5.48xlarge',
+        zone: 'us-east-1a',
+        count: 2,
+        startsAt: w.emu.now(),
+        endsAt: w.emu.now() + DAY,
+        upfrontPrice: 0,
+        currency: 'USD',
+      },
+      {
+        // Self-describing: the purchase re-finds the offering and never pays more than this.
+        id: `cb:us-east-1a/p5.48xlarge/2/24/${start / 1000}/235968/cb-0aaaaaaaaaaaaaaa1`,
+        instanceType: 'p5.48xlarge',
+        zone: 'us-east-1a',
+        count: 2,
+        startsAt: start,
+        endsAt: start + DAY,
+        upfrontPrice: 2_359.68,
+        currency: 'USD',
+      },
+      expect.objectContaining({
+        id: expect.stringMatching(/\/cb-0ccccccccccccccc3$/),
+        startsAt: start + DAY,
+      }),
+    ]);
+    // A start window that excludes now offers no ODCR; it narrows the blocks too.
+    const later = await w.compute.listReservationOfferings(
+      { instanceType: 'p5.48xlarge', count: 2, durationHours: 24, earliestStart: start + DAY / 2 },
+      w.call(),
+    );
+    expect(later.map((offering) => offering.id.split('/').pop())).toEqual(['cb-0ccccccccccccccc3']);
+    await expect(
+      w.compute.listReservationOfferings(
+        { instanceType: 'p5.48xlarge', count: 0, durationHours: 24 },
+        w.call(),
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  const blockId = (
+    w: ReturnType<typeof world>,
+    start: number,
+    id: string,
+    cents: number,
+    extra = 0,
+  ) => `cb:us-east-1a/p5.48xlarge/2/24/${(start + extra) / 1000}/${cents}/${id}`;
+
+  it('allowPurchases=false refuses, before any EC2 call', async () => {
+    const w = world();
+    const start = offerings(w);
+    await expect(
+      w.compute.purchaseReservation(
+        blockId(w, start, 'cb-0aaaaaaaaaaaaaaa1', 235968),
+        w.call('buy-1'),
+      ),
+    ).rejects.toMatchObject({ code: 'ACCESS_DENIED', details: { reason: 'purchases-disabled' } });
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(0);
+  });
+
+  it('buying a Capacity Block is idempotent by key', async () => {
+    const w = world({ allowPurchases: true });
+    const start = offerings(w);
+    const id = blockId(w, start, 'cb-0aaaaaaaaaaaaaaa1', 235968);
+    const bought = await w.compute.purchaseReservation(id, w.call('buy-1'));
+    expect(bought).toMatchObject({
+      id: expect.stringMatching(/^cb:cr-/),
+      state: 'scheduled',
+      machineType: 'p5.48xlarge',
+      zone: 'us-east-1a',
+      total: 2,
+      startsAt: start,
+      endsAt: start + DAY,
+      specificOnly: true,
+      shared: false,
+    });
+    const purchase = w.emu.calls('PurchaseCapacityBlock')[0]!.params;
+    expect(purchase.get('InstancePlatform')).toBe('Linux/UNIX');
+    expect(purchase.get('TagSpecification.1.ResourceType')).toBe('capacity-reservation');
+    // A retry with the same key finds the block it bought (by its purchase tag): no second buy.
+    const again = await w.compute.purchaseReservation(id, w.call('buy-1'));
+    expect(again.id).toBe(bought.id);
+    expect(w.capacity.purchases).toHaveLength(1);
+    // Another key is another purchase.
+    await w.compute.purchaseReservation(
+      blockId(w, start, 'cb-0ccccccccccccccc3', 210000, DAY),
+      w.call('buy-2'),
+    );
+    expect(w.capacity.purchases).toHaveLength(2);
+  });
+
+  it('a block whose price rose or that is gone is not bought', async () => {
+    const w = world({ allowPurchases: true });
+    const start = offerings(w);
+    // Confirmed at 2 000.00; it now costs 2 359.68.
+    await expect(
+      w.compute.purchaseReservation(
+        blockId(w, start, 'cb-0aaaaaaaaaaaaaaa1', 200000),
+        w.call('k1'),
+      ),
+    ).rejects.toMatchObject({ code: 'CONFLICT', details: { reason: 'price-changed' } });
+    // Sold to someone else.
+    w.capacity.blockOfferings.splice(0, 1);
+    await expect(
+      w.compute.purchaseReservation(
+        blockId(w, start, 'cb-0aaaaaaaaaaaaaaa1', 235968),
+        w.call('k2'),
+      ),
+    ).rejects.toMatchObject({ code: 'CAPACITY_UNAVAILABLE', details: { reason: 'offering-gone' } });
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(0);
+  });
+
+  it('creating an ODCR is idempotent by ClientToken', async () => {
+    const w = world({ allowPurchases: true });
+    const created = await w.compute.purchaseReservation(
+      'odcr:us-east-1a/m7i.large/3/48',
+      w.call('buy-odcr'),
+    );
+    expect(created).toMatchObject({
+      id: expect.stringMatching(/^cr-/),
+      state: 'creating',
+      machineType: 'm7i.large',
+      total: 3,
+      specificOnly: true,
+    });
+    const params = w.emu.calls('CreateCapacityReservation')[0]!.params;
+    expect(params.get('InstanceMatchCriteria')).toBe('targeted');
+    expect(params.get('EndDateType')).toBe('limited');
+    expect(params.get('EndDate')).toBe(new Date(w.emu.now() + 48 * HOUR).toISOString());
+    expect(params.get('Tenancy')).toBe('default');
+    expect(params.get('ClientToken')).toMatch(/^[0-9a-f]{64}$/);
+    const again = await w.compute.purchaseReservation(
+      'odcr:us-east-1a/m7i.large/3/48',
+      w.call('buy-odcr'),
+    );
+    expect(again.id).toBe(created.id);
+    expect(w.capacity.reservations.size).toBe(1);
+  });
+
+  it('refuses malformed, foreign-zone and tenant-account purchases', async () => {
+    const w = world({ allowPurchases: true });
+    offerings(w);
+    const start = offerings(w);
+    for (const id of [
+      'odcr:us-east-1c/m7i.large/1/24',
+      'odcr:us-east-1a/m7i.large/0/24',
+      'nope',
+      'cb:',
+      'cb:cb-0aaaaaaaaaaaaaaa1',
+      'odcr:us-east-1a/m7i.large/1/24/x',
+      `cb:us-east-1c/p5.48xlarge/2/24/${start / 1000}/200000/cb-0bbbbbbbbbbbbbbb2`,
+    ])
+      await expect(w.compute.purchaseReservation(id, w.call('k'))).rejects.toMatchObject({
+        code: 'INVALID_INPUT',
+      });
+    // A tenant's own AWS account is never spent from (purchases are the platform's).
+    const tenant = world({ allowPurchases: true });
+    (tenant.compute.context as { account?: unknown }).account = {
+      id: 'pa_tenant',
+      tenantId: 'acme',
+      platform: false,
+    };
+    await expect(
+      tenant.compute.purchaseReservation('odcr:us-east-1a/m7i.large/1/24', tenant.call('k')),
+    ).rejects.toMatchObject({ code: 'ACCESS_DENIED', details: { reason: 'not-platform-account' } });
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(0);
+    expect(w.emu.calls('CreateCapacityReservation')).toHaveLength(0);
+  });
+});

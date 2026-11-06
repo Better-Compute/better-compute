@@ -23,6 +23,33 @@ export interface EmuReservation {
   end?: number;
   match: 'open' | 'targeted';
   reservationType: 'default' | 'capacity-block';
+  tags?: Map<string, string>;
+  clientToken?: string;
+}
+
+/** A Capacity Block on sale. */
+export interface EmuBlockOffering {
+  id: string;
+  type: string;
+  zone: string;
+  count: number;
+  start: number;
+  hours: number;
+  upfrontFee: number;
+}
+
+/** TagSpecification.N with ResourceType `type` → its tags. */
+function tagsOf(params: URLSearchParams, type: string): Map<string, string> {
+  const tags = new Map<string, string>();
+  for (let n = 1; params.has(`TagSpecification.${n}.ResourceType`); n++) {
+    if (params.get(`TagSpecification.${n}.ResourceType`) !== type) continue;
+    for (let m = 1; params.has(`TagSpecification.${n}.Tag.${m}.Key`); m++)
+      tags.set(
+        params.get(`TagSpecification.${n}.Tag.${m}.Key`)!,
+        params.get(`TagSpecification.${n}.Tag.${m}.Value`) ?? '',
+      );
+  }
+  return tags;
 }
 
 /** Filter.N.Name / Filter.N.Value.M → name → values. */
@@ -64,6 +91,9 @@ export class CapacityEmulator {
   ) {
     ec2.extra.set('DescribeCapacityReservations', (request) => this.#describe(request));
     ec2.extra.set('DescribeSpotPriceHistory', (request) => this.#spotPrices(request));
+    ec2.extra.set('DescribeCapacityBlockOfferings', (request) => this.#blockOfferings(request));
+    ec2.extra.set('PurchaseCapacityBlock', (request) => this.#purchaseBlock(request));
+    ec2.extra.set('CreateCapacityReservation', (request) => this.#createReservation(request));
     ec2.runHooks.push({
       check: (params) => this.#check(params),
       launched: (instance, params) => this.#launched(instance, params),
@@ -123,7 +153,10 @@ export class CapacityEmulator {
       el('endDateType', r.end === undefined ? 'unlimited' : 'limited'),
       el('instanceMatchCriteria', r.match),
       el('reservationType', r.reservationType),
-      items('tagSet', []),
+      items(
+        'tagSet',
+        [...(r.tags ?? [])].map(([key, value]) => `${el('key', key)}${el('value', value)}`),
+      ),
     ].join('');
   }
 
@@ -144,6 +177,8 @@ export class CapacityEmulator {
     for (const [name, values] of filters) {
       if (name === 'state') found = found.filter((r) => values.includes(r.state));
       else if (name === 'instance-type') found = found.filter((r) => values.includes(r.type));
+      else if (name.startsWith('tag:'))
+        found = found.filter((r) => values.includes(r.tags?.get(name.slice(4)) ?? '\u0000'));
       else return ec2Error('InvalidParameterValue', `unknown filter ${name}`);
     }
     const start = Number(p.get('NextToken')?.replace(/^tok-/, '') ?? '0');
@@ -156,6 +191,101 @@ export class CapacityEmulator {
         'capacityReservationSet',
         page.map((r) => this.#xml(r)),
       ) + el('nextToken', next),
+    );
+  }
+
+  /** Capacity Blocks on sale; DescribeCapacityBlockOfferings filters them. */
+  readonly blockOfferings: EmuBlockOffering[] = [];
+  /** Every PurchaseCapacityBlock that bought something (a second buy of one offering is a second block). */
+  readonly purchases: string[] = [];
+
+  #blockOfferings(request: EmulatorRequest): Response {
+    const p = request.params;
+    const type = p.get('InstanceType');
+    const count = Number(p.get('InstanceCount') ?? '0');
+    const hours = Number(p.get('CapacityDurationHours') ?? '0');
+    if (!type || !(count > 0) || !(hours > 0))
+      return ec2Error('MissingParameter', 'InstanceType, InstanceCount and CapacityDurationHours');
+    const from = Date.parse(p.get('StartDateRange') ?? '') || 0;
+    const until = Date.parse(p.get('EndDateRange') ?? '') || Infinity;
+    const found = this.blockOfferings.filter(
+      (o) =>
+        o.type === type &&
+        o.count === count &&
+        o.hours === hours &&
+        o.start >= from &&
+        o.start + o.hours * 3_600_000 <= until,
+    );
+    return ec2Response(
+      'DescribeCapacityBlockOfferings',
+      items(
+        'capacityBlockOfferingSet',
+        found.map((o) =>
+          [
+            el('capacityBlockOfferingId', o.id),
+            el('instanceType', o.type),
+            el('availabilityZone', o.zone),
+            el('instanceCount', o.count),
+            el('startDate', new Date(o.start).toISOString()),
+            el('endDate', new Date(o.start + o.hours * 3_600_000).toISOString()),
+            el('capacityBlockDurationHours', o.hours),
+            el('upfrontFee', o.upfrontFee.toFixed(2)),
+            el('currencyCode', 'USD'),
+            el('tenancy', 'default'),
+          ].join(''),
+        ),
+      ),
+    );
+  }
+
+  #purchaseBlock(request: EmulatorRequest): Response {
+    const p = request.params;
+    const offering = this.blockOfferings.find((o) => o.id === p.get('CapacityBlockOfferingId'));
+    if (!offering)
+      return ec2Error('InvalidCapacityBlockOfferingId.NotFound', 'no such Capacity Block offering');
+    if (p.get('InstancePlatform') !== 'Linux/UNIX')
+      return ec2Error('InvalidParameterValue', 'InstancePlatform');
+    this.purchases.push(offering.id);
+    // Sold: the offering is not on sale any more.
+    this.blockOfferings.splice(this.blockOfferings.indexOf(offering), 1);
+    const reservation = this.add({
+      type: offering.type,
+      zone: offering.zone,
+      total: offering.count,
+      state: 'payment-pending',
+      reservationType: 'capacity-block',
+      start: offering.start,
+      end: offering.start + offering.hours * 3_600_000,
+      tags: tagsOf(p, 'capacity-reservation'),
+    });
+    return ec2Response(
+      'PurchaseCapacityBlock',
+      `<capacityReservation>${this.#xml(reservation)}</capacityReservation>`,
+    );
+  }
+
+  #createReservation(request: EmulatorRequest): Response {
+    const p = request.params;
+    const token = p.get('ClientToken') ?? undefined;
+    const existing = token
+      ? [...this.reservations.values()].find((r) => r.clientToken === token)
+      : undefined;
+    const reservation =
+      existing ??
+      this.add({
+        type: p.get('InstanceType') ?? '',
+        zone: p.get('AvailabilityZone') ?? '',
+        platform: p.get('InstancePlatform') ?? '',
+        total: Number(p.get('InstanceCount') ?? '0'),
+        state: 'pending',
+        match: p.get('InstanceMatchCriteria') === 'targeted' ? 'targeted' : 'open',
+        ...(p.get('EndDate') ? { end: Date.parse(p.get('EndDate')!) } : {}),
+        tags: tagsOf(p, 'capacity-reservation'),
+        ...(token ? { clientToken: token } : {}),
+      });
+    return ec2Response(
+      'CreateCapacityReservation',
+      `<capacityReservation>${this.#xml(reservation)}</capacityReservation>`,
     );
   }
 

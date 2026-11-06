@@ -4,6 +4,8 @@ import {
   type CallContext,
   type ExternalMachine,
   type ExternalReservation,
+  type ReservationOffering,
+  type ReservationOfferingQuery,
   type ImageRef,
   type NetworkRef,
   type Offer,
@@ -36,6 +38,14 @@ import {
 } from './markets/reservations.js';
 import { quotaClassOf, quotaReader, type QuotaReader } from './markets/quotas.js';
 import { priceReader, type PriceReader } from './markets/pricing.js';
+import {
+  blockOfferingId,
+  checkOfferingQuery,
+  maxBlockInstances,
+  odcrOffering,
+  parseOfferingId,
+  type ParsedOffering,
+} from './markets/purchases.js';
 
 export interface AwsComputeDeps {
   ec2: QueryClient;
@@ -60,6 +70,8 @@ export interface AwsCreateRequest {
 
 const offeringsTtlMs = 3_600_000;
 const imageTtlMs = 86_400_000;
+/** The tag a bought capacity reservation carries: the purchase's ClientToken (idempotency). */
+const purchaseTag = 'better-compute:purchase';
 /** EC2 allows 50 tags per resource; ours take 3, the rest is for tenant labels. */
 const maxLabels = 40;
 
@@ -414,6 +426,9 @@ export class AwsCompute implements ProviderImpl {
   protected async capacityReservations(
     signal: AbortSignal,
     ids?: readonly string[],
+    filters: readonly { Name: string; Value: readonly string[] }[] = [
+      { Name: 'state', Value: liveReservationStates },
+    ],
   ): Promise<CapacityReservationInfo[]> {
     const zoneIds = await this.deps.zones.all(signal);
     const names = new Map([...zoneIds].map(([name, id]) => [id, name]));
@@ -426,7 +441,7 @@ export class AwsCompute implements ProviderImpl {
         ids
           ? { CapacityReservationId: ids }
           : {
-              Filter: [{ Name: 'state', Value: liveReservationStates }],
+              Filter: filters.map(({ Name, Value }) => ({ Name, Value: [...Value] })),
               MaxResults: 1000,
               NextToken: token,
             },
@@ -495,6 +510,311 @@ export class AwsCompute implements ProviderImpl {
       }
       return out;
     }
+  }
+
+  // --- Capacity markets (A3): buying capacity ---------------------------------------------------
+
+  /** The currency EC2 prices this partition in. */
+  get #currency(): string {
+    return this.config.region.startsWith('cn-') ? 'CNY' : 'USD';
+  }
+
+  /**
+   * ODCRs the account could create now (in each of its zones that offers the type) and Capacity
+   * Blocks on sale. A read: nothing is bought.
+   */
+  async listReservationOfferings(
+    query: ReservationOfferingQuery,
+    context: CallContext,
+  ): Promise<ReservationOffering[]> {
+    checkOfferingQuery(query);
+    const { signal } = context;
+    const now = this.context.clock.now();
+    const info = (await this.#knownTypes([query.instanceType], signal)).get(query.instanceType);
+    if (!info || info.bareMetal)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `instance type ${query.instanceType} is not a virtual EC2 type in ${this.config.region}`,
+        undefined,
+        { provider: 'aws', reason: 'instance-type' },
+      );
+    const offered = new Set(
+      (await this.#offeringPairs(signal))
+        .filter(([, type]) => type === query.instanceType)
+        .map(([zone]) => zone),
+    );
+    const out: ReservationOffering[] = [];
+    for (const zone of this.config.zones) {
+      if (!offered.has(zone)) continue;
+      const offering = odcrOffering(query, zone, now, this.#currency);
+      if (offering) out.push(offering);
+    }
+    if (query.count <= maxBlockInstances)
+      for (const {
+        offeringId: _id,
+        upfrontCents: _cents,
+        ...offering
+      } of await this.#blockOfferings(query, signal))
+        out.push(offering);
+    return out.sort(
+      (a, b) =>
+        a.startsAt - b.startsAt ||
+        a.upfrontPrice - b.upfrontPrice ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    );
+  }
+
+  /** DescribeCapacityBlockOfferings for the query, in the account's zones, with self-describing ids. */
+  async #blockOfferings(
+    query: Pick<
+      ReservationOfferingQuery,
+      'instanceType' | 'count' | 'durationHours' | 'earliestStart' | 'latestStart'
+    >,
+    signal: AbortSignal,
+  ): Promise<(ReservationOffering & { offeringId: string; upfrontCents: number })[]> {
+    const hours = query.durationHours;
+    const out: (ReservationOffering & { offeringId: string; upfrontCents: number })[] = [];
+    const seen = new Set<string>();
+    let token: string | undefined;
+    do {
+      const doc = await this.call(
+        'DescribeCapacityBlockOfferings',
+        {
+          InstanceType: query.instanceType,
+          InstanceCount: query.count,
+          CapacityDurationHours: hours,
+          StartDateRange:
+            query.earliestStart === undefined
+              ? undefined
+              : new Date(query.earliestStart).toISOString(),
+          EndDateRange:
+            query.latestStart === undefined
+              ? undefined
+              : new Date(query.latestStart + hours * 3_600_000).toISOString(),
+          MaxResults: 1000,
+          NextToken: token,
+        },
+        signal,
+      );
+      for (const item of doc.items('capacityBlockOfferingSet')) {
+        const offeringId = item.textOf('capacityBlockOfferingId');
+        const zone = item.textOf('availabilityZone');
+        const startsAt = Date.parse(item.textOf('startDate') ?? '');
+        const endsAt = Date.parse(item.textOf('endDate') ?? '');
+        const fee = Number(item.textOf('upfrontFee'));
+        if (
+          !offeringId ||
+          !/^[a-z]{2,4}-[0-9a-f]{8,17}$/.test(offeringId) ||
+          !zone ||
+          !this.config.zones.includes(zone) ||
+          item.textOf('instanceType') !== query.instanceType ||
+          Number(item.textOf('instanceCount')) !== query.count ||
+          (item.textOf('tenancy') ?? 'default') !== 'default' ||
+          !Number.isFinite(startsAt) ||
+          !Number.isFinite(endsAt) ||
+          !Number.isFinite(fee) ||
+          fee < 0
+        )
+          continue;
+        if (query.earliestStart !== undefined && startsAt < query.earliestStart) continue;
+        if (query.latestStart !== undefined && startsAt > query.latestStart) continue;
+        const upfrontCents = Math.round(fee * 100);
+        out.push({
+          id: blockOfferingId({
+            zone,
+            instanceType: query.instanceType,
+            count: query.count,
+            hours,
+            startsAt,
+            upfrontPrice: fee,
+            offeringId,
+          }),
+          instanceType: query.instanceType,
+          zone,
+          count: query.count,
+          startsAt,
+          endsAt,
+          upfrontPrice: upfrontCents / 100,
+          currency: item.textOf('currencyCode') ?? this.#currency,
+          offeringId,
+          upfrontCents,
+        });
+      }
+      token = doc.textOf('nextToken') || undefined;
+      if (token && seen.has(token))
+        throw new ComputeError(
+          'PROVIDER_ERROR',
+          'AWS returned a pagination token twice',
+          undefined,
+          {
+            provider: 'aws',
+            reason: 'pagination-loop',
+          },
+        );
+      if (token) seen.add(token);
+    } while (token);
+    return out;
+  }
+
+  /**
+   * Buys an offering. **Spends money.** Off unless config `allowPurchases`, and only on a platform
+   * account. Idempotent by `idempotencyKey`: the reservation carries a purchase tag (the key's
+   * ClientToken), so a retry finds what an earlier attempt bought; an ODCR also sends the
+   * ClientToken. A Capacity Block is bought only if EC2 still lists the confirmed offering at no
+   * more than the confirmed price.
+   */
+  async purchaseReservation(id: string, context: CallContext): Promise<ExternalReservation> {
+    if (!this.config.allowPurchases)
+      throw new ComputeError(
+        'ACCESS_DENIED',
+        'this AWS account does not allow buying capacity (config allowPurchases)',
+        undefined,
+        { provider: 'aws', reason: 'purchases-disabled' },
+      );
+    if (this.context.account?.platform !== true)
+      throw new ComputeError(
+        'ACCESS_DENIED',
+        'capacity is bought only in platform AWS accounts',
+        undefined,
+        { provider: 'aws', reason: 'not-platform-account' },
+      );
+    const offering = parseOfferingId(id, this.config.zones);
+    const { signal } = context;
+    const token = clientToken(context.idempotencyKey);
+    const earlier = await this.#purchased(token, signal);
+    if (earlier) return earlier;
+    const purchaseTags = [
+      { Key: tags.managed, Value: 'true' },
+      { Key: purchaseTag, Value: token },
+    ];
+    let doc: XmlElement;
+    if (offering.kind === 'block') {
+      await this.#confirmBlock(offering, signal);
+      doc = await this.call(
+        'PurchaseCapacityBlock',
+        {
+          CapacityBlockOfferingId: offering.offeringId,
+          InstancePlatform: 'Linux/UNIX',
+          TagSpecification: [{ ResourceType: 'capacity-reservation', Tag: purchaseTags }],
+        },
+        signal,
+      );
+    } else {
+      const offered = (await this.#offeringPairs(signal)).some(
+        ([zone, type]) => zone === offering.zone && type === offering.instanceType,
+      );
+      if (!offered)
+        throw new ComputeError(
+          'INVALID_INPUT',
+          `${offering.instanceType} is not offered in ${offering.zone}`,
+          undefined,
+          { provider: 'aws', reason: 'offering' },
+        );
+      try {
+        doc = await this.call(
+          'CreateCapacityReservation',
+          {
+            ClientToken: token,
+            InstanceType: offering.instanceType,
+            InstancePlatform: 'Linux/UNIX',
+            AvailabilityZone: offering.zone,
+            Tenancy: 'default',
+            InstanceCount: offering.count,
+            InstanceMatchCriteria: 'targeted',
+            EndDateType: 'limited',
+            EndDate: new Date(this.context.clock.now() + offering.hours * 3_600_000).toISOString(),
+            TagSpecification: [{ ResourceType: 'capacity-reservation', Tag: purchaseTags }],
+          },
+          signal,
+        );
+      } catch (error) {
+        // The ClientToken was used with other parameters: an earlier attempt of this purchase
+        // created it (its end date moved on since). Retry until the purchase tag shows it.
+        if (isComputeError(error, 'CONFLICT'))
+          throw new ComputeError(
+            'UNAVAILABLE',
+            'an earlier attempt of this purchase created the reservation; EC2 does not show it yet',
+            undefined,
+            { provider: 'aws', reason: 'purchase-propagating' },
+          );
+        throw error;
+      }
+    }
+    const item = doc.child('capacityReservation');
+    const zoneIds = await this.deps.zones.all(signal);
+    const info = item
+      ? parseCapacityReservation(item, new Map([...zoneIds].map(([name, zid]) => [zid, name])))
+      : undefined;
+    const reservation = info ? await this.#asReservation(info, signal) : undefined;
+    if (!reservation)
+      throw new ComputeError(
+        'PROVIDER_ERROR',
+        'EC2 returned no usable capacity reservation',
+        undefined,
+        {
+          provider: 'aws',
+        },
+      );
+    return reservation;
+  }
+
+  /** The reservation an earlier attempt with this purchase token bought, if EC2 shows one. */
+  async #purchased(token: string, signal: AbortSignal): Promise<ExternalReservation | undefined> {
+    const [found] = await this.capacityReservations(signal, undefined, [
+      { Name: `tag:${purchaseTag}`, Value: [token] },
+    ]);
+    if (!found) return undefined;
+    const reservation = await this.#asReservation(found, signal);
+    if (!reservation)
+      throw new ComputeError(
+        'CONFLICT',
+        `the capacity reservation this purchase bought (${found.capacityReservationId}) is ${found.state}`,
+        undefined,
+        { provider: 'aws', reason: 'purchase-ended', state: found.state },
+      );
+    return reservation;
+  }
+
+  async #asReservation(
+    info: CapacityReservationInfo,
+    signal: AbortSignal,
+  ): Promise<ExternalReservation | undefined> {
+    const { account } = await this.deps.account.verify({ signal, clock: this.context.clock });
+    const types = await this.#knownTypes([info.instanceType], signal);
+    return toReservation(info, { region: this.config.region, account, types });
+  }
+
+  /** The confirmed block must still be on sale, at no more than the confirmed price. */
+  async #confirmBlock(
+    offering: Extract<ParsedOffering, { kind: 'block' }>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const listed = (
+      await this.#blockOfferings(
+        {
+          instanceType: offering.instanceType,
+          count: offering.count,
+          durationHours: offering.hours,
+          earliestStart: offering.startsAt - 1_000,
+          latestStart: offering.startsAt + 1_000,
+        },
+        signal,
+      )
+    ).find((entry) => entry.offeringId === offering.offeringId && entry.zone === offering.zone);
+    if (!listed)
+      throw new ComputeError(
+        'CAPACITY_UNAVAILABLE',
+        `Capacity Block offering ${offering.offeringId} is no longer on sale`,
+        undefined,
+        { provider: 'aws', reason: 'offering-gone' },
+      );
+    if (listed.upfrontCents > offering.upfrontCents)
+      throw new ComputeError(
+        'CONFLICT',
+        `Capacity Block offering ${offering.offeringId} now costs ${listed.upfrontPrice} ${listed.currency}, more than confirmed`,
+        undefined,
+        { provider: 'aws', reason: 'price-changed' },
+      );
   }
 
   /** Ready reservations with their free slots, as offers; an unreadable read leaves them out. */
