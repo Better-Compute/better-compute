@@ -6,6 +6,8 @@ export const pendingKey = 'bc.providerAccounts.connect';
 
 export interface PendingConnect {
   state: string;
+  /** The tenant the flow was started for: the account is connected to it, whatever tenant is selected on return. */
+  tenantId: string;
   provider: 'digitalocean';
   name: string;
   regions: string[];
@@ -15,6 +17,49 @@ export interface PendingConnect {
 }
 
 export const pendingTtlMs = 15 * 60_000;
+
+/** `providerAccounts.connect`'s input for a redirect back. */
+export interface ConnectRequest {
+  tenantId: string;
+  provider: 'digitalocean';
+  name: string;
+  code: string;
+  redirectUri: string;
+  config: { regions: string[] };
+  idempotencyKey: string;
+}
+
+/**
+ * The connect request of the redirect back (its query `params`) for the flow this tab started (`pending`), or why
+ * there is none: the state must be the one this tab sent, the flow at most 15 minutes old, and the account goes to
+ * the tenant the flow was started for (another tab may have switched the console's tenant since).
+ */
+export function connectRequestOf(
+  pending: PendingConnect | undefined,
+  params: URLSearchParams,
+  now: number,
+): { request: ConnectRequest } | { error: string } {
+  if (params.get('error')) return { error: `DigitalOcean answered ${params.get('error')}` };
+  const code = params.get('code');
+  const state = params.get('state');
+  if (!pending || !state || state !== pending.state)
+    return { error: 'This sign-in was not started from this tab: start again' };
+  if (typeof pending.tenantId !== 'string' || !pending.tenantId)
+    return { error: 'This sign-in does not say which tenant it was for: start again' };
+  if (now - pending.startedAt > pendingTtlMs) return { error: 'The sign-in expired: start again' };
+  if (!code) return { error: 'DigitalOcean sent no authorization code' };
+  return {
+    request: {
+      tenantId: pending.tenantId,
+      provider: pending.provider,
+      name: pending.name,
+      code,
+      redirectUri: pending.redirectUri,
+      config: { regions: pending.regions },
+      idempotencyKey: `connect:${state.slice(0, 120)}`,
+    },
+  };
+}
 
 /** 32 random bytes, base64url (43 characters): the state DigitalOcean echoes back. */
 export function newState(): string {

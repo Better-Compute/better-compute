@@ -23,6 +23,7 @@ export default function ConnectDigitalOceanPage() {
     try {
       const pending: PendingConnect = {
         state: newState(),
+        tenantId,
         provider: 'digitalocean',
         name: name.trim(),
         regions: regions
