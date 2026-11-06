@@ -257,6 +257,7 @@ describe('offers', () => {
       memoryGiB: 8,
       diskGiB: 100,
       available: true,
+      arch: 'x86_64',
     });
   });
 

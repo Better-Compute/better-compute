@@ -3,6 +3,7 @@ import {
   isComputeError,
   type CallContext,
   type ExternalMachine,
+  type ExternalReservation,
   type ImageRef,
   type NetworkRef,
   type Offer,
@@ -23,6 +24,15 @@ import {
   type ZoneCache,
 } from './shapes.js';
 import { packUserData } from './userdata.js';
+import {
+  liveReservationStates,
+  matchesQuery,
+  parseCapacityReservation,
+  reservationOffer,
+  toReservation,
+  usable,
+  type CapacityReservationInfo,
+} from './markets/reservations.js';
 
 export interface AwsComputeDeps {
   ec2: QueryClient;
@@ -135,6 +145,8 @@ export class AwsCompute implements ProviderImpl {
   readonly #managedClaims = new Map<string, number>();
   readonly #rootDevices = new Map<string, { device: string | undefined; at: number }>();
   readonly #loggedSsm = new Set<string>();
+  /** Error codes already logged once (an unreadable market read is warned once per code). */
+  readonly #warned = new Set<string>();
   readonly #ssmPrefixes: readonly string[];
 
   constructor(
@@ -254,7 +266,136 @@ export class AwsCompute implements ProviderImpl {
         diskGiB: this.config.rootVolumeGiB,
         ...(info.gpus ? { gpus: { ...info.gpus } } : {}),
         available: true,
+        ...(info.arch[0] ? { arch: info.arch[0] } : {}),
       });
+    }
+    offers.push(...(await this.#reservationOffers(query, signal)));
+    return offers;
+  }
+
+  // --- Capacity markets (A3): reservations ---------------------------------------------------------
+
+  /** Warns once per (topic, code) that a market read failed; the offers it would add are left out. */
+  protected warnOnce(topic: string, error: unknown): void {
+    const code = isComputeError(error) ? error.code : 'error';
+    if (this.#warned.has(`${topic}:${code}`)) return;
+    this.#warned.add(`${topic}:${code}`);
+    this.context.log.warn(`aws: ${topic} unreadable; offers leave them out`, {
+      provider: 'aws',
+      reason: code,
+    });
+  }
+
+  /** Every live capacity reservation (ODCRs and Capacity Blocks), paged; `ids` narrows the read. */
+  protected async capacityReservations(
+    signal: AbortSignal,
+    ids?: readonly string[],
+  ): Promise<CapacityReservationInfo[]> {
+    const zoneIds = await this.deps.zones.all(signal);
+    const names = new Map([...zoneIds].map(([name, id]) => [id, name]));
+    const out: CapacityReservationInfo[] = [];
+    const seen = new Set<string>();
+    let token: string | undefined;
+    do {
+      const doc = await this.call(
+        'DescribeCapacityReservations',
+        ids
+          ? { CapacityReservationId: ids }
+          : {
+              Filter: [{ Name: 'state', Value: liveReservationStates }],
+              MaxResults: 1000,
+              NextToken: token,
+            },
+        signal,
+      );
+      for (const item of doc.items('capacityReservationSet')) {
+        const info = parseCapacityReservation(item, names);
+        if (info) out.push(info);
+      }
+      token = ids ? undefined : doc.textOf('nextToken') || undefined;
+      if (token && seen.has(token))
+        throw new ComputeError(
+          'PROVIDER_ERROR',
+          'AWS returned a pagination token twice',
+          undefined,
+          { provider: 'aws', reason: 'pagination-loop' },
+        );
+      if (token) seen.add(token);
+    } while (token);
+    return out;
+  }
+
+  /** ODCRs and Capacity Blocks better-compute can launch into, as ExternalReservations. */
+  async listReservations(context: CallContext): Promise<ExternalReservation[]> {
+    return this.#reservations(context.signal);
+  }
+
+  async #reservations(signal: AbortSignal): Promise<ExternalReservation[]> {
+    const { account } = await this.deps.account.verify({ signal, clock: this.context.clock });
+    const infos = (await this.capacityReservations(signal)).filter((info) =>
+      usable(info, this.config.zones),
+    );
+    const types = await this.#knownTypes(
+      infos.map((info) => info.instanceType),
+      signal,
+    );
+    const out: ExternalReservation[] = [];
+    for (const info of infos) {
+      const reservation = toReservation(info, { region: this.config.region, account, types });
+      if (reservation) out.push(reservation);
+    }
+    return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  }
+
+  /** Instance types by name; a type EC2 no longer knows is left out rather than failing the read. */
+  async #knownTypes(
+    names: readonly string[],
+    signal: AbortSignal,
+  ): Promise<ReadonlyMap<string, InstanceTypeInfo>> {
+    const unique = [...new Set(names)];
+    if (unique.length === 0) return new Map();
+    try {
+      return await this.#types(unique, signal);
+    } catch (error) {
+      if (!isComputeError(error, 'INVALID_INPUT') && !isComputeError(error, 'PROVIDER_ERROR'))
+        throw error;
+      const out = new Map<string, InstanceTypeInfo>();
+      for (const name of unique) {
+        try {
+          const hit = (await this.#types([name], signal)).get(name);
+          if (hit) out.set(name, hit);
+        } catch (inner) {
+          if (!isComputeError(inner, 'INVALID_INPUT') && !isComputeError(inner, 'PROVIDER_ERROR'))
+            throw inner;
+        }
+      }
+      return out;
+    }
+  }
+
+  /** Ready reservations with their free slots, as offers; an unreadable read leaves them out. */
+  async #reservationOffers(query: OfferQuery, signal: AbortSignal): Promise<Offer[]> {
+    let reservations: ExternalReservation[];
+    try {
+      reservations = await this.#reservations(signal);
+    } catch (error) {
+      if (signal.aborted) throw error;
+      this.warnOnce('capacity reservations', error);
+      return [];
+    }
+    const types = await this.#knownTypes(
+      reservations.map((r) => r.machineType),
+      signal,
+    );
+    const offers: Offer[] = [];
+    for (const reservation of reservations) {
+      const info = types.get(reservation.machineType);
+      const offer = reservationOffer(reservation, {
+        diskGiB: this.config.rootVolumeGiB,
+        ...(info?.arch[0] ? { arch: info.arch[0] } : {}),
+        ...(info?.bareMetal ? { bareMetal: true } : {}),
+      });
+      if (offer && matchesQuery(query, offer)) offers.push(offer);
     }
     return offers;
   }
