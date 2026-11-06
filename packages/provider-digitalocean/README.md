@@ -1,6 +1,6 @@
 # @better-compute/provider-digitalocean
 
-A DigitalOcean provider for better-compute: Droplets as VPS instances and offers (GPU Droplets included), with attach and tenant networks. It talks to the DigitalOcean API v2 over plain `fetch` and has no npm dependencies beyond `@better-compute/core` and `@better-compute/vps`.
+A DigitalOcean provider for better-compute: Droplets as VPS instances and offers (GPU Droplets included), with attach and tenant networks, plus storage: a Spaces `BlobStore`, Spaces buckets and keys, CDN endpoints and Container Registry as resource kinds, and a DOCR image source. It talks to the DigitalOcean API v2 over plain `fetch` and has no npm dependencies beyond `@better-compute/core` and `@better-compute/vps`.
 
 It is not part of the `better-compute` umbrella: install it next to `better-compute`.
 
@@ -23,6 +23,8 @@ An account is data, validated by the provider's manifest:
 | `allowSpot`         | Accepted, default `false`; reserved for Spot capacity, which P1 does not create (see [Machines](#machines)).                                  |
 | `discoverTag`       | A tag: discovery yields only Droplets that carry it. Lower-case `[a-z0-9:_-]`, at most 255 characters (else `INVALID_CONFIG`, `discoverTag`). |
 | `previews`          | Accepted, default `false`; reserved for products that DigitalOcean still marks as previews. It has no effect yet.                             |
+| `spacesAccessKey`   | A secret reference to a Spaces access key id. With `spacesSecretKey`, it is the S3 key pair that manages tenant buckets (see [Storage](#storage-spaces-cdn-and-container-registry)). |
+| `spacesSecretKey`   | A secret reference to the Spaces secret key that goes with `spacesAccessKey`. Set both or neither.                                           |
 
 ## Usage
 
@@ -63,6 +65,7 @@ Create the token as a custom-scope token with at least:
 | `tag:read,create,delete`                                                   | Making tags, putting them on one Droplet at a time and taking them off again.                                                        |
 | `vpc:read,create,update,delete`                                            | The VPC behind each tenant subnet.                                                                                                   |
 | `firewall:read,create,update,delete`                                       | The base firewall and the firewall behind each tenant rule.                                                                          |
+| `spaces_key:read,create,update,delete`, `cdn:read,create,update,delete`, `registry:read,create,update,delete` | The storage kinds and DOCR credentials, only if they are used. These scope names are **unverified** until the live suite checks them. |
 
 A token without a scope fails the call that needs it with `ACCESS_DENIED` (`details.reason` `scope`); `probeAccount` names the missing read scopes up front.
 
@@ -118,6 +121,81 @@ DigitalOcean has no network object, so a tenant network is built from a VPC per 
 - **A Droplet joins a network by tag.** `create` on a tenant network puts `bc-net-<net16>` and the tags its rules target on the Droplet from the first boot; `setTags` adds the new tags before it removes old ones and never removes a member tag unless the Droplet's VPC belongs to another network.
 - **An attached Droplet outside the network's VPCs** that a rule targets loses egress: DigitalOcean denies what a firewall doesn't allow, and the rule's firewall allows only what the rule says.
 
+## Storage: Spaces, CDN and Container Registry
+
+### The operator's BlobStore on Spaces
+
+`spacesBlobStore({ region, bucket, accessKey, secretKey, secrets, prefix?, partSizeBytes? })` implements core `BlobStore` on an existing Spaces bucket, for daemon downloads, log bundles and images. The host builds it and passes it to `betterCompute({ blobStore })`.
+
+```ts
+import { spacesBlobStore } from '@better-compute/provider-digitalocean';
+
+const blobStore = spacesBlobStore({
+  region: 'nyc3',
+  bucket: 'acme-bc-ops',
+  accessKey: 'vault://platform/spaces/access-key',
+  secretKey: 'vault://platform/spaces/secret-key',
+  secrets, // the host's SecretResolver
+  prefix: 'better-compute/',
+});
+```
+
+- `get` answers `undefined` for a missing object. A missing bucket throws `NOT_FOUND`.
+- `put` sends a `Uint8Array`, or a stream of at most one part (default 16 MiB, at least 5 MiB), as one `PUT`. A longer stream goes as a multipart upload, which is aborted if anything fails, so at most one part is held in memory.
+- `delete` succeeds for a blob that is already gone.
+- `presign` signs a `GET` or `PUT` for 1 second to 7 days.
+
+Requests are path-style (`https://<region>.digitaloceanspaces.com/<bucket>/<key>`) and signed with SigV4 (`spaces/sigv4.ts`). The signer is hand-written on `node:crypto` (DO-D19) and tested against AWS's published vectors. `@better-compute/aws-core` is reserved for the AWS packages (`scripts/check-deps.mjs` rule 5), so this package does not use it.
+
+A key with a `.` or `..` segment, a control character, a leading `/` or more than 1024 bytes is refused before any request, because URL parsing would turn it into another key. The key pair is resolved on first use. The secret key never appears in a URL, a header that is returned, a log line or an error.
+
+### Storage kinds
+
+`doStorageResources(config, context, options?)` serves an account's storage resources as desired-state kinds. Each kind's metadata (`spec` manifest, `outputs`, `secretOutputs`, `regional`, `updatable`) mirrors the program plan's `ProviderResourceKind`, so the `cloud-resources` module can dispatch them once that contract is in core. Until then `doResources` is the dispatcher, and it validates each spec before any call. Every `ensure` and `delete` is idempotent.
+
+| Kind | Spec (updatable in **bold**) | Outputs | Ownership |
+| --- | --- | --- | --- |
+| `do.spaces-key` | **`grants`**: `<bucket>:read`, `<bucket>:readwrite` or `*:fullaccess` | `accessKeyId`, `name`, `grants`. Secret output: `secretKey`, returned only by the `ensure` that creates the key | The name is `bc-…` |
+| `do.spaces-bucket` | `region`, **`acl`** (`private` or `public-read`), **`versioning`** | `bucket`, `region`, `endpoint`, `origin`, `acl`, `versioning` | The marker object `.better-compute/owner`, which names the deployment |
+| `do.cdn-endpoint` | `origin` (`<bucket>.<region>.digitaloceanspaces.com`), **`ttl`** (60, 600, 3600, 86400 or 604800), **`customDomain`** with **`certificateId`** | `origin`, `endpoint`, `url`, `ttl`, `customDomain` | The origin is a managed bucket |
+| `do.container-registry` | `region` | `name`, `region`, `endpoint` (`registry.digitalocean.com/<name>`), `storageUsageBytes` | The name is `bc-…` |
+| `do.registry-garbage-collection` | `registry` (a managed one), **`type`**, **`intervalHours`** (default 24) | `registry`, `uuid`, `status`, `blobsDeleted`, `freedBytes` | The registry is managed |
+
+Buckets, keys, CDN endpoints and registries carry no tags, so each kind proves ownership another way. The last column says how. A resource without that proof is never changed or deleted: it is refused with `INVALID_STATE` and `reason` `unmanaged`, `otherDeployment` or `unmanagedOrigin`.
+
+Tenant data is never deleted to delete a resource:
+
+- A bucket is deleted only when it holds nothing but its marker. Otherwise the delete is refused with `bucketNotEmpty`. If an object arrives during the delete, the marker is put back.
+- A registry is deleted only when it holds no repositories. Otherwise the delete is refused with `registryNotEmpty`.
+
+A bucket needs the account's Spaces key pair (the `spacesAccessKey` and `spacesSecretKey` config fields, both secret references). Without it, every bucket call fails closed with `INVALID_CONFIG` and `reason` `spacesKeys`. A bucket name that another account holds is `CONFLICT` with `bucketNameTaken`.
+
+There is one CDN endpoint per origin, as DigitalOcean enforces. The kind's `purge(id, files)` method clears cached paths.
+
+A garbage collection means "the registry was collected within the last `intervalHours`". `ensure` adopts the newest collection inside that window, or a running one, and starts a collection only when there is none. A reconciler that calls it again therefore never starts a second one. `delete` cancels a running collection. `repositories(name)` on the registry kind lists a registry's repositories. They are created by pushes, so they are read-only here.
+
+### DOCR images
+
+`docrImageSource({ token, secrets })` is an OCI `ImageSource` (scheme `oci`) for `oci://registry.digitalocean.com/<registry>/<repository>:<tag>` or `@sha256:<digest>`. A tag or a digest is required.
+
+It resolves a reference this way:
+
+1. It gets read-only registry credentials from `GET /v2/registry/docker-credentials`. They last 120 to 3600 seconds (default 600), are kept only in memory, and are renewed a minute before they expire.
+2. It runs the registry's bearer-token flow with them.
+3. It reads the manifest. A manifest referenced by digest is checked against that digest.
+4. It picks the one disk layer, found by media type `application/vnd.better-compute.disk.<raw|qcow2|iso>[+zstd|gzip]` or by an `org.opencontainers.image.title` ending in `.raw`, `.img`, `.qcow2` or `.iso`, optionally followed by `.zst` or `.gz`.
+
+It returns that layer's sha256, size, format and compression, together with the registry's own short-lived presigned blob URL. Nodes get only that URL, and they verify the digest.
+
+The source fails closed in two cases:
+
+- A registry that would serve the bytes itself is refused with `blobRedirect`, because a node would need the control plane's credentials to fetch them.
+- Credentials are never sent to a token realm outside DigitalOcean's hosts. Such a realm is refused with `realm`.
+
+An image index is `UNSUPPORTED`; reference one platform's manifest by digest.
+
+Nothing consumes `ImageSource` extensions yet: wiring them into provision's image resolution is a follow-up.
+
 ## Rate budget
 
 DigitalOcean allows 250 requests a minute and 5 000 an hour per token, over sliding windows, and the limits are shared by everything that uses the token: every reconciler of every account that names it, in every process. The provider keeps each token's requests (found by a hash of the token, which is never kept) under both limits, and re-seeds from the `ratelimit-*` headers of each response, so traffic from other processes counts. Requests have a class: a `mutate` (create, delete, action, tag write) may spend whatever is left, an `observe` (a read of one Droplet, an action, a firewall list) at most 30 % of a window (network reconciles reuse the firewall list for ten seconds, and drop it on each firewall write of their own; deletes read it afresh), and a `sweep` (discovery, `list`, the catalogs) at most 20 %. So discovery defers first, and at least half of every window stays free for the calls that change something. A request over its share is `RATE_LIMITED` with `retryAfterMs` (`details.reason` `budget`); a 429 from DigitalOcean is `RATE_LIMITED` with `retryAfterMs` from `ratelimit-reset`. `digitaloceanProvider({ budget: { perMinute, perHour } })` lowers the limits of an account that shares its token with other tools.
@@ -135,6 +213,8 @@ DigitalOcean errors map to `ComputeError` codes: 401 `INVALID_CONFIG` (`token`),
 ## Tests, and what is not yet verified
 
 The tests run against an in-memory emulator of the endpoints the provider uses (`tests/support/do-emulator/`), plugged in through the `fetch` option. `tests/provider-digitalocean.test.ts` and `tests/provider-digitalocean-networks.test.ts` run the conformance cases and the DigitalOcean specifics, and `tests/do-end-to-end.test.ts` runs the provider and the emulator through vps: create, stop and delete; discover, attach and detach; auto-attach; a tenant network with its base firewall and a rule; and a create DigitalOcean refuses for capacity.
+
+The storage tests cover the signer (`tests/provider-digitalocean-sigv4.test.ts`, on AWS's published vectors), the S3 client and the BlobStore (`-spaces-s3`, `-spaces-blob-store`), the kinds (`-spaces-keys`, `-spaces-buckets`, `-cdn`, `-registry-kinds`) and the DOCR image source (`-docr-image-source`). They run against `tests/support/spaces-emulator.ts`, which checks every SigV4 signature with its own canonicalization, and against the Spaces Keys, CDN and registry modules in `tests/support/do-emulator/` (`spaces-keys.ts`, `cdn.ts`, `registry.ts`, which the tests register). How Spaces answers a `HEAD` on another account's bucket (403) and on a bucket in another region (301), the CDN's one-endpoint-per-origin rule, and the registry's redirect of blobs to presigned storage are **unverified** until the live suite checks them.
 
 The emulator's bodies are shaped like the fixtures in `tests/fixtures/digitalocean/`, which come from DigitalOcean's published OpenAPI specification. Some behaviours are not in the specification (`docs/research/digitalocean.md` marks them **unverified**): whether a `tag_name` list includes GPU Droplets, the exact text of the 422 messages for capacity and the Droplet limit, whether Droplet names may repeat, the limits on firewall rules, and the MTU of a VPC. The provider handles both outcomes of each, and an opt-in live suite settles them. **The live suite has not been run yet.**
 
