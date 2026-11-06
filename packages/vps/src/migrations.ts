@@ -19,6 +19,7 @@ import {
   providerPurchasesMigration,
   providerPurchasesUnknownMigration,
 } from './provider-purchases.js';
+import { providerEventsMigration, providerInterruptionsMigration } from './provider-events.js';
 import {
   vpsIdentityRebindMigration,
   vpsSandboxExpiringMigration,
@@ -219,4 +220,6 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsSubnetPrivateAccessMigration,
   providerPurchasesMigration,
   providerPurchasesUnknownMigration,
+  providerEventsMigration,
+  providerInterruptionsMigration,
 ]);

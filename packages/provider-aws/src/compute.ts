@@ -12,6 +12,7 @@ import {
   type OfferQuery,
   type PowerAction,
   type ProviderContext,
+  type ProviderEventBatch,
   type ProviderImpl,
   type PurchaseAttempt,
 } from '@better-compute/core';
@@ -19,6 +20,12 @@ import type { JsonClient, QueryClient, QueryParams, XmlElement } from '@better-c
 import type { AccountCredentials } from './account.js';
 import { parseDiscoverTag, type AwsConfig, type AwsProviderOptions } from './config.js';
 import { clientToken, offerId, parseInstanceId, parseOfferId, tags, tagValue } from './ids.js';
+import {
+  defaultEventSources,
+  pollQueue,
+  scanScheduledEvents,
+  scheduledEventScanMs,
+} from './events.js';
 import { aliasRootDeviceOf, resolveImage, ssmImagePrefixes } from './images.js';
 import { AwsNetworks } from './networks.js';
 import {
@@ -56,6 +63,8 @@ export interface AwsComputeDeps {
   quotas?: JsonClient;
   /** (A3) The Price List Query API (JSON 1.1); absent: offers carry no on-demand price. */
   pricing?: JsonClient;
+  /** (A4) The event-intake queue's client, when the account names `eventQueueUrl`. */
+  sqs?: JsonClient;
   account: AccountCredentials;
   types: InstanceTypeCache;
   zones: ZoneCache;
@@ -188,6 +197,8 @@ export class AwsCompute implements ProviderImpl {
   readonly networks: AwsNetworks;
   readonly #quotas: QuotaReader | undefined;
   readonly #prices: PriceReader;
+  /** (A4, no queue) When the last DescribeInstanceStatus scan succeeded. */
+  #scannedAt: number | undefined;
 
   constructor(
     readonly config: AwsConfig,
@@ -1573,6 +1584,46 @@ export class AwsCompute implements ProviderImpl {
       'DeleteTags',
       { ResourceId: [id], Tag: [{ Key: tags.instance, Value: instanceId }, { Key: tags.managed }] },
       context.signal,
+    );
+  }
+
+  // --- Events (A4) --------------------------------------------------------------------------------
+
+  /**
+   * The account's EventBridge events from its intake queue (`eventQueueUrl`), authenticated by
+   * account, region and source. Messages are deleted only by the batch's `ack`. Without a queue,
+   * the account's scheduled events (DescribeInstanceStatus) at most every 5 minutes.
+   */
+  async pollEvents(
+    context: CallContext,
+    options: { waitMs: number; max: number },
+  ): Promise<ProviderEventBatch> {
+    const { sqs } = this.deps;
+    if (sqs === undefined || this.config.eventQueueUrl === undefined) {
+      const now = this.context.clock.now();
+      if (this.#scannedAt !== undefined && now - this.#scannedAt < scheduledEventScanMs)
+        return { events: [], received: 0, ack: async () => {} };
+      const events = await scanScheduledEvents(
+        (action, params, signal) => this.call(action, params, signal),
+        context.signal,
+        now,
+      );
+      this.#scannedAt = now;
+      // Not a queue: nothing more to read until the next scan, however many events it found.
+      return { events, received: 0, ack: async () => {} };
+    }
+    return pollQueue(
+      {
+        sqs,
+        queueUrl: this.config.eventQueueUrl,
+        region: this.config.region,
+        sources: this.config.eventSources ?? defaultEventSources,
+        account: async (signal) =>
+          (await this.deps.account.verify({ signal, clock: this.context.clock })).account,
+        log: context.log,
+      },
+      context,
+      options,
     );
   }
 }

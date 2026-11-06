@@ -1058,6 +1058,47 @@ export interface CallContext {
   log: Logger;
 }
 
+/**
+ * (AWS A4, AD12) What a provider's event intake reports. Events only wake reconcilers early: polling
+ * stays the source of truth, so an event never writes machine state by itself.
+ */
+export type ProviderEventKind =
+  | 'machine-changed'
+  | 'interruption-warning'
+  | 'rebalance-recommended'
+  | 'maintenance-scheduled'
+  | 'reservation-changed'
+  | 'health'
+  | 'api-call';
+
+/** One authenticated provider event (the provider already dropped foreign or unknown ones). */
+export interface ProviderEvent {
+  /** The provider's event id, unique per account: vps processes each id once. */
+  id: string;
+  kind: ProviderEventKind;
+  /** The machine (`ExternalMachine.id`) the event is about. */
+  machineId?: string;
+  reservationId?: string;
+  /** When the provider says the event happened (epoch ms). */
+  at: number;
+  /** The interruption or maintenance time (epoch ms). */
+  deadline?: number;
+  /** Short provider facts (state, event code, status); never secrets or raw message bodies. */
+  details?: Readonly<Record<string, string>>;
+}
+
+/** One poll's events. `ack` removes them at the provider; vps calls it after its transaction commits. */
+export interface ProviderEventBatch {
+  events: readonly ProviderEvent[];
+  /**
+   * (AWS A4) How many queue messages the poll read, mapped or dropped (0 for a source that is no
+   * queue). One message can map to many events or none, so vps polls again while this equals
+   * `max`. Absent: vps counts `events`.
+   */
+  received?: number;
+  ack(): Promise<void>;
+}
+
 /** One configured provider account's client (§5.4). */
 export interface ProviderImpl {
   listOffers(query: OfferQuery): Promise<Offer[]>;
@@ -1158,6 +1199,15 @@ export interface ProviderImpl {
     window: { from: number; to: number },
     context: CallContext,
   ): AsyncIterable<ProviderCostRecord>;
+  /**
+   * (AWS A4) Long-polls the account's event intake for at most `waitMs` (≤ 10 000) and returns at
+   * most `max` events. Read outside any transaction; vps acks the batch after its transaction
+   * commits, so an unacked batch is delivered again (vps drops ids it has seen).
+   */
+  pollEvents?(
+    context: CallContext,
+    options: { waitMs: number; max: number },
+  ): Promise<ProviderEventBatch>;
 }
 
 export interface ProviderContext {

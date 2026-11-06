@@ -62,9 +62,26 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
                 : {}),
               ...(options.rateLimit ? { rateLimit: options.rateLimit } : {}),
             });
+      // A4: the event-intake queue, when the account has one (SQS JSON 1.0 protocol).
+      const sqs =
+        config.eventQueueUrl === undefined
+          ? undefined
+          : jsonClient({
+              service: 'sqs',
+              region: config.region,
+              credentials: account.source,
+              fetch: options.fetch,
+              clock: context.clock,
+              log: context.log,
+              jsonVersion: '1.0',
+              targetPrefix: 'AmazonSQS',
+              ...(options.endpoints?.sqs !== undefined ? { endpoint: options.endpoints.sqs } : {}),
+              ...(options.rateLimit ? { rateLimit: options.rateLimit } : {}),
+            });
       const compute = new AwsCompute(config, context, options, {
         ec2,
         quotas,
+        ...(sqs ? { sqs } : {}),
         ...(pricing ? { pricing } : {}),
         account,
         types: instanceTypeCache(ec2, { clock: context.clock }),

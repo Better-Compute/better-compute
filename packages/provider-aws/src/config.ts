@@ -5,6 +5,7 @@ import {
   partitionOf,
   type CredentialSource,
 } from '@better-compute/aws-core';
+import { parseEventQueueUrl } from './events.js';
 
 /**
  * One AWS account in one region (AD3). Credentials are a SecretRef, never a value. There is no
@@ -103,6 +104,16 @@ export const awsConfig = manifest({
     .describe(
       'Allow buying capacity (Capacity Blocks, new ODCRs) in this platform account; spends money, root-only and confirmed',
     ),
+  eventQueueUrl: field
+    .string({ maxLength: 256 })
+    .optional()
+    .describe(
+      "SQS queue the account's EventBridge rules feed (https://sqs.<region>.amazonaws.com/<account>/<name>, in this account and region; render it with `aws event-rules`); absent: scheduled events are read with DescribeInstanceStatus every 5 minutes",
+    ),
+  eventSources: field
+    .list(field.option(['aws.ec2', 'aws.health', 'aws.guardduty']), { min: 1 })
+    .optional()
+    .describe('EventBridge sources taken from the queue (default aws.ec2 and aws.health); anything else is dropped'),
 });
 
 /** The validated account configuration. */
@@ -130,12 +141,14 @@ export interface AwsConfig {
   pricing: 'off' | 'on-demand' | 'all';
   /** (A3) Allow purchaseReservation (spends money). */
   allowPurchases: boolean;
+  eventQueueUrl?: string;
+  eventSources?: ('aws.ec2' | 'aws.health' | 'aws.guardduty')[];
 }
 
 export interface AwsProviderOptions {
   fetch?: typeof fetch;
   /** Tests and VPC endpoints; host options, never account config. */
-  endpoints?: Partial<Record<'ec2' | 'sts' | 'servicequotas' | 'pricing', string>>;
+  endpoints?: Partial<Record<'ec2' | 'sts' | 'servicequotas' | 'pricing' | 'sqs', string>>;
   /** Ambient identity for platform accounts (default `ambientCredentials()`). */
   credentials?: CredentialSource;
   /** ExternalId prefix: `${externalIdPrefix}:${providerAccountId}` (default 'better-compute'). */
@@ -205,6 +218,7 @@ export function validateAwsConfig(config: AwsConfig): void {
       );
   roleArnOf(config);
   if (config.discoverTag !== undefined) parseDiscoverTag(config.discoverTag);
+  if (config.eventQueueUrl !== undefined) parseEventQueueUrl(config.eventQueueUrl, config.region);
   if (config.instanceProfile !== undefined) {
     let arn;
     try {
