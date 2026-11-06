@@ -7,8 +7,15 @@ import {
   staticCredentials,
   type CredentialContext,
   type CredentialSource,
+  webIdentityCredentials,
 } from '@better-compute/aws-core';
-import { roleArnOf, type AwsConfig, type AwsProviderOptions } from './config.js';
+import {
+  roleArnOf,
+  webIdentityAudience,
+  webIdentityRoleArnOf,
+  type AwsConfig,
+  type AwsProviderOptions,
+} from './config.js';
 
 export interface AccountCredentials {
   /** Credentials for EC2 calls (already cached). */
@@ -44,10 +51,18 @@ function sessionNameOf(accountId: string): string {
  * | tenant   | set         | set           | AssumeRole from static, ExternalId |
  * | tenant   | –           | set           | AssumeRole from the platform identity, ExternalId |
  * | tenant   | –           | –             | INVALID_CONFIG (F1: ambient credentials are the platform's) |
+ * | any      | –           | –, webIdentityRoleArn set | AssumeRoleWithWebIdentity with the account's workload identity |
  *
  * The ExternalId is `${externalIdPrefix}:${providerAccountId}` and never comes from config, so a
  * tenant naming another tenant's role gets AccessDenied from STS. A tenant role in a platform AWS
  * account is refused, and after AssumeRole the identity must be the role's own account.
+ *
+ * `webIdentityRoleArn` is the keyless path (A7, as provider-gcp's `federationAudience`): the
+ * account's workload identity (`context.identity`, whose subject vps fixes to the account) is
+ * minted for the audience `sts.amazonaws.com` and exchanged, unsigned, with
+ * AssumeRoleWithWebIdentity. It never touches the host's AWS identity, so it satisfies F1 for a
+ * tenant account; it excludes `credentials` and `assumeRoleArn` and needs a workload issuer. The
+ * role's trust names the subject, so a tenant naming another account's role is refused by STS.
  */
 export function accountCredentials(
   config: AwsConfig,
@@ -56,6 +71,8 @@ export function accountCredentials(
 ): AccountCredentials {
   const account = context.account;
   const platform = account?.platform === true;
+  const webRole = webIdentityRoleArnOf(config);
+  if (webRole) return webIdentityAccount(config, context, options, webRole);
   const role = roleArnOf(config);
   if (role && !account)
     throw invalidConfig(
@@ -154,4 +171,80 @@ export function accountCredentials(
       return verified;
     },
   };
+}
+
+/** `sts:GetCallerIdentity` must be the role's own account; memoized on success. */
+function verifier(
+  source: CredentialSource,
+  roleAccount: string,
+  config: AwsConfig,
+  options: AwsProviderOptions,
+): AccountCredentials['verify'] {
+  let verified: Promise<{ account: string }> | undefined;
+  return (call) => {
+    verified ??= getCallerIdentity(source, {
+      region: config.region,
+      fetch: options.fetch,
+      ...(options.endpoints?.sts !== undefined ? { endpoint: options.endpoints.sts } : {}),
+      signal: call.signal,
+      clock: call.clock,
+    })
+      .then(({ account }) => {
+        if (account !== roleAccount)
+          throw accessDenied(
+            `AssumeRoleWithWebIdentity for account ${roleAccount} returned an identity in account ${account}`,
+            'assumed-identity-mismatch',
+          );
+        return { account };
+      })
+      .catch((error: unknown) => {
+        verified = undefined;
+        throw error;
+      });
+    return verified;
+  };
+}
+
+/** The keyless account (A7): see `accountCredentials`. */
+function webIdentityAccount(
+  config: AwsConfig,
+  context: ProviderContext,
+  options: AwsProviderOptions,
+  role: NonNullable<ReturnType<typeof webIdentityRoleArnOf>>,
+): AccountCredentials {
+  const account = context.account;
+  if (config.credentials !== undefined || config.assumeRoleArn !== undefined)
+    throw invalidConfig(
+      'An AWS account names either webIdentityRoleArn (keyless sign-in with its workload identity) ' +
+        'or credentials / assumeRoleArn, not both',
+      'webIdentityExclusive',
+    );
+  if (!account)
+    throw invalidConfig(
+      'an AWS account with webIdentityRoleArn needs its provider account context (the session names it)',
+      'account-context-required',
+    );
+  if (!context.identity)
+    throw invalidConfig(
+      'webIdentityRoleArn needs the host to run a workload issuer (better-compute has none ' +
+        'configured), so this account cannot sign in',
+      'noWorkloadIssuer',
+    );
+  if (!account.platform && (options.platformAccounts ?? []).includes(role.account))
+    throw invalidConfig(
+      `webIdentityRoleArn names AWS account ${role.account}, which is the platform's`,
+      'platform-account-role',
+    );
+  const identity = context.identity;
+  const source = cachedCredentials(
+    webIdentityCredentials({
+      roleArn: config.webIdentityRoleArn!,
+      sessionName: sessionNameOf(account.id),
+      token: async () => (await identity.mint({ audience: webIdentityAudience })).token,
+      region: config.region,
+      fetch: options.fetch,
+      ...(options.endpoints?.sts !== undefined ? { endpoint: options.endpoints.sts } : {}),
+    }),
+  );
+  return { source, verify: verifier(source, role.account, config, options) };
 }

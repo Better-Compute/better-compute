@@ -1,3 +1,4 @@
+import { staticJwks, verifyJwt } from '@better-compute/pki';
 import type { AwsEmulator } from './index.js';
 import { el, queryError, queryResponse } from './xml.js';
 
@@ -20,15 +21,40 @@ export interface StsRole {
 }
 
 /**
+ * A role trusting an IAM OIDC provider (AssumeRoleWithWebIdentity, A7): STS verifies the token's
+ * signature against the provider's JWKS, its `iss` (the provider URL), `aud` (a client id of the
+ * provider, `sts.amazonaws.com`) and `exp`, then the trust's `<issuer>:sub` condition.
+ */
+export interface StsWebRole {
+  issuer: string;
+  jwks: () => Promise<unknown>;
+  /** The provider's client id the trust pins (default `sts.amazonaws.com`). */
+  audience?: string;
+  /** The trust policy's condition over `sub`. */
+  trust: (sub: string) => boolean;
+  /** Override: the account GetCallerIdentity reports for the minted credentials. */
+  identityAccount?: string;
+}
+
+/**
  * STS: GetCallerIdentity (by access key id), AssumeRole (ExternalId and trust checks; mints ASIA
  * keys valid for DurationSeconds of emulator time) and AssumeRoleWithWebIdentity (unsigned;
- * configured tokens only).
+ * configured tokens, or a JWT verified against a `webRoles` OIDC trust).
  */
 export class StsEmulator {
   readonly identities = new Map<string, StsIdentity>();
   readonly roles = new Map<string, StsRole>();
   /** Web identity token → the role ARN it may assume. */
   readonly webTokens = new Map<string, string>();
+  /** Roles that trust an OIDC provider (checked when a token is not in `webTokens`). */
+  readonly webRoles = new Map<string, StsWebRole>();
+  /** Every AssumeRoleWithWebIdentity against `webRoles`: `sub` once the token verified. */
+  readonly webExchanges: {
+    roleArn: string;
+    sessionName: string;
+    sub?: string;
+    accepted: boolean;
+  }[] = [];
   /** Every AssumeRole request's parameters. */
   readonly assumed: {
     roleArn: string;
@@ -112,6 +138,9 @@ export class StsEmulator {
                 'AssumeRoleWithWebIdentity is unsigned',
                 'Sender',
               );
+            const webRole = this.webRoles.get(roleArn);
+            if (webRole && !this.webTokens.has(token))
+              return this.#federate(roleArn, p.get('RoleSessionName') ?? '', token, webRole, p);
             if (this.webTokens.get(token) !== roleArn)
               return queryError('InvalidIdentityToken', 'Token is not valid', 'Sender', 400);
             return this.#mint(
@@ -126,6 +155,58 @@ export class StsEmulator {
         }
       },
     });
+  }
+
+  async #federate(
+    roleArn: string,
+    sessionName: string,
+    token: string,
+    role: StsWebRole,
+    p: URLSearchParams,
+  ): Promise<Response> {
+    const record = (accepted: boolean, sub?: string) =>
+      this.webExchanges.push({ roleArn, sessionName, accepted, ...(sub ? { sub } : {}) });
+    let claims: Record<string, unknown>;
+    try {
+      claims = await verifyJwt(token, staticJwks(await role.jwks()));
+    } catch {
+      record(false);
+      return queryError('InvalidIdentityToken', 'The token signature is not valid', 'Sender', 400);
+    }
+    const sub = typeof claims.sub === 'string' ? claims.sub : undefined;
+    if (claims.iss !== role.issuer) {
+      record(false, sub);
+      return queryError(
+        'InvalidIdentityToken',
+        'No OpenIDConnect provider found in your account for the issuer',
+        'Sender',
+        400,
+      );
+    }
+    if (claims.aud !== (role.audience ?? 'sts.amazonaws.com')) {
+      record(false, sub);
+      return queryError('InvalidIdentityToken', 'Incorrect token audience', 'Sender', 400);
+    }
+    if (typeof claims.exp !== 'number' || claims.exp * 1000 <= this.emu.now()) {
+      record(false, sub);
+      return queryError('ExpiredTokenException', 'Token is expired', 'Sender', 400);
+    }
+    if (sub === undefined || !role.trust(sub)) {
+      record(false, sub);
+      return queryError(
+        'AccessDenied',
+        'Not authorized to perform sts:AssumeRoleWithWebIdentity',
+        'Sender',
+        403,
+      );
+    }
+    record(true, sub);
+    return this.#mint(
+      'AssumeRoleWithWebIdentity',
+      roleArn,
+      role.identityAccount ?? roleArn.split(':')[4]!,
+      Number(p.get('DurationSeconds') ?? 3600),
+    );
   }
 
   #identity(keyId: string | undefined, token: string | null): StsIdentity | undefined {
