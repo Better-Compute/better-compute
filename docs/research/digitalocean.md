@@ -139,6 +139,32 @@ DO nodes still join with tokens (DO-D12).
   (`node_inventory_sections` CHECK in postgres `0015`), outside this program's block. The control plane decodes it
   with `cloudInstanceOf` (`@better-compute/inventory`), normalizing again, and uses it for no label or placement.
 
+### P3 review fixes (2026-11-05)
+
+- **Catalog images are resolved per tenant (D-P3-8).** A `name@version` is unique only within a tenant's catalog and
+  may be private, so vps refuses (`NOT_FOUND`) a catalog-form image id that `vps({ images })` does not resolve for the
+  instance's tenant on a provider pool, and passes the resolution to the provider (core's optional
+  `catalogImage: { tenantId, sha256 }` on create and reinstall). `CatalogImageSource.locate` receives both, and the
+  provider refuses a location with another digest. A catalog ref without a resolution is refused before the source is
+  asked.
+- **Spot creates are checked against the loaded catalog, and need `previews` while unverified (D-P3-9).** A Spot member
+  DO ignored would make an on-demand GPU Droplet at full price that reads back as Spot, so DO is never left to decide:
+  the size catalog is loaded when the client holds none, and Spot needs `previews` until `spotShape.verified`.
+- **`@spot` is the provider's to declare (D-P3-10).** A provider declares the `spot-offers` capability; on any other
+  provider `…@spot` names a reservation called `spot`, which admission requires to exist.
+- **Preempted recreates (D-P3-11).** An `archive` Droplet is never adopted by a create; a recreated instance's
+  provider calls use the key `<id>:r<generation>`; replacements that never reach `running` stop after three, with
+  backoff from the second. Preemption is still read from any disappearance of an `@spot`, non-attached instance:
+  DO-D14's `details.reason 'preempted'` from the action log is not possible, since a gone Droplet's actions can't be
+  read, so a Spot Droplet destroyed by hand is also replaced (bounded by the cap above).
+- **Bare Metal (D-P3-12).** Every machine pins its host key; calls act on the caller's exact claim (so a machine is
+  bootstrapped under the key that claimed it: `providerAccounts.bootstrap` with its `offerId`); a non-root login runs
+  each command through `sudo -n`; a release removes bcd's binary, units, `/etc/bcd` and `/var/lib/bcd` before the
+  claim. The OS is not reinstalled (no API), so anything outside bcd's paths survives a release.
+- **Still open:** no sweeper deletes imported custom images no Droplet uses any more (DO bills their storage), there is
+  no per-region `provider_images` table (D-P3-1 keeps the image as its own record), Spot estimates still say
+  `spot: false` (billing owner), and MicroVMs stay behind the design gate above.
+
 ## Consequences for the plans (applied 2026-10-18)
 
 1. **Lists and lookups cover GPU Droplets explicitly.**
