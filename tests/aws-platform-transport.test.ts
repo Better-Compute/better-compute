@@ -1,4 +1,7 @@
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
+import { s3BlobStore } from '@better-compute/aws';
 import { ComputeError } from '@better-compute/core';
 import { presignUrl, signRequest } from '../packages/aws/src/internal/sigv4.js';
 import {
@@ -133,5 +136,74 @@ describe('internal transport', () => {
     expect(log.text()).not.toContain('c2VjcmV0');
     expect(log.text()).not.toContain('testsecret');
     expect(log.text()).not.toContain('Signature=');
+  });
+});
+
+describe('transport timeouts (review: time to headers only)', () => {
+  // A real HTTP server and the platform fetch: the fetch spec errors a response body when the
+  // request's signal fires, which the in-memory emulator cannot show.
+  async function slowServer(handler: (request: IncomingMessage, response: ServerResponse) => void) {
+    const server = createServer(handler);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    return {
+      endpoint: `http://127.0.0.1:${port}`,
+      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    };
+  }
+  const credentials = { kind: 'test', credentials: async () => ({ accessKeyId: 'AKIATESTKEY0000000001', secretAccessKey: 'x' }) };
+
+  it('a GET whose body streams for longer than timeoutMs still reads the whole body', async () => {
+    const server = await slowServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/octet-stream' });
+      let sent = 0;
+      const tick = setInterval(() => {
+        response.write('chunk;');
+        if (++sent === 6) {
+          clearInterval(tick);
+          response.end();
+        }
+      }, 100);
+    });
+    try {
+      const store = s3BlobStore({ region: 'us-east-1', credentials, endpoint: server.endpoint, bucket: 'bc-blobs', pathStyle: true, timeoutMs: 200 });
+      const body = await store.get('big');
+      expect(await new Response(body).text()).toBe('chunk;'.repeat(6));
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('a response whose headers take longer than timeoutMs is UNAVAILABLE (timeout)', async () => {
+    const server = await slowServer((_request, response) => {
+      setTimeout(() => response.writeHead(200).end('late'), 600);
+    });
+    try {
+      const transport = createTransport({ region: 'us-east-1', credentials, endpoint: server.endpoint, timeoutMs: 100 });
+      const error = await transport
+        .send({ method: 'GET', url: new URL(`${server.endpoint}/x`), service: 's3', operation: 'GetObject', protocol: 'rest-xml', s3: true })
+        .catch((e: unknown) => e as ComputeError);
+      expect(error).toMatchObject({ code: 'UNAVAILABLE', details: { reason: 'timeout' } });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('S3 uploads get a timeout scaled to the body size', async () => {
+    const server = await slowServer((request, response) => {
+      request.resume();
+      request.on('end', () => setTimeout(() => response.writeHead(200, { etag: '"e"' }).end(), 300));
+    });
+    try {
+      const store = s3BlobStore({ region: 'us-east-1', credentials, endpoint: server.endpoint, bucket: 'bc-blobs', pathStyle: true, timeoutMs: 100 });
+      await expect(store.put('object', new Uint8Array(1024 * 1024))).resolves.toBeUndefined();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('refuses a timeoutMs that is not a positive integer', () => {
+    for (const timeoutMs of [0, -1, 1.5, Number.NaN])
+      expect(() => createTransport({ region: 'us-east-1', credentials, timeoutMs })).toThrow(/timeoutMs/);
   });
 });

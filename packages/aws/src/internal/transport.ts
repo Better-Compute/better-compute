@@ -27,7 +27,10 @@ export interface TransportOptions {
   endpoint?: string;
   clock?: Clock;
   log?: Logger;
-  /** Default 20_000. */
+  /**
+   * Time to response headers per attempt (default 20_000). The body of an accepted response is not
+   * bounded by it: a slow download streams for as long as it takes (callers own its signal).
+   */
   timeoutMs?: number;
 }
 
@@ -183,6 +186,8 @@ export interface SendInput {
   /** Statuses that are not errors (S3: 404 on GET/DELETE). */
   accept?: readonly number[];
   signal?: AbortSignal;
+  /** Time to response headers for this request (uploads: scaled to the body size). */
+  timeoutMs?: number;
 }
 
 export interface Transport {
@@ -190,6 +195,8 @@ export interface Transport {
   readonly clock: Clock;
   readonly log?: Logger;
   readonly endpointOverride?: string;
+  /** The default time to response headers. */
+  readonly timeoutMs: number;
   credentials(signal?: AbortSignal): Promise<AwsCredentials>;
   /** Signs, sends and maps errors. A non-error response is returned unread. */
   send(input: SendInput): Promise<Response>;
@@ -214,7 +221,7 @@ export function createTransport(options: TransportOptions): Transport {
   const region = assertRegion(options.region);
   const clock = options.clock ?? systemClock;
   const fetcher = options.fetch ?? fetch;
-  const timeoutMs = options.timeoutMs ?? 20_000;
+  const timeoutMs = checkTimeout(options.timeoutMs ?? 20_000);
   if (options.endpoint !== undefined) serviceEndpoint('x', region, options.endpoint);
   let skewMs = 0;
 
@@ -237,8 +244,14 @@ export function createTransport(options: TransportOptions): Transport {
       unsignedPayload: input.unsignedPayload,
       normalizePath: !input.s3,
     });
-    const timeout = AbortSignal.timeout(timeoutMs);
-    const signal = input.signal ? AbortSignal.any([input.signal, timeout]) : timeout;
+    // Only the time to headers is bounded: a signal that fires later would also error the body
+    // (fetch ties the body to the request's signal), so the timer is cleared once headers arrive.
+    const timeout = new AbortController();
+    const timer = setTimeout(
+      () => timeout.abort(new DOMException('The AWS request timed out', 'TimeoutError')),
+      input.timeoutMs ?? timeoutMs,
+    );
+    const signal = input.signal ? AbortSignal.any([input.signal, timeout.signal]) : timeout.signal;
     try {
       return await fetcher(input.url, {
         method: input.method,
@@ -251,13 +264,15 @@ export function createTransport(options: TransportOptions): Transport {
       });
     } catch (error) {
       if (input.signal?.aborted) throw error;
-      const timedOut = timeout.aborted;
+      const timedOut = timeout.signal.aborted;
       throw new ComputeError(
         'UNAVAILABLE',
         `AWS ${input.service} ${input.operation} failed: ${timedOut ? 'timed out' : 'network error'}`,
         undefined,
         { provider: 'aws', service: input.service, reason: timedOut ? 'timeout' : 'network' },
       );
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -327,7 +342,14 @@ export function createTransport(options: TransportOptions): Transport {
     });
   }
 
-  return { region, clock, log: options.log, endpointOverride: options.endpoint, credentials, send, presign };
+  return { region, clock, log: options.log, endpointOverride: options.endpoint, timeoutMs, credentials, send, presign };
+}
+
+/** A timeout in ms: a positive integer of at most a day, or INVALID_CONFIG. */
+export function checkTimeout(value: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > 24 * 3600_000)
+    throw new ComputeError('INVALID_CONFIG', 'timeoutMs is a positive integer of milliseconds (at most a day)');
+  return value;
 }
 
 // --- Protocol clients -----------------------------------------------------------------------------

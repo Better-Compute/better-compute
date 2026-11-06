@@ -24,6 +24,16 @@ const minPartBytes = 5 * MiB;
 const maxPartBytes = 5 * 1024 * MiB;
 const maxParts = 10_000;
 const maxPresignSeconds = 7 * 24 * 3600;
+/**
+ * The slowest upload rate an S3 PUT or UploadPart is given time for: the time to headers of an
+ * upload is `timeoutMs` plus the body at this rate (a 16 MiB part: 64 s more).
+ */
+const minUploadBytesPerSecond = 256 * 1024;
+
+/** The time-to-headers budget of a request that sends `bytes` (internal; exported for tests). */
+export function uploadTimeoutMs(baseMs: number, bytes: number): number {
+  return baseMs + Math.ceil((bytes / minUploadBytesPerSecond) * 1000);
+}
 
 /** S3 operations behind the BlobStore, SnapshotStore and audit sink (internal). */
 export interface S3Access {
@@ -102,6 +112,7 @@ export function s3Access(options: S3StoreOptions): S3Access {
       };
     },
     request(input) {
+      const bytes = input.body === undefined ? 0 : typeof input.body === 'string' ? Buffer.byteLength(input.body) : input.body.length;
       return transport.send({
         method: input.method,
         url: url(input.key, input.query),
@@ -112,6 +123,7 @@ export function s3Access(options: S3StoreOptions): S3Access {
         protocol: 'rest-xml',
         s3: true,
         accept: input.accept,
+        ...(bytes > 0 ? { timeoutMs: uploadTimeoutMs(transport.timeoutMs, bytes) } : {}),
       });
     },
     presign(fullKey, input) {

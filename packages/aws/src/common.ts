@@ -13,6 +13,8 @@ export interface AwsServiceOptions {
   endpoint?: string;
   clock?: Clock;
   log?: Logger;
+  /** Time to response headers per request attempt (default 20_000 ms); response bodies stream unbounded. */
+  timeoutMs?: number;
 }
 
 /** The transport behind a factory (internal). */
