@@ -58,6 +58,9 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
   const databaseClients = cfnImport('DatabaseClientSecurityGroupId', 'DataStack');
   const bucketArn = (bucket: string, path = '') => cfnSub(`\${${bucket}.Arn}${path}`);
 
+  /** BETTER_COMPUTE_SECRET: the retained secret of an earlier stack when one is named, otherwise the generated one. */
+  const deploymentSecret = cfnIf('HasExistingDeploymentSecret', cfnRef('ExistingDeploymentSecretArn'), cfnRef('DeploymentSecret'));
+
   const parameters: Record<string, CfnParameter> = {
     NetworkStack: { Type: 'String', Description: 'The network stack name', AllowedPattern: stackNamePattern },
     DataStack: { Type: 'String', Description: 'The data stack name', AllowedPattern: stackNamePattern },
@@ -137,6 +140,21 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
       AllowedValues: ['PriceClass_100', 'PriceClass_200', 'PriceClass_All'],
     },
     AlarmEmail: { Type: 'String', Description: 'Optional address subscribed to the alarm topic (empty: none)', Default: '' },
+    ExistingDeploymentSecretArn: {
+      Type: 'String',
+      Description:
+        'Restores and redeploys: the retained BETTER_COMPUTE_SECRET of an earlier stack (its DeploymentSecretArn), used instead of generating a new one (empty: generate)',
+      Default: '',
+      AllowedPattern: '^$|^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$',
+      ConstraintDescription: 'empty, or a Secrets Manager secret ARN',
+    },
+    ExistingDeploymentSecretKeyArn: {
+      Type: 'String',
+      Description: 'The KMS key that encrypts ExistingDeploymentSecretArn (the earlier stack\'s retained PlatformKeyArn), or empty',
+      Default: '',
+      AllowedPattern: '^$|^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/[0-9a-f-]+$',
+      ConstraintDescription: 'empty, or a KMS key ARN',
+    },
   };
 
   const resources: Record<string, CfnResource> = {};
@@ -174,8 +192,13 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
     Type: 'AWS::KMS::Alias',
     Properties: { AliasName: `alias/${name}-platform`, TargetKeyId: cfnRef('PlatformKey') },
   };
+  // DO NOT CHANGE either GenerateSecretString block (tests/aws-deploy-control-plane.test.ts pins them).
+  // CloudFormation generates a new value whenever that property changes on an update: BETTER_COMPUTE_SECRET
+  // would rotate silently, leaving everything sealed with it unreadable (the PKI bundle too), and the
+  // operator's sealed PKI bundle would be replaced by a random placeholder.
   resources.DeploymentSecret = {
     Type: 'AWS::SecretsManager::Secret',
+    Condition: 'CreateDeploymentSecret',
     DeletionPolicy: 'Retain',
     UpdateReplacePolicy: 'Retain',
     Properties: {
@@ -416,8 +439,12 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
         {
           PolicyName: 'inject-secrets',
           PolicyDocument: policyDocument([
-            { Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: [cfnRef('DeploymentSecret'), cfnRef('PkiBundleSecret')] },
-            { Effect: 'Allow', Action: 'kms:Decrypt', Resource: keyArn },
+            { Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: [deploymentSecret, cfnRef('PkiBundleSecret')] },
+            {
+              Effect: 'Allow',
+              Action: 'kms:Decrypt',
+              Resource: [keyArn, cfnIf('HasExistingDeploymentSecretKey', cfnRef('ExistingDeploymentSecretKeyArn'), cfnNoValue)],
+            },
           ]),
         },
       ],
@@ -639,7 +666,7 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
               : {}),
             Environment: environment(role),
             Secrets: [
-              { Name: 'BETTER_COMPUTE_SECRET', ValueFrom: cfnRef('DeploymentSecret') },
+              { Name: 'BETTER_COMPUTE_SECRET', ValueFrom: deploymentSecret },
               { Name: 'BC_PKI_BUNDLE', ValueFrom: cfnRef('PkiBundleSecret') },
             ],
             ReadonlyRootFilesystem: true,
@@ -801,6 +828,9 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
       HasAlarmEmail: { 'Fn::Not': [cfnEquals(cfnRef('AlarmEmail'), '')] },
       HasMigrateImage: { 'Fn::Not': [cfnEquals(cfnRef('MigrateImage'), '')] },
       HasAccessLogs: { 'Fn::Not': [cfnEquals(cfnRef('AccessLogsBucket'), '')] },
+      HasExistingDeploymentSecret: { 'Fn::Not': [cfnEquals(cfnRef('ExistingDeploymentSecretArn'), '')] },
+      CreateDeploymentSecret: cfnEquals(cfnRef('ExistingDeploymentSecretArn'), ''),
+      HasExistingDeploymentSecretKey: { 'Fn::Not': [cfnEquals(cfnRef('ExistingDeploymentSecretKeyArn'), '')] },
     },
     Resources: resources,
     Outputs: {
@@ -814,7 +844,7 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
       AuditBucketName: { Description: 'The Object Lock audit archive', Value: cfnRef('AuditBucket') },
       EventBusName: { Description: 'The EventBridge bus for eventBridgeSink', Value: cfnRef('EventBus') },
       PlatformKeyArn: { Description: 'The platform KMS key', Value: keyArn },
-      DeploymentSecretArn: { Description: 'BETTER_COMPUTE_SECRET', Value: cfnRef('DeploymentSecret') },
+      DeploymentSecretArn: { Description: 'BETTER_COMPUTE_SECRET', Value: deploymentSecret },
       PkiBundleSecretArn: { Description: 'Put the sealed PKI bundle here', Value: cfnRef('PkiBundleSecret') },
       AlarmTopicArn: { Description: 'Alarm notifications', Value: cfnRef('AlarmTopic') },
       ClusterName: { Description: 'The ECS cluster', Value: cfnRef('Cluster') },

@@ -36,6 +36,7 @@ const statementsOf = (role: string): Statement[] => {
   return [...policies.flatMap((policy) => policy.PolicyDocument.Statement), ...managed];
 };
 const actionsOf = (role: string) => statementsOf(role).flatMap((statement) => [statement.Action].flat());
+const deploymentSecret = { 'Fn::If': ['HasExistingDeploymentSecret', { Ref: 'ExistingDeploymentSecretArn' }, { Ref: 'DeploymentSecret' }] };
 
 describe('control-plane template', () => {
   it('lints clean', () => {
@@ -92,13 +93,55 @@ describe('control-plane template', () => {
       expect(entry.LinuxParameters).toMatchObject({ InitProcessEnabled: true, Capabilities: { Drop: ['ALL'] } });
       expect(entry.LogConfiguration.LogDriver).toBe('awslogs');
       expect(entry.Secrets).toEqual([
-        { Name: 'BETTER_COMPUTE_SECRET', ValueFrom: { Ref: 'DeploymentSecret' } },
+        { Name: 'BETTER_COMPUTE_SECRET', ValueFrom: deploymentSecret },
         { Name: 'BC_PKI_BUNDLE', ValueFrom: { Ref: 'PkiBundleSecret' } },
       ]);
       for (const variable of entry.Environment) expect(variable.Name).not.toMatch(/SECRET|PASSWORD|TOKEN|KEY$/);
     }
-    expect(props('DeploymentSecret').GenerateSecretString).toMatchObject({ PasswordLength: 64, ExcludePunctuation: true });
     expect(resource('DeploymentSecret').DeletionPolicy).toBe('Retain');
+  });
+
+  it('never changes how the two secrets are generated', () => {
+    // DO NOT CHANGE these values. CloudFormation regenerates a GenerateSecretString secret whenever the
+    // property changes on a stack update: BETTER_COMPUTE_SECRET would rotate silently (everything sealed
+    // with it, the PKI bundle included, becomes unreadable), and the operator's sealed PKI bundle would
+    // be overwritten with a random placeholder.
+    expect(props('DeploymentSecret').GenerateSecretString).toEqual({ PasswordLength: 64, ExcludePunctuation: true, IncludeSpace: false });
+    expect(props('PkiBundleSecret').GenerateSecretString).toEqual({ PasswordLength: 32, ExcludePunctuation: true });
+    expect(props('DeploymentSecret').Name).toBe('bc-deploy/better-compute/secret');
+    expect(props('PkiBundleSecret').Name).toBe('bc-deploy/better-compute/pki-bundle');
+  });
+
+  it('adopts a retained deployment secret instead of generating one, for a restore or redeploy', () => {
+    const parameters = template.Parameters!;
+    expect(parameters.ExistingDeploymentSecretArn!.Default).toBe('');
+    expect(parameters.ExistingDeploymentSecretKeyArn!.Default).toBe('');
+    const secretPattern = new RegExp(parameters.ExistingDeploymentSecretArn!.AllowedPattern!);
+    expect(secretPattern.test('')).toBe(true);
+    expect(secretPattern.test('arn:aws:secretsmanager:us-east-1:123456789012:secret:bc-deploy/better-compute/secret-AbCdEf')).toBe(true);
+    expect(secretPattern.test('bc-deploy/better-compute/secret')).toBe(false);
+    const keyPattern = new RegExp(parameters.ExistingDeploymentSecretKeyArn!.AllowedPattern!);
+    expect(keyPattern.test('')).toBe(true);
+    expect(keyPattern.test('arn:aws:kms:us-east-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab')).toBe(true);
+    expect(keyPattern.test('alias/old')).toBe(false);
+    expect(template.Conditions!.HasExistingDeploymentSecret).toEqual({ 'Fn::Not': [{ 'Fn::Equals': [{ Ref: 'ExistingDeploymentSecretArn' }, ''] }] });
+    expect(template.Conditions!.CreateDeploymentSecret).toEqual({ 'Fn::Equals': [{ Ref: 'ExistingDeploymentSecretArn' }, ''] });
+    expect(resource('DeploymentSecret').Condition).toBe('CreateDeploymentSecret');
+    // Every use of the generated secret goes through the same choice: it does not exist when one is adopted.
+    const text = JSON.stringify(template);
+    const bare = text.split(JSON.stringify({ Ref: 'DeploymentSecret' })).length - 1;
+    const chosen = text.split(JSON.stringify(deploymentSecret)).length - 1;
+    expect(bare).toBeGreaterThan(0);
+    expect(bare).toBe(chosen);
+    expect(template.Outputs!.DeploymentSecretArn!.Value).toEqual(deploymentSecret);
+    // ECS injects it, so the execution role may read it and decrypt with the key that sealed it.
+    const inject = (props('ExecutionRole').Policies as { PolicyDocument: { Statement: Statement[] } }[])[0]!.PolicyDocument.Statement;
+    expect(inject.find((statement) => statement.Action === 'secretsmanager:GetSecretValue')!.Resource).toEqual([deploymentSecret, { Ref: 'PkiBundleSecret' }]);
+    expect(inject.find((statement) => statement.Action === 'kms:Decrypt')!.Resource).toEqual([
+      { 'Fn::GetAtt': ['PlatformKey', 'Arn'] },
+      { 'Fn::If': ['HasExistingDeploymentSecretKey', { Ref: 'ExistingDeploymentSecretKeyArn' }, { Ref: 'AWS::NoValue' }] },
+    ]);
+    expect(lintTemplate(template)).toEqual([]);
   });
 
   it('serves the API over HTTPS on the ALB with a TLS 1.3 policy, redirects HTTP, and puts WAF in front', () => {

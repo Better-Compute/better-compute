@@ -109,6 +109,26 @@ A release is a new image digest, and its expand migrations run before any proces
 The database and both load balancers have deletion protection, and the keys, secrets, log groups and the blobs,
 snapshots and audit buckets are retained. Audit objects stay under Object Lock until their retention ends.
 
+Redeploying under the same `NAME` collides with what was retained under fixed names: the secrets
+`bc-deploy/$NAME/secret` and `bc-deploy/$NAME/pki-bundle`, and the log groups
+`/better-compute/$NAME/{api,worker,gateway,migrate}`. The bucket names are generated, and the key alias goes with
+the stack.
+
+To restore a retained database (or its snapshot) under a new control-plane stack, the processes need the old
+`BETTER_COMPUTE_SECRET`: everything sealed with it, the PKI bundle included, is unreadable under a new one. Adopt
+it instead of generating one:
+
+1. Note the old stack's `DeploymentSecretArn` and `PlatformKeyArn` outputs (the key encrypts the secret).
+2. Copy the sealed bundle out of the old `bc-deploy/$NAME/pki-bundle` into a file only you can read, export the old
+   log groups if you need them, then delete that secret and those log groups (or deploy under a new `NAME`).
+3. Deploy the control plane (step 4) with `ExistingDeploymentSecretArn=<old DeploymentSecretArn>
+   ExistingDeploymentSecretKeyArn=<old PlatformKeyArn>`. The stack then creates no deployment secret, and ECS
+   injects the old one.
+4. In step 5, put the old sealed bundle instead of running `pki init`.
+
+Leave both parameters as they are on every later update. The stack never regenerates either secret by itself: the
+templates pin how they are generated, because CloudFormation would generate a new value if that ever changed.
+
 ## The live suite
 
 `tests/live/aws/` runs against a dedicated sandbox account only; see its README. It never runs in CI or by default.
