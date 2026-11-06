@@ -248,7 +248,11 @@ async function readCluster(
   return reply?.database;
 }
 
-/** The oldest cluster of the engine carrying the key's tag. */
+/**
+ * The oldest cluster of the engine carrying the key's tag that this deployment manages. A cluster of another
+ * deployment carrying the same key tag (a control plane restored from another's backup shares resource ids) is
+ * never one of ours (DO-D5): it is never changed through this lookup.
+ */
 async function byKey(
   env: DoKindEnv,
   engine: DoEngine,
@@ -260,7 +264,7 @@ async function byKey(
     budget: 'observe',
   });
   return (reply.databases ?? [])
-    .filter((database) => database.engine === engine)
+    .filter((database) => database.engine === engine && managedBy(env, database.tags) === 'this')
     .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))[0];
 }
 
@@ -500,6 +504,15 @@ interface DoUser {
   password?: string;
 }
 
+/** The cluster's admin user (role `primary`) is DigitalOcean's: no user resource is ever bound to it. */
+const primaryUser = (name: string) =>
+  new ComputeError(
+    'INVALID_INPUT',
+    `${name} is the cluster's admin user; it comes with the cluster (its password is the cluster's own secret output)`,
+    undefined,
+    { provider: 'digitalocean', reason: 'primaryUser', field: 'spec.name' },
+  );
+
 function userKind(info: EngineInfo): DoKind {
   const kind = `${databaseKind(info.engine)}.user`;
   const state = (parent: string, user: DoUser): ProviderResourceState => ({
@@ -544,6 +557,7 @@ function userKind(info: EngineInfo): DoKind {
         };
       if (database.status !== 'online') return { id: childId(database.id, name), state: 'pending' };
       const existing = await read(env, database.id, name, context.signal);
+      if (existing?.user.role === 'primary') throw primaryUser(name);
       if (existing) return state(database.id, existing.user);
       try {
         const created = await env.client.request<{ user: DoUser }>(
@@ -573,17 +587,8 @@ function userKind(info: EngineInfo): DoKind {
       const database = await ownedParent(env, kind, parent, context.signal);
       if (!database) return { id, state: 'deleted' };
       const reply = await read(env, parent, name, context.signal);
-      if (!reply) return { id, state: 'deleted' };
-      if (reply.user.role === 'primary')
-        throw new ComputeError(
-          'INVALID_STATE',
-          `${name} is the cluster's admin user; it goes with the cluster`,
-          undefined,
-          {
-            provider: 'digitalocean',
-            reason: 'primaryUser',
-          },
-        );
+      // The admin user goes with the cluster: nothing is sent, and a resource bound to it never holds the cluster up.
+      if (!reply || reply.user.role === 'primary') return { id, state: 'deleted' };
       await found(() =>
         env.client.request('DELETE', `/databases/${parent}/users/${encodeURIComponent(name)}`, {
           signal: context.signal,
@@ -851,6 +856,15 @@ interface DoFirewallRule {
 const cidrPattern =
   /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?:\/(?:[0-9]|[12][0-9]|3[0-2]))?$|^[0-9a-fA-F:]+(?:\/[0-9]{1,3})?$/;
 
+/** The trusted sources that name account-wide objects: Droplet tags and Droplet ids. */
+function firewallAccountWide(spec: unknown): string[] {
+  const value = (spec ?? {}) as { tags?: unknown[]; droplets?: unknown[] };
+  return [
+    ...((value.tags ?? []).length > 0 ? ['tags'] : []),
+    ...((value.droplets ?? []).length > 0 ? ['droplets'] : []),
+  ];
+}
+
 function firewallKind(info: EngineInfo): DoKind {
   const kind = `${databaseKind(info.engine)}.firewall`;
   const rulesOf = (spec: {
@@ -909,8 +923,19 @@ function firewallKind(info: EngineInfo): DoKind {
       regional: false,
       updatable: ['ipAddresses', 'tags', 'droplets'],
       parent: databaseKind(info.engine),
+      // Droplet ids and tags name objects of the whole account: on a shared (hosted) account they would reach other
+      // tenants' Droplets, and a refused id would tell which exist.
+      accountWide: firewallAccountWide,
     },
     async ensure(env, request, context) {
+      const fields = firewallAccountWide(request.spec);
+      if (fields.length > 0 && request.accountScope !== 'tenant')
+        throw new ComputeError(
+          'INVALID_INPUT',
+          `${kind}: ${fields.join(' and ')} are account-wide; only a cluster on the tenant's own account may trust them`,
+          undefined,
+          { provider: 'digitalocean', reason: 'accountWide', fields },
+        );
       const database = await ownedParent(env, kind, request.parent, context.signal);
       const id = childId(request.parent!, 'firewall');
       if (!database) return { id, state: 'error', message: 'Its cluster is gone' };

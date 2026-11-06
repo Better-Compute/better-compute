@@ -129,9 +129,14 @@ DigitalOcean has no network object, so a tenant network is built from a VPC per 
   MongoDB, Kafka, OpenSearch), `do.database.pg.pool` (PgBouncer), `.replica` (PostgreSQL, MySQL) and `.firewall`
   (trusted addresses, Droplet tags and Droplet ids). Size, nodes and storage resize in place; PostgreSQL and MySQL
   upgrade in place; a downgrade, a region change or a storage shrink is `INVALID_STATE` (`replaceRequired`).
+  Droplet tags and Droplet ids are account-wide (`accountWide`): on a shared (hosted) account they would reach other
+  tenants' Droplets, so only addresses are trusted there. A `.user` is never bound to the cluster's admin user (role
+  `primary`, `doadmin`): that is `INVALID_INPUT` (`primaryUser`), and a delete of it answers `deleted` without a call,
+  since it goes with the cluster.
 - **Ownership.** A cluster carries `better-compute-managed:true`, this deployment's tag, the idempotency key's tag and
   the module's `better-compute-resource:<id>` and `better-compute-tenant:<t>` tags. A create first looks the key's tag
-  up, and the account-unique name settles a race. `delete` and `release` refuse (`notManaged`, nothing sent) a
+  up (only among clusters this deployment manages: another deployment's cluster with the same key tag is never
+  changed), and the account-unique name settles a race. `delete` and `release` refuse (`notManaged`, nothing sent) a
   cluster without the managed and deployment tags, and so does anything living in such a cluster. Users, pools and
   firewalls have no tags: they are owned through their cluster.
 - **Secrets.** Passwords and connection URIs (which embed the password) are only ever `secretOutputs`; the module

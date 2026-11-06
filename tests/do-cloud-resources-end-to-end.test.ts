@@ -199,6 +199,61 @@ describe('DigitalOcean Managed Databases through cloudResources', () => {
     await expect(secrets.resolve(ready.secretOutputs.password)).rejects.toBeDefined();
   });
 
+  it('a user resource naming the admin user never holds the cluster up; trusted Droplet tags are refused on a hosted pool', async () => {
+    const w = await world();
+    const database = await w.api.cloudResources.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      kind: 'do.database.pg',
+      name: 'billing',
+      spec: { region: 'nyc3', version: '16', size: 'db-s-1vcpu-1gb' },
+      idempotencyKey: 'billing',
+    });
+    await w.until(database.id, 'ready');
+    const providerId = (await w.get(database.id)).providerId;
+    const admin = await w.api.cloudResources.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      kind: 'do.database.pg.user',
+      name: 'admin',
+      parentId: database.id,
+      spec: { name: 'doadmin' },
+      idempotencyKey: 'admin-user',
+    });
+    await w.until(admin.id, 'error');
+    const refused = await w.get(admin.id);
+    expect(refused.message).toMatch(/admin user/);
+    expect(refused.providerId).toBeUndefined();
+    expect(refused.secretOutputs).toEqual({});
+
+    // Droplet tags and ids reach every tenant's Droplets on the platform's account: refused at the API.
+    for (const spec of [{ tags: ['bc-net-someone-else'] }, { droplets: ['424242'] }]) {
+      const error = await w.api.cloudResources
+        .create(w.acme, {
+          tenantId: w.acmeTenant,
+          poolId: w.poolId,
+          kind: 'do.database.pg.firewall',
+          name: `fw-${Object.keys(spec)[0]}`,
+          parentId: database.id,
+          spec,
+          idempotencyKey: `fw-${Object.keys(spec)[0]}`,
+        })
+        .then(
+          () => undefined,
+          (failure: { code?: string; details?: Record<string, unknown> }) => failure,
+        );
+      expect(error).toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'accountWide' } });
+    }
+    expect(
+      w.emu.requests.filter((request) => request.url.pathname.endsWith('/firewall')),
+    ).toEqual([]);
+
+    await w.api.cloudResources.delete(w.acme, { tenantId: w.acmeTenant, resourceId: database.id });
+    await w.until(database.id, 'deleted');
+    expect((await w.get(admin.id)).state).toBe('deleted');
+    expect(w.emu.state.databases.has(providerId)).toBe(false);
+  });
+
   it('a tenant cannot discover or adopt on the platform account it is offered', async () => {
     const w = await world();
     await expect(

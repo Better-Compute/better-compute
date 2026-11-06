@@ -322,6 +322,44 @@ describe('Managed Database clusters', () => {
     expect(plain.state).toBe('ready');
   });
 
+  it('the key-tag lookup ignores a cluster another deployment manages: it is never resized', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    // A staging control plane restored from prod's backup shares resource ids, so the key tag matches.
+    const prod = seedDatabase(emu.state, {
+      name: 'prod-orders',
+      tags: [managedTag, deploymentTag('prod'), keyTag('crs_shared')],
+    });
+    const state = await resources.ensure(
+      {
+        kind: 'do.database.pg',
+        name: 'bc-r-staging',
+        spec: { ...pg, size: 'db-s-2vcpu-4gb' },
+        labels,
+      },
+      ctx('crs_shared'),
+    );
+    expect(state.id).not.toBe(prod.id);
+    expect(prod.size).toBe('db-s-1vcpu-1gb');
+    expect(mutations(emu, 'PUT', /\/(resize|upgrade)$/)).toEqual([]);
+    // The name taken too: the create is refused, and the lookup after it still never takes theirs.
+    const emu2 = emulator();
+    const other = await build(emu2);
+    const theirs = seedDatabase(emu2.state, {
+      name: 'bc-r-same',
+      tags: [managedTag, deploymentTag('prod'), keyTag('crs_shared')],
+    });
+    const refused = await failure(
+      other.resources.ensure(
+        { kind: 'do.database.pg', name: 'bc-r-same', spec: { ...pg, nodes: 2 }, labels },
+        ctx('crs_shared'),
+      ),
+    );
+    expect(refused.code).toBe('CONFLICT');
+    expect(theirs.num_nodes).toBe(1);
+    expect(mutations(emu2, 'PUT', /\/(resize|upgrade)$/)).toEqual([]);
+  });
+
   it('delete refuses an unmanaged or another deployment’s cluster, and sends no DELETE', async () => {
     const emu = emulator();
     const { resources } = await build(emu);
@@ -369,14 +407,29 @@ describe('what lives in a cluster', () => {
       created.id,
     );
     expect(mutations(emu, 'POST', /\/users$/)).toHaveLength(1);
-    const admin = await failure(
-      resources.delete('do.database.pg.user', `${mine.id}/doadmin`, ctx()),
-    );
-    expect(admin.details?.reason).toBe('primaryUser');
+    // The admin user goes with the cluster: deleting it sends nothing and answers deleted, so nothing waits on it.
+    expect(
+      (await resources.delete('do.database.pg.user', `${mine.id}/doadmin`, ctx())).state,
+    ).toBe('deleted');
+    expect(mutations(emu, 'DELETE', /\/users\//)).toEqual([]);
+    expect(mine._users.some((u: any) => u.name === 'doadmin')).toBe(true);
     expect((await resources.delete('do.database.pg.user', created.id, ctx())).state).toBe(
       'deleted',
     );
     expect(await resources.get('do.database.pg.user', created.id, ctx())).toBeUndefined();
+  });
+
+  it('a user resource is never bound to the cluster’s primary (admin) user', async () => {
+    const { emu, resources, mine } = await cluster();
+    const error = await failure(
+      resources.ensure(
+        { kind: 'do.database.pg.user', name: 'bc-r-a', spec: { name: 'doadmin' }, parent: mine.id },
+        ctx('crs_admin'),
+      ),
+    );
+    expect(error.code).toBe('INVALID_INPUT');
+    expect(error.details?.reason).toBe('primaryUser');
+    expect(mutations(emu, 'POST', /\/users$/)).toEqual([]);
   });
 
   it('a child of a cluster this deployment does not manage is refused; one of a creating cluster waits', async () => {
@@ -412,7 +465,7 @@ describe('what lives in a cluster', () => {
     const { emu, resources, mine } = await cluster();
     const spec = { ipAddresses: ['203.0.113.0/24'], tags: ['bc-pool-1'], droplets: ['42'] };
     const state = await resources.ensure(
-      { kind: 'do.database.pg.firewall', name: 'fw', spec, parent: mine.id },
+      { kind: 'do.database.pg.firewall', name: 'fw', spec, parent: mine.id, accountScope: 'tenant' },
       ctx(),
     );
     expect(state).toMatchObject({ id: `${mine.id}/firewall`, state: 'ready' });
@@ -425,7 +478,7 @@ describe('what lives in a cluster', () => {
     });
     // The same rules again: nothing sent.
     await resources.ensure(
-      { kind: 'do.database.pg.firewall', name: 'fw', spec, parent: mine.id },
+      { kind: 'do.database.pg.firewall', name: 'fw', spec, parent: mine.id, accountScope: 'tenant' },
       ctx(),
     );
     expect(mutations(emu, 'PUT', /\/firewall$/)).toHaveLength(1);
@@ -434,6 +487,49 @@ describe('what lives in a cluster', () => {
       'deleted',
     );
     expect(mine._firewall).toEqual([]);
+  });
+
+  it('trusted Droplet ids and tags are account-wide: refused on a shared account, nothing sent', async () => {
+    const { emu, resources, mine } = await cluster();
+    const kind = resources.kinds().find((entry) => entry.kind === 'do.database.pg.firewall')!;
+    expect(kind.accountWide!({ ipAddresses: ['203.0.113.0/24'], tags: [], droplets: [] })).toEqual([]);
+    expect(kind.accountWide!({ ipAddresses: [], tags: ['bc-pool-1'], droplets: ['42'] })).toEqual([
+      'tags',
+      'droplets',
+    ]);
+    for (const spec of [
+      { ipAddresses: [], tags: ['bc-net-other'], droplets: [] },
+      { ipAddresses: [], tags: [], droplets: ['424242'] },
+    ])
+      for (const accountScope of [undefined, 'shared'] as const) {
+        const error = await failure(
+          resources.ensure(
+            {
+              kind: 'do.database.pg.firewall',
+              name: 'fw',
+              spec,
+              parent: mine.id,
+              ...(accountScope ? { accountScope } : {}),
+            },
+            ctx(),
+          ),
+        );
+        expect(error.code).toBe('INVALID_INPUT');
+        expect(error.details?.reason).toBe('accountWide');
+      }
+    expect(mutations(emu, 'PUT', /\/firewall$/)).toEqual([]);
+    // Addresses alone are fine on a shared account.
+    const state = await resources.ensure(
+      {
+        kind: 'do.database.pg.firewall',
+        name: 'fw',
+        spec: { ipAddresses: ['198.51.100.7'], tags: [], droplets: [] },
+        parent: mine.id,
+        accountScope: 'shared',
+      },
+      ctx(),
+    );
+    expect(state.state).toBe('ready');
   });
 
   it('pools: created, changed in place, with the password a secret output', async () => {
