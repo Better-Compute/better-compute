@@ -88,11 +88,24 @@ const usageRegions: Readonly<Record<string, string>> = {
 };
 
 const prefixPattern = /^([A-Z]{2,4}\d?)-(.+)$/;
+/**
+ * A Local Zone or Wavelength segment after the region prefix (`USW2-LAX1-BoxUsage`, `USE1-WL1-BOS1-BoxUsage`):
+ * upper-case letters and digits, then `-` and an upper-case letter. A family (`BoxUsage`, `EBS:`, `PublicIPv4:`,
+ * `DataTransfer-`) never has that shape.
+ */
+const zoneSegment = /^[A-Z]{2,4}\d{1,2}-(?=[A-Z])/;
 
-/** The usage type without its region prefix (`USE2-SpotUsage:g5.xlarge` → `SpotUsage:g5.xlarge`). */
+/**
+ * The usage type without its region prefix and any Local Zone or Wavelength segments
+ * (`USE2-SpotUsage:g5.xlarge` → `SpotUsage:g5.xlarge`, `USW2-LAX1-BoxUsage:t3.medium` → `BoxUsage:t3.medium`).
+ */
 function usageFamily(usageType: string): string {
   const match = prefixPattern.exec(usageType);
-  return match && (match[1]! in usageRegions || /\d$/.test(match[1]!)) ? match[2]! : usageType;
+  if (!match || !(match[1]! in usageRegions || /\d$/.test(match[1]!))) return usageType;
+  let family = match[2]!;
+  for (let segment = 0; segment < 3 && zoneSegment.test(family); segment++)
+    family = family.replace(zoneSegment, '');
+  return family;
 }
 
 /** The region a usage type's prefix names; no prefix is us-east-1, an unknown prefix none. */
@@ -131,14 +144,24 @@ export const awsBilling = Object.freeze({
 
 /**
  * A Cost Explorer decimal amount as integer micros, rounded half away from zero without float drift
- * (`0.0000005` → 1). Anything that is not a plain decimal is 0; so is a negative amount that rounds to nothing.
+ * (`0.0000005` → 1). Cost Explorer writes tiny amounts in scientific notation (`1.2E-5` → 12): the exponent moves
+ * the decimal point in the digit string, never through a float. Anything that is not a decimal, or whose whole part
+ * has more than 15 digits, is 0; so is a negative amount that rounds to nothing.
  */
 export function costMicros(amount: string): number {
-  const match = /^(-)?(\d{1,15})(?:\.(\d*))?$/.exec(
+  const match = /^(-)?(\d{1,15})(?:\.(\d*))?(?:[eE]([+-]?\d{1,3}))?$/.exec(
     typeof amount === 'string' ? amount.trim() : '',
   );
   if (!match) return 0;
-  const [, sign, whole, fraction = ''] = match;
+  const [, sign, written, writtenFraction = '', exponent = '0'] = match;
+  // The decimal point sits after `point` of the digits once the exponent has moved it.
+  const all = written! + writtenFraction;
+  const point = written!.length + Number(exponent);
+  const padded = point < 1 ? '0'.repeat(1 - point) + all : all.padEnd(point, '0');
+  const at = Math.max(point, 1);
+  const whole = padded.slice(0, at).replace(/^0+(?=\d)/, '');
+  const fraction = padded.slice(at);
+  if (whole.length > 15) return 0;
   const digits = (fraction + '0000000').slice(0, 7);
   let value = Number(whole) * 1e6 + Number(digits.slice(0, 6));
   if (Number(digits[6]) >= 5) value += 1;

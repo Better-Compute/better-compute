@@ -231,6 +231,23 @@ describe('provider-aws costs (Cost Explorer)', () => {
     expect(costMicros('garbage')).toBe(0);
   });
 
+  it('costMicros reads the scientific notation Cost Explorer gives tiny amounts', () => {
+    expect(costMicros('1.2E-5')).toBe(12);
+    expect(costMicros('1.2e-5')).toBe(costMicros('0.000012'));
+    expect(costMicros('-3.4E-6')).toBe(-3);
+    expect(costMicros('5E-7')).toBe(1);
+    expect(costMicros('4.9E-7')).toBe(0);
+    expect(costMicros('1.5E+2')).toBe(150_000_000);
+    expect(costMicros('2.5E3')).toBe(2_500_000_000);
+    expect(costMicros('1.23456789E1')).toBe(12_345_679);
+    // no float drift: the half-micro is read from the digits, not a product of floats
+    expect(costMicros('3.000005E-1')).toBe(300_001);
+    expect(costMicros('3.0000049E-1')).toBe(300_000);
+    expect(costMicros('1E')).toBe(0);
+    expect(costMicros('1E-')).toBe(0);
+    expect(costMicros('1E99')).toBe(0);
+  });
+
   it('reads a window once a day, then again the next day', async () => {
     const { emu, ce, read, today } = await world();
     ce.lines.push(line());
@@ -293,5 +310,41 @@ describe('provider-aws costs (Cost Explorer)', () => {
     expect(metered('USE1-PublicIPv4:InUseAddress', 'Amazon Virtual Private Cloud')).toBe(true);
     expect(metered('USE1-DataTransfer-Out-Bytes')).toBe(false);
     expect(awsProvider().billing).toBe(awsBilling);
+  });
+
+  it('awsBilling: Local Zone and Wavelength usage types are instance hours and metered disks too', () => {
+    const compute = (sku: string, service = 'Amazon Elastic Compute Cloud - Compute') =>
+      awsBilling.computeSku({ service, sku });
+    const metered = (sku: string, service = 'EC2 - Other') =>
+      awsBilling.meteredSku({ service, sku });
+    expect(usageTypeService('USW2-LAX1-BoxUsage:t3.medium')).toBe(
+      'Amazon Elastic Compute Cloud - Compute',
+    );
+    expect(usageTypeService('USE1-MIA1-SpotUsage:c5.large')).toBe(
+      'Amazon Elastic Compute Cloud - Compute',
+    );
+    expect(usageTypeService('USW2-LAX1-EBS:VolumeUsage.gp3')).toBe('EC2 - Other');
+    expect(usageTypeRegion('USW2-LAX1-BoxUsage:t3.medium')).toBe('us-west-2');
+    expect(compute('USW2-LAX1-BoxUsage:t3.medium')).toBe(true);
+    expect(compute('USE1-MIA1-SpotUsage:c5.large')).toBe(true);
+    expect(compute('USE1-WL1-BOS1-BoxUsage:t3.medium')).toBe(true);
+    expect(metered('USW2-LAX1-EBS:VolumeUsage.gp3')).toBe(true);
+    expect(metered('USE1-MIA1-PublicIPv4:InUseAddress', 'Amazon Virtual Private Cloud')).toBe(true);
+    // a pass-through rule `LAX1` is not itself compute, but the Local Zone rows it matches are: vps's
+    // judge refuses any row computeSku or meteredSku claims, so they are never billed twice
+    const probe = { service: '', sku: 'LAX1', skuDescription: 'LAX1' };
+    expect(awsBilling.computeSku(probe) || awsBilling.meteredSku(probe)).toBe(false);
+    for (const [service, sku] of [
+      ['Amazon Elastic Compute Cloud - Compute', 'USW2-LAX1-BoxUsage:t3.medium'],
+      ['EC2 - Other', 'USW2-LAX1-EBS:VolumeUsage.gp3'],
+    ] as const) {
+      expect(new RegExp('LAX1', 'i').test(sku)).toBe(true);
+      expect(awsBilling.computeSku({ service, sku }) || awsBilling.meteredSku({ service, sku })).toBe(
+        true,
+      );
+    }
+    // a family is never mistaken for a zone segment
+    expect(compute('USE1-BoxUsage:m7i.large')).toBe(true);
+    expect(usageTypeService('USE1-DataTransfer-Out-Bytes')).toBe('EC2 - Other');
   });
 });
