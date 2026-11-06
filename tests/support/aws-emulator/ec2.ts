@@ -4,8 +4,8 @@ import { ec2Error, ec2Response, el, items } from './xml.js';
 // EC2 as provider-aws uses it: instance types, offerings and AZs; RunInstances with ClientToken
 // dedupe; DescribeInstances with ids, filters and paging; terminate, start/stop/reboot, diagnostic
 // interrupts, replace-root-volume tasks, tags and images. Knobs: newInstanceNotFound (eventual
-// consistency), asyncFailure, tick, settleOnRead, disableApiTermination and addInstance (foreign
-// instances). Like EC2, StartInstances refuses a stopping instance, StopInstances a pending one and
+// consistency), staleTagReads and serveStaleTags (tag writes EC2 does not show yet), asyncFailure,
+// tick, settleOnRead, disableApiTermination and addInstance (foreign instances). Like EC2, StartInstances refuses a stopping instance, StopInstances a pending one and
 // RebootInstances anything not running (IncorrectInstanceState).
 
 export interface EmuType {
@@ -44,6 +44,8 @@ export interface EmuInstance {
   notFoundByToken: number;
   rootDevice: string;
   userData?: string;
+  /** Tags by-id reads show instead of `tags`, for `reads` more reads (eventually consistent tags). */
+  staleTags?: { tags: Map<string, string>; reads: number };
 }
 
 const defaultTypes: EmuType[] = [
@@ -123,6 +125,8 @@ export class Ec2Emulator {
   newInstanceNotFound = { byId: 0, byToken: 0 };
   /** Every DescribeInstances first moves transitional states one step (time passing between reads). */
   settleOnRead = false;
+  /** After CreateTags/DeleteTags, this many by-id reads still show the tags from before the write. */
+  staleTagReads = 0;
   #next = 0;
 
   constructor(private readonly emu: AwsEmulator) {
@@ -194,6 +198,11 @@ export class Ec2Emulator {
     }
   }
 
+  /** The next `reads` by-id reads of `id` show `tags` (a stale replica). */
+  serveStaleTags(id: string, tags: Record<string, string>, reads = 1): void {
+    this.instances.get(id)!.staleTags = { tags: new Map(Object.entries(tags)), reads };
+  }
+
   disableApiTermination(id: string): void {
     this.instances.get(id)!.terminationProtected = true;
   }
@@ -206,10 +215,10 @@ export class Ec2Emulator {
     return { page, ...(next ? { next } : {}) };
   }
 
-  #instanceXml(instance: EmuInstance): string {
+  #instanceXml(instance: EmuInstance, shownTags: Map<string, string> = instance.tags): string {
     const tagSet = items(
       'tagSet',
-      [...instance.tags]
+      [...shownTags]
         .sort(([a], [b]) => (a < b ? -1 : 1))
         .map(([k, v]) => `${el('key', k)}${el('value', v)}`),
     );
@@ -368,13 +377,19 @@ export class Ec2Emulator {
         }
         found = found.filter((instance) => this.#matches(instance, filters));
         const { page, next } = ids.length ? { page: found, next: undefined } : this.#page(found, p);
+        const shown = (instance: EmuInstance) => {
+          const stale = instance.staleTags;
+          if (!ids.length || !stale || stale.reads <= 0) return instance.tags;
+          stale.reads -= 1;
+          return stale.tags;
+        };
         return ec2Response(
           action,
           items(
             'reservationSet',
             page.map(
               (instance) =>
-                `${el('reservationId', `r-${instance.id.slice(2)}`)}${el('ownerId', '222222222222')}${items('instancesSet', [this.#instanceXml(instance)])}`,
+                `${el('reservationId', `r-${instance.id.slice(2)}`)}${el('ownerId', '222222222222')}${items('instancesSet', [this.#instanceXml(instance, shown(instance))])}`,
             ),
           ) + el('nextToken', next),
         );
@@ -470,6 +485,8 @@ export class Ec2Emulator {
           const instance = this.instances.get(id);
           if (!instance)
             return ec2Error('InvalidInstanceID.NotFound', `The instance ID '${id}' does not exist`);
+          if (this.staleTagReads > 0)
+            instance.staleTags = { tags: new Map(instance.tags), reads: this.staleTagReads };
           for (let n = 1; p.has(`Tag.${n}.Key`); n++) {
             const key = p.get(`Tag.${n}.Key`)!;
             if (action === 'CreateTags') instance.tags.set(key, p.get(`Tag.${n}.Value`) ?? '');

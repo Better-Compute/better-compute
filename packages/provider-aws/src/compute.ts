@@ -101,6 +101,16 @@ function transitional(id: string, state?: string): ComputeError {
   );
 }
 
+/** EC2 tag writes are eventually consistent: a read right after CreateTags may not show them. */
+function tagPropagation(id: string): ComputeError {
+  return new ComputeError(
+    'UNAVAILABLE',
+    `EC2 does not show the ownership tags just written on instance ${id} yet; it is retried`,
+    undefined,
+    { provider: 'aws', reason: 'tag-propagation' },
+  );
+}
+
 /** The ownership keys (`better-compute:<key>`) a tenant label may never set. */
 const reservedLabels: ReadonlySet<string> = new Set(
   Object.values(tags)
@@ -121,6 +131,8 @@ function labelKey(key: string): string | undefined {
 export class AwsCompute implements ProviderImpl {
   #offerings: { pairs: [string, string][]; at: number } | undefined;
   readonly #created = new Map<string, number>();
+  /** Instance id → when this client last claimed it with `managed` (tags lag behind writes). */
+  readonly #managedClaims = new Map<string, number>();
   readonly #rootDevices = new Map<string, { device: string | undefined; at: number }>();
   readonly #loggedSsm = new Set<string>();
 
@@ -149,6 +161,13 @@ export class AwsCompute implements ProviderImpl {
     }
     const at = map.get(id);
     return at !== undefined && now - at < this.consistencyWindowMs;
+  }
+
+  /** Records `id` at the current time (moving it to the end, so the map stays in time order). */
+  #remember(map: Map<string, number>, id: string): void {
+    this.recent(map, id);
+    map.delete(id);
+    map.set(id, this.context.clock.now());
   }
 
   /** Every EC2 call runs after the account's identity checks (memoized). */
@@ -489,6 +508,9 @@ export class AwsCompute implements ProviderImpl {
     const tagged = new Map(
       instance.items('tagSet').map((item) => [item.textOf('key'), item.textOf('value')]),
     );
+    // Just claimed with managed by this client: EC2 may not show the tag yet. Retry, never fail.
+    if (tagged.get(tags.managed) !== 'true' && this.recent(this.#managedClaims, id))
+      throw tagPropagation(id);
     if (tagged.get(tags.managed) !== 'true')
       throw new ComputeError(
         'INVALID_STATE',
@@ -687,7 +709,8 @@ export class AwsCompute implements ProviderImpl {
   /**
    * Writes the ownership tag. EC2 tags have no compare-and-swap: the vps unique index on the
    * external id referees between control planes, and the re-read narrows the window between two
-   * writers here (a lost race is CONFLICT).
+   * writers here (a lost race is CONFLICT). EC2 tag reads are eventually consistent too: a re-read
+   * that does not show the tag (or `managed`) yet is a retryable UNAVAILABLE, never a lost race.
    */
   async claim(
     id: string,
@@ -726,7 +749,12 @@ export class AwsCompute implements ProviderImpl {
     if (holder !== instanceId || (options.managed && before.tags.get(tags.managed) !== 'true'))
       await this.call('CreateTags', { ResourceId: [id], Tag: wanted }, context.signal);
     const after = await this.#tagged(id, context.signal);
-    if (after.tags.get(tags.instance) !== instanceId)
+    const now = after.tags.get(tags.instance);
+    if (!now || (options.managed && after.tags.get(tags.managed) !== 'true')) {
+      if (options.managed) this.#remember(this.#managedClaims, id);
+      throw tagPropagation(id);
+    }
+    if (now !== instanceId)
       throw new ComputeError(
         'CONFLICT',
         `instance ${id} was claimed by another control plane at the same time`,
@@ -736,6 +764,7 @@ export class AwsCompute implements ProviderImpl {
           reason: 'lost-race',
         },
       );
+    if (options.managed) this.#remember(this.#managedClaims, id);
     return this.machine(after.instance, context.signal);
   }
 

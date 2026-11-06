@@ -116,6 +116,51 @@ describe('provider-aws attach', () => {
     expect(foreign.tags.get('better-compute:instance')).toBe('ins_rival');
   });
 
+  it('claim retries (UNAVAILABLE) while its own tag write is not visible yet', async () => {
+    const { ec2emu, impl, call, emu } = await world();
+    const foreign = ec2emu.addInstance();
+    ec2emu.staleTagReads = 1;
+    const error = await rejection(() => impl.claim(foreign.id, 'ins_stale', call()));
+    expect(error).toMatchObject({ code: 'UNAVAILABLE', details: { reason: 'tag-propagation' } });
+    expect(foreign.tags.get('better-compute:instance')).toBe('ins_stale');
+    // The retry sees the tag: no second write, and the claim holds.
+    ec2emu.staleTagReads = 0;
+    expect((await impl.claim(foreign.id, 'ins_stale', call())).claimedBy).toBe('ins_stale');
+    expect(emu.calls('CreateTags')).toHaveLength(1);
+  });
+
+  it('claim with managed retries while managed is not visible yet', async () => {
+    const { ec2emu, impl, call } = await world();
+    const foreign = ec2emu.addInstance({ tags: { 'better-compute:instance': 'ins_m' } });
+    ec2emu.staleTagReads = 1;
+    const error = await rejection(() =>
+      impl.claim(foreign.id, 'ins_m', call(), { managed: true }),
+    );
+    expect(error).toMatchObject({ code: 'UNAVAILABLE', details: { reason: 'tag-propagation' } });
+    ec2emu.staleTagReads = 0;
+    expect((await impl.claim(foreign.id, 'ins_m', call(), { managed: true })).claimedBy).toBe(
+      'ins_m',
+    );
+  });
+
+  it('delete right after a managed claim retries while managed is not visible yet', async () => {
+    const { ec2emu, impl, call, emu } = await world();
+    const foreign = ec2emu.addInstance();
+    await impl.claim(foreign.id, 'ins_md', call('ins_md'), { managed: true });
+    ec2emu.serveStaleTags(foreign.id, { 'better-compute:instance': 'ins_md' });
+    const error = await rejection(() => impl.delete(foreign.id, call('ins_md')));
+    expect(error).toMatchObject({ code: 'UNAVAILABLE', details: { reason: 'tag-propagation' } });
+    expect(emu.calls('TerminateInstances')).toHaveLength(0);
+    await impl.delete(foreign.id, call('ins_md'));
+    expect(foreign.state).toBe('shutting-down');
+    // An instance this client never claimed managed stays refused for good.
+    const other = ec2emu.addInstance({ tags: { 'better-compute:instance': 'ins_md2' } });
+    expect(await rejection(() => impl.delete(other.id, call('ins_md2')))).toMatchObject({
+      code: 'INVALID_STATE',
+      details: { reason: 'not-managed' },
+    });
+  });
+
   it('release removes only its own tag', async () => {
     const { ec2emu, impl, call } = await world();
     const foreign = ec2emu.addInstance();
