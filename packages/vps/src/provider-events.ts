@@ -36,7 +36,8 @@ import {
 // | event | effect |
 // |---|---|
 // | machine-changed, api-call | the instance's reconcile is enqueued |
-// | interruption-warning | `InterruptionPending` condition, `instance.interruption`; the node the machine backs (a joined provider bootstrap) gets the NoSchedule taint `<provider>.spot/interruption` and its reservations the spot notice up to the deadline |
+// | interruption-warning | `InterruptionPending` condition, `instance.interruption`; the node the machine backs (a joined provider bootstrap) gets the NoSchedule taint `<provider>.spot/interruption` and its reservations the spot notice up to the deadline. Past its deadline: only the reconcile |
+// | machine-changed, state running, after a pending interruption's deadline | both conditions cleared, the taint removed (`node.tainted` with it in `removed`) |
 // | rebalance-recommended | `RebalanceRecommended` condition, `instance.rebalance-recommended` |
 // | maintenance-scheduled | `MaintenanceScheduled` condition (cleared when completed or canceled), `instance.maintenance` |
 // | reservation-changed | the account's `vps.reservations` scan is enqueued |
@@ -81,6 +82,20 @@ CREATE TABLE provider_event_seen (
   PRIMARY KEY (account_id, event_id)
 );
 CREATE INDEX provider_event_seen_at ON provider_event_seen (seen_at);
+`,
+};
+
+export const providerInterruptionsMigration: Migration = {
+  name: 'vps/0091_provider_interruptions',
+  sql: `
+-- Machines with a pending provider interruption (AWS A4): a running state change after the deadline
+-- (a Spot instance stopped or hibernated and back) clears the instance conditions and node taint.
+CREATE TABLE provider_interruptions (
+  account_id text NOT NULL REFERENCES provider_accounts ON DELETE CASCADE,
+  machine_id text NOT NULL,
+  deadline timestamptz NOT NULL,
+  PRIMARY KEY (account_id, machine_id)
+);
 `,
 };
 
@@ -140,6 +155,18 @@ async function seedAccounts(
     await tx.query(
       `DELETE FROM provider_event_seen WHERE seen_at < compute_now() - make_interval(secs => $1::float8)`,
       [retainMs / 1000],
+    );
+    // A pending interruption whose machine is no live instance or joined node any more (terminated,
+    // deleted) has nothing left to clear. One that may still run again is kept, however long.
+    await tx.query(
+      `DELETE FROM provider_interruptions p
+        WHERE p.deadline < compute_now()
+          AND NOT EXISTS (SELECT 1 FROM instances i
+                           WHERE i.provider_account_id = p.account_id AND i.external_id = p.machine_id
+                             AND NOT i.draft AND i.state <> 'deleted')
+          AND NOT EXISTS (SELECT 1 FROM provider_bootstraps b
+                           WHERE b.account_id = p.account_id AND b.machine_id = p.machine_id
+                             AND b.state = 'joined')`,
     );
     if (polling.length === 0) return;
     if (context.work.enqueueMany) await context.work.enqueueMany(tx, providerEventsWork, polling);
@@ -298,6 +325,9 @@ export async function handleEvents(
     if (!target) continue;
     switch (event.kind) {
       case 'machine-changed':
+        if (event.details?.state === 'running') await interruptionOver(deps, tx, account, event, target);
+        if (target.instanceId) wake.add(target.instanceId);
+        break;
       case 'api-call':
         if (target.instanceId) wake.add(target.instanceId);
         break;
@@ -438,6 +468,13 @@ async function interruption(
   target: Target,
 ): Promise<void> {
   const deadline = interruptionDeadline(event);
+  // Remembered until the machine is seen running after the deadline (stop or hibernate).
+  await tx.query(
+    `INSERT INTO provider_interruptions (account_id, machine_id, deadline) VALUES ($1, $2, $3::timestamptz)
+     ON CONFLICT (account_id, machine_id) DO UPDATE
+       SET deadline = GREATEST(provider_interruptions.deadline, EXCLUDED.deadline)`,
+    [account.id, event.machineId, iso(deadline)],
+  );
   if (target.instanceId)
     await conditionEvent(
       deps,
@@ -487,5 +524,57 @@ async function interruption(
       deadline,
       reservations: noticed,
     },
+  });
+}
+
+/**
+ * The machine runs again after a pending interruption's deadline (EC2 `instance-action` stop or
+ * hibernate, the instance id kept): the instance loses `InterruptionPending` and
+ * `RebalanceRecommended`, and the node it backs the interruption taint (`node.tainted` with the
+ * key in `removed`). A running change from before the deadline (delivered out of order) clears
+ * nothing. Locks the instance, then the node.
+ */
+async function interruptionOver(
+  deps: InstanceDeps,
+  tx: SqlTx,
+  account: Pick<ProviderAccount, 'id' | 'provider'>,
+  event: ProviderEvent,
+  target: Target,
+): Promise<void> {
+  const { rowCount } = await tx.query(
+    `DELETE FROM provider_interruptions
+      WHERE account_id = $1 AND machine_id = $2 AND deadline < $3::timestamptz`,
+    [account.id, event.machineId, iso(event.at)],
+  );
+  if (!rowCount) return;
+  if (target.instanceId) {
+    const row = await readInstance(tx, target.instanceId, { lock: true });
+    if (row && row.state !== 'deleted') {
+      const conditions = withoutCondition(withoutCondition(row.conditions, interruptionCondition), rebalanceCondition);
+      if (conditions.length !== row.conditions.length)
+        // No version bump, as when the conditions were set.
+        await tx.query(`UPDATE instances SET conditions = $2::jsonb WHERE id = $1`, [
+          row.id,
+          JSON.stringify(conditions),
+        ]);
+    }
+  }
+  if (!target.nodeId) return;
+  const key = interruptionTaintKey(account.provider);
+  const { rows } = await tx.query<{ owner_tenant_id: string; no_schedule_reasons: string[] }>(
+    `SELECT owner_tenant_id, no_schedule_reasons FROM nodes WHERE id = $1 FOR UPDATE`,
+    [target.nodeId],
+  );
+  const node = rows[0];
+  if (!node || !node.no_schedule_reasons.includes(`taint:${key}`)) return;
+  await tx.query(
+    `UPDATE nodes SET no_schedule_reasons = $2::text[], version = version + 1 WHERE id = $1`,
+    [target.nodeId, node.no_schedule_reasons.filter((reason) => reason !== `taint:${key}`)],
+  );
+  await deps.events.publish(tx, {
+    type: 'node.tainted',
+    tenantId: node.owner_tenant_id,
+    subject: `node/${target.nodeId}`,
+    data: { nodeId: target.nodeId, added: [], removed: [key], reason: 'interruption-over' },
   });
 }

@@ -12,6 +12,7 @@ import {
   instanceWork,
   interruptionCondition,
   maintenanceCondition,
+  rebalanceCondition,
   providerEventsWork,
   reservationsWork,
 } from '@better-compute/vps';
@@ -146,6 +147,62 @@ async function eventsWorld(): Promise<EventsWorld> {
   };
 }
 
+/**
+ * A metal-host pool whose one node is the platform's machine us-central1-a/spot-host, joined
+ * through a provider bootstrap of the events account.
+ */
+async function spotNode(world: EventsWorld): Promise<{ nodeId: string; hostsPoolId: string }> {
+  const { api, root } = world;
+  const db = world.fixture.database;
+  const site = await api.sites.create(root, {
+    tenantId: world.rootTenant,
+    kind: 'shared',
+    region: 'us-central1',
+    idempotencyKey: 'host-site',
+  });
+  const hosts = await api.pools.create(root, {
+    tenantId: world.rootTenant,
+    siteId: site.id,
+    class: 'metal-host',
+    gpuModel: 'H100',
+    idempotencyKey: 'host-pool',
+  });
+  await api.pools.offer(root, {
+    tenantId: world.rootTenant,
+    poolId: hosts.id,
+    toTenantId: world.acmeTenant,
+    quota: { gpu: 8 },
+  });
+  const nodeId = 'node_01jz00000000000000000000sp';
+  await db.query(
+    `INSERT INTO nodes (id, site_id, pool_id, owner_tenant_id, role, provision_state, maintenance, cordoned,
+       connectivity, trust, generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+     VALUES ($1, $2, $3, $4, 'host', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 1, 0, 1)`,
+    [nodeId, site.id, hosts.id, world.rootTenant],
+  );
+  for (let index = 0; index < 4; index++)
+    await db.query(
+      `INSERT INTO devices (id, node_id, class, bookable, healthy, attributes)
+       VALUES ($1, $2, 'gpu', true, true, '{"gpuModel":"H100","vramGiB":80}')`,
+      [`GPU-sp-${index}`, nodeId],
+    );
+  await db.query(
+    `INSERT INTO provider_bootstraps (id, tenant_id, account_id, pool_id, machine_id, state, node_id,
+       owner_identity_id, idempotency_key, request_hash, version)
+     VALUES ('pbs_test', $1, $2, $3, 'us-central1-a/spot-host', 'joined', $4, 'usr_root', 'b-1', 'h', 1)`,
+    [world.rootTenant, world.eventsAccountId, world.eventsPoolId, nodeId],
+  );
+  return { nodeId, hostsPoolId: hosts.id };
+}
+
+const nodeTaints = async (world: GceWorld, nodeId: string) =>
+  (
+    await world.fixture.database.query<{ no_schedule_reasons: string[] }>(
+      `SELECT no_schedule_reasons FROM nodes WHERE id = $1`,
+      [nodeId],
+    )
+  ).rows[0]!.no_schedule_reasons;
+
 async function instanceRow(world: GceWorld, id: string) {
   const { rows } = await world.fixture.database.query<{
     state: string;
@@ -189,51 +246,11 @@ describe('vps.provider-events', () => {
 
   it('interruption taints the backing node and drains reservations', async () => {
     const world = await eventsWorld();
-    const { api, root, fixture } = world;
-    const db = fixture.database;
-    // A metal-host pool whose one node is the platform's machine us-central1-a/spot-host, joined
-    // through a provider bootstrap of the events account.
-    const site = await api.sites.create(root, {
-      tenantId: world.rootTenant,
-      kind: 'shared',
-      region: 'us-central1',
-      idempotencyKey: 'host-site',
-    });
-    const hosts = await api.pools.create(root, {
-      tenantId: world.rootTenant,
-      siteId: site.id,
-      class: 'metal-host',
-      gpuModel: 'H100',
-      idempotencyKey: 'host-pool',
-    });
-    await api.pools.offer(root, {
-      tenantId: world.rootTenant,
-      poolId: hosts.id,
-      toTenantId: world.acmeTenant,
-      quota: { gpu: 8 },
-    });
-    const nodeId = 'node_01jz00000000000000000000sp';
-    await db.query(
-      `INSERT INTO nodes (id, site_id, pool_id, owner_tenant_id, role, provision_state, maintenance, cordoned,
-         connectivity, trust, generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
-       VALUES ($1, $2, $3, $4, 'host', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 1, 0, 1)`,
-      [nodeId, site.id, hosts.id, world.rootTenant],
-    );
-    for (let index = 0; index < 4; index++)
-      await db.query(
-        `INSERT INTO devices (id, node_id, class, bookable, healthy, attributes)
-         VALUES ($1, $2, 'gpu', true, true, '{"gpuModel":"H100","vramGiB":80}')`,
-        [`GPU-sp-${index}`, nodeId],
-      );
-    await db.query(
-      `INSERT INTO provider_bootstraps (id, tenant_id, account_id, pool_id, machine_id, state, node_id,
-         owner_identity_id, idempotency_key, request_hash, version)
-       VALUES ('pbs_test', $1, $2, $3, 'us-central1-a/spot-host', 'joined', $4, 'usr_root', 'b-1', 'h', 1)`,
-      [world.rootTenant, world.eventsAccountId, world.eventsPoolId, nodeId],
-    );
+    const { api, fixture } = world;
+    const { nodeId, hostsPoolId } = await spotNode(world);
     const reservation = await api.reservations.create(world.acme, {
       tenantId: world.acmeTenant,
-      poolId: hosts.id,
+      poolId: hostsPoolId,
       devices: [{ class: 'gpu', count: 2 }],
       duration: '4h',
       idempotencyKey: 'r-1',
@@ -241,7 +258,9 @@ describe('vps.provider-events', () => {
     expect(reservation.state).toBe('placed');
     // And a VM of the account, interrupted in the same batch.
     const vm = await world.instance('vm-1');
-
+    const db = fixture.database;
+    void db;
+    
     const now = fixture.clock.now();
     const deadline = now + 120_000;
     world.intake.pending.push(
@@ -292,6 +311,57 @@ describe('vps.provider-events', () => {
       }),
     ]);
     expect(await world.events('reservation.preempting')).toHaveLength(1);
+  });
+
+  it('a stopped Spot machine that runs again loses its interruption condition and taint', async () => {
+    // instance-action stop or hibernate: the instance id survives and runs again later, and the
+    // node rejoins. A running state change after the deadline clears what the warning set.
+    const world = await eventsWorld();
+    const { nodeId } = await spotNode(world);
+    const vm = await world.instance('vm-1');
+    const now = world.fixture.clock.now();
+    const deadline = now + 120_000;
+    world.intake.pending.push(
+      { id: 'w-host', kind: 'interruption-warning', machineId: 'us-central1-a/spot-host', at: now, deadline, details: { action: 'stop' } },
+      { id: 'w-vm', kind: 'interruption-warning', machineId: vm.machineId, at: now, deadline, details: { action: 'hibernate' } },
+      { id: 'r-vm', kind: 'rebalance-recommended', machineId: vm.machineId, at: now },
+    );
+    await world.poll();
+    expect(await nodeTaints(world, nodeId)).toContain('taint:fake-events.spot/interruption');
+    const types = async () => (await instanceRow(world, vm.id)).conditions.map((c) => c.type);
+    expect(await types()).toEqual(expect.arrayContaining([interruptionCondition, rebalanceCondition]));
+
+    // A running change from before the deadline (delivered out of order) clears nothing.
+    world.intake.pending.push(
+      { id: 's-early', kind: 'machine-changed', machineId: vm.machineId, at: now + 1_000, details: { state: 'running' } },
+      { id: 's-early-host', kind: 'machine-changed', machineId: 'us-central1-a/spot-host', at: now + 1_000, details: { state: 'running' } },
+    );
+    await world.fixture.advance(15_000);
+    await world.poll();
+    expect(await types()).toContain(interruptionCondition);
+    expect(await nodeTaints(world, nodeId)).toContain('taint:fake-events.spot/interruption');
+
+    // Stopped at the deadline, then running again later.
+    await world.fixture.advance(10 * 60_000);
+    const back = world.fixture.clock.now();
+    world.intake.pending.push(
+      { id: 's-stopped', kind: 'machine-changed', machineId: vm.machineId, at: deadline, details: { state: 'stopped' } },
+      { id: 's-vm', kind: 'machine-changed', machineId: vm.machineId, at: back, details: { state: 'running' } },
+      { id: 's-host', kind: 'machine-changed', machineId: 'us-central1-a/spot-host', at: back, details: { state: 'running' } },
+    );
+    await world.poll();
+    expect(await types()).not.toContain(interruptionCondition);
+    expect(await types()).not.toContain(rebalanceCondition);
+    expect(await nodeTaints(world, nodeId)).not.toContain('taint:fake-events.spot/interruption');
+    expect((await world.events('node.tainted')).map((event) => event.data)).toEqual([
+      expect.objectContaining({ nodeId, added: ['fake-events.spot/interruption'], removed: [] }),
+      expect.objectContaining({ nodeId, added: [], removed: ['fake-events.spot/interruption'], reason: 'interruption-over' }),
+    ]);
+    // A later running change finds nothing to clear and publishes nothing.
+    world.intake.pending.push({ id: 's-again', kind: 'machine-changed', machineId: 'us-central1-a/spot-host', at: back + 60_000, details: { state: 'running' } });
+    await world.fixture.advance(15_000);
+    await world.poll();
+    expect(await world.events('node.tainted')).toHaveLength(2);
   });
 
   it('duplicate event ids are processed once', async () => {

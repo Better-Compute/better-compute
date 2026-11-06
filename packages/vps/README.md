@@ -129,7 +129,8 @@ has passed only wakes the instance reconcile. Events never write machine state:
 | Event | Effect |
 |---|---|
 | `machine-changed`, `api-call` | The instance's reconcile is enqueued now. |
-| `interruption-warning` | `InterruptionPending` condition and `instance.interruption { deadline }`. When the machine backs a node (a joined provider bootstrap), the node's reservations get the spot notice up to the deadline (cut back, or re-queued when not started) and the node the NoSchedule taint `<provider>.spot/interruption` (`node.tainted`). |
+| `interruption-warning` | `InterruptionPending` condition and `instance.interruption { deadline }`. When the machine backs a node (a joined provider bootstrap), the node's reservations get the spot notice up to the deadline (cut back, or re-queued when not started) and the node the NoSchedule taint `<provider>.spot/interruption` (`node.tainted`). The machine is remembered in `provider_interruptions` until it is seen running again. |
+| `machine-changed` with state `running`, after a pending interruption's deadline | A Spot machine stopped or hibernated by the interruption runs again: `InterruptionPending` and `RebalanceRecommended` are cleared and the taint removed (`node.tainted` with the key in `removed`, reason `interruption-over`). A running change from before the deadline clears nothing. |
 | `rebalance-recommended` | `RebalanceRecommended` condition and `instance.rebalance-recommended`. |
 | `maintenance-scheduled` | `MaintenanceScheduled` condition (cleared when the event completes or is canceled) and `instance.maintenance`. |
 | `reservation-changed` | The account's `vps.reservations` scan is enqueued. |
