@@ -1,6 +1,7 @@
 export * from './config.js';
 export * from './ids.js';
 export * from './account.js';
+export * from './federation.js';
 export * from './shapes.js';
 export * from './compute.js';
 export * from './images.js';

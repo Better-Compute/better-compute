@@ -115,6 +115,8 @@ export interface AwsProviderOptions {
    * private parameters are refused unless listed here.
    */
   ssmImagePrefixes?: readonly string[];
+  /** How long one network call of a keyless account's `checkAccount` may take (default 10 000). */
+  checkTimeoutMs?: number;
 }
 
 function invalid(message: string, reason: string): ComputeError {

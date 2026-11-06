@@ -3,6 +3,7 @@ import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 import { accountCredentials } from './account.js';
 import { AwsCompute } from './compute.js';
 import { awsConfig, validateAwsConfig, type AwsConfig, type AwsProviderOptions } from './config.js';
+import { checkAwsAccount } from './federation.js';
 import { instanceTypeCache, zoneCache } from './shapes.js';
 
 /**
@@ -17,6 +18,11 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
     provides: ['vps'],
     config: awsConfig as unknown as ProviderDefinition<AwsConfig>['config'],
     capabilities: ['power', 'reinstall', 'list', 'discover', 'claim'],
+    // A keyless (webIdentityRoleArn) account is proven before it is stored (A7).
+    checkAccount: (config, context) => {
+      validateAwsConfig(config);
+      return checkAwsAccount(config, context, options);
+    },
     create: (config, context) => {
       validateAwsConfig(config);
       const account = accountCredentials(config, context, options);
