@@ -4,6 +4,9 @@ import { ec2Client, jsonClient } from '@better-compute/aws-core';
 import {
   accountCredentials,
   AwsCompute,
+  awsIamPolicyCommand,
+  iamPolicy,
+  type IamStatement,
   awsConfig,
   instanceTypeCache,
   zoneCache,
@@ -736,5 +739,62 @@ describe('purchases', () => {
     ).rejects.toMatchObject({ code: 'ACCESS_DENIED', details: { reason: 'not-platform-account' } });
     expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(0);
     expect(w.emu.calls('CreateCapacityReservation')).toHaveLength(0);
+  });
+});
+
+describe('iam policy (A3)', () => {
+  const actionsOf = (statement: IamStatement) =>
+    typeof statement.Action === 'string' ? [statement.Action] : [...statement.Action];
+  const all = (policy: { Statement: readonly IamStatement[] }) =>
+    policy.Statement.flatMap(actionsOf);
+
+  it('reads capacity markets and launches into reservations by default', () => {
+    const policy = iamPolicy({ region: 'us-east-1', account: '222222222222' });
+    expect(all(policy)).toEqual(
+      expect.arrayContaining([
+        'ec2:DescribeCapacityReservations',
+        'ec2:DescribeCapacityBlockOfferings',
+        'ec2:DescribeSpotPriceHistory',
+        'servicequotas:GetServiceQuota',
+      ]),
+    );
+    const quotas = policy.Statement.find((s) => s.Sid === 'Quotas')!;
+    expect(quotas.Resource).toBe('arn:aws:servicequotas:us-east-1:222222222222:ec2/*');
+    expect(policy.Statement.find((s) => s.Sid === 'RunInReservations')!.Resource).toBe(
+      'arn:aws:ec2:us-east-1:222222222222:capacity-reservation/*',
+    );
+    // Nothing that spends, prices or launches Spot unless asked.
+    for (const action of [
+      'ec2:PurchaseCapacityBlock',
+      'ec2:CreateCapacityReservation',
+      'pricing:GetProducts',
+      'iam:CreateServiceLinkedRole',
+    ])
+      expect(all(policy)).not.toContain(action);
+  });
+
+  it('--spot, --pricing and --allow-purchases add their statements', async () => {
+    const policy = iamPolicy({ spot: true, pricing: true, purchases: true });
+    const buy = policy.Statement.find((s) => s.Sid === 'BuyCapacity')!;
+    expect(actionsOf(buy).sort()).toEqual([
+      'ec2:CreateCapacityReservation',
+      'ec2:PurchaseCapacityBlock',
+    ]);
+    expect(buy.Condition?.StringEquals?.['aws:RequestTag/better-compute:managed']).toBe('true');
+    expect(policy.Statement.find((s) => s.Sid === 'SpotServiceRole')!.Condition).toEqual({
+      StringEquals: { 'iam:AWSServiceName': 'spot.amazonaws.com' },
+    });
+    expect(policy.Statement.find((s) => s.Sid === 'Prices')!.Action).toBe('pricing:GetProducts');
+    const out: string[] = [];
+    await awsIamPolicyCommand().run({
+      flags: { spot: true, pricing: true, 'allow-purchases': true },
+      io: { out: (message: string) => out.push(message) },
+      note() {},
+      path: (value: string) => value,
+    });
+    const printed = JSON.parse(out.join('\n')) as { Statement: IamStatement[] };
+    expect(printed.Statement.map((s) => s.Sid)).toEqual(
+      expect.arrayContaining(['RunSpot', 'Prices', 'BuyCapacity', 'TagBoughtCapacity']),
+    );
   });
 });

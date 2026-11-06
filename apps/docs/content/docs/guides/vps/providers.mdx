@@ -1104,6 +1104,23 @@ in one region: a fleet in several regions is several accounts.
       type: 'string',
       description: '"key=value": discovery yields only instances carrying this tag.',
     },
+    spot: { type: 'boolean', description: 'Offer and launch Spot capacity.', default: 'false' },
+    quotas: {
+      type: 'boolean',
+      description: 'Cap offers at the EC2 vCPU quota headroom.',
+      default: 'true',
+    },
+    pricing: {
+      type: "'off' | 'on-demand' | 'all'",
+      description: 'Offer prices from the AWS Price List; all adds Spot prices.',
+      default: "'off'",
+    },
+    allowPurchases: {
+      type: 'boolean',
+      description:
+        'Allow buying Capacity Blocks and new ODCRs in this platform account (spends money).',
+      default: 'false',
+    },
   }}
 />
 
@@ -1121,8 +1138,7 @@ in one region: a fleet in several regions is several accounts.
 - **Tags and the guard.** Instances and root volumes are tagged `better-compute:managed=true` and
   `better-compute:instance=<id>`. `delete` needs the first, `power` and `reinstall` the second, and the generated
   policy makes AWS enforce the same rules (ABAC).
-- **Offers and images.** An offer is `<zone>/<instanceType>` (bare metal is not offered; reservation and Spot offers
-  are `UNSUPPORTED` until a later phase). An image is an `ami-…`, a `resolve:ssm:<parameter>`, or one of the aliases
+- **Offers and images.** An offer is `<zone>/<instanceType>` (bare metal is not offered). An image is an `ami-…`, a `resolve:ssm:<parameter>`, or one of the aliases
   `ubuntu-24.04`, `ubuntu-22.04`, `al2023`, `dlami-gpu` and `eks-al2023-<k8s>`, resolved for the instance type's
   architecture.
 - **Hardened defaults.** IMDSv2 only, hop limit 1, instance metadata tags off, an encrypted root volume, and a
@@ -1132,6 +1148,13 @@ in one region: a fleet in several regions is several accounts.
   for two minutes). User data over 16 KiB is gzipped, and refused (`user-data-too-large`) if still over. An instance
   EC2 ends for capacity after accepting it is `CAPACITY_UNAVAILABLE`, and the instance ends in `error` with
   `ProvisionFailed`.
+- **Capacity markets.** ODCRs and Capacity Blocks are provider reservations (`cr-…`, `cb:cr-…`) offered as
+  `<zone>/<type>@<cr-id>` with their free slots, so [provider reservations](#provider-reservations) admit creates
+  against them; a block launch sets `MarketType=capacity-block`. With `spot`, `:spot` offers launch one-time Spot
+  Instances, and a reclaimed one reads as `deleted` with an `interruption`. Offers carry the vCPU quota headroom as
+  `count` and, with `pricing`, Price List and Spot prices. `providerAccounts.reservationOfferings` lists capacity to
+  buy, and `providerAccounts.purchaseReservation` buys it: root-only, `confirm: true`, exactly once, and only with
+  `allowPurchases` in a platform account.
 - **Attach.** `discover` yields every instance that is not terminated; `claim` writes the ownership tag and re-reads
   it, turning a lost race into `CONFLICT`; deleting an attached instance detaches it and leaves it running.
 
