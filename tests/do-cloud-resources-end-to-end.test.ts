@@ -84,7 +84,7 @@ async function world() {
       `${resourceId} never reached ${state}: ${JSON.stringify(await get(resourceId))}`,
     );
   };
-  return { emu, fixture, api, acme, acmeTenant, poolId: pool.id, logs, get, until };
+  return { emu, fixture, api, root, acme, acmeTenant, poolId: pool.id, logs, get, until };
 }
 
 describe('DigitalOcean Managed Databases through cloudResources', () => {
@@ -198,5 +198,115 @@ describe('DigitalOcean Managed Databases through cloudResources', () => {
     expect(w.emu.requests.filter((request) => request.url.pathname === '/v2/databases')).toEqual(
       [],
     );
+  });
+});
+
+describe('DigitalOcean App Platform and Functions through cloudResources', () => {
+  it('an app’s SECRET env is a tenant SecretRef resolved at DO only; account-wide sources are refused on a hosted pool', async () => {
+    const w = await world();
+    const { ref } = await w.api.secrets.put(w.acme, {
+      tenantId: w.acmeTenant,
+      name: 'stripe',
+      value: 'sk_live_plaintext_4242',
+      idempotencyKey: 'stripe',
+    });
+    const spec = {
+      region: 'nyc',
+      services: [{ name: 'web', image: { registry_type: 'DOCKER_HUB', repository: 'nginx' } }],
+      envs: [{ key: 'STRIPE_KEY', type: 'SECRET', value: ref }],
+    };
+    const app = await w.api.cloudResources.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      kind: 'do.app',
+      name: 'shop',
+      spec,
+      idempotencyKey: 'shop',
+    });
+    await w.until(app.id, 'ready');
+    const ready = await w.get(app.id);
+    const atDo = w.emu.state.apps.get(ready.providerId)!;
+    expect(atDo.spec.name).toBe(app.providerName);
+    expect(atDo._secrets.STRIPE_KEY).toBe('sk_live_plaintext_4242');
+    expect(ready.outputs.liveUrl).toMatch(/^https:/);
+    expect(ready.spec.envs).toEqual([{ key: 'STRIPE_KEY', type: 'SECRET', value: ref }]);
+    const rows = await w.fixture.database.query(`SELECT * FROM cloud_resources`);
+    const outbox = await w.fixture.database.query(`SELECT payload FROM outbox`);
+    expect(JSON.stringify([rows.rows, outbox.rows, w.logs])).not.toContain(
+      'sk_live_plaintext_4242',
+    );
+
+    // A linked repository of the platform's account is out of reach on the hosted pool.
+    const linked = await w.api.cloudResources.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      kind: 'do.app',
+      name: 'linked',
+      spec: { services: [{ name: 'web', github: { repo: 'platform/private', branch: 'main' } }] },
+      idempotencyKey: 'linked',
+    });
+    await w.until(linked.id, 'error');
+    expect((await w.get(linked.id)).message).toContain('account-wide');
+    expect([...w.emu.state.apps.values()].map((entry) => entry.spec.name)).toEqual([
+      app.providerName,
+    ]);
+
+    // A ref to another tenant's secret (here the root's DO token) does not resolve for acme.
+    const { ref: rootRef } = await w.api.secrets.put(w.root, {
+      tenantId: w.fixture.tenants.root.id,
+      name: 'root-only',
+      value: 'root-only-value-77',
+      idempotencyKey: 'root-only',
+    });
+    const stolen = await w.api.cloudResources.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      kind: 'do.app',
+      name: 'stolen',
+      spec: { ...spec, envs: [{ key: 'X', type: 'SECRET', value: rootRef }] },
+      idempotencyKey: 'stolen',
+    });
+    await w.until(stolen.id, 'error');
+    expect(JSON.stringify([...w.emu.state.apps.values()])).not.toContain('root-only-value-77');
+
+    await w.api.cloudResources.delete(w.acme, { tenantId: w.acmeTenant, resourceId: app.id });
+    await w.until(app.id, 'deleted');
+    expect(w.emu.state.apps.size).toBe(0);
+  });
+
+  it('a Functions namespace’s key is sealed; a trigger lives in it and goes first on delete', async () => {
+    const w = await world();
+    const namespace = await w.api.cloudResources.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      kind: 'do.functions-namespace',
+      name: 'jobs',
+      spec: { region: 'ams3' },
+      idempotencyKey: 'jobs',
+    });
+    await w.until(namespace.id, 'ready');
+    const ready = await w.get(namespace.id);
+    const atDo = w.emu.state.functionsNamespaces.get(ready.providerId)!;
+    const secrets = w.fixture.compute.context.secrets!;
+    expect(await secrets.resolve(ready.secretOutputs.key, { tenantId: w.acmeTenant })).toBe(
+      atDo.key,
+    );
+    const trigger = await w.api.cloudResources.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      kind: 'do.functions-trigger',
+      name: 'nightly',
+      parentId: namespace.id,
+      spec: { name: 'nightly', function: 'jobs/cleanup', cron: '0 3 * * *' },
+      idempotencyKey: 'nightly',
+    });
+    await w.until(trigger.id, 'ready');
+    expect(atDo._triggers.map((entry: { name: string }) => entry.name)).toEqual(['nightly']);
+    const rows = await w.fixture.database.query(`SELECT * FROM cloud_resources`);
+    expect(JSON.stringify([rows.rows, w.logs])).not.toContain(atDo.key);
+    await w.api.cloudResources.delete(w.acme, { tenantId: w.acmeTenant, resourceId: namespace.id });
+    await w.until(namespace.id, 'deleted');
+    expect((await w.get(trigger.id)).state).toBe('deleted');
+    expect(w.emu.state.functionsNamespaces.size).toBe(0);
   });
 });

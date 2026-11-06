@@ -47,6 +47,10 @@ export class DoState {
   tags = new Map<string, Json>();
   /** Keyed by uuid. DO Managed Database clusters (with their users, pools, replicas and firewall). */
   databases = new Map<string, Json>();
+  /** Keyed by id. DO App Platform apps (with their deployments). */
+  apps = new Map<string, Json>();
+  /** Keyed by namespace id. DO Functions namespaces (with their triggers). */
+  functionsNamespaces = new Map<string, Json>();
   /** Keyed by uuid. DO autoscale pool resources. */
   autoscalePools = new Map<string, Json>();
   /** The members of each autoscale pool, keyed by the pool's uuid. */

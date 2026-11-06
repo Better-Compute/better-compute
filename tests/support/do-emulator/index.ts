@@ -1,10 +1,12 @@
 import { registerAccount } from './account.js';
 import { registerActions } from './actions.js';
+import { registerApps } from './apps.js';
 import { registerAutoscale } from './autoscale.js';
 import { registerCatalog } from './catalog.js';
 import { registerDatabases } from './databases.js';
 import { registerDroplets } from './droplets.js';
 import { registerFirewalls } from './firewalls.js';
+import { registerFunctions } from './functions.js';
 import { registerKeys } from './keys.js';
 import { registerTags } from './tags.js';
 import { registerVpcs } from './vpcs.js';
@@ -91,6 +93,10 @@ export class DoEmulator {
   firewallReads = 0;
   /** How many reads a database cluster (or replica) that is being created, resized or upgraded takes to be online. */
   databaseReads = 1;
+  /** How many reads an App Platform deployment stays `PENDING_BUILD` before it completes. */
+  appReads = 1;
+  /** App Platform deployments end `ERROR` instead of `ACTIVE`. */
+  failDeployments = false;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -276,5 +282,7 @@ export class DoEmulator {
     registerVpcs(this);
     registerFirewalls(this);
     registerDatabases(this);
+    registerApps(this);
+    registerFunctions(this);
   }
 }

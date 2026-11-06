@@ -168,12 +168,16 @@ export function childId(parent: string, name: string): string {
   return `${parent}/${name}`;
 }
 
-/** Splits a child id; anything else is `INVALID_INPUT`. */
-export function parseChildId(kind: string, id: string): { parent: string; name: string } {
+/** Splits a child id; anything else is `INVALID_INPUT`. `parentPattern` is the parent's id (a uuid by default). */
+export function parseChildId(
+  kind: string,
+  id: string,
+  parentPattern: RegExp = /^[0-9a-f-]{8,64}$/,
+): { parent: string; name: string } {
   const slash = id.indexOf('/');
   const parent = slash > 0 ? id.slice(0, slash) : '';
   const name = slash > 0 ? id.slice(slash + 1) : '';
-  if (!/^[0-9a-f-]{8,64}$/.test(parent) || !/^[A-Za-z0-9_.-]{1,128}$/.test(name))
+  if (!parentPattern.test(parent) || !/^[A-Za-z0-9_.-]{1,128}$/.test(name))
     throw new ComputeError(
       'INVALID_INPUT',
       `${JSON.stringify(id)} is not a ${kind} id`,
