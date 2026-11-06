@@ -193,7 +193,10 @@ export class AwsCompute implements ProviderImpl {
   readonly #created = new Map<string, number>();
   /** Instance id → when this client last claimed it with `managed` (tags lag behind writes). */
   readonly #managedClaims = new Map<string, number>();
-  readonly #rootDevices = new Map<string, { device: string | undefined; at: number }>();
+  readonly #rootDevices = new Map<
+    string,
+    { device: string | undefined; arch?: string; at: number }
+  >();
   readonly #loggedSsm = new Set<string>();
   /** Error codes already logged once (an unreadable market read is warned once per code). */
   readonly #warned = new Set<string>();
@@ -1041,8 +1044,10 @@ export class AwsCompute implements ProviderImpl {
         );
       throw error;
     }
-    const device = doc.items('imagesSet')[0]?.textOf('rootDeviceName');
-    this.#rootDevices.set(imageId, { device, at: now });
+    const described = doc.items('imagesSet')[0];
+    const device = described?.textOf('rootDeviceName');
+    const arch = described?.textOf('architecture');
+    this.#rootDevices.set(imageId, { device, ...(arch ? { arch } : {}), at: now });
     return device;
   }
 
@@ -1132,6 +1137,15 @@ export class AwsCompute implements ProviderImpl {
       );
     const imageId = resolveImage(request.image, info.arch[0] ?? 'x86_64', this.#ssmPrefixes);
     const rootDevice = await this.#rootDevice(request.image, imageId, signal);
+    // (A10) An AMI of the other architecture (x86_64 on Graviton) fails at launch: refuse it first.
+    const imageArch = this.#rootDevices.get(imageId)?.arch;
+    if (imageArch && !(info.arch as readonly string[]).includes(imageArch))
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `image ${imageId} is built for ${imageArch.slice(0, 16)}, not ${info.arch.join(' or ')} (${offer.instanceType})`,
+        undefined,
+        { provider: 'aws', reason: 'image-arch' },
+      );
     const userData = packUserData(request.userData, request.sshKeys);
     // On a tenant network: its subnet in the offer's zone and the groups of its firewall rules.
     const placement = request.network

@@ -358,16 +358,16 @@ describe('EFA', () => {
 
   it('a single-card EFA type keeps its public address', async () => {
     const w = world({ efa: 'auto', subnetId: subnet });
-    w.ec2emu.types.set('hpc7g.16xlarge', {
-      type: 'hpc7g.16xlarge',
-      vcpu: 64,
-      memoryMiB: 131_072,
-      arch: ['arm64'],
+    w.ec2emu.types.set('hpc6a.48xlarge', {
+      type: 'hpc6a.48xlarge',
+      vcpu: 96,
+      memoryMiB: 393_216,
+      arch: ['x86_64'],
       efa: 1,
       networkCards: 1,
     });
-    w.ec2emu.offerings.get('us-east-1a')!.add('hpc7g.16xlarge');
-    await w.compute.create(request('us-east-1a/hpc7g.16xlarge'), w.call());
+    w.ec2emu.offerings.get('us-east-1a')!.add('hpc6a.48xlarge');
+    await w.compute.create(request('us-east-1a/hpc6a.48xlarge'), w.call());
     expect(interfaces(w.runs()[0]!.params)).toEqual([
       expect.objectContaining({ InterfaceType: 'efa', AssociatePublicIpAddress: 'true' }),
     ]);
@@ -473,5 +473,32 @@ describe('Neuron accelerators', () => {
     const w = neuronWorld();
     const offers = await w.compute.listOffers({ gpuModel: 'TRN1' });
     expect(offers.map((offer) => offer.id)).toEqual(['us-east-1a/trn1.32xlarge']);
+  });
+});
+
+describe('Graviton', () => {
+  it('arm64 types are offered as arm64 and launch the arm64 build of an image alias', async () => {
+    const w = world();
+    const offers = await w.compute.listOffers({});
+    expect(offers.find((offer) => offer.id === 'us-east-1a/m7g.large')?.arch).toBe('arm64');
+    expect(offers.find((offer) => offer.id === 'us-east-1a/m7i.large')?.arch).toBe('x86_64');
+    await w.compute.create({ ...request('us-east-1a/m7g.large'), image: 'ubuntu-24.04' }, w.call());
+    expect(w.runs()[0]!.params.get('ImageId')).toBe(
+      'resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id',
+    );
+  });
+
+  it('refuses an AMI built for the other architecture before launching', async () => {
+    const w = world();
+    await expect(w.compute.create(request('us-east-1a/m7g.large'), w.call())).rejects.toMatchObject(
+      { code: 'INVALID_INPUT', details: { reason: 'image-arch' } },
+    );
+    expect(w.runs()).toHaveLength(0);
+    w.ec2emu.images.set('ami-0aaaaaaaaaaaaaaa1', { rootDevice: '/dev/xvda', arch: 'arm64' });
+    await w.compute.create(
+      { ...request('us-east-1a/m7g.large'), image: 'ami-0aaaaaaaaaaaaaaa1' },
+      w.call(),
+    );
+    expect(w.runs()).toHaveLength(1);
   });
 });
