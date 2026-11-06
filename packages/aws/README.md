@@ -166,7 +166,7 @@ A CA whose key never leaves KMS (an `ECC_NIST_P256` `SIGN_VERIFY` key). `better-
 
 ## RDS IAM authentication
 
-`rdsAuthTokenProvider({ region, credentials, hostname, port, username })` returns `() => Promise<string>` for `pg`'s `password`: a 15-minute token, refreshed three minutes before it expires. The package never imports `pg`:
+`rdsAuthTokenProvider({ region, credentials, hostname, port, username })` returns `() => Promise<string>` for `pg`'s `password`: a 15-minute token, refreshed three minutes before it expires, or three minutes before the temporary credentials that signed it expire if that comes first. The package never imports `pg`:
 
 ```ts
 postgres({

@@ -50,6 +50,31 @@ describe('RDS IAM auth', () => {
     expect(resolved).toBe(2);
   });
 
+  it('provider refreshes before temporary credentials expire (review)', async () => {
+    const emu = new AwsEmulator();
+    let resolved = 0;
+    const provider = rdsAuthTokenProvider({
+      ...rdsOptions(emu),
+      credentials: {
+        kind: 'expiring',
+        credentials: async () => {
+          resolved++;
+          return { accessKeyId: 'ASIATESTKEY000000001', secretAccessKey: 'x', sessionToken: 'tok', expiresAt: emu.clock.now() + 5 * 60_000 };
+        },
+      },
+    });
+    const first = await provider();
+    expect(resolved).toBe(1);
+    // Within the credentials' life less three minutes: cached.
+    emu.clock.advance(60_000);
+    expect(await provider()).toBe(first);
+    // Two minutes before the credentials expire (the token itself would have 13 left): re-minted.
+    emu.clock.advance(2 * 60_000);
+    const fresh = await provider();
+    expect(fresh).not.toBe(first);
+    expect(resolved).toBe(2);
+  });
+
   it('token never appears in logs', async () => {
     // The token path has no logger at all; the provider holds it only in memory.
     const emu = new AwsEmulator();

@@ -30,6 +30,11 @@ function check(options: RdsAuthTokenOptions): { hostname: string; port: number }
  * without the scheme. It is a password: never log it.
  */
 export async function rdsAuthToken(options: RdsAuthTokenOptions): Promise<string> {
+  return (await mintRdsAuthToken(options)).token;
+}
+
+/** The token and when the credentials that signed it expire (temporary credentials only). */
+async function mintRdsAuthToken(options: RdsAuthTokenOptions): Promise<{ token: string; credentialsExpireAt?: number }> {
   const { hostname, port } = check(options);
   const clock = options.clock ?? systemClock;
   const credentials = await options.credentials.credentials({ signal: new AbortController().signal, clock });
@@ -46,12 +51,16 @@ export async function rdsAuthToken(options: RdsAuthTokenOptions): Promise<string
     now: clock.now(),
     expiresInSeconds: lifetimeSeconds,
   });
-  return signed.replace(/^https:\/\//, '');
+  return {
+    token: signed.replace(/^https:\/\//, ''),
+    ...(credentials.expiresAt !== undefined ? { credentialsExpireAt: credentials.expiresAt } : {}),
+  };
 }
 
 /**
  * A memoizing provider for `pg`'s `password: () => Promise<string>`: one token at a time
- * (single-flight), refreshed three minutes before it expires.
+ * (single-flight), refreshed three minutes before it expires, or before the temporary credentials
+ * that signed it expire (IRSA, ECS, IMDS) when that is sooner: a token stops working with them.
  */
 export function rdsAuthTokenProvider(options: RdsAuthTokenOptions): () => Promise<string> {
   check(options);
@@ -63,8 +72,13 @@ export function rdsAuthTokenProvider(options: RdsAuthTokenOptions): () => Promis
     pending ??= (async () => {
       const minted = clock.now();
       try {
-        const token = await rdsAuthToken(options);
-        current = { token, refreshAt: minted + lifetimeSeconds * 1000 - refreshBeforeMs };
+        const { token, credentialsExpireAt } = await mintRdsAuthToken(options);
+        const tokenRefresh = minted + lifetimeSeconds * 1000 - refreshBeforeMs;
+        current = {
+          token,
+          refreshAt:
+            credentialsExpireAt === undefined ? tokenRefresh : Math.min(tokenRefresh, credentialsExpireAt - refreshBeforeMs),
+        };
         return token;
       } finally {
         pending = undefined;
