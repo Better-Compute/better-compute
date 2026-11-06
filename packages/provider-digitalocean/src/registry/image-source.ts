@@ -50,9 +50,34 @@ export interface DocrImageSourceOptions {
   registryUrl?: string;
   /** How long each registry credential lasts (120–3600 s). Default 600. */
   expirySeconds?: number;
+  /**
+   * Regional mirrors: `{ <source registry>: { <region>: <mirror registry> } }`, or `false` for
+   * none. By default they are discovered: the account's registry named `<source>-<region>` and
+   * stored in that region mirrors `<source>` there (`GET /v2/registries`, cached 5 minutes). A
+   * resolution for a region reads the manifest from the source and the disk layer, by digest,
+   * from the mirror; a mirror without the layer, or one that fails, falls back to the source.
+   */
+  mirrors?: Readonly<Record<string, Readonly<Record<string, string>>>> | false;
   clock?: Clock;
   log?: Logger;
 }
+
+/** Where an image is wanted: a region picks that region's mirror, when there is one. */
+export interface DocrResolveOptions {
+  region?: string;
+}
+
+export interface DocrImageSource extends ImageSource {
+  resolve(ref: string, options?: DocrResolveOptions): Promise<ResolvedImage>;
+  /** This source for one region: plain `resolve(ref)` uses that region's mirrors. */
+  forRegion(region: string): ImageSource;
+}
+
+const registryNamePattern = /^[a-z0-9-]{1,63}$/;
+const regionSlugPattern = /^[a-z]{3}[0-9]$/;
+const redirects = [301, 302, 303, 307, 308];
+const listingTtlMs = 300_000;
+const failedListingTtlMs = 60_000;
 
 export interface OciReference {
   host: string;
@@ -153,13 +178,30 @@ function formatOf(layer: {
   };
 }
 
-export function docrImageSource(options: DocrImageSourceOptions): ImageSource {
+function checkMirrors(mirrors: DocrImageSourceOptions['mirrors']): void {
+  if (!mirrors) return;
+  for (const [source, byRegion] of Object.entries(mirrors)) {
+    const entries = Object.entries(byRegion);
+    if (
+      !registryNamePattern.test(source) ||
+      entries.some(([region, mirror]) => !regionSlugPattern.test(region) || !registryNamePattern.test(mirror))
+    )
+      throw registryError(
+        'INVALID_CONFIG',
+        'A registry mirror maps a registry name to { <region slug>: <registry name> }',
+        'mirrors',
+      );
+  }
+}
+
+export function docrImageSource(options: DocrImageSourceOptions): DocrImageSource {
   if (!isSecretRef(options.token))
     throw registryError(
       'INVALID_CONFIG',
       'docrImageSource takes the token as a secret reference',
       'secretRef',
     );
+  checkMirrors(options.mirrors);
   const doFetch = options.fetch ?? globalThis.fetch.bind(globalThis);
   const clock = options.clock ?? systemClock;
   const log: Logger = options.log ?? { debug() {}, info() {}, warn() {}, error() {} };
@@ -271,7 +313,98 @@ export function docrImageSource(options: DocrImageSourceOptions): ImageSource {
 
   const statusResponse = (status: number) => new Response(null, { status });
 
-  async function resolve(ref: string): Promise<ResolvedImage> {
+  // The account's registries (name → region), for mirror discovery. A failed listing is
+  // remembered for a minute: resolution goes to the source meanwhile.
+  let listing: { at: number; ttl: number; registries: Map<string, string> } | undefined;
+
+  async function accountRegistries(signal: AbortSignal): Promise<Map<string, string>> {
+    if (listing && clock.now() - listing.at < listing.ttl) return listing.registries;
+    const registries = new Map<string, string>();
+    let ttl = listingTtlMs;
+    try {
+      for await (const registry of client.pages<{ name?: string; region?: string }>(
+        '/registries',
+        'registries',
+        { signal, budget: 'observe' },
+      ))
+        if (registry.name && registry.region) registries.set(registry.name, registry.region);
+    } catch (error) {
+      if (signal.aborted) throw error;
+      registries.clear();
+      ttl = failedListingTtlMs;
+      log.warn('digitalocean.registry.mirror-listing-failed', {
+        code: error instanceof ComputeError ? error.code : 'UNKNOWN',
+      });
+    }
+    listing = { at: clock.now(), ttl, registries };
+    return registries;
+  }
+
+  /** The registry that mirrors `source` in `region`, if any. */
+  async function mirrorFor(
+    source: string,
+    region: string,
+    signal: AbortSignal,
+  ): Promise<string | undefined> {
+    if (options.mirrors === false) return undefined;
+    if (options.mirrors) {
+      const mirror = options.mirrors[source]?.[region];
+      return mirror && mirror !== source ? mirror : undefined;
+    }
+    const registries = await accountRegistries(signal);
+    const name = `${source}-${region}`;
+    return registries.get(name) === region ? name : undefined;
+  }
+
+  /** The presigned URL a registry redirects a blob request to, or the response it gave instead. */
+  async function blobRedirect(
+    name: string,
+    digest: string,
+    signal: AbortSignal,
+  ): Promise<{ url: URL } | { status: number; ok: boolean }> {
+    const blob = await registryGet(`/v2/${name}/blobs/${digest}`, `repository:${name}:pull`, '*/*', signal);
+    await blob.body?.cancel();
+    const location = blob.headers.get('location');
+    if (!redirects.includes(blob.status) || !location) return { status: blob.status, ok: blob.ok };
+    const target = new URL(location, registryUrl);
+    if (target.protocol !== 'https:')
+      throw registryError('PROVIDER_ERROR', 'The registry redirected to a non-https URL', 'blobRedirect');
+    return { url: target };
+  }
+
+  /**
+   * The layer from the region's mirror, or undefined to use the source. The mirror serves bytes
+   * only: what they must be is the source manifest's digest, which nodes verify.
+   */
+  async function fromMirror(
+    parsed: OciReference,
+    digest: string,
+    region: string,
+    signal: AbortSignal,
+  ): Promise<URL | undefined> {
+    const source = parsed.name.slice(0, parsed.name.indexOf('/'));
+    const mirror = await mirrorFor(source, region, signal);
+    if (!mirror) return undefined;
+    const name = `${mirror}${parsed.name.slice(source.length)}`;
+    try {
+      const found = await blobRedirect(name, digest, signal);
+      if ('url' in found) {
+        log.debug('digitalocean.registry.mirror-hit', { mirror, region });
+        return found.url;
+      }
+      log.info('digitalocean.registry.mirror-miss', { mirror, region, status: found.status });
+    } catch (error) {
+      if (signal.aborted) throw error;
+      log.warn('digitalocean.registry.mirror-failed', {
+        mirror,
+        region,
+        code: error instanceof ComputeError ? error.code : 'UNKNOWN',
+      });
+    }
+    return undefined;
+  }
+
+  async function resolve(ref: string, resolveOptions: DocrResolveOptions = {}): Promise<ResolvedImage> {
     const parsed = parseOciReference(ref);
     if (parsed.host !== registryUrl.host)
       throw registryError(
@@ -339,21 +472,24 @@ export function docrImageSource(options: DocrImageSourceOptions): ImageSource {
     if (!digest)
       throw registryError('PROVIDER_ERROR', 'The disk layer has no sha256 digest', 'layerDigest');
 
-    const blob = await registryGet(`/v2/${parsed.name}/blobs/${layer.digest}`, scope, '*/*', signal);
-    await blob.body?.cancel();
-    const location = blob.headers.get('location');
-    if (![301, 302, 303, 307, 308].includes(blob.status) || !location) {
-      if (!blob.ok) throw statusError(blob.status, `blob of ${parsed.name}`);
-      // The registry served the bytes itself: a node would need our credentials to fetch them.
-      throw registryError(
-        'UNSUPPORTED',
-        'The registry did not hand out a presigned URL for the layer',
-        'blobRedirect',
-      );
+    const region = resolveOptions.region;
+    let target =
+      region && regionSlugPattern.test(region)
+        ? await fromMirror(parsed, layer.digest!, region, signal)
+        : undefined;
+    if (!target) {
+      const found = await blobRedirect(parsed.name, layer.digest!, signal);
+      if (!('url' in found)) {
+        if (!found.ok) throw statusError(found.status, `blob of ${parsed.name}`);
+        // The registry served the bytes itself: a node would need our credentials to fetch them.
+        throw registryError(
+          'UNSUPPORTED',
+          'The registry did not hand out a presigned URL for the layer',
+          'blobRedirect',
+        );
+      }
+      target = found.url;
     }
-    const target = new URL(location, registryUrl);
-    if (target.protocol !== 'https:')
-      throw registryError('PROVIDER_ERROR', 'The registry redirected to a non-https URL', 'blobRedirect');
     log.debug('digitalocean.registry.resolved', { name: parsed.name });
     return {
       url: target.toString(),
@@ -364,11 +500,19 @@ export function docrImageSource(options: DocrImageSourceOptions): ImageSource {
     };
   }
 
-  return {
-    extension: 'image-source',
+  const base = {
+    extension: 'image-source' as const,
     id: 'digitalocean-registry',
     version: '0.1.0',
-    schemes: ['oci'],
+    schemes: ['oci'] as const,
+  };
+  return {
+    ...base,
     resolve,
+    forRegion(region: string): ImageSource {
+      if (!regionSlugPattern.test(region))
+        throw registryError('INVALID_INPUT', `${JSON.stringify(region)} is not a region slug`, 'region');
+      return { ...base, resolve: (ref: string) => resolve(ref, { region }) };
+    },
   };
 }

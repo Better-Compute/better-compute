@@ -5,6 +5,7 @@ import {
   parseBearerChallenge,
   parseOciReference,
   resetBudgets,
+  type DocrImageSourceOptions,
 } from '@better-compute/provider-digitalocean';
 import { DoEmulator } from './support/do-emulator/index.js';
 import {
@@ -12,6 +13,7 @@ import {
   docrFetch,
   registerRegistry,
   registryWorld,
+  seedRegistry,
 } from './support/do-emulator/registry.js';
 
 // The DOCR image source: oci://registry.digitalocean.com/... resolved to the disk layer's digest
@@ -180,6 +182,122 @@ describe('docrImageSource', () => {
     expect(() =>
       docrImageSource({ token: 'dop_v1_plain' as unknown as 'secret://x', secrets }),
     ).toThrow(/secret reference/);
+  });
+});
+
+describe('regional mirrors', () => {
+  const ref = 'oci://registry.digitalocean.com/acme/images/ubuntu:24.04';
+  const blobHost = (url: string) => new URL(url).host;
+
+  function mirrored(mirrors: DocrImageSourceOptions['mirrors']) {
+    const base = setup();
+    const source = docrImageSource({
+      token: 'secret://do/t',
+      secrets,
+      fetch: docrFetch(base.emu, base.docr),
+      clock: base.clock,
+      ...(mirrors !== undefined ? { mirrors } : {}),
+    });
+    base.docr.blobRegions.set('acme-ams3', 'ams3');
+    base.docr.blobRegions.set('acme-sgp1', 'sgp1');
+    return { ...base, source };
+  }
+
+  const manifestReads = (docr: DocrEmulator) =>
+    docr.requests.filter((r) => r.url.pathname.includes('/manifests/')).map((r) => r.url.pathname);
+  const blobReads = (docr: DocrEmulator) =>
+    docr.requests
+      .filter((r) => r.url.pathname.includes('/blobs/') && !r.headers.authorization?.startsWith('Basic'))
+      .map((r) => r.url.pathname.split('/')[2]);
+
+  it('serves the layer from the mirror in the region, the manifest from the source', async () => {
+    const { source, docr, layer } = mirrored({ acme: { ams3: 'acme-ams3' } });
+    const resolved = await source.resolve(ref, { region: 'ams3' });
+    expect(blobHost(resolved.url)).toBe('docr-blobs.ams3.digitaloceanspaces.com');
+    expect(resolved.sha256).toBe(layer.slice('sha256:'.length));
+    // The source registry is authoritative for what the tag means; the mirror only serves bytes
+    // the node verifies by digest.
+    expect(manifestReads(docr).every((path) => path.startsWith('/v2/acme/images/'))).toBe(true);
+    expect(new Set(blobReads(docr))).toEqual(new Set(['acme-ams3']));
+    // Without a region, or in a region with no mirror: the source.
+    expect(blobHost((await source.resolve(ref)).url)).toBe('docr-blobs.nyc3.digitaloceanspaces.com');
+    expect(blobHost((await source.resolve(ref, { region: 'fra1' })).url)).toBe(
+      'docr-blobs.nyc3.digitaloceanspaces.com',
+    );
+    // A source bound to a region.
+    expect(blobHost((await source.forRegion('ams3').resolve(ref)).url)).toBe(
+      'docr-blobs.ams3.digitaloceanspaces.com',
+    );
+  });
+
+  it('falls back to the source when the mirror lacks the layer or is down', async () => {
+    const { source, docr, layer } = mirrored({ acme: { ams3: 'acme-ams3' } });
+    docr.missingBlobs.add(`acme-ams3@${layer}`);
+    expect(blobHost((await source.resolve(ref, { region: 'ams3' })).url)).toBe(
+      'docr-blobs.nyc3.digitaloceanspaces.com',
+    );
+    docr.missingBlobs.clear();
+    docr.failingRegistries.set('acme-ams3', 503);
+    expect(blobHost((await source.resolve(ref, { region: 'ams3' })).url)).toBe(
+      'docr-blobs.nyc3.digitaloceanspaces.com',
+    );
+    // A mirror that would serve the bytes itself is skipped, never handed to a node.
+    docr.failingRegistries.clear();
+    docr.serveBlobs = true;
+    expect((await failure(source.resolve(ref, { region: 'ams3' }))).details?.reason).toBe(
+      'blobRedirect',
+    );
+  });
+
+  it('discovers mirrors among the account registries: <source>-<region>, in that region', async () => {
+    const { source, docr, emu } = mirrored(undefined);
+    seedRegistry(emu, { name: 'acme', region: 'nyc3' });
+    seedRegistry(emu, { name: 'acme-sgp1', region: 'sgp1' });
+    // Named for fra1 but stored in ams3: not a fra1 mirror.
+    seedRegistry(emu, { name: 'acme-fra1', region: 'ams3' });
+    expect(blobHost((await source.resolve(ref, { region: 'sgp1' })).url)).toBe(
+      'docr-blobs.sgp1.digitaloceanspaces.com',
+    );
+    expect(blobHost((await source.resolve(ref, { region: 'fra1' })).url)).toBe(
+      'docr-blobs.nyc3.digitaloceanspaces.com',
+    );
+    // The source's own region needs no mirror.
+    expect(blobHost((await source.resolve(ref, { region: 'nyc3' })).url)).toBe(
+      'docr-blobs.nyc3.digitaloceanspaces.com',
+    );
+    const listings = () => emu.requests.filter((r) => r.url.pathname === '/v2/registries').length;
+    expect(listings()).toBe(1);
+    expect(blobReads(docr)).not.toContain('acme-fra1');
+  });
+
+  it('resolves from the source when the registry listing fails, and never lists with mirrors off', async () => {
+    const off = mirrored(false);
+    seedRegistry(off.emu, { name: 'acme-sgp1', region: 'sgp1' });
+    expect(blobHost((await off.source.resolve(ref, { region: 'sgp1' })).url)).toBe(
+      'docr-blobs.nyc3.digitaloceanspaces.com',
+    );
+    expect(off.emu.requests.some((r) => r.url.pathname === '/v2/registries')).toBe(false);
+
+    const broken = mirrored(undefined);
+    seedRegistry(broken.emu, { name: 'acme-sgp1', region: 'sgp1' });
+    broken.emu.failNext({ method: 'GET', path: /^\/registries$/ }, 403, {
+      id: 'forbidden',
+      message: 'You are not authorized to perform this operation',
+    });
+    expect(blobHost((await broken.source.resolve(ref, { region: 'sgp1' })).url)).toBe(
+      'docr-blobs.nyc3.digitaloceanspaces.com',
+    );
+  });
+
+  it('refuses a mirror map with an invalid registry or region', () => {
+    const invalid: Record<string, Record<string, string>>[] = [
+      { acme: { ams3: 'Not_A_Registry' } },
+      { acme: { amsterdam: 'acme-ams3' } },
+    ];
+    for (const mirrors of invalid)
+      expect(() =>
+        docrImageSource({ token: 'secret://do/t', secrets, mirrors }),
+      ).toThrow(/mirror/);
   });
 });
 

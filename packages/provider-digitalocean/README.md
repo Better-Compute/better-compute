@@ -208,6 +208,22 @@ The source fails closed in two cases:
 
 An image index is `UNSUPPORTED`; reference one platform's manifest by digest.
 
+#### Regional mirrors
+
+`resolve(ref, { region })` uses a mirror in that region when one exists. So does `forRegion(region)`, an `ImageSource` whose `resolve(ref)` is bound to one region. A mirror is a registry in the same account that holds a copy of the source registry's repositories, such as AI images (CUDA bases, inference servers) pushed to every region with GPUs. It works like this:
+
+- The manifest is always read from the source registry. The source decides what a tag means, and the disk layer's digest comes from there.
+- Only the layer, by digest, is fetched from the mirror. A node verifies that digest, so a stale or tampered mirror cannot substitute content.
+- A mirror that lacks the layer, answers an error, or would serve the bytes itself is skipped. The source's presigned URL is used instead.
+
+The `mirrors` option sets them:
+
+- By default mirrors are discovered from `GET /v2/registries`, cached for 5 minutes. The mirror of `<source>` in region `R` is the registry named `<source>-R` whose storage region is `R`. If the listing fails, resolution goes to the source and the listing is retried a minute later.
+- `{ <source>: { <region>: <mirror> } }` names them explicitly. A map with an invalid registry name or region slug is refused with `INVALID_CONFIG` (`mirrors`).
+- `false` turns mirrors off.
+
+A plain `resolve(ref)` never looks for a mirror.
+
 Nothing consumes `ImageSource` extensions yet: wiring them into provision's image resolution is a follow-up.
 
 ## Rate budget
