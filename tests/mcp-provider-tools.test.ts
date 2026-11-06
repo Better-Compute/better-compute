@@ -45,8 +45,15 @@ describe('provider account tools', () => {
   it('are built only when asked for, and are read-only', () => {
     const { api } = recorder();
     expect(mcpWith(api).tools.map((tool) => tool.name)).not.toContain('check_provider_account');
-    const tools = mcpWith(api, true).tools.filter((tool) => tool.name.includes('provider_account'));
-    expect(tools.map((tool) => tool.name)).toEqual(['list_provider_accounts', 'check_provider_account']);
+    expect(mcpWith(api).tools.map((tool) => tool.name)).not.toContain('list_billing_leaks');
+    const names = [
+      'list_provider_accounts',
+      'check_provider_account',
+      'provider_account_findings',
+      'list_billing_leaks',
+    ];
+    const tools = mcpWith(api, true).tools.filter((tool) => names.includes(tool.name));
+    expect(tools.map((tool) => tool.name)).toEqual(names);
     expect(tools.every((tool) => tool.annotations.readOnlyHint === true)).toBe(true);
   });
 
@@ -65,6 +72,25 @@ describe('provider account tools', () => {
     expect(calls).toHaveLength(2);
   });
 
+  it('findings name one account; leaks read the platform billing over the days asked', async () => {
+    const { api, calls } = recorder();
+    const mcp = mcpWith(api, true);
+    await call(mcp, 'provider_account_findings', { accountId: PACCT });
+    await call(mcp, 'list_billing_leaks', { days: 7 });
+    expect(calls[0]).toEqual({
+      path: 'providerAccounts/findings',
+      input: { tenantId: 'org_acme', accountId: PACCT },
+    });
+    const leaks = calls[1]!;
+    expect(leaks.path).toBe('billing/leaks');
+    const { from, to } = leaks.input as { from: number; to: number };
+    expect(to - from).toBe(8 * 86_400_000);
+    expect(to).toBeGreaterThan(Date.now());
+    expect((await call(mcp, 'list_billing_leaks', { days: 0 })).isError).toBe(true);
+    expect((await call(mcp, 'provider_account_findings', { accountId: 'x' })).isError).toBe(true);
+    expect(calls).toHaveLength(2);
+  });
+
   it('the gate checks providers:read on the account a check names', () => {
     expect(gateTools().check_provider_account).toBeUndefined();
     const rules = gateTools({ providers: true });
@@ -79,5 +105,9 @@ describe('provider account tools', () => {
       id: PACCT,
     });
     expect(() => rule.resource({ accountId: '../x' })).toThrow();
+    expect(rules.provider_account_findings).toBe(rule);
+    const leaks = rules.list_billing_leaks as { action: string; resource(args: object): unknown };
+    expect(leaks.action).toBe('compute:billing:read');
+    expect(leaks.resource({})).toEqual({ type: 'compute-fleet', id: 'global' });
   });
 });

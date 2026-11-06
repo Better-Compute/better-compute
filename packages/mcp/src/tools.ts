@@ -29,7 +29,9 @@ export interface JsonSchema {
 
 const sha256Hex = async (text: string): Promise<string> =>
   Array.from(
-    new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))),
+    new Uint8Array(
+      await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)),
+    ),
     (byte) => byte.toString(16).padStart(2, '0'),
   ).join('');
 
@@ -190,8 +192,12 @@ async function withConfirmation(
         await context.sleep(polling.intervalMs ?? 2000);
       }
     } catch (failure) {
-      if (failure instanceof ComputeClientError && failure.code !== 'CONFIRMATION_REQUIRED') throw failure;
-      return { ...pending, message: `${pending.message} (Checking the approval failed; retry with the same idempotencyKey.)` };
+      if (failure instanceof ComputeClientError && failure.code !== 'CONFIRMATION_REQUIRED')
+        throw failure;
+      return {
+        ...pending,
+        message: `${pending.message} (Checking the approval failed; retry with the same idempotencyKey.)`,
+      };
     }
     return pending;
   }
@@ -594,7 +600,9 @@ export function computeTools(
         })) as { items?: Record<string, unknown>[] } & Record<string, unknown>;
         return {
           ...page,
-          items: (page.items ?? []).map(({ userData: _userData, env: _env, ...template }) => template),
+          items: (page.items ?? []).map(
+            ({ userData: _userData, env: _env, ...template }) => template,
+          ),
         };
       },
     },
@@ -755,7 +763,12 @@ export function computeTools(
         required: ['volumeId', 'sizeGiB'],
         properties: {
           volumeId: id('vol', 'The volume'),
-          sizeGiB: { type: 'integer', minimum: 1, maximum: 16_384, description: 'The new size in GiB' },
+          sizeGiB: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 16_384,
+            description: 'The new size in GiB',
+          },
         },
         additionalProperties: false,
       },
@@ -1069,6 +1082,49 @@ export function computeTools(
             accountId: args.accountId,
           }),
       },
+      {
+        name: 'provider_account_findings',
+        title: 'Read provider account findings',
+        description:
+          "What the provider says an operator should look at on the account (DigitalOcean: its latest security scan), read-only: each finding's id, kind, severity (critical, warning or info), title and detail. A part the credential may not read is itself a finding, never an empty list.",
+        inputSchema: {
+          type: 'object',
+          required: ['accountId'],
+          properties: { accountId: id('pacct', 'The provider account') },
+          additionalProperties: false,
+        },
+        annotations: { readOnlyHint: true, openWorldHint: true },
+        run: (args, context) =>
+          context.api.$request('providerAccounts/findings', {
+            tenantId: context.tenantId,
+            accountId: args.accountId,
+          }),
+      },
+      {
+        name: 'list_billing_leaks',
+        title: 'List billing leaks',
+        description:
+          "Platform operators only: the billing leaks raised on the platform's provider accounts over the last `days` days (default 31), newest first. A leak is an instance the provider billed more hours of compute for than compute metered (a machine compute no longer tracks): account, instance, its tenant, providerHours and meteredHours.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            days: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 400,
+              description: 'How many days back to list (default 31)',
+            },
+          },
+          additionalProperties: false,
+        },
+        annotations: { readOnlyHint: true, openWorldHint: false },
+        run: (args, context) => {
+          const day = 86_400_000;
+          const to = Math.ceil((Date.now() + 1) / day) * day;
+          const days = typeof args.days === 'number' ? args.days : 31;
+          return context.api.$request('billing/leaks', { from: to - (days + 1) * day, to });
+        },
+      },
     );
   return tools;
 }
@@ -1090,7 +1146,9 @@ export function validateArguments(
       for (const [key, item] of Object.entries(record)) {
         // Own properties only: `constructor`, `__proto__`, `toString` are not arguments (review 14 L1).
         const property =
-          schema.properties && Object.hasOwn(schema.properties, key) ? schema.properties[key] : undefined;
+          schema.properties && Object.hasOwn(schema.properties, key)
+            ? schema.properties[key]
+            : undefined;
         if (!property) {
           if (schema.additionalProperties === false)
             return `${path}.${key} is not a known argument`;
@@ -1108,7 +1166,10 @@ export function validateArguments(
         return `${path} has more than ${schema.maxItems} items`;
       if (schema.minItems !== undefined && value.length < schema.minItems)
         return `${path} needs at least ${schema.minItems} items`;
-      if (schema.uniqueItems && new Set(value.map((item) => JSON.stringify(item))).size !== value.length)
+      if (
+        schema.uniqueItems &&
+        new Set(value.map((item) => JSON.stringify(item))).size !== value.length
+      )
         return `${path} has duplicate items`;
       if (schema.items)
         for (const [index, item] of value.entries()) {

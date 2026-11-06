@@ -62,7 +62,8 @@ A host that runs the control plane in the same process can use `computeMcpEndpoi
 | `exec_command` (only with `execCommand: true`) | `commands.run` (allowlisted kinds) | `compute:nodes:read` on the node |
 | `propose_command_batch` (only with `execCommand: true`) | `commandBatches.create` | any authenticated caller |
 | `fleet_export`, `fleet_plan` (only with `fleet: true`) | `fleet.export`, `fleet.plan` (read-only) | `compute:fleet:admin` on the fleet |
-| `list_provider_accounts`, `check_provider_account` (only with `providers: true`) | `providerAccounts.list`, `providerAccounts.check` (read-only) | any authenticated caller; `compute:providers:read` on the account |
+| `list_provider_accounts`, `check_provider_account`, `provider_account_findings` (only with `providers: true`) | `providerAccounts.list`, `providerAccounts.check`, `providerAccounts.findings` (read-only) | any authenticated caller; `compute:providers:read` on the account |
+| `list_billing_leaks` (only with `providers: true`) | `billing.leaks` (read-only) | `compute:billing:read` on the fleet (platform operators) |
 
 - **Fleet tools plan but never apply.** `fleet_plan` returns the changes and a `planHash`, but not the call list. A person applies the reviewed plan with `better-compute fleet apply FILE --plan-hash HASH`. Pass the same `fleet: true` to `gateTools()`.
 - **Command batches need people.** `propose_command_batch` only proposes a batch of node reboots; nothing runs until operators approve it with their approver keys (`better-compute batch approve`). There is no approve tool. Pass the same `execCommand: true` to `gateTools()`.
