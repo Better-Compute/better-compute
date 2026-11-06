@@ -296,6 +296,8 @@ describe('ProviderResources conformance: do.inference-key', () => {
       spec: { rotation: 0 },
       updatedSpec: { rotation: 1 },
       unmanaged: unmanaged.uuid,
+      // A model access key reaches the whole account: only the tenant's own account may have one.
+      accountScope: 'tenant',
     };
   };
   for (const test of providerResourcesConformanceCases())
@@ -312,6 +314,7 @@ describe('do.inference-key (a model access key)', () => {
     name: 'bc-r-key',
     spec: { rotation: 0 },
     labels,
+    accountScope: 'tenant' as const,
     ...extra,
   });
   const call = (key = 'crs_key'): CallContext => ctx(key);
@@ -329,6 +332,20 @@ describe('do.inference-key (a model access key)', () => {
       meters: [{ meter: 'ai.inference.tokens', unit: 'token' }],
     });
     expect(kind.quota).toBeUndefined();
+    // An account-wide bearer: declared so the API refuses it on a shared account before recording anything.
+    expect(kind.accountWide?.({ rotation: 0 })).toEqual(['rotation']);
+  });
+
+  it('is refused on a shared account before any call: the key would reach the whole operator account', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    for (const accountScope of [undefined, 'shared'] as const) {
+      const refused = await failure(resources.ensure(request({ accountScope }), call()));
+      expect(refused.code).toBe('INVALID_INPUT');
+      expect(refused.details).toMatchObject({ reason: 'accountWide', fields: ['rotation'] });
+    }
+    expect(emu.requests).toEqual([]);
+    expect(emu.state.modelKeys.size).toBe(0);
   });
 
   it('creates a key named for this deployment; its secret comes back once, as a secret output only', async () => {

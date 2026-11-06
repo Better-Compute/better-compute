@@ -18,7 +18,7 @@ type Api = any;
 
 async function world(gpuQuota = 2, config: Record<string, unknown> = {}) {
   const emu = new DoEmulator();
-  emu.validTokens = new Set(['root-do-token']);
+  emu.validTokens = new Set(['root-do-token', 'acme-do-token']);
   const provider = digitaloceanProvider({ fetch: emu.fetch });
   const logs: string[] = [];
   const line = (message: string, fields?: unknown) =>
@@ -67,6 +67,35 @@ async function world(gpuQuota = 2, config: Record<string, unknown> = {}) {
     quota: { vcpu: 64, memoryGiB: 256, diskGiB: 1000, gpu: gpuQuota },
   });
   const acmeTenant = tenants.acme.id;
+  // acme's own DigitalOcean account and pool (a BYO account): what only the tenant's own account may have.
+  const ownPool = async () => {
+    const { ref: acmeRef } = await api.secrets.put(acme, {
+      tenantId: acmeTenant,
+      name: 'acme-do',
+      value: 'acme-do-token',
+      idempotencyKey: 'acme-do-token',
+    });
+    const own = await api.providerAccounts.create(acme, {
+      tenantId: acmeTenant,
+      provider: 'digitalocean',
+      name: 'acme-do',
+      config: { token: acmeRef, regions: ['nyc3'], ...config },
+    });
+    const ownSite = await api.sites.create(acme, {
+      tenantId: acmeTenant,
+      kind: 'custom',
+      region: 'nyc3',
+      idempotencyKey: 'acme-do-site',
+    });
+    const created = await api.pools.create(acme, {
+      tenantId: acmeTenant,
+      siteId: ownSite.id,
+      class: 'provider',
+      providerAccountId: own.id,
+      idempotencyKey: 'acme-do-pool',
+    });
+    return created.id as string;
+  };
   const get = (resourceId: string) =>
     api.cloudResources.get(acme, { tenantId: acmeTenant, resourceId });
   const until = async (resourceId: string, state: string) => {
@@ -86,7 +115,19 @@ async function world(gpuQuota = 2, config: Record<string, unknown> = {}) {
     );
     return Number(rows[0]?.used ?? 0);
   };
-  return { emu, fixture, api, acme, acmeTenant, poolId: pool.id, logs, get, until, gpusUsed };
+  return {
+    emu,
+    fixture,
+    api,
+    acme,
+    acmeTenant,
+    poolId: pool.id,
+    ownPool,
+    logs,
+    get,
+    until,
+    gpusUsed,
+  };
 }
 
 describe('DigitalOcean Dedicated Inference through cloudResources', () => {
@@ -162,11 +203,39 @@ describe('DigitalOcean Dedicated Inference through cloudResources', () => {
     expect(JSON.stringify(w.logs)).not.toContain('root-do-token');
   });
 
-  it('a model access key is sealed in the run that received it; a rotation seals the new one and destroys the old', async () => {
+  it('a model access key is refused on a shared pool, with no row and nothing sent', async () => {
     const w = await world(0);
-    const created = await w.api.cloudResources.create(w.acme, {
+    const sent = w.emu.requests.length;
+    await expect(
+      w.api.cloudResources.create(w.acme, {
+        tenantId: w.acmeTenant,
+        poolId: w.poolId,
+        kind: 'do.inference-key',
+        name: 'app-key',
+        spec: {},
+        idempotencyKey: 'app-key',
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      details: { reason: 'accountWide', fields: ['rotation'] },
+    });
+    const { items } = await w.api.cloudResources.list(w.acme, {
       tenantId: w.acmeTenant,
       poolId: w.poolId,
+    });
+    expect(items).toEqual([]);
+    expect(w.emu.requests.slice(sent).filter((r) => r.url.pathname.includes('gen-ai'))).toEqual(
+      [],
+    );
+    expect(w.emu.state.modelKeys.size).toBe(0);
+  });
+
+  it('a model access key is sealed in the run that received it; a rotation seals the new one and destroys the old', async () => {
+    const w = await world(0);
+    const ownPoolId = await w.ownPool();
+    const created = await w.api.cloudResources.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: ownPoolId,
       kind: 'do.inference-key',
       name: 'app-key',
       spec: {},

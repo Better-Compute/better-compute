@@ -16,6 +16,10 @@ import { found, type DoKind, type DoKindEnv } from '../kind.js';
 // hash>`. A create whose answer was lost finds its key by name and regenerates it, so a secret no one sealed is never
 // live; bumping `rotation` regenerates it on purpose. Usage is by tokens (`ai.inference.tokens`): the operator proxy
 // counts them, or DigitalOcean billing reports them (P9). Shapes follow the API reference (genai), not a recording.
+//
+// A model access key is an account-wide bearer: it reaches every model and every Dedicated Inference endpoint of the
+// account, and a tenant that reads it can call DigitalOcean directly, past the proxy, on the account's bill. So only
+// the tenant's own account may have one (`accountScope: 'tenant'`); on a shared account it is refused before any call.
 
 export const inferenceKeyKindName = 'do.inference-key';
 /** Tokens a key's inference uses (input and output), counted by the operator proxy or reported by billing. */
@@ -93,6 +97,16 @@ async function byName(env: DoKindEnv, name: string, signal: AbortSignal) {
   )[0];
 }
 
+function assertTenantAccount(request: Pick<ProviderResourceRequest, 'accountScope'>): void {
+  if (request.accountScope !== 'tenant')
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${inferenceKeyKindName} is a bearer for the whole account; only the tenant's own account may have one`,
+      undefined,
+      { provider: 'digitalocean', reason: 'accountWide', fields: ['rotation'] },
+    );
+}
+
 function state(key: DoModelKey, endpoint: string, secret?: string | null): ProviderResourceState {
   const parsed = parse(key.name);
   return {
@@ -144,9 +158,12 @@ export function inferenceKeyKind(endpoint: string = defaultInferenceEndpoint): D
       regional: false,
       updatable: ['rotation'],
       meters: [{ meter: inferenceTokensMeter, unit: 'token' }],
+      // An account-wide bearer: the tenant's own account only, whatever the spec.
+      accountWide: () => ['rotation'],
     },
 
     async ensure(env, request: ProviderResourceRequest, context) {
+      assertTenantAccount(request);
       const wanted = request.spec as InferenceKeySpec;
       const name = nameFor(env, request.name, wanted.rotation);
       if (request.id !== undefined) {

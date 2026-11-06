@@ -96,6 +96,12 @@ module seals it in the reconciler run that received it: the resource's `secretOu
 value never reaches a row, an event or a log. Raising `rotation` regenerates the key; the old one stops working. A
 create whose answer was lost is found by its name and regenerated, so a secret no one sealed is never live.
 
+A model access key reaches the whole DigitalOcean account: every model, and every Dedicated Inference endpoint on it.
+So only a pool on the tenant's own account may have one. On a shared pool (the platform's account, offered to the
+tenant) the create is refused with `INVALID_INPUT` and `details.reason` `accountWide`, before anything is recorded
+or sent. Otherwise a tenant that read its key could call DigitalOcean directly, past the proxy, on the operator's bill,
+and could reach other tenants' endpoints.
+
 Tokens are counted in one of two ways:
 
 - **Through the operator's proxy.** `inferenceProxy` from `@better-compute/provider-digitalocean` forwards
