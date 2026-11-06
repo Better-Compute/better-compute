@@ -136,6 +136,10 @@ export class EbsEmulator {
    * rather than making a new one ((verify) how long EC2 keeps a token after the volume is deleted).
    */
   retainClientTokens = false;
+  /** AttachVolume adds the volume to laggingAttachments (attachment reads that lag the write). */
+  attachmentReadLag = false;
+  /** Volumes whose attachment DescribeVolumes on attachment.instance-id and the instance's block device mappings leave out. */
+  laggingAttachments = new Set<string>();
   /** token → the deleted volume it made (with retainClientTokens). */
   readonly #retired = new Map<string, EmuVolume>();
   #next = 0;
@@ -243,7 +247,7 @@ export class EbsEmulator {
       `${el('deviceName', instance.rootDevice)}<ebs>${el('volumeId', `vol-root${instance.id.slice(2, 10)}`)}${el('status', 'attached')}</ebs>`,
     ];
     for (const volume of this.volumes.values())
-      if (volume.attachment?.instanceId === instance.id)
+      if (volume.attachment?.instanceId === instance.id && !this.laggingAttachments.has(volume.id))
         out.push(
           `${el('deviceName', volume.attachment.device)}<ebs>${el('volumeId', volume.id)}${el('status', volume.attachment.state)}</ebs>`,
         );
@@ -344,6 +348,7 @@ export class EbsEmulator {
           if (status && !status.includes(volume.state)) return false;
           const attached = filters.get('attachment.instance-id');
           if (attached && !attached.includes(volume.attachment?.instanceId ?? '')) return false;
+          if (attached && this.laggingAttachments.has(volume.id)) return false;
           return true;
         });
         const { page, next } = ids.length ? { page: found, next: undefined } : this.#page(found, p);
@@ -389,6 +394,7 @@ export class EbsEmulator {
         if (used.includes(deviceKey(device)))
           return ec2Error('InvalidParameterValue', `Attachment point ${device} is already in use`);
         volume.attachment = { instanceId, device, state: 'attaching' };
+        if (this.attachmentReadLag) this.laggingAttachments.add(volume.id);
         volume.state = 'in-use';
         return ec2Response(action, this.#attachmentXml(volume));
       }

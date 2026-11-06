@@ -571,6 +571,46 @@ describe('provider-aws volumes: attach, detach', () => {
     expect(ebs.volumes.get(volume.id)!.attachment?.device).toBe('/dev/sdg');
   });
 
+  it('two attaches to one instance in a pass never pick one device, whatever the reads lag', async () => {
+    const { volumes, call, ebs, ec2, emu, managed } = world();
+    const instance = owned(ec2);
+    ebs.attachmentReadLag = true;
+    const first = ebs.addVolume({ tags: managed });
+    const second = ebs.addVolume({ tags: { ...managed, 'better-compute:volume': 'bc-v-two' } });
+    expect((await volumes.attachVolume(first.id, instance.id, call(), 'ins_1')).state).toBe(
+      'pending',
+    );
+    // The attachment reads do not show the first attach yet: this client remembers its device.
+    expect((await volumes.attachVolume(second.id, instance.id, call(), 'ins_1')).state).toBe(
+      'pending',
+    );
+    expect(emu.calls('AttachVolume').map((c) => c.params.get('Device'))).toEqual([
+      '/dev/sdf',
+      '/dev/sdg',
+    ]);
+  });
+
+  it('an attachment point another writer took, unseen by any read, is a retried device race', async () => {
+    const { volumes, fresh, call, ebs, ec2, emu, managed } = world();
+    const instance = owned(ec2);
+    ebs.attachmentReadLag = true;
+    const theirs = ebs.addVolume({ tags: managed });
+    const ours = ebs.addVolume({ tags: { ...managed, 'better-compute:volume': 'bc-v-two' } });
+    // Another control-plane process attached at /dev/sdf; no read shows it yet.
+    await fresh().attachVolume(theirs.id, instance.id, call(), 'ins_1');
+    await rejects(
+      volumes.attachVolume(ours.id, instance.id, call(), 'ins_1'),
+      'UNAVAILABLE',
+      'device-race',
+    );
+    // The retry skips the device EC2 refused.
+    expect((await volumes.attachVolume(ours.id, instance.id, call(), 'ins_1')).state).toBe(
+      'pending',
+    );
+    expect(ebs.volumes.get(ours.id)!.attachment?.device).toBe('/dev/sdg');
+    expect(emu.calls('AttachVolume')).toHaveLength(3);
+  });
+
   it('detach: deleting, then deleted; never detaches from another machine', async () => {
     const { volumes, call, ebs, ec2, emu, managed, settle } = world();
     const a = owned(ec2, 'ins_a');

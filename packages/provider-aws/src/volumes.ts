@@ -296,6 +296,12 @@ export class AwsVolumes implements ProviderVolumes {
   readonly #resizing = new Map<string, { sizeGiB: number; at: number }>();
   /** volume id → when this client sent its DeleteVolume: a deleting twin of a name is then its own. */
   readonly #deleted = new Map<string, number>();
+  /**
+   * instance id → device letter → the volume this client attached there (or '': a device EC2 said
+   * was in use), for the window attachment reads may not show it: two attaches to one new instance in
+   * one pass never pick one device.
+   */
+  readonly #devices = new Map<string, Map<string, { volumeId: string; at: number }>>();
 
   constructor(
     readonly config: AwsConfig,
@@ -336,6 +342,26 @@ export class AwsVolumes implements ProviderVolumes {
       if (now - at >= this.consistencyWindowMs) this.#createdSnapshotIds.delete(key);
     this.#createdSnapshots.set(name, { id, at: now });
     this.#createdSnapshotIds.set(id, now);
+  }
+
+  #takeDevice(instanceId: string, letter: string, volumeId: string): void {
+    const now = this.context.clock.now();
+    for (const [id, letters] of this.#devices) {
+      for (const [key, entry] of letters)
+        if (now - entry.at >= this.consistencyWindowMs) letters.delete(key);
+      if (letters.size === 0) this.#devices.delete(id);
+    }
+    let letters = this.#devices.get(instanceId);
+    if (!letters) this.#devices.set(instanceId, (letters = new Map()));
+    letters.set(letter, { volumeId, at: now });
+  }
+
+  /** Lets go of the devices this client gave a volume on an instance (it is being detached). */
+  #releaseDevices(instanceId: string, volumeId: string): void {
+    const letters = this.#devices.get(instanceId);
+    if (!letters) return;
+    for (const [key, entry] of letters) if (entry.volumeId === volumeId) letters.delete(key);
+    if (letters.size === 0) this.#devices.delete(instanceId);
   }
 
   // --- reads -----------------------------------------------------------------------------------
@@ -676,6 +702,8 @@ export class AwsVolumes implements ProviderVolumes {
   /** The device names in use on an instance: its mappings plus every volume attached or attaching. */
   async #usedDevices(instance: EbsInstance, signal: AbortSignal): Promise<Set<string>> {
     const used = new Set(instance.devices.map(deviceKey));
+    for (const [letter, entry] of this.#devices.get(instance.id) ?? [])
+      if (this.#recent(entry.at)) used.add(letter);
     const seen = new Set<string>();
     let token: string | undefined;
     do {
@@ -780,14 +808,23 @@ export class AwsVolumes implements ProviderVolumes {
           'attached-elsewhere',
         );
       }
-      if (error.code === 'INVALID_INPUT' && (await this.#usedDevices(instance, signal)).has(letter))
+      // The device: one a re-read (or another call of this client) shows taken, or EC2's own
+      // "attachment point … in use" when no read shows the writer yet ((verify) the live message).
+      if (
+        error.code === 'INVALID_INPUT' &&
+        (/attachment point|already in use/i.test(error.message) ||
+          (await this.#usedDevices(instance, signal)).has(letter))
+      ) {
+        this.#takeDevice(machineId, letter, '');
         throw fail(
           'UNAVAILABLE',
           `device ${device} on instance ${machineId} was taken at the same time; it is retried`,
           'device-race',
         );
+      }
       throw error;
     }
+    this.#takeDevice(machineId, letter, volume.id);
     return state(volume.id, 'pending', {
       ...volumeOutputs(volume, region),
       attachedTo: machineId,
@@ -824,6 +861,7 @@ export class AwsVolumes implements ProviderVolumes {
         signal,
       );
       if (force) this.#forced.add(key);
+      this.#releaseDevices(machineId, id);
     } catch (error) {
       // Detached between the read and the call: the next call reads it detached.
       if (
