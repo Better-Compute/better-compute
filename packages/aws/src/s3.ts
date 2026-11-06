@@ -2,6 +2,7 @@ import { ComputeError, type BlobStore } from '@better-compute/core';
 import { parseXml } from '@better-compute/aws-core';
 import { transportFor, type AwsServiceOptions } from './common.js';
 import { encodeRfc3986 } from './internal/sigv4.js';
+import { settleMissing } from './internal/s3-missing.js';
 import { assertRegion, type Transport } from './internal/transport.js';
 
 export interface S3Location {
@@ -262,7 +263,7 @@ export function s3BlobStore(options: S3StoreOptions): BlobStore {
     async get(key) {
       const response = await s3.request({ method: 'GET', key: s3.fullKey(key), operation: 'GetObject', accept: [404] });
       if (response.status === 404) {
-        await response.body?.cancel();
+        await settleMissing(response, 'GetObject');
         return undefined;
       }
       return response.body ?? new Response(new Uint8Array()).body!;
@@ -288,7 +289,8 @@ export function s3BlobStore(options: S3StoreOptions): BlobStore {
 
     async delete(key) {
       const response = await s3.request({ method: 'DELETE', key: s3.fullKey(key), operation: 'DeleteObject', accept: [404] });
-      await response.body?.cancel();
+      if (response.status === 404) await settleMissing(response, 'DeleteObject');
+      else await response.body?.cancel();
     },
 
     async presign(key, presignOptions) {

@@ -14,6 +14,11 @@ export function s3Fake(emu: AwsEmulator, options: { baseHost?: string } = {}) {
   const buckets = new Map<string, Map<string, FakeObject>>();
   const uploads = new Map<string, { bucket: string; key: string; parts: Map<number, { body: Buffer; etag: string }>; headers: Record<string, string> }>();
   const aborted: string[] = [];
+  /**
+   * Whether the caller holds s3:ListBucket on the bucket. Without it S3 answers a missing key with
+   * 403 AccessDenied rather than 404 NoSuchKey (it will not reveal whether the key exists).
+   */
+  const access = { listBucket: true };
   let nextUpload = 1;
 
   function locate(url: URL): { bucket: string; key: string; style: 'virtual' | 'path' } {
@@ -61,7 +66,10 @@ export function s3Fake(emu: AwsEmulator, options: { baseHost?: string } = {}) {
         case 'GetObject':
         case 'HeadObject': {
           const object = objects.get(key);
-          if (!object) throw new EmuError('NoSuchKey', 'The specified key does not exist.', 404);
+          if (!object) {
+            if (!access.listBucket) throw new EmuError('AccessDenied', 'Access Denied', 403);
+            throw new EmuError('NoSuchKey', 'The specified key does not exist.', 404);
+          }
           return new Response(request.operation === 'HeadObject' ? null : object.body, {
             status: 200,
             headers: { etag: object.etag, 'content-type': object.headers['content-type'] ?? 'binary/octet-stream' },
@@ -125,6 +133,7 @@ export function s3Fake(emu: AwsEmulator, options: { baseHost?: string } = {}) {
     buckets,
     uploads,
     aborted,
+    access,
     createBucket(name: string) {
       buckets.set(name, new Map());
     },

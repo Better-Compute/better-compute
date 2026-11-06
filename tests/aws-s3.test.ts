@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import { ComputeError, manualClock, type AuditRecord } from '@better-compute/core';
@@ -107,6 +108,29 @@ describe('S3 BlobStore', () => {
     await store.put('x', new Uint8Array([1]));
     await store.delete('x');
     expect(await store.get('x')).toBeUndefined();
+  });
+
+  it('without s3:ListBucket a missing key is ACCESS_DENIED, so the README policy grants it on the prefix (review)', async () => {
+    const { store, s3 } = s3World();
+    s3.access.listBucket = false;
+    await expect(store.get('nope')).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    s3.access.listBucket = true;
+    expect(await store.get('nope')).toBeUndefined();
+    // The documented policy for the blob and snapshot stores includes the prefix-scoped ListBucket.
+    const readme = readFileSync(new URL('../packages/aws/README.md', import.meta.url), 'utf8');
+    const s3Section = readme.slice(readme.indexOf('### `s3BlobStore(options)`'), readme.indexOf('### `s3SnapshotStore(options)`'));
+    expect(s3Section).toContain('"Action": "s3:ListBucket"');
+    expect(s3Section).toContain('"arn:aws:s3:::<bucket>"');
+    expect(s3Section).toContain('"s3:prefix": "<prefix>/*"');
+  });
+
+  it('a wrong bucket is an error, never a missing key (review)', async () => {
+    const { base } = s3World();
+    const store = s3BlobStore({ ...base, bucket: 'bc-no-such-bucket', prefix: 'downloads' });
+    await expect(store.get('nope')).rejects.toMatchObject({ code: 'INVALID_CONFIG', details: { code: 'NoSuchBucket' } });
+    await expect(store.delete('nope')).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
+    const snapshots = s3SnapshotStore({ ...base, bucket: 'bc-no-such-bucket', prefix: 'snapshots' });
+    await expect(snapshots.delete({ tenantId: 't1', snapshotId: 'snap1', url: 's3://bc-no-such-bucket/snapshots/t1/sbx1/snap1' })).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
   });
 
   it('refuses unsafe keys', async () => {

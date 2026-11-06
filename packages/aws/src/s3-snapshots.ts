@@ -1,6 +1,7 @@
 import { ComputeError, isComputeError, systemClock, type Clock, type Logger } from '@better-compute/core';
 import type { SnapshotStore } from '@better-compute/vps';
 import type { AwsCredentials, CredentialSource } from './internal/transport.js';
+import { settleMissing } from './internal/s3-missing.js';
 import { s3Access, type S3StoreOptions } from './s3.js';
 import { checkSegment } from './secret-refs.js';
 
@@ -135,7 +136,8 @@ export function s3SnapshotStore(options: S3SnapshotStoreOptions): S3SnapshotStor
     async delete(input) {
       const key = ownKey(input);
       const response = await s3.request({ method: 'DELETE', key, operation: 'DeleteObject', accept: [404] });
-      await response.body?.cancel();
+      if (response.status === 404) await settleMissing(response, 'DeleteObject');
+      else await response.body?.cancel();
     },
   };
 }

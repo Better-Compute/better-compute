@@ -96,13 +96,21 @@ The operator who runs `kms-sealing-key` needs `kms:GenerateDataKeyWithoutPlainte
 
 ### `s3BlobStore(options)`
 
-`get` streams (a missing key is `undefined`); `put` sends one signed PUT up to `singlePutBytes` (64 MiB) and otherwise a multipart upload in `partBytes` parts (16 MiB, at least 5 MiB), aborted on any failure so no parts are orphaned; `delete` treats a missing key as success; `presign` lasts at most 7 days. Keys with `..`, `.` or empty segments, a leading `/` or control characters are refused. `sse` adds SSE-KMS or SSE-S3 headers. Virtual-hosted URLs unless the bucket has a dot or `pathStyle` is set. `timeoutMs` (default 20 s, every factory takes it) bounds only the time to response headers: a download streams for as long as it takes. Requests that send a body get `timeoutMs` plus the body at 256 KiB/s. A presigned PUT carries no SSE headers, so the bucket's default encryption applies to support bundle uploads.
+`get` streams (a missing key, S3's `NoSuchKey`, is `undefined`); `put` sends one signed PUT up to `singlePutBytes` (64 MiB) and otherwise a multipart upload in `partBytes` parts (16 MiB, at least 5 MiB), aborted on any failure so no parts are orphaned; `delete` treats a missing key as success. A bucket that does not exist (`NoSuchBucket`) is never treated as a missing key: `get` and `delete` throw `INVALID_CONFIG`. `presign` lasts at most 7 days. Keys with `..`, `.` or empty segments, a leading `/` or control characters are refused. `sse` adds SSE-KMS or SSE-S3 headers. Virtual-hosted URLs unless the bucket has a dot or `pathStyle` is set. `timeoutMs` (default 20 s, every factory takes it) bounds only the time to response headers: a download streams for as long as it takes. Requests that send a body get `timeoutMs` plus the body at 256 KiB/s. A presigned PUT carries no SSE headers, so the bucket's default encryption applies to support bundle uploads.
 
 ```json
-{ "Effect": "Allow",
-  "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"],
-  "Resource": "arn:aws:s3:::<bucket>/<prefix>/*" }
+[
+  { "Effect": "Allow",
+    "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"],
+    "Resource": "arn:aws:s3:::<bucket>/<prefix>/*" },
+  { "Effect": "Allow",
+    "Action": "s3:ListBucket",
+    "Resource": "arn:aws:s3:::<bucket>",
+    "Condition": { "StringLike": { "s3:prefix": "<prefix>/*" } } }
+]
 ```
+
+The second statement is required. Without `s3:ListBucket`, S3 answers a GET of a missing key with 403 `AccessDenied` instead of 404 `NoSuchKey`, because it will not reveal whether the key exists. `get` would then throw `ACCESS_DENIED` where the `BlobStore` contract says `undefined`, which breaks downloads and support-bundle reads. The condition limits the listing to the store's prefix.
 
 ### `s3SnapshotStore(options)`
 
@@ -110,7 +118,7 @@ Sandbox snapshots at `<prefix>/<tenantId>/<sandboxId>/<snapshotId>`. The stored 
 
 vps asks for a download URL only while a restore is pending (instance `provisioning` or `starting`). Once the host has restored the instance, its spec carries the stable `s3://` identifier, so the spec stops changing and no live presigned link stays in `nodes.spec`. bcd keeps the snapshot file by digest and fetches only for an instance it does not have yet. A presigned GET is in `nodes.spec` only while its restore is pending, and it expires after `downloadExpiresSeconds`.
 
-`downloadUrl` runs inside NodeSpec's transaction, so it makes no network call. It signs with credentials held in memory: they load when the store is made (`await store.warm()` at startup to be sure), refresh in the background once less than one URL lifetime is left, and are never used within a minute of expiry. While no credentials are loaded, `downloadUrl` is `UNAVAILABLE`. vps then logs the code, keeps that restore on its stored url for this pass, and still renders the rest of the node. A stored url that is not `s3://` (written before the host switched to this store) passes through unchanged. Same IAM as the blob store.
+`downloadUrl` runs inside NodeSpec's transaction, so it makes no network call. It signs with credentials held in memory: they load when the store is made (`await store.warm()` at startup to be sure), refresh in the background once less than one URL lifetime is left, and are never used within a minute of expiry. While no credentials are loaded, `downloadUrl` is `UNAVAILABLE`. vps then logs the code, keeps that restore on its stored url for this pass, and still renders the rest of the node. A stored url that is not `s3://` (written before the host switched to this store) passes through unchanged. Same IAM as the blob store, including the prefix-scoped `s3:ListBucket` statement.
 
 ### `s3AuditSink(options)`
 
