@@ -785,6 +785,107 @@ export interface ProviderResourceState {
 }
 
 /**
+ * (provider volumes) A volume as vps asks for it. `name` is the provider-side name vps derives: unique per region and
+ * account, so a retried ensure finds the volume its first attempt made. `kind: 'shared'` is a network filesystem
+ * (NFS); a provider without one refuses it with `UNSUPPORTED`.
+ */
+export interface ProviderVolumeSpec {
+  name: string;
+  region: string;
+  /** Whole GiB, at least 1. */
+  sizeGiB: number;
+  kind: 'block' | 'shared';
+  /** The filesystem the provider formats the volume with; absent or `none`: left raw. */
+  filesystem?: 'ext4' | 'xfs' | 'none';
+  /** Creates the volume from this snapshot (an id `snapshotVolume` returned); `sizeGiB` is at least the snapshot's. */
+  snapshotId?: string;
+  /** Plain labels, written as the provider's labels or tags. `better-compute-*` keys are the provider's own. */
+  labels?: Readonly<Record<string, string>>;
+}
+
+/**
+ * (provider volumes) Block volumes and their snapshots on a provider account. Every call is idempotent and
+ * non-blocking, like `ProviderNetworks`: it returns `pending`, `updating` or `deleting` while a provider operation
+ * runs, and the reconciler calls again. Ids are the ones `ensureVolume` and `snapshotVolume` returned.
+ *
+ * A volume's outputs: `region`, `sizeGiB`, `filesystem` (when formatted), `device` (the guest path it appears at
+ * once attached) and `attachedTo` (the machine id; absent while detached). A snapshot's: `volume`, `region` and
+ * `sizeGiB`. `attachVolume` and `detachVolume` return the attachment's state: `pending` then `ready`, `deleting`
+ * then `deleted`. A provider only acts on volumes and snapshots it made for this deployment (`INVALID_STATE`
+ * otherwise); a volume in another region than the machine is `INVALID_INPUT` before any write; a volume attached to
+ * another machine is `CONFLICT`; an attached volume is not deleted (`INVALID_STATE`); `resizeVolume` only grows
+ * (`INVALID_INPUT` for a smaller size).
+ */
+export interface ProviderVolumes {
+  ensureVolume(spec: ProviderVolumeSpec, context: CallContext): Promise<ProviderResourceState>;
+  /** The volume as it is; undefined when it does not exist. */
+  getVolume(volumeId: string, context: CallContext): Promise<ProviderResourceState | undefined>;
+  /** With `instanceId`, only a machine whose ownership label names that instance is attached to. */
+  attachVolume(
+    volumeId: string,
+    machineId: string,
+    context: CallContext,
+    instanceId?: string,
+  ): Promise<ProviderResourceState>;
+  detachVolume(
+    volumeId: string,
+    machineId: string,
+    context: CallContext,
+  ): Promise<ProviderResourceState>;
+  resizeVolume(
+    volumeId: string,
+    sizeGiB: number,
+    context: CallContext,
+  ): Promise<ProviderResourceState>;
+  deleteVolume(volumeId: string, context: CallContext): Promise<ProviderResourceState>;
+  /** A snapshot of the volume named `name`; a second call with the same name returns the same snapshot. */
+  snapshotVolume(
+    volumeId: string,
+    name: string,
+    context: CallContext,
+  ): Promise<ProviderResourceState>;
+  getSnapshot(snapshotId: string, context: CallContext): Promise<ProviderResourceState | undefined>;
+  deleteSnapshot(snapshotId: string, context: CallContext): Promise<ProviderResourceState>;
+}
+
+/** (provider addresses) A reserved public address as vps asks for it. */
+export interface ProviderAddressSpec {
+  name: string;
+  region: string;
+  family: 'ipv4' | 'ipv6';
+  /** `pool`: one from the provider's pool (the default). `byoip`: from the account's own prefix. */
+  source?: 'pool' | 'byoip';
+  /** The BYOIP prefix to draw from. */
+  prefix?: string;
+  /**
+   * The id an earlier `ensureAddress` of this address returned. A provider whose addresses carry no name or tag
+   * (DigitalOcean) finds the address by it; without it, it reserves a new one.
+   */
+  id?: string;
+}
+
+/**
+ * (provider addresses) Reserved public addresses on a provider account, idempotent and non-blocking like
+ * `ProviderVolumes`. Outputs: `address`, `family`, `region` and `assignedTo` (the machine id; absent while
+ * unassigned). `assignAddress` and `unassignAddress` return the assignment's state (`pending`/`ready`,
+ * `deleting`/`deleted`). An address assigned to another machine is `CONFLICT` (never moved silently); an assigned
+ * address is not deleted (`INVALID_STATE`); a machine in another region is `INVALID_INPUT`.
+ */
+export interface ProviderAddresses {
+  ensureAddress(spec: ProviderAddressSpec, context: CallContext): Promise<ProviderResourceState>;
+  getAddress(addressId: string, context: CallContext): Promise<ProviderResourceState | undefined>;
+  /** With `instanceId`, only a machine whose ownership label names that instance gets the address. */
+  assignAddress(
+    addressId: string,
+    machineId: string,
+    context: CallContext,
+    instanceId?: string,
+  ): Promise<ProviderResourceState>;
+  unassignAddress(addressId: string, context: CallContext): Promise<ProviderResourceState>;
+  deleteAddress(addressId: string, context: CallContext): Promise<ProviderResourceState>;
+}
+
+/**
  * (kubernetes) A managed Kubernetes cluster as the kubernetes module asks for it. The provider runs the control plane
  * (GKE, DOKS); better-compute never does. `name` is the provider-side name the module derives (`bc-k-…`).
  */
@@ -1050,6 +1151,10 @@ export interface ProviderImpl {
   networks?: ProviderNetworks;
   /** (kubernetes) Managed Kubernetes clusters and node pools on this account. */
   kubernetes?: ProviderKubernetes;
+  /** (provider volumes) Block volumes and snapshots on this account. */
+  volumes?: ProviderVolumes;
+  /** (provider addresses) Reserved public addresses on this account. */
+  addresses?: ProviderAddresses;
   /**
    * (v1.0, D10) The account's billed cost rows whose usage started in `[window.from, window.to)`.
    * Read outside any transaction. A provider whose export is not configured leaves it absent.
