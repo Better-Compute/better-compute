@@ -29,6 +29,24 @@ const retryMs = 30_000;
 /** A run stops starting provider calls after this long (the lease is 60 s); the rest waits for the next run. */
 const runBudgetMs = 40_000;
 
+/** The columns every provider resource table ends with (state, idempotency, version). */
+export const columns = `
+  state text NOT NULL CHECK (state IN ('pending', 'ready', 'updating', 'deleting', 'deleted', 'error')),
+  desired_state text NOT NULL CHECK (desired_state IN ('present', 'deleted')),
+  message text,
+  -- Set (in its own transaction) before the first provider create: a create whose answer was lost may have made it.
+  ensure_requested bool NOT NULL DEFAULT false,
+  ready_at timestamptz,
+  deleted_at timestamptz,
+  metered_until timestamptz,
+  -- The caller identity: idempotency keys are scoped to (tenant, caller), as the id derives from them.
+  created_by text NOT NULL,
+  idempotency_key text NOT NULL,
+  request_hash bytea NOT NULL,
+  version bigint NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT compute_now(),
+  UNIQUE (tenant_id, created_by, idempotency_key)`;
+
 export const code = (error: unknown): string | undefined => (error as { code?: string } | undefined)?.code;
 export const uniqueViolation = (error: unknown) => code(error) === '23505';
 

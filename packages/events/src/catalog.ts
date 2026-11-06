@@ -268,6 +268,20 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
       'Reserved provider addresses (DO P2): created { poolId, providerAccountId, name, region, family }, updated ({ assign | unassign }), ready { address }, assigned { instanceId }, unassigned, error { message }, deleting, deleted; data { addressId, ... }',
   },
   {
+    type: 'providerCertificate.*',
+    subject: 'provider-certificate/{id}',
+    module: 'vps',
+    description:
+      'TLS certificates on a provider account (DO P4): created { poolId, providerAccountId, name, kind }, ready, error { message }, deleting, deleted; data { certificateId, ... }',
+  },
+  {
+    type: 'providerLoadBalancer.*',
+    subject: 'provider-load-balancer/{id}',
+    module: 'vps',
+    description:
+      'Load balancers on a provider account (DO P4): created { poolId, providerAccountId, name, scope, region? }, updated { changed }, ready { address? }, error { message }, deleting, deleted; data { loadBalancerId, ... }',
+  },
+  {
     type: 'kubernetes.cluster.*',
     subject: 'kubernetes-cluster/{id}',
     module: 'kubernetes',

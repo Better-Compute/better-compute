@@ -44,6 +44,8 @@ export const computeResourceKinds = [
   'provider-volume',
   'provider-snapshot',
   'provider-address',
+  'provider-certificate',
+  'provider-load-balancer',
 ] as const;
 export type ComputeResourceKind = (typeof computeResourceKinds)[number];
 
@@ -107,6 +109,9 @@ const definitions = {
       // (DO P2) Provider volumes, snapshots and addresses: their `list` methods are gated on the tenant.
       ...a('volumes', 'read'),
       ...a('addresses', 'read'),
+      // (DO P4) Certificates and load balancers: their `list` methods are gated on the tenant.
+      ...a('certificates', 'read'),
+      ...a('load-balancers', 'read'),
       // v1.0 destructive-batch quorum (§13): on top of the approvers' signatures, never instead.
       ...a('batches', 'read', 'create', 'approve'),
     ],
@@ -297,6 +302,26 @@ const definitions = {
       projectId: 'string',
       region: 'string',
       family: 'string',
+    },
+  },
+  'provider-certificate': {
+    description:
+      "A tenant's TLS certificate on a provider account (managed by the provider, or uploaded from the tenant's secrets), for its load balancers",
+    parent: 'tenant',
+    actions: a('certificates', 'read', 'manage'),
+    attributes: { providerAccountId: 'string', poolId: 'string', projectId: 'string', kind: 'string' },
+  },
+  'provider-load-balancer': {
+    description:
+      "A tenant's load balancer on a provider account: regional in front of its instances, or global in front of its regional ones",
+    parent: 'tenant',
+    actions: a('load-balancers', 'read', 'manage'),
+    attributes: {
+      providerAccountId: 'string',
+      poolId: 'string',
+      projectId: 'string',
+      region: 'string',
+      scope: 'string',
     },
   },
 } as const satisfies Record<ComputeResourceKind, KindDefinition>;
@@ -736,6 +761,20 @@ group('providerAddresses', 'vps', [
   ['assign', 'mutation', 'addresses:manage', 'provider-address', 'v1.0'],
   ['unassign', 'mutation', 'addresses:manage', 'provider-address', 'v1.0'],
   ['delete', 'mutation', 'addresses:manage', 'provider-address', 'v1.0'],
+]);
+// (DO P4) TLS certificates and load balancers on a provider account (vps provider-certificates.ts, -load-balancers.ts).
+group('certificates', 'vps', [
+  ['create', 'mutation', 'certificates:manage', 'provider-certificate', 'v1.0'],
+  ['list', 'read', 'certificates:read', 'tenant', 'v1.0', list],
+  ['get', 'read', 'certificates:read', 'provider-certificate', 'v1.0'],
+  ['delete', 'mutation', 'certificates:manage', 'provider-certificate', 'v1.0'],
+]);
+group('loadBalancers', 'vps', [
+  ['create', 'mutation', 'load-balancers:manage', 'provider-load-balancer', 'v1.0'],
+  ['list', 'read', 'load-balancers:read', 'tenant', 'v1.0', list],
+  ['get', 'read', 'load-balancers:read', 'provider-load-balancer', 'v1.0'],
+  ['update', 'mutation', 'load-balancers:manage', 'provider-load-balancer', 'v1.0'],
+  ['delete', 'mutation', 'load-balancers:manage', 'provider-load-balancer', 'v1.0'],
 ]);
 // Managed Kubernetes (GKE, …) on a provider account; the provider runs the control plane (kubernetes module).
 group('kubernetesClusters', 'kubernetes', [

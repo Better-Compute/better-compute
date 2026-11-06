@@ -21,7 +21,19 @@ import { readAccount } from './accounts.js';
 import { canonical, fail, id, int, key, object, optional, sha256Hex, tenant } from './input.js';
 import { providerResourceName } from './networks.js';
 import {
+  liveCertificatesSql,
+  reconcileCertificate,
+  unsettledCertificatesSql,
+} from './provider-certificates.js';
+import {
+  liveLoadBalancersSql,
+  onLoadBalancedInstanceGone,
+  reconcileLoadBalancer,
+  unsettledLoadBalancersSql,
+} from './provider-load-balancers.js';
+import {
   ambiguousCodes,
+  columns,
   assertNameFree,
   assertRegion,
   bool,
@@ -88,22 +100,6 @@ export const maxProviderVolumeGiB = 16_384;
 /** At most this many snapshots (not deleted) per volume. */
 export const maxSnapshotsPerVolume = 25;
 
-const columns = `
-  state text NOT NULL CHECK (state IN ('pending', 'ready', 'updating', 'deleting', 'deleted', 'error')),
-  desired_state text NOT NULL CHECK (desired_state IN ('present', 'deleted')),
-  message text,
-  -- Set (in its own transaction) before the first provider create: a create whose answer was lost may have made it.
-  ensure_requested bool NOT NULL DEFAULT false,
-  ready_at timestamptz,
-  deleted_at timestamptz,
-  metered_until timestamptz,
-  -- The caller identity: idempotency keys are scoped to (tenant, caller), as the id derives from them.
-  created_by text NOT NULL,
-  idempotency_key text NOT NULL,
-  request_hash bytea NOT NULL,
-  version bigint NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT compute_now(),
-  UNIQUE (tenant_id, created_by, idempotency_key)`;
 
 /** (DO P2) Tenant block volumes on a provider account, and which instance each is attached to. */
 export const providerVolumesMigration: Migration = {
@@ -2653,6 +2649,8 @@ export async function onInstanceDeleted(
   );
   for (const id of [...volumeIds, ...addresses.rows.map((row) => row.id)])
     await deps.work.enqueue(tx, providerResourcesWork, id);
+  // (P4) Its load balancers stop sending it traffic now, not at the periodic pass.
+  await onLoadBalancedInstanceGone(deps, tx, instanceId);
 }
 
 // --- Entry points ------------------------------------------------------------------------------
@@ -2672,6 +2670,8 @@ export async function reconcileProviderResource(
   if (resourceId.startsWith('pvol_')) await reconcileVolume(run, resourceId);
   else if (resourceId.startsWith('psnap_')) await reconcileSnapshot(run, resourceId);
   else if (resourceId.startsWith('paddr_')) await reconcileAddress(run, resourceId);
+  else if (resourceId.startsWith('pcert_')) await reconcileCertificate(run, resourceId);
+  else if (resourceId.startsWith('plb_')) await reconcileLoadBalancer(run, resourceId);
   else return undefined;
   return run.next();
 }
@@ -2696,13 +2696,17 @@ const unsettledIds = `
    WHERE state <> 'deleted'
      AND (state <> 'ready' OR desired_state <> 'present'
           OR (instance_id IS NULL AND assignment_state <> 'none')
-          OR (instance_id IS NOT NULL AND assignment_state <> 'ready'))`;
+          OR (instance_id IS NOT NULL AND assignment_state <> 'ready'))
+  UNION ALL ${unsettledCertificatesSql}
+  UNION ALL ${unsettledLoadBalancersSql}`;
 
 /** Live rows that are settled (the complement of `unsettledIds`). */
 const settledSql = `
   SELECT id FROM (SELECT id FROM provider_volumes WHERE state <> 'deleted'
                   UNION ALL SELECT id FROM provider_snapshots WHERE state <> 'deleted'
-                  UNION ALL SELECT id FROM provider_addresses WHERE state <> 'deleted') live
+                  UNION ALL SELECT id FROM provider_addresses WHERE state <> 'deleted'
+                  UNION ALL ${liveCertificatesSql}
+                  UNION ALL ${liveLoadBalancersSql}) live
   EXCEPT SELECT id FROM (${unsettledIds}) unsettled
   ORDER BY id`;
 

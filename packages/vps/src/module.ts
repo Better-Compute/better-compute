@@ -365,6 +365,41 @@ import {
   type SnapshotProviderVolumeInput,
 } from './provider-resources.js';
 import {
+  clearStagedProviderCertificate,
+  createProviderCertificate,
+  deleteProviderCertificate,
+  getProviderCertificate,
+  listProviderCertificates,
+  parseCreateProviderCertificate,
+  parseListProviderCertificates,
+  parseProviderCertificateRef,
+  prepareCreateProviderCertificate,
+  providerCertificateSchemas,
+  type CreateProviderCertificateInput,
+  type ListProviderCertificatesInput,
+  type ProviderCertificateRef,
+  type ProviderCertificateView,
+} from './provider-certificates.js';
+import {
+  clearStagedProviderLoadBalancer,
+  createProviderLoadBalancer,
+  deleteProviderLoadBalancer,
+  getProviderLoadBalancer,
+  listProviderLoadBalancers,
+  parseCreateProviderLoadBalancer,
+  parseListProviderLoadBalancers,
+  parseProviderLoadBalancerRef,
+  parseUpdateProviderLoadBalancer,
+  prepareCreateProviderLoadBalancer,
+  providerLoadBalancerSchemas,
+  updateProviderLoadBalancer,
+  type CreateProviderLoadBalancerInput,
+  type ListProviderLoadBalancersInput,
+  type ProviderLoadBalancerRef,
+  type ProviderLoadBalancerView,
+  type UpdateProviderLoadBalancerInput,
+} from './provider-load-balancers.js';
+import {
   deleteSnapshot,
   getSnapshot,
   instanceSnapshotKind,
@@ -589,6 +624,21 @@ export type VpsApi = {
     unassign: MethodDefinition<ProviderAddressRef, ProviderAddressView>;
     delete: MethodDefinition<ProviderAddressRef, ProviderAddressView>;
   };
+  /** (DO P4) TLS certificates on a provider account, for load balancers (provider-certificates.ts). */
+  certificates: {
+    create: MethodDefinition<CreateProviderCertificateInput, ProviderCertificateView>;
+    list: MethodDefinition<ListProviderCertificatesInput, { items: ProviderCertificateView[] }>;
+    get: MethodDefinition<ProviderCertificateRef, ProviderCertificateView>;
+    delete: MethodDefinition<ProviderCertificateRef, ProviderCertificateView>;
+  };
+  /** (DO P4) Load balancers on a provider account (provider-load-balancers.ts). */
+  loadBalancers: {
+    create: MethodDefinition<CreateProviderLoadBalancerInput, ProviderLoadBalancerView>;
+    list: MethodDefinition<ListProviderLoadBalancersInput, { items: ProviderLoadBalancerView[] }>;
+    get: MethodDefinition<ProviderLoadBalancerRef, ProviderLoadBalancerView>;
+    update: MethodDefinition<UpdateProviderLoadBalancerInput, ProviderLoadBalancerView>;
+    delete: MethodDefinition<ProviderLoadBalancerRef, ProviderLoadBalancerView>;
+  };
 };
 
 function tenantResource<I extends { tenantId: string }>(input: I) {
@@ -663,6 +713,12 @@ function providerSnapshotResource<I extends { snapshotId: string }>(input: I) {
 }
 function providerAddressResource<I extends { addressId: string }>(input: I) {
   return { type: 'provider-address', id: input.addressId };
+}
+function providerCertificateResource<I extends { certificateId: string }>(input: I) {
+  return { type: 'provider-certificate', id: input.certificateId };
+}
+function providerLoadBalancerResource<I extends { loadBalancerId: string }>(input: I) {
+  return { type: 'provider-load-balancer', id: input.loadBalancerId };
 }
 
 function parsePool(raw: unknown): PoolInput {
@@ -1043,6 +1099,15 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       action: 'compute:instances:update',
       resource: { type: `${prefix}instance`, id: instanceId },
     });
+  };
+  /** (DO P4) A load balancer's named target instances: each decided as `targetInstanceCheck` decides one. */
+  const instancesCheck = async (
+    context: MethodContext,
+    tenantId: string,
+    instanceIds: readonly string[] | undefined,
+  ): Promise<void> => {
+    for (const instanceId of instanceIds ?? [])
+      await targetInstanceCheck(context, tenantId, instanceId);
   };
   /**
    * An update that changes what the guest runs (image, flavor, user data, env, network) hands the
@@ -2157,6 +2222,114 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         validate: describedBy(providerResourceSchemas.address, parseProviderAddressRef),
         handler: (context, input) =>
           deleteProviderAddress(networkDeps(context), context.sql, input),
+      }),
+    },
+    certificates: {
+      create: defineMethod({
+        action: 'compute:certificates:manage',
+        kind: 'mutation',
+        // The envelope decides on the certificate `prepare` returns.
+        resource: (input: CreateProviderCertificateInput) => ({
+          type: 'provider-certificate',
+          id: `draft:${input.idempotencyKey}`,
+        }),
+        validate: describedBy(providerCertificateSchemas.create, parseCreateProviderCertificate),
+        admission: {
+          prepare: (context, input, tx) =>
+            prepareCreateProviderCertificate(networkDeps(context), context, input, tx),
+          denied: (context, input, tx) => clearStagedProviderCertificate(context, input, tx),
+          abandoned: (context, input, tx) => clearStagedProviderCertificate(context, input, tx),
+        },
+        handler: (context, input) =>
+          createProviderCertificate(networkDeps(context), context, input),
+      }),
+      list: defineMethod({
+        action: 'compute:certificates:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(providerCertificateSchemas.list, parseListProviderCertificates),
+        handler: (context, input) => listProviderCertificates(context.sql, input),
+      }),
+      get: defineMethod({
+        action: 'compute:certificates:read',
+        kind: 'read',
+        resource: providerCertificateResource,
+        validate: describedBy(providerCertificateSchemas.certificate, parseProviderCertificateRef),
+        handler: (context, input) => getProviderCertificate(context.sql, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:certificates:manage',
+        kind: 'mutation',
+        resource: providerCertificateResource,
+        validate: describedBy(providerCertificateSchemas.certificate, parseProviderCertificateRef),
+        handler: (context, input) =>
+          deleteProviderCertificate(networkDeps(context), context.sql, input),
+      }),
+    },
+    loadBalancers: {
+      create: defineMethod({
+        action: 'compute:load-balancers:manage',
+        kind: 'mutation',
+        resource: (input: CreateProviderLoadBalancerInput) => ({
+          type: 'provider-load-balancer',
+          id: `draft:${input.idempotencyKey}`,
+        }),
+        validate: describedBy(providerLoadBalancerSchemas.create, parseCreateProviderLoadBalancer),
+        admission: {
+          prepare: (context, input, tx) =>
+            prepareCreateProviderLoadBalancer(networkDeps(context), context, input, tx),
+          denied: (context, input, tx) => clearStagedProviderLoadBalancer(context, input, tx),
+          abandoned: (context, input, tx) => clearStagedProviderLoadBalancer(context, input, tx),
+          // Sending an instance traffic changes what reaches its guest: decided on each named instance too.
+          check: (context, input) =>
+            instancesCheck(context, input.tenantId, input.targets.instanceIds),
+        },
+        handler: (context, input) =>
+          createProviderLoadBalancer(networkDeps(context), context, input),
+      }),
+      list: defineMethod({
+        action: 'compute:load-balancers:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(providerLoadBalancerSchemas.list, parseListProviderLoadBalancers),
+        handler: (context, input) => listProviderLoadBalancers(context.sql, input),
+      }),
+      get: defineMethod({
+        action: 'compute:load-balancers:read',
+        kind: 'read',
+        resource: providerLoadBalancerResource,
+        validate: describedBy(
+          providerLoadBalancerSchemas.loadBalancer,
+          parseProviderLoadBalancerRef,
+        ),
+        handler: (context, input) => getProviderLoadBalancer(context.sql, input),
+      }),
+      update: defineMethod({
+        action: 'compute:load-balancers:manage',
+        kind: 'mutation',
+        resource: providerLoadBalancerResource,
+        validate: describedBy(providerLoadBalancerSchemas.update, parseUpdateProviderLoadBalancer),
+        admission: {
+          prepare: async (_context, input) => ({
+            status: 'decide',
+            resource: providerLoadBalancerResource(input),
+          }),
+          check: (context, input) =>
+            instancesCheck(context, input.tenantId, input.targets?.instanceIds),
+        },
+        handler: (context, input) =>
+          updateProviderLoadBalancer(networkDeps(context), context.sql, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:load-balancers:manage',
+        kind: 'mutation',
+        resource: providerLoadBalancerResource,
+        validate: describedBy(
+          providerLoadBalancerSchemas.loadBalancer,
+          parseProviderLoadBalancerRef,
+        ),
+        handler: (context, input) =>
+          deleteProviderLoadBalancer(networkDeps(context), context.sql, input),
       }),
     },
   });

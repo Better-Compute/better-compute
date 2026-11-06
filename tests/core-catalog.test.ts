@@ -51,6 +51,8 @@ const planActions: Record<string, string[]> = {
     ...a('kubernetes', 'read'),
     ...a('volumes', 'read'),
     ...a('addresses', 'read'),
+    ...a('certificates', 'read'),
+    ...a('load-balancers', 'read'),
     ...a('batches', 'read', 'create', 'approve'),
   ],
   'compute-project': [...a('projects', 'read', 'manage'), ...a('usage', 'read')],
@@ -93,6 +95,8 @@ const planActions: Record<string, string[]> = {
   'compute-provider-volume': a('volumes', 'read', 'manage'),
   'compute-provider-snapshot': a('volumes', 'read', 'manage'),
   'compute-provider-address': a('addresses', 'read', 'manage'),
+  'compute-provider-certificate': a('certificates', 'read', 'manage'),
+  'compute-provider-load-balancer': a('load-balancers', 'read', 'manage'),
 };
 
 describe('resource types (§12.3)', () => {
@@ -116,6 +120,8 @@ describe('resource types (§12.3)', () => {
       'compute-provider-volume': 'compute-tenant',
       'compute-provider-snapshot': 'compute-tenant',
       'compute-provider-address': 'compute-tenant',
+      'compute-provider-certificate': 'compute-tenant',
+      'compute-provider-load-balancer': 'compute-tenant',
     });
     expect(types['compute-project']?.relations).toEqual(['member', 'admin']);
     expect(types['compute-pool']?.relations).toEqual(['viewer', 'user', 'operator', 'admin']);
@@ -409,6 +415,8 @@ describe('apiSurface (§9.2)', () => {
         'providerVolumes.list',
         'providerSnapshots.list',
         'providerAddresses.list',
+        'certificates.list',
+        'loadBalancers.list',
         'kubernetesClusters.list',
       ],
     );
