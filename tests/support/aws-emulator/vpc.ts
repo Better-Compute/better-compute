@@ -9,7 +9,8 @@ import { ec2Error, ec2Response, el, items } from './xml.js';
 // RunInstances is patched with the VPC and security groups of its subnet. Like EC2, deletes refuse
 // a resource still in use with DependencyViolation. Knobs: associating (CIDR associations stay
 // `associating` for that many reads), pendingVpcReads (a new VPC reads `pending`), ruleLimit (rules
-// per security group), naclEntryLimit (entries per direction) and groupsPerInterface.
+// per security group), naclEntryLimit (entries per direction), groupsPerInterface and tagLagReads
+// (a new VPC is missing from tag-filtered DescribeVpcs for that many reads, as AWS tag reads lag).
 
 type Tags = Map<string, string>;
 
@@ -17,6 +18,8 @@ export interface EmuVpc {
   id: string;
   state: 'pending' | 'available';
   pendingReads: number;
+  /** Tag-filtered reads that do not show this VPC yet. */
+  tagHiddenReads: number;
   cidrs: {
     associationId: string;
     cidr: string;
@@ -192,6 +195,8 @@ export class VpcEmulator {
   associating = 0;
   /** Reads a new VPC stays `pending`. */
   pendingVpcReads = 0;
+  /** Tag-filtered DescribeVpcs reads a new VPC is missing from. */
+  tagLagReads = 0;
   ruleLimit = 60;
   naclEntryLimit = 20;
   groupsPerInterface = 5;
@@ -267,6 +272,7 @@ export class VpcEmulator {
       id: this.#id('vpc'),
       state: 'pending',
       pendingReads: this.pendingVpcReads,
+      tagHiddenReads: this.tagLagReads,
       cidrs: [{ associationId: this.#id('vpc-cidr-assoc'), cidr, state: 'associated', reads: 0 }],
       tags,
       dnsSupport: true,
@@ -415,12 +421,20 @@ export class VpcEmulator {
         for (const id of ids)
           if (!this.vpcs.has(id))
             return ec2Error('InvalidVpcID.NotFound', `The vpc ID '${id}' does not exist`);
+        const byTag = [...filters.keys()].some((name) => name.startsWith('tag'));
         const found = [...this.vpcs.values()].filter(
           (vpc) =>
             (ids.length === 0 || ids.includes(vpc.id)) &&
             matches(vpc.tags, filters, (name) =>
-              name === 'vpc-id' ? [vpc.id] : name === 'state' ? [vpc.state] : undefined,
-            ),
+              name === 'vpc-id'
+                ? [vpc.id]
+                : name === 'state'
+                  ? [vpc.state]
+                  : name === 'cidr-block-association.cidr-block'
+                    ? vpc.cidrs.map((block) => block.cidr)
+                    : undefined,
+            ) &&
+            !(byTag && vpc.tagHiddenReads-- > 0),
         );
         for (const vpc of found) {
           if (vpc.state === 'pending' && vpc.pendingReads-- <= 0) vpc.state = 'available';

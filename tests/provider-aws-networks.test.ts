@@ -180,6 +180,92 @@ describe('networks: VPC', () => {
     expect(vpc.vpcs.has(foreign.id)).toBe(true);
     expect(emu.calls('DeleteVpc')).toHaveLength(0);
   });
+
+  it('deleteNetwork right after ensureNetwork waits for the new VPC and deletes it', async () => {
+    const { networks, vpc, call } = await world();
+    // Tag-filtered reads do not show the new VPC yet.
+    vpc.tagLagReads = 5;
+    expect((await networks.ensureNetwork({ name: 'bc-net-1' }, call())).state).toBe('pending');
+    const made = vpc.vpcByName('bc-net-1')!;
+    const gone = await networks.deleteNetwork('bc-net-1', call());
+    expect(gone.state).toBe('deleted');
+    expect(vpc.vpcs.has(made.id)).toBe(false);
+  });
+
+  it('deleteNetwork finds a VPC the tag read hides, even after it got its gateway', async () => {
+    const { networks, vpc, call, settle } = await world();
+    await settle(() => networks.ensureNetwork({ name: 'bc-net-1' }, call()));
+    const made = vpc.vpcByName('bc-net-1')!;
+    made.tagHiddenReads = 5;
+    let result = await networks.deleteNetwork('bc-net-1', call());
+    for (let n = 0; n < 5 && result.state === 'pending'; n++)
+      result = await networks.deleteNetwork('bc-net-1', call());
+    expect(result.state).toBe('deleted');
+    expect(vpc.vpcs.has(made.id)).toBe(false);
+    expect(vpc.igws.size).toBe(0);
+  });
+
+  it('a just-created VPC no read shows yet is waited for, then given up after the window', async () => {
+    const { networks, vpc, emu, call } = await world();
+    vpc.tagLagReads = 100;
+    await networks.ensureNetwork({ name: 'bc-net-1' }, call());
+    const made = vpc.vpcByName('bc-net-1')!;
+    // Gone by hand (or never shown): a read by id finds nothing either.
+    vpc.vpcs.delete(made.id);
+    const waiting = await networks.deleteNetwork('bc-net-1', call());
+    expect(waiting).toMatchObject({ state: 'pending', id: made.id });
+    emu.clock.advance(121_000);
+    expect((await networks.deleteNetwork('bc-net-1', call())).state).toBe('deleted');
+  });
+
+  it('ensureNetwork rides out the tag lag without making a second VPC', async () => {
+    const { networks, vpc, emu, call, settle } = await world();
+    vpc.tagLagReads = 3;
+    expect((await settle(() => networks.ensureNetwork({ name: 'bc-net-1' }, call()))).state).toBe(
+      'ready',
+    );
+    expect(emu.calls('CreateVpc')).toHaveLength(1);
+    expect(vpc.vpcs.size).toBe(1);
+  });
+
+  it('a delete blocked by a subnet in use leaves the gateway and route alone', async () => {
+    const { networks, vpc, ec2, emu, call, settle } = await world();
+    await settle(() => networks.ensureNetwork({ name: 'bc-net-1' }, call()));
+    const made = vpc.vpcByName('bc-net-1')!;
+    await networks.ensureSubnet(
+      {
+        network: 'bc-net-1',
+        name: 'bc-sub-1',
+        region: 'us-east-1',
+        cidr: '10.64.1.0/24',
+        zone: 'us-east-1a',
+      },
+      call(),
+    );
+    const subnet = [...vpc.subnets.values()][0]!;
+    const instance = ec2.addInstance();
+    instance.subnetId = subnet.id;
+    instance.vpcId = made.id;
+    const before = emu.requests.length;
+    expect((await networks.deleteNetwork('bc-net-1', call())).state).toBe('pending');
+    // The machine still running there keeps its internet gateway.
+    const igw = [...vpc.igws.values()][0]!;
+    expect(igw.vpcId).toBe(made.id);
+    const ops = emu.requests.slice(before).map((r) => r.operation);
+    expect(ops).not.toContain('DetachInternetGateway');
+    expect(ops).not.toContain('DeleteVpc');
+    instance.state = 'terminated';
+    expect((await networks.deleteNetwork('bc-net-1', call())).state).toBe('deleted');
+    // In order: subnets, then groups, then the gateway, then the VPC.
+    const order = emu.requests
+      .map((r) => r.operation)
+      .filter((op) =>
+        ['DeleteSubnet', 'DeleteSecurityGroup', 'DetachInternetGateway', 'DeleteVpc'].includes(op),
+      );
+    const last = (op: string) => order.lastIndexOf(op);
+    expect(last('DeleteSubnet')).toBeLessThan(last('DetachInternetGateway'));
+    expect(last('DetachInternetGateway')).toBeLessThan(last('DeleteVpc'));
+  });
 });
 
 describe('networks: subnets', () => {

@@ -557,7 +557,22 @@ export class AwsNetworks implements ProviderNetworks {
     const { signal } = context;
     // Only VPCs better-compute made are deleted: an adopted VPC id never is.
     const vpcs = await this.#vpcsOf(name, signal);
-    if (vpcs.length === 0) return state(name, 'deleted');
+    // A VPC this client just created may not show in tag reads yet: never take that for "gone".
+    const created = this.#created.get(name);
+    if (
+      created &&
+      !vpcs.some((vpc) => vpc.id === created.id) &&
+      this.host.context.clock.now() - created.at < this.host.consistencyWindowMs()
+    ) {
+      const fresh = await this.#vpc(created.id, signal);
+      // Not even a read by id shows it yet: wait, rather than leave a VPC nobody deletes.
+      if (!fresh) return state(created.id, 'pending', `Waiting for VPC ${created.id} to show`);
+      vpcs.push(fresh);
+    }
+    if (vpcs.length === 0) {
+      this.#created.delete(name);
+      return state(name, 'deleted');
+    }
     const waiting: string[] = [];
     for (const vpc of vpcs) {
       const blocked = await this.#deleteVpc(name, vpc.id, signal);
@@ -607,6 +622,9 @@ export class AwsNetworks implements ProviderNetworks {
         await attempt(`subnet ${subnet.id}`, () =>
           this.#call('DeleteSubnet', { SubnetId: subnet.id }, signal),
         );
+    // A subnet still in use has machines on it: they keep their groups, gateway and route until
+    // they are gone, so the delete goes no further than the subnets.
+    if (reasons.length) return `VPC ${vpcId}: ${reasons.join(', ')}`;
 
     const groups = await this.#call('DescribeSecurityGroups', byVpc, signal);
     for (const item of groups.items('securityGroupInfo')) {
