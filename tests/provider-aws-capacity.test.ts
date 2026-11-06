@@ -10,6 +10,7 @@ import {
   type IamStatement,
   awsConfig,
   instanceTypeCache,
+  purchasePropagationMs,
   zoneCache,
   type AwsConfig,
 } from '@better-compute/provider-aws';
@@ -729,6 +730,123 @@ describe('purchases', () => {
     expect(created.id).not.toBe('cr-0eeeeeeeeeeeeeee5');
     expect(created.shared).toBe(false);
     expect(w.emu.calls('CreateCapacityReservation')).toHaveLength(1);
+  });
+
+  // PurchaseCapacityBlock takes no ClientToken, and DescribeCapacityReservations is eventually
+  // consistent: a retry after a lost answer must never buy a second block.
+  const loseNextPurchase = (w: ReturnType<typeof world>) => {
+    let lost = true;
+    w.emu.afterAction('PurchaseCapacityBlock', () => {
+      if (lost) {
+        lost = false;
+        throw new TypeError('fetch failed: connection reset');
+      }
+    });
+  };
+
+  it('a lost Capacity Block answer never buys twice while EC2 does not show the block', async () => {
+    const w = world({ allowPurchases: true });
+    const start = offerings(w);
+    // EC2 could sell another block like it: the offering stays on sale.
+    w.capacity.blockOfferings[0]!.stock = 3;
+    // The bought block is out of sight for 4 reads, then its tags for 4 more.
+    w.capacity.purchaseLag = { hiddenReads: 4, tagsHiddenReads: 8 };
+    loseNextPurchase(w);
+    const requestedAt = w.emu.now();
+    const id = blockId(w, start, 'cb-0aaaaaaaaaaaaaaa1', 235968);
+    await expect(w.compute.purchaseReservation(id, w.call('buy-1'))).rejects.toBeDefined();
+    expect(w.capacity.purchases).toHaveLength(1);
+    const uncertainSince = requestedAt;
+    const reasons: unknown[] = [];
+    let bought;
+    for (let attempt = 2; attempt < 10 && !bought; attempt++) {
+      w.emu.clock.advance(30_000);
+      try {
+        bought = await w.compute.purchaseReservation(id, w.call('buy-1'), {
+          attempt,
+          requestedAt,
+          uncertainSince,
+        });
+      } catch (error) {
+        reasons.push((error as { code: string; details?: { reason?: string } }).details?.reason);
+        expect(error).toMatchObject({ code: 'UNAVAILABLE' });
+      }
+    }
+    // While the block is out of sight the retry waits; once it shows (by what it is, before its
+    // tag does) the retry answers with it.
+    expect(reasons.length).toBeGreaterThan(0);
+    expect(new Set(reasons)).toEqual(new Set(['purchase-propagating']));
+    expect(bought).toMatchObject({ id: expect.stringMatching(/^cb:cr-/), startsAt: start });
+    expect(w.capacity.purchases).toHaveLength(1);
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(1);
+    expect(bought!.id).toBe(`cb:${[...w.capacity.reservations.keys()][0]}`);
+  });
+
+  it('a sold-out offering on such a retry is not a failure', async () => {
+    const w = world({ allowPurchases: true });
+    const start = offerings(w);
+    // Sold out by this very purchase, whose block EC2 does not show for a long time.
+    w.capacity.purchaseLag = { hiddenReads: 1_000, tagsHiddenReads: 1_000 };
+    loseNextPurchase(w);
+    const requestedAt = w.emu.now();
+    const id = blockId(w, start, 'cb-0aaaaaaaaaaaaaaa1', 235968);
+    await expect(w.compute.purchaseReservation(id, w.call('buy-1'))).rejects.toBeDefined();
+    w.emu.clock.advance(60_000);
+    await expect(
+      w.compute.purchaseReservation(id, w.call('buy-1'), {
+        attempt: 2,
+        requestedAt,
+        uncertainSince: requestedAt,
+      }),
+    ).rejects.toMatchObject({ code: 'UNAVAILABLE', details: { reason: 'purchase-propagating' } });
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(1);
+  });
+
+  it('once the window passed with no block in sight, the retry buys', async () => {
+    const w = world({ allowPurchases: true });
+    const start = offerings(w);
+    const requestedAt = w.emu.now();
+    // The earlier attempt never reached EC2 (it failed before sending).
+    w.emu.clock.advance(purchasePropagationMs + 1_000);
+    const bought = await w.compute.purchaseReservation(
+      blockId(w, start, 'cb-0aaaaaaaaaaaaaaa1', 235968),
+      w.call('buy-1'),
+      { attempt: 2, requestedAt, uncertainSince: requestedAt },
+    );
+    expect(bought.id).toMatch(/^cb:cr-/);
+    expect(w.capacity.purchases).toHaveLength(1);
+  });
+
+  it('a block like it that another purchase bought, or an older one, is never taken for this one', async () => {
+    const w = world({ allowPurchases: true });
+    const start = offerings(w);
+    const requestedAt = w.emu.now();
+    const like = {
+      type: 'p5.48xlarge',
+      zone: 'us-east-1a',
+      total: 2,
+      reservationType: 'capacity-block' as const,
+      state: 'scheduled',
+      start,
+      end: start + DAY,
+    };
+    // Another purchase's block (its tag shows) and one bought before this purchase was requested.
+    w.capacity.add({
+      ...like,
+      tags: new Map([['better-compute:purchase', clientToken('another')]]),
+    });
+    w.capacity.add({ ...like, created: requestedAt - HOUR });
+    // And one in another account, shared in.
+    w.capacity.add({ ...like, ownerId: '333333333333' });
+    w.emu.clock.advance(30_000);
+    await expect(
+      w.compute.purchaseReservation(
+        blockId(w, start, 'cb-0aaaaaaaaaaaaaaa1', 235968),
+        w.call('buy-1'),
+        { attempt: 2, requestedAt, uncertainSince: requestedAt },
+      ),
+    ).rejects.toMatchObject({ code: 'UNAVAILABLE', details: { reason: 'purchase-propagating' } });
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(0);
   });
 
   it('refuses malformed, foreign-zone and tenant-account purchases', async () => {

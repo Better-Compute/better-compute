@@ -25,6 +25,12 @@ export interface EmuReservation {
   reservationType: 'default' | 'capacity-block';
   tags?: Map<string, string>;
   clientToken?: string;
+  /** createDate (epoch ms); add() sets the emulator's now. */
+  created?: number;
+  /** EC2's eventual consistency: DescribeCapacityReservations calls that do not see it at all yet. */
+  hiddenReads?: number;
+  /** DescribeCapacityReservations calls that see it without its tags yet (tag filters miss it). */
+  tagsHiddenReads?: number;
 }
 
 /** A Capacity Block on sale. */
@@ -36,6 +42,8 @@ export interface EmuBlockOffering {
   start: number;
   hours: number;
   upfrontFee: number;
+  /** Blocks of this offering left to sell (default 1): EC2 computes offerings per request. */
+  stock?: number;
 }
 
 /** TagSpecification.N with ResourceType `type` → its tags. */
@@ -84,6 +92,11 @@ export class CapacityEmulator {
     ['us-east-1a/g6.xlarge', 0.3121],
   ]);
   #next = 0;
+  /**
+   * How long a reservation PurchaseCapacityBlock or CreateCapacityReservation makes stays out of
+   * sight (eventual consistency), in DescribeCapacityReservations calls.
+   */
+  purchaseLag = { hiddenReads: 0, tagsHiddenReads: 0 };
 
   constructor(
     private readonly emu: AwsEmulator,
@@ -117,6 +130,7 @@ export class CapacityEmulator {
       state: 'active',
       match: 'targeted',
       reservationType: 'default',
+      created: this.emu.now(),
       ...options,
     };
     this.reservations.set(id, reservation);
@@ -131,7 +145,7 @@ export class CapacityEmulator {
     return used;
   }
 
-  #xml(r: EmuReservation): string {
+  #xml(r: EmuReservation, withTags = true): string {
     const available = Math.max(0, r.total - this.used(r));
     return [
       el('capacityReservationId', r.id),
@@ -153,9 +167,12 @@ export class CapacityEmulator {
       el('endDateType', r.end === undefined ? 'unlimited' : 'limited'),
       el('instanceMatchCriteria', r.match),
       el('reservationType', r.reservationType),
+      el('createDate', r.created === undefined ? undefined : new Date(r.created).toISOString()),
       items(
         'tagSet',
-        [...(r.tags ?? [])].map(([key, value]) => `${el('key', key)}${el('value', value)}`),
+        [...((withTags && r.tags) || [])].map(
+          ([key, value]) => `${el('key', key)}${el('value', value)}`,
+        ),
       ),
     ].join('');
   }
@@ -164,7 +181,13 @@ export class CapacityEmulator {
     const p = request.params;
     const ids = listOf(p, 'CapacityReservationId');
     const filters = filtersOf(p);
-    let found = [...this.reservations.values()];
+    const all = [...this.reservations.values()];
+    // One read: what is still out of sight now comes into sight a little more.
+    const hidden = new Set(all.filter((r) => (r.hiddenReads ?? 0) > 0));
+    const untagged = new Set(all.filter((r) => (r.tagsHiddenReads ?? 0) > 0));
+    for (const r of hidden) r.hiddenReads! -= 1;
+    for (const r of untagged) r.tagsHiddenReads! -= 1;
+    let found = all.filter((r) => !hidden.has(r));
     if (ids.length) {
       const missing = ids.find((id) => !this.reservations.has(id));
       if (missing)
@@ -172,13 +195,16 @@ export class CapacityEmulator {
           'InvalidCapacityReservationId.NotFound',
           `The capacity reservation '${missing}' does not exist`,
         );
-      found = ids.map((id) => this.reservations.get(id)!);
+      found = ids.map((id) => this.reservations.get(id)!).filter((r) => !hidden.has(r));
     }
     for (const [name, values] of filters) {
       if (name === 'state') found = found.filter((r) => values.includes(r.state));
       else if (name === 'instance-type') found = found.filter((r) => values.includes(r.type));
+      else if (name === 'availability-zone') found = found.filter((r) => values.includes(r.zone));
       else if (name.startsWith('tag:'))
-        found = found.filter((r) => values.includes(r.tags?.get(name.slice(4)) ?? '\u0000'));
+        found = found.filter(
+          (r) => !untagged.has(r) && values.includes(r.tags?.get(name.slice(4)) ?? '\u0000'),
+        );
       else return ec2Error('InvalidParameterValue', `unknown filter ${name}`);
     }
     const start = Number(p.get('NextToken')?.replace(/^tok-/, '') ?? '0');
@@ -189,7 +215,7 @@ export class CapacityEmulator {
       'DescribeCapacityReservations',
       items(
         'capacityReservationSet',
-        page.map((r) => this.#xml(r)),
+        page.map((r) => this.#xml(r, !untagged.has(r))),
       ) + el('nextToken', next),
     );
   }
@@ -246,8 +272,9 @@ export class CapacityEmulator {
     if (p.get('InstancePlatform') !== 'Linux/UNIX')
       return ec2Error('InvalidParameterValue', 'InstancePlatform');
     this.purchases.push(offering.id);
-    // Sold: the offering is not on sale any more.
-    this.blockOfferings.splice(this.blockOfferings.indexOf(offering), 1);
+    // Sold: the offering is not on sale any more, unless EC2 has more blocks like it.
+    offering.stock = (offering.stock ?? 1) - 1;
+    if (offering.stock <= 0) this.blockOfferings.splice(this.blockOfferings.indexOf(offering), 1);
     const reservation = this.add({
       type: offering.type,
       zone: offering.zone,
@@ -257,6 +284,7 @@ export class CapacityEmulator {
       start: offering.start,
       end: offering.start + offering.hours * 3_600_000,
       tags: tagsOf(p, 'capacity-reservation'),
+      ...this.purchaseLag,
     });
     return ec2Response(
       'PurchaseCapacityBlock',
@@ -282,6 +310,7 @@ export class CapacityEmulator {
         ...(p.get('EndDate') ? { end: Date.parse(p.get('EndDate')!) } : {}),
         tags: tagsOf(p, 'capacity-reservation'),
         ...(token ? { clientToken: token } : {}),
+        ...this.purchaseLag,
       });
     return ec2Response(
       'CreateCapacityReservation',

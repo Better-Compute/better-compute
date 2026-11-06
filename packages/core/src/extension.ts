@@ -732,6 +732,22 @@ export interface ReservationOffering {
   currency: string;
 }
 
+/**
+ * (AWS A3) What vps knows about earlier attempts of one purchase, so a provider whose buy call has
+ * no idempotency token (EC2 PurchaseCapacityBlock) never buys twice when an earlier answer was lost.
+ */
+export interface PurchaseAttempt {
+  /** 1 for the first call of this purchase. */
+  attempt: number;
+  /** When the purchase was requested, epoch ms: nothing it bought is older. */
+  requestedAt: number;
+  /**
+   * Set when an earlier attempt ended without the provider's answer (a timeout, a dropped
+   * connection) and so may have bought: when the latest such attempt started, epoch ms.
+   */
+  uncertainSince?: number;
+}
+
 /** A provider capacity reservation (GCE reservations and the like), as the provider reports it. */
 export interface ExternalReservation {
   /** `<zone>/<name>`, or `projects/<owner>/zones/<zone>/reservations/<name>` when shared in. */
@@ -1096,7 +1112,11 @@ export interface ProviderImpl {
    * (AWS A3) Buys an offering. **Spends money.** vps calls it only for a root caller, after
    * confirmation, with a stable `idempotencyKey`, so a retried purchase buys once.
    */
-  purchaseReservation?(offeringId: string, context: CallContext): Promise<ExternalReservation>;
+  purchaseReservation?(
+    offeringId: string,
+    context: CallContext,
+    attempt?: PurchaseAttempt,
+  ): Promise<ExternalReservation>;
   /**
    * (platform compute billing) The provider's list prices, for the regions asked (all when absent). A provider
    * caches what it reads; the prices are the provider's, before any margin.

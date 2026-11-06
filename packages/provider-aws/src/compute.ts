@@ -13,6 +13,7 @@ import {
   type PowerAction,
   type ProviderContext,
   type ProviderImpl,
+  type PurchaseAttempt,
 } from '@better-compute/core';
 import type { JsonClient, QueryClient, QueryParams, XmlElement } from '@better-compute/aws-core';
 import type { AccountCredentials } from './account.js';
@@ -30,6 +31,7 @@ import {
   liveReservationStates,
   matchesQuery,
   parseCapacityReservation,
+  purchaseTag,
   reservationOffer,
   toReservation,
   usable,
@@ -70,8 +72,14 @@ export interface AwsCreateRequest {
 
 const offeringsTtlMs = 3_600_000;
 const imageTtlMs = 86_400_000;
-/** The tag a bought capacity reservation carries: the purchase's ClientToken (idempotency). */
-const purchaseTag = 'better-compute:purchase';
+/**
+ * How long after an attempt that may have bought a Capacity Block (its answer was lost) a retry
+ * waits for EC2 to show that block before it decides the attempt bought nothing and buys. EC2's
+ * reads settle in seconds; this is far beyond that.
+ */
+export const purchasePropagationMs = 15 * 60_000;
+/** Clock skew allowed between vps (the purchase's request time) and EC2 (a block's createDate). */
+const purchaseSkewMs = 5 * 60_000;
 /** EC2 allows 50 tags per resource; ours take 3, the rest is for tenant labels. */
 const maxLabels = 40;
 
@@ -661,9 +669,15 @@ export class AwsCompute implements ProviderImpl {
    * account. Idempotent by `idempotencyKey`: the reservation carries a purchase tag (the key's
    * ClientToken), so a retry finds what an earlier attempt bought; an ODCR also sends the
    * ClientToken. A Capacity Block is bought only if EC2 still lists the confirmed offering at no
-   * more than the confirmed price.
+   * more than the confirmed price. PurchaseCapacityBlock has no ClientToken, so after an attempt
+   * that may have bought (`attempt.uncertainSince`) a retry also looks for the block by what it
+   * is, and buys again only once `purchasePropagationMs` passed without EC2 showing one.
    */
-  async purchaseReservation(id: string, context: CallContext): Promise<ExternalReservation> {
+  async purchaseReservation(
+    id: string,
+    context: CallContext,
+    attempt?: PurchaseAttempt,
+  ): Promise<ExternalReservation> {
     if (!this.config.allowPurchases)
       throw new ComputeError(
         'ACCESS_DENIED',
@@ -683,6 +697,21 @@ export class AwsCompute implements ProviderImpl {
     const token = clientToken(context.idempotencyKey);
     const earlier = await this.#purchased(token, signal);
     if (earlier) return earlier;
+    // PurchaseCapacityBlock takes no ClientToken, and EC2's reads are eventually consistent: when an
+    // earlier attempt may have bought (its answer was lost), the block it bought may not show its
+    // tag, or not show at all, yet. Look for it by what it is; until the window passes, never buy
+    // again (nor take a sold-out offering for a failure): the earlier attempt may be the buyer.
+    if (offering.kind === 'block' && attempt?.uncertainSince !== undefined) {
+      const like = await this.#boughtBlock(offering, token, attempt.requestedAt, signal);
+      if (like) return like;
+      if (this.context.clock.now() < attempt.uncertainSince + purchasePropagationMs)
+        throw new ComputeError(
+          'UNAVAILABLE',
+          'an earlier attempt of this purchase may have bought the Capacity Block; EC2 does not show it yet',
+          undefined,
+          { provider: 'aws', reason: 'purchase-propagating' },
+        );
+    }
     const purchaseTags = [
       { Key: tags.managed, Value: 'true' },
       { Key: purchaseTag, Value: token },
@@ -767,6 +796,49 @@ export class AwsCompute implements ProviderImpl {
         { Name: `tag:${purchaseTag}`, Value: [token] },
       ])
     ).find((info) => info.ownerId === account);
+    if (!found) return undefined;
+    const reservation = await this.#asReservation(found, signal);
+    if (!reservation)
+      throw new ComputeError(
+        'CONFLICT',
+        `the capacity reservation this purchase bought (${found.capacityReservationId}) is ${found.state}`,
+        undefined,
+        { provider: 'aws', reason: 'purchase-ended', state: found.state },
+      );
+    return reservation;
+  }
+
+  /**
+   * A Capacity Block of the account matching the offering (type, zone, count, start, duration),
+   * created since the purchase was requested and carrying no other purchase's tag: what an earlier
+   * attempt bought, when its tag does not show yet.
+   */
+  async #boughtBlock(
+    offering: Extract<ParsedOffering, { kind: 'block' }>,
+    token: string,
+    requestedAt: number,
+    signal: AbortSignal,
+  ): Promise<ExternalReservation | undefined> {
+    const { account } = await this.deps.account.verify({ signal, clock: this.context.clock });
+    const hours = offering.hours * 3_600_000;
+    const found = (
+      await this.capacityReservations(signal, undefined, [
+        { Name: 'instance-type', Value: [offering.instanceType] },
+        { Name: 'availability-zone', Value: [offering.zone] },
+      ])
+    ).find(
+      (info) =>
+        info.ownerId === account &&
+        info.block &&
+        info.zone === offering.zone &&
+        info.instanceType === offering.instanceType &&
+        info.total === offering.count &&
+        (info.purchase === undefined || info.purchase === token) &&
+        info.startsAt !== undefined &&
+        Math.abs(info.startsAt - offering.startsAt) < 60_000 &&
+        (info.endsAt === undefined || Math.abs(info.endsAt - info.startsAt - hours) <= 3_600_000) &&
+        (info.createdAt === undefined || info.createdAt >= requestedAt - purchaseSkewMs),
+    );
     if (!found) return undefined;
     const reservation = await this.#asReservation(found, signal);
     if (!reservation)

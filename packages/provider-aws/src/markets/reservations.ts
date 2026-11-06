@@ -28,6 +28,9 @@ export const liveReservationStates = Object.keys(reservationStates);
 /** The prefix of a Capacity Block's reservation id (`cb:cr-…`). */
 export const blockPrefix = 'cb:';
 
+/** The tag a bought capacity reservation carries: the purchase's ClientToken (idempotency). */
+export const purchaseTag = 'better-compute:purchase';
+
 export interface CapacityReservationInfo {
   /** `cr-…` */
   capacityReservationId: string;
@@ -44,6 +47,10 @@ export interface CapacityReservationInfo {
   endsAt?: number;
   targeted: boolean;
   block: boolean;
+  /** createDate, epoch ms. */
+  createdAt?: number;
+  /** The purchase token it was bought with (its `better-compute:purchase` tag), when EC2 shows it. */
+  purchase?: string;
 }
 
 const count = (text: string | undefined): number => {
@@ -73,6 +80,11 @@ export function parseCapacityReservation(
   if (!zone) return undefined;
   const startsAt = time(item.textOf('startDate'));
   const endsAt = time(item.textOf('endDate'));
+  const createdAt = time(item.textOf('createDate'));
+  const purchase = item
+    .items('tagSet')
+    .find((tag) => tag.textOf('key') === purchaseTag)
+    ?.textOf('value');
   return {
     capacityReservationId: id,
     ownerId: item.textOf('ownerId') ?? '',
@@ -87,6 +99,8 @@ export function parseCapacityReservation(
     ...(endsAt !== undefined ? { endsAt } : {}),
     targeted: item.textOf('instanceMatchCriteria') === 'targeted',
     block: item.textOf('reservationType') === 'capacity-block',
+    ...(createdAt !== undefined ? { createdAt } : {}),
+    ...(purchase ? { purchase } : {}),
   };
 }
 
