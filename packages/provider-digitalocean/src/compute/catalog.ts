@@ -1,7 +1,7 @@
 import { ComputeError, isComputeError, type Logger } from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
 import { labels, tagFor } from '../ids.js';
-import type { DoImage } from './types.js';
+import type { DoAction, DoImage } from './types.js';
 
 // Catalog images as DigitalOcean custom images (P3). DO imports a custom image from a URL it
 // fetches itself, so the host hands the provider a source (`catalogImages`) that names a catalog
@@ -279,11 +279,38 @@ export class DoCatalogImages {
     }
     if (status !== 'available') throw importing(ref, 'imageImporting');
     if (image.regions.includes(region)) return image.id;
-    throw fail(
-      'INVALID_STATE',
-      `catalog image ${ref} was imported into another region than ${region}`,
-      'imageRegion',
-    );
+    await this.transfer(image, ref, region, signal);
+    throw importing(ref, 'imageTransferring');
+  }
+
+  /**
+   * Copies an import into another region, unless a copy there is already running (a retried
+   * create finds the transfer its first attempt started). A transfer that errored is started
+   * again. Only an image of ours is ever transferred (`byTag` returns no other).
+   */
+  protected async transfer(
+    image: DoImage,
+    ref: string,
+    region: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    for await (const action of this.#client.pages<DoAction>(
+      `/images/${image.id}/actions`,
+      'actions',
+      { signal, budget: 'observe' },
+    ))
+      if (
+        action.type === 'transfer' &&
+        action.status === 'in-progress' &&
+        action.region_slug === region
+      )
+        return;
+    await this.#client.request('POST', `/images/${image.id}/actions`, {
+      body: { type: 'transfer', region },
+      signal,
+      budget: 'mutate',
+    });
+    this.#log.info('digitalocean.imageTransfer', { ref, image: image.id, region });
   }
 }
 

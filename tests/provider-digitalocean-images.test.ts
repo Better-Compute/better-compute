@@ -295,3 +295,60 @@ describe('catalog image import', () => {
     expect(distributionOf('custom@1', 'Windows')).toBe('Unknown');
   });
 });
+
+describe('catalog image region transfer', () => {
+  it('copies an import into another region once, then creates there', async () => {
+    const emu = new DoEmulator({ now: () => t0 });
+    emu.transferReads = 3;
+    const imported = seedImage(emu.state, { tags: ourImageTags, regions: ['nyc3'] });
+    const { source } = catalogSource();
+    const compute = await build(
+      emu,
+      { ...doAccount, regions: ['nyc3', 'sfo3'] },
+      { catalogImages: source },
+    );
+    const sfo = request({ offerId: 'sfo3/s-1vcpu-1gb', image: catalogRef });
+    const transfers = () =>
+      emu.requests.filter(
+        (r) => r.method === 'POST' && r.url.pathname === `/v2/images/${imported.id}/actions`,
+      );
+
+    const first = await failure(compute.create(sfo, ctx('k')));
+    expect(first.code).toBe('UNAVAILABLE');
+    expect(first.details).toMatchObject({ reason: 'imageTransferring', retryAfterMs: 30_000 });
+    expect(transfers().map((r) => r.body)).toEqual([{ type: 'transfer', region: 'sfo3' }]);
+
+    // While the copy runs, a retry starts no second one.
+    await failure(compute.create(sfo, ctx('k')));
+    await failure(compute.create(sfo, ctx('k')));
+    expect(transfers()).toHaveLength(1);
+
+    await compute.create(sfo, ctx('k'));
+    expect((dropletPosts(emu)[0]!.body as { image: unknown; region: string })).toMatchObject({
+      image: imported.id,
+      region: 'sfo3',
+    });
+    expect(imagePosts(emu)).toHaveLength(0);
+  });
+
+  it('a transfer that errored is started again', async () => {
+    const emu = new DoEmulator({ now: () => t0 });
+    emu.transferReads = 10;
+    const imported = seedImage(emu.state, { tags: ourImageTags, regions: ['nyc3'] });
+    const { source } = catalogSource();
+    const compute = await build(
+      emu,
+      { ...doAccount, regions: ['nyc3', 'sfo3'] },
+      { catalogImages: source },
+    );
+    const sfo = request({ offerId: 'sfo3/s-1vcpu-1gb', image: catalogRef });
+    await failure(compute.create(sfo, ctx('k')));
+    const action = [...emu.state.actions.values()].find((a) => a.resource_id === imported.id);
+    action!.status = 'errored';
+    await failure(compute.create(sfo, ctx('k')));
+    const posts = emu.requests.filter(
+      (r) => r.method === 'POST' && r.url.pathname === `/v2/images/${imported.id}/actions`,
+    );
+    expect(posts).toHaveLength(2);
+  });
+});
