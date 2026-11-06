@@ -257,6 +257,8 @@ function wireInstance(instance: InstanceSpec): Json {
   // Set only when used, so other specs hash as before.
   if (instance.identityRebindRef) wire.identityRebindRef = instance.identityRebindRef;
   if (instance.sshFromHostOnly) wire.sshFromHostOnly = true;
+  // (AWS A7) Set only when used, so other specs hash as before.
+  if (instance.awsRole) wire.awsRole = instance.awsRole;
   const placement: JsonObject = {};
   if (instance.placement?.cpus) placement.cpus = instance.placement.cpus;
   if (instance.placement?.mems) placement.mems = instance.placement.mems;

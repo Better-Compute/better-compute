@@ -66,6 +66,17 @@ describe('NodeSpec instances section (v0.5)', () => {
     );
   });
 
+  it('carries the AWS workload role, only when set (AWS A7)', async () => {
+    const role = 'arn:aws:iam::222222222222:role/ml-readers';
+    const wire = await wireNodeSpec(tx, { instances: [instance({ awsRole: role })] });
+    expect(fromJson(NodeSpecSchema, wire as never).instances!.instances[0]!.awsRole).toBe(role);
+    const plain = await wireNodeSpec(tx, { instances: [instance()] });
+    expect(fromJson(NodeSpecSchema, plain as never).instances!.instances[0]!.awsRole).toBe('');
+    expect(specHash(await wireNodeSpec(tx, { instances: [instance({ awsRole: '' })] }))).toBe(
+      specHash(plain),
+    );
+  });
+
   it('carries a NIC’s gateway and nameservers for the guest’s network-config (v1.1)', async () => {
     const nic = { network: 'br0', mac: '02:00:00:00:00:01', addresses: ['10.0.0.2/24'] };
     const wire = await wireNodeSpec(tx, {

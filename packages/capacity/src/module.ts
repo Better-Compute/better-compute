@@ -651,6 +651,29 @@ export interface SetQuotaInput {
   max: number;
 }
 
+/**
+ * (AWS A7) `policy.workloadRoles`: `{ aws?: string[] }`, IAM role ARN globs with a literal account
+ * (vps `awsRoleGlobPattern`; vps matches them when an instance names a role), at most 64.
+ */
+function checkWorkloadRoles(roles: unknown): void {
+  if (roles === undefined) return;
+  if (typeof roles !== 'object' || roles === null || Array.isArray(roles))
+    fail('policy.workloadRoles must be an object');
+  for (const key of Object.keys(roles))
+    if (key !== 'aws') fail(`policy.workloadRoles.${key.slice(0, 32)} is not a known field`);
+  const aws = (roles as { aws?: unknown }).aws;
+  if (aws === undefined) return;
+  const glob = /^arn:(?:aws|aws-cn|aws-us-gov):iam::\d{12}:role\/[\w+=,.@/*?-]{1,512}$/;
+  if (
+    !Array.isArray(aws) ||
+    aws.length > 64 ||
+    !aws.every((entry) => typeof entry === 'string' && glob.test(entry))
+  )
+    fail(
+      'policy.workloadRoles.aws lists at most 64 IAM role ARNs (arn:aws:iam::<12-digit account>:role/<name>; * and ? in the name)',
+    );
+}
+
 /** A pool policy object; the fields capacity enforces are type-checked. */
 function checkPolicy(policy: unknown): PoolPolicy {
   if (typeof policy !== 'object' || policy === null || Array.isArray(policy))
@@ -658,6 +681,7 @@ function checkPolicy(policy: unknown): PoolPolicy {
   const singleTenant = (policy as Record<string, unknown>).singleTenant;
   if (singleTenant !== undefined && typeof singleTenant !== 'boolean')
     fail('policy.singleTenant must be true or false');
+  checkWorkloadRoles((policy as Record<string, unknown>).workloadRoles);
   const billing = (policy as Record<string, unknown>).billing;
   if (billing !== undefined) {
     if (typeof billing !== 'object' || billing === null || Array.isArray(billing))

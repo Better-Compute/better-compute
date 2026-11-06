@@ -1,4 +1,10 @@
 import {
+  assertWorkloadIdentity,
+  parseWorkloadIdentity,
+  type InstanceWorkloadIdentity,
+  type PoolWorkloadPolicy,
+} from './workload-roles.js';
+import {
   ComputeError,
   draftId,
   instanceStateTable,
@@ -157,6 +163,8 @@ export interface CreateInstanceInput {
    * creating in another tenant) names someone else, as `instances.attach` does (D7).
    */
   ownerIdentityId?: string;
+  /** (AWS A7) The IAM role the instance's workloads assume (hosted pools that allow it). */
+  workloadIdentity?: InstanceWorkloadIdentity;
   idempotencyKey: string;
   /**
    * §9.1 async-with-wait: hold the answer up to `timeoutMs` (≤ 30 s) until the instance leaves
@@ -288,6 +296,7 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
     'subnetId',
     'labels',
     'ownerIdentityId',
+    'workloadIdentity',
     'idempotencyKey',
     'wait',
   ]);
@@ -345,6 +354,8 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
       fail('ownerIdentityId is invalid');
     result.ownerIdentityId = input.ownerIdentityId;
   }
+  if (input.workloadIdentity !== undefined)
+    result.workloadIdentity = parseWorkloadIdentity(input.workloadIdentity);
   if (input.wait !== undefined) {
     if (typeof input.wait !== 'object' || input.wait === null || Array.isArray(input.wait))
       fail('wait must be an object');
@@ -487,6 +498,7 @@ interface RawInstance {
   subnet_id: string | null;
   labels: Record<string, string> | string | null;
   network_external_name: string | null;
+  aws_role_arn?: string | null;
 }
 
 /** How an instance came to be (vps/0024): created by better-compute, or an attached provider machine. */
@@ -616,6 +628,8 @@ export interface InstanceRow {
   networkExternalName?: string;
   /** The tenant's provider labels (`instances.create`, vps/0043). */
   labels?: Record<string, string>;
+  /** (AWS A7) The IAM role its workloads assume (`instances.create`, vps/0096). */
+  awsRoleArn?: string;
 }
 
 const json = <T>(value: T | string): T =>
@@ -675,6 +689,7 @@ function toRow(raw: RawInstance): InstanceRow {
   if (raw.network_external_name !== null && raw.network_external_name !== undefined)
     row.networkExternalName = raw.network_external_name;
   if (raw.labels !== null && raw.labels !== undefined) row.labels = json(raw.labels);
+  if (raw.aws_role_arn !== null && raw.aws_role_arn !== undefined) row.awsRoleArn = raw.aws_role_arn;
   return row;
 }
 
@@ -687,7 +702,7 @@ const columns = `i.id, i.tenant_id, i.pool_id, i.project_id, i.flavor_id, i.flav
   (extract(epoch FROM i.host_cert_valid_before) * 1000)::float8 AS host_cert_valid_ms, i.network_policy,
   i.identity_rebind_ref, i.origin, i.on_delete, i.provider_claimed_at IS NOT NULL AS claimed,
   coalesce(i.reboot_requested_at > coalesce(i.rebooted_at, '-infinity'), false) AS reboot_pending,
-  i.reboot_hard, i.network_id, i.subnet_id, i.labels,
+  i.reboot_hard, i.network_id, i.subnet_id, i.labels, i.aws_role_arn,
   (SELECT n.external_name FROM networks n WHERE n.id = i.network_id) AS network_external_name`;
 
 export async function readInstance(
@@ -729,6 +744,7 @@ export function instanceView(row: InstanceRow): Instance {
   if (row.networkId !== undefined) view.networkId = row.networkId;
   if (row.subnetId !== undefined) view.subnetId = row.subnetId;
   if (row.labels !== undefined) view.labels = { ...row.labels };
+  if (row.awsRoleArn !== undefined) view.workloadIdentity = { awsRoleArn: row.awsRoleArn };
   return view;
 }
 
@@ -1296,6 +1312,19 @@ export async function prepareCreateInstance(
   } else if (!pool.providerAccountId)
     throw new ComputeError('INVALID_STATE', `Provider pool ${pool.id} has no provider account`);
   else image = await deps.images?.resolve(tx, input.tenantId, input.imageId);
+  // (AWS A7) A workload role: hosted pools with workload identity on that list the role.
+  if (input.workloadIdentity !== undefined) {
+    const { rows: policies } = await tx.query<{ policy: PoolWorkloadPolicy | string | null }>(
+      'SELECT policy FROM pools WHERE id = $1',
+      [pool.id],
+    );
+    const stored = policies[0]?.policy;
+    assertWorkloadIdentity(
+      pool,
+      typeof stored === 'string' ? (JSON.parse(stored) as PoolWorkloadPolicy) : stored,
+      input.workloadIdentity,
+    );
+  }
 
   // (v1.0) A tenant network: provider pools only, ready, on the pool's account. Locked until this
   // transaction commits, so networks.delete sees the draft that is on it.
@@ -1332,9 +1361,10 @@ export async function prepareCreateInstance(
       `INSERT INTO instances (id, tenant_id, pool_id, project_id, flavor_id, flavor, image_id, image,
                               ssh_keys, user_data, runtime, draft, state, desired_state,
                               provider_account_id, owner_identity_id, agent_id, delegation_id,
-                              idempotency_key, request_hash, version, network_id, subnet_id, labels)
+                              idempotency_key, request_hash, version, network_id, subnet_id, labels,
+                              aws_role_arn)
        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::text[], $10, $11, true, 'pending', $12,
-               $13, $14, $15, $16, $17, decode($18, 'hex'), 1, $19, $20, $21::jsonb)`,
+               $13, $14, $15, $16, $17, decode($18, 'hex'), 1, $19, $20, $21::jsonb, $22)`,
       [
         instanceId,
         input.tenantId,
@@ -1357,6 +1387,7 @@ export async function prepareCreateInstance(
         placement?.networkId ?? null,
         placement?.subnetId ?? null,
         input.labels ? JSON.stringify(input.labels) : null,
+        input.workloadIdentity?.awsRoleArn ?? null,
       ],
     );
   await context.authz.upsert(tx, {

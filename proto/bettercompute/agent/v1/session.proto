@@ -631,6 +631,11 @@ message InstanceSpec {
   InstancePlacement placement = 16;
   // (v1.1, agent memory) Persistent volumes to attach (InstancesSection.volumes).
   repeated InstanceVolume volumes = 17;
+  // (AWS A7) The IAM role ARN the guest's metadata endpoint serves AWS credentials for. bcd exchanges
+  // the instance's workload token (audience sts.amazonaws.com) with STS AssumeRoleWithWebIdentity
+  // (RoleSessionName bc-<instance_id>) and serves the result on the AWS-compatible
+  // /latest/meta-data/iam/security-credentials/ paths. Empty: no AWS credentials are served.
+  string aws_role = 18;
 }
 
 message InstancePlacement {
