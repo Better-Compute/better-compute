@@ -20,7 +20,8 @@ const (
 	// KubeletConf is the kubelet's kubeconfig, written by kubeadm join: its presence means joined.
 	KubeletConf = "/etc/kubernetes/kubelet.conf"
 	// EksKubeletConf is the kubelet's kubeconfig on an EKS node (mode "eks"), written by nodeadm: its
-	// user is an exec credential plugin (aws-iam-authenticator) with the instance role.
+	// user is an exec credential plugin (`aws eks get-token`) with the instance role, and its CA is
+	// /etc/kubernetes/pki/ca.crt.
 	EksKubeletConf = "/var/lib/kubelet/kubeconfig"
 	// StateFile records what the unit manages: the cluster, the Node name, the labels and taints it
 	// set, and whether the device plugin may run (Manager reads it, unprivileged: 0644). Everything

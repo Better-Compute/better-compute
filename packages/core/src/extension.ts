@@ -904,6 +904,8 @@ export interface ProviderKubernetes {
    * (`policy.kubernetes`): for EKS, nodeadm's cluster (`eks`). Plain values only, never credentials.
    */
   listClusters?(context: CallContext): Promise<ProviderKubernetesCluster[]>;
+  /** (AWS A9) Clusters are regional only (EKS): a zone as a cluster location is refused at create. */
+  readonly regionalOnly?: boolean;
 }
 
 /** (AWS A9) One cluster of `ProviderKubernetes.listClusters`. */

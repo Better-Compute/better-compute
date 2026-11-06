@@ -117,6 +117,8 @@ const busyState: Record<'create' | 'update' | 'delete', ProviderResourceState['s
 const segment = (value: string) => encodeURIComponent(value);
 
 export class AwsKubernetes implements ProviderKubernetes {
+  /** EKS clusters are regional (D-EKS-4): the module refuses a zone as their location at create. */
+  readonly regionalOnly = true;
   readonly #client: EksClient;
   readonly #ec2: QueryClient;
   readonly #types: InstanceTypeCache;

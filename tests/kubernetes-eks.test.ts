@@ -201,6 +201,24 @@ describe('the kubernetes module on EKS', () => {
   });
 });
 
+describe('cluster locations on an AWS account', () => {
+  it('refuses a zone as a cluster location at create: EKS clusters are regional', async () => {
+    const before = eks.calls('CreateCluster').length;
+    await expect(
+      api.kubernetesClusters.create(acme, {
+        tenantId: acmeTenant,
+        poolId,
+        name: 'zonal',
+        mode: 'standard',
+        location: 'us-east-1a',
+        nodePools: [{ name: 'system', machineType: 'm7i.large', nodeCount: 1 }],
+        idempotencyKey: 'zonal-1',
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT', message: expect.stringMatching(/regional.*us-east-1/) });
+    expect(eks.calls('CreateCluster').length).toBe(before);
+  });
+});
+
 describe('providerAccounts.clusters on an AWS account', () => {
   it('lists the account clusters with the nodeadm settings k8s-join mode eks takes', async () => {
     const before = eks.calls('ListClusters').length;

@@ -60,7 +60,7 @@ func eksSettings(ca string, extra string) string {
 // NodeConfig's taints.
 func nodeadmJoined(c *fakeCluster, server string) {
 	c.sys.Set(EksKubeletConf, "apiVersion: v1\nclusters:\n- cluster:\n    certificate-authority: /etc/kubernetes/pki/ca.crt\n    server: "+server+
-		"\n  name: kubernetes\nusers:\n- name: kubelet\n  user:\n    exec:\n      apiVersion: client.authentication.k8s.io/v1beta1\n      command: aws-iam-authenticator\n      args: [token, -i, training, --region, us-east-1]\n")
+		"\n  name: kubernetes\nusers:\n- name: kubelet\n  user:\n    exec:\n      apiVersion: client.authentication.k8s.io/v1beta1\n      command: aws\n      args: [eks, get-token, --cluster-name, training, --region, us-east-1]\n")
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	n := &nodeObject{}
