@@ -37,6 +37,11 @@ export const networkTags = {
   firewallPrefix: 'better-compute:firewall:',
   /** `better-compute:deny:<ingress|egress>:<n>` on a network ACL: entry n belongs to the firewall named by the value. */
   denyPrefix: 'better-compute:deny:',
+  /**
+   * On a security group rule: EFA's self-referencing all-traffic rule of a network's group (config
+   * `efa: 'auto'`). It carries no firewall key, so firewall diffing never sees or revokes it.
+   */
+  efa: 'better-compute:efa',
 } as const;
 
 /** The VPC CIDR a network gets when its spec names none. */
@@ -452,6 +457,7 @@ export class AwsNetworks implements ProviderNetworks {
     const igw = await this.#ensureGateway(spec.name, vpc.id, signal);
     await this.#ensureDefaultRoute(spec.name, vpc.id, igw, signal);
     await this.#ensureAclBaseline(spec.name, vpc.id, signal);
+    await this.#reconcileEfaRule(spec.name, vpc.id, signal);
     await this.#sweepTagGroups(vpc.id, signal);
     return state(vpc.id, 'ready');
   }
@@ -1083,17 +1089,23 @@ export class AwsNetworks implements ProviderNetworks {
   // --- Firewalls -------------------------------------------------------------------------------------
 
   async #rulesOf(firewall: string, signal: AbortSignal): Promise<Rule[]> {
+    return this.#rulesWhere(
+      [{ Name: `tag:${networkTags.firewallPrefix}${firewall}`, Value: ['true'] }],
+      signal,
+    );
+  }
+
+  async #rulesWhere(
+    filters: { Name: string; Value: string[] }[],
+    signal: AbortSignal,
+  ): Promise<Rule[]> {
     const out: Rule[] = [];
     const seen = new Set<string>();
     let token: string | undefined;
     do {
       const doc = await this.#call(
         'DescribeSecurityGroupRules',
-        {
-          Filter: [{ Name: `tag:${networkTags.firewallPrefix}${firewall}`, Value: ['true'] }],
-          MaxResults: 1000,
-          NextToken: token,
-        },
+        { Filter: filters, MaxResults: 1000, NextToken: token },
         signal,
       );
       out.push(...doc.items('securityGroupRuleSet').map(parseRule));
@@ -1111,6 +1123,72 @@ export class AwsNetworks implements ProviderNetworks {
       if (token) seen.add(token);
     } while (token);
     return out;
+  }
+
+  /**
+   * EFA's self-referencing rule (AWS A10): with config `efa: 'auto'`, the network's group
+   * (`bc-net-<network>`, on every machine of the network and on each of its EFA interfaces) allows
+   * all traffic from and to itself, as EFA's OS-bypass traffic needs. The two rules carry
+   * `better-compute:efa` and no firewall key, so firewall diffing never revokes them; with `efa: 'off'`
+   * the rules better-compute made are revoked again, and a rule of the same content that someone
+   * else made is left alone.
+   */
+  async #reconcileEfaRule(network: string, vpcId: string, signal: AbortSignal): Promise<void> {
+    const have = await this.#rulesWhere(
+      [
+        { Name: `tag:${networkTags.efa}`, Value: ['true'] },
+        { Name: `tag:${networkTags.network}`, Value: [network] },
+      ],
+      signal,
+    );
+    const keep = new Set<string>();
+    if (this.#config.efa === 'auto') {
+      const name = AwsNetworks.groupName('network', network);
+      const groupId = (await this.#ensureGroups(vpcId, [{ name }], network, signal)).get(name)!;
+      const self = `sg:${groupId}`;
+      for (const egress of [false, true]) {
+        const found = have.find(
+          (rule) =>
+            rule.groupId === groupId &&
+            rule.egress === egress &&
+            rule.protocol === '-1' &&
+            rule.cidr === self,
+        );
+        if (found) {
+          keep.add(found.id);
+          continue;
+        }
+        // A rule of the same content (someone else's) already allows it: Duplicate, and nothing to do.
+        await this.#tolerate(['InvalidPermission.Duplicate'], () =>
+          this.#call(
+            egress ? 'AuthorizeSecurityGroupEgress' : 'AuthorizeSecurityGroupIngress',
+            {
+              GroupId: groupId,
+              IpPermissions: [{ IpProtocol: '-1', Groups: [{ GroupId: groupId }] }],
+              TagSpecification: [
+                {
+                  ResourceType: 'security-group-rule',
+                  Tag: [
+                    { Key: networkTags.efa, Value: 'true' },
+                    { Key: networkTags.network, Value: network },
+                  ],
+                },
+              ],
+            },
+            signal,
+          ),
+        );
+      }
+    }
+    for (const rule of have)
+      if (!keep.has(rule.id))
+        await this.#tolerate(['*NotFound'], () =>
+          this.#call(
+            rule.egress ? 'RevokeSecurityGroupEgress' : 'RevokeSecurityGroupIngress',
+            { GroupId: rule.groupId, SecurityGroupRuleId: [rule.id] },
+            signal,
+          ),
+        );
   }
 
   async ensureFirewall(
@@ -1774,7 +1852,13 @@ function parseRule(item: XmlElement): Rule {
     protocol: item.textOf('ipProtocol') ?? '',
     from: Number(item.textOf('fromPort') ?? -1),
     to: Number(item.textOf('toPort') ?? -1),
-    cidr: item.textOf('cidrIpv4') ?? item.textOf('cidrIpv6') ?? '',
+    // A rule matching a security group (EFA's self rule) has no range: its peer is the group.
+    cidr:
+      item.textOf('cidrIpv4') ??
+      item.textOf('cidrIpv6') ??
+      (item.child('referencedGroupInfo')?.textOf('groupId')
+        ? `sg:${item.child('referencedGroupInfo')!.textOf('groupId')}`
+        : ''),
     tags: tagMap(item),
   };
 }

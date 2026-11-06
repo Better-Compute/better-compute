@@ -1341,3 +1341,96 @@ describe('networks: a rule that changes action', () => {
     expect([...acl.tags.keys()].some((k) => k.startsWith('better-compute:deny:'))).toBe(false);
   });
 });
+
+describe('networks: EFA self rule (AWS A10)', () => {
+  const groupOf = (w: Awaited<ReturnType<typeof world>>, network: string) =>
+    [...w.vpc.groups.values()].find(
+      (g) => g.name === `bc-net-${network}` && g.vpcId === w.vpc.vpcByName(network)!.id,
+    );
+  const selfRules = (w: Awaited<ReturnType<typeof world>>, groupId: string) =>
+    [...w.vpc.rules.values()].filter(
+      (r) => r.groupId === groupId && r.referencedGroupId === groupId,
+    );
+
+  it("efa auto gives the network's group all traffic from and to itself, tagged as EFA's", async () => {
+    const w = await world({ efa: 'auto' });
+    const ready = await w.settle(() => w.networks.ensureNetwork({ name: 'bc-net-1' }, w.call()));
+    expect(ready.state).toBe('ready');
+    const group = groupOf(w, 'bc-net-1')!;
+    expect(group).toBeDefined();
+    const rules = selfRules(w, group.id);
+    expect(rules.map((r) => [r.egress, r.protocol]).sort()).toEqual([
+      [false, '-1'],
+      [true, '-1'],
+    ]);
+    for (const rule of rules) {
+      expect(rule.tags.get('better-compute:efa')).toBe('true');
+      expect(rule.tags.get('better-compute:network')).toBe('bc-net-1');
+      expect([...rule.tags.keys()].some((k) => k.startsWith('better-compute:firewall:'))).toBe(
+        false,
+      );
+    }
+    // Ensuring again authorizes nothing.
+    const before =
+      w.emu.calls('AuthorizeSecurityGroupIngress').length +
+      w.emu.calls('AuthorizeSecurityGroupEgress').length;
+    await w.networks.ensureNetwork({ name: 'bc-net-1' }, w.call());
+    expect(
+      w.emu.calls('AuthorizeSecurityGroupIngress').length +
+        w.emu.calls('AuthorizeSecurityGroupEgress').length,
+    ).toBe(before);
+  });
+
+  it('firewall changes on the network never revoke the self rule', async () => {
+    const w = await world({ efa: 'auto' });
+    await w.settle(() => w.networks.ensureNetwork({ name: 'bc-net-1' }, w.call()));
+    const spec: ProviderFirewallSpec = {
+      network: 'bc-net-1',
+      name: 'bc-fw-1',
+      direction: 'ingress',
+      action: 'allow',
+      priority: 1000,
+      rules: [{ protocol: 'all' }],
+      sources: ['10.64.0.0/16'],
+    };
+    await w.networks.ensureFirewall(spec, w.call());
+    await w.networks.ensureFirewall({ ...spec, disabled: true }, w.call());
+    await w.networks.ensureFirewall({ ...spec, action: 'deny' }, w.call());
+    await w.networks.deleteFirewall('bc-fw-1', w.call());
+    expect(selfRules(w, groupOf(w, 'bc-net-1')!.id)).toHaveLength(2);
+  });
+
+  it('efa off revokes the self rule it made, and makes none', async () => {
+    const auto = await world({ efa: 'auto' });
+    await auto.settle(() => auto.networks.ensureNetwork({ name: 'bc-net-1' }, auto.call()));
+    const group = groupOf(auto, 'bc-net-1')!;
+    // The same account, now configured efa off.
+    const provider = awsProvider({ fetch: auto.emu.fetch, credentials: auto.emu.ambient });
+    const off = (await provider.create(
+      awsConfig.parse({ region: 'us-east-1', zones: ['us-east-1a', 'us-east-1b'] }) as AwsConfig,
+      {
+        clock: auto.emu.clock,
+        log: quiet,
+        secrets: { resolve: async () => '' },
+        account: { id: 'pa_platform', tenantId: 'root', platform: true },
+      },
+    )) as AwsCompute;
+    const ready = await auto.settle(() =>
+      off.networks!.ensureNetwork({ name: 'bc-net-1' }, auto.call()),
+    );
+    expect(ready.state).toBe('ready');
+    expect(selfRules(auto, group.id)).toHaveLength(0);
+
+    const plain = await world();
+    await plain.settle(() => plain.networks.ensureNetwork({ name: 'bc-net-1' }, plain.call()));
+    expect([...plain.vpc.rules.values()].some((r) => r.referencedGroupId)).toBe(false);
+  });
+
+  it('a group referenced only by itself is still deleted with its network', async () => {
+    const w = await world({ efa: 'auto' });
+    await w.settle(() => w.networks.ensureNetwork({ name: 'bc-net-1' }, w.call()));
+    const deleted = await w.settle(() => w.networks.deleteNetwork('bc-net-1', w.call()));
+    expect(deleted.state).toBe('deleted');
+    expect([...w.vpc.groups.values()].some((g) => g.name === 'bc-net-bc-net-1')).toBe(false);
+  });
+});

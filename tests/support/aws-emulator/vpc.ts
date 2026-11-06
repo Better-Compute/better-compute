@@ -59,6 +59,8 @@ export interface EmuRule {
   to: number;
   cidrIpv4?: string;
   cidrIpv6?: string;
+  /** A rule that matches a security group (UserIdGroupPairs) instead of a range. */
+  referencedGroupId?: string;
   tags: Tags;
 }
 
@@ -376,6 +378,9 @@ export class VpcEmulator {
       el('toPort', rule.to),
       el('cidrIpv4', rule.cidrIpv4),
       el('cidrIpv6', rule.cidrIpv6),
+      rule.referencedGroupId
+        ? `<referencedGroupInfo>${el('groupId', rule.referencedGroupId)}${el('userId', '222222222222')}</referencedGroupInfo>`
+        : '',
       tagSet(rule.tags),
     ].join('');
   }
@@ -779,6 +784,9 @@ export class VpcEmulator {
           return ec2Error('CannotDelete', 'the default security group cannot be deleted');
         if (this.#liveInstances().some((instance) => instance.groups.some((g) => g.id === id)))
           return ec2Error('DependencyViolation', `resource ${id} has a dependent object`);
+        // Another group's rule naming this one blocks the delete; a rule naming its own group does not.
+        if ([...this.rules.values()].some((r) => r.referencedGroupId === id && r.groupId !== id))
+          return ec2Error('DependencyViolation', `resource ${id} has a dependent object`);
         this.groups.delete(id);
         for (const [ruleId, rule] of this.rules) if (rule.groupId === id) this.rules.delete(ruleId);
         return ec2Response(action, el('return', true));
@@ -814,6 +822,15 @@ export class VpcEmulator {
               ...base,
               cidrIpv6: p.get(`IpPermissions.${n}.Ipv6Ranges.${m}.CidrIpv6`)!,
             });
+          for (let m = 1; p.has(`IpPermissions.${n}.Groups.${m}.GroupId`); m++) {
+            const referenced = p.get(`IpPermissions.${n}.Groups.${m}.GroupId`)!;
+            if (!this.groups.has(referenced))
+              return ec2Error(
+                'InvalidGroup.NotFound',
+                `The security group '${referenced}' does not exist`,
+              );
+            wanted.push({ ...base, referencedGroupId: referenced });
+          }
         }
         const same = (a: Omit<EmuRule, 'id' | 'tags'>, b: Omit<EmuRule, 'id' | 'tags'>) =>
           a.groupId === b.groupId &&
@@ -822,7 +839,8 @@ export class VpcEmulator {
           a.from === b.from &&
           a.to === b.to &&
           a.cidrIpv4 === b.cidrIpv4 &&
-          a.cidrIpv6 === b.cidrIpv6;
+          a.cidrIpv6 === b.cidrIpv6 &&
+          a.referencedGroupId === b.referencedGroupId;
         if (wanted.some((rule) => [...this.rules.values()].some((have) => same(have, rule))))
           return ec2Error('InvalidPermission.Duplicate', 'the specified rule already exists');
         const count = [...this.rules.values()].filter(
