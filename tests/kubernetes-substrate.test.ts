@@ -256,6 +256,13 @@ describe('substrate: refusals', () => {
     expect(await world.substrate(pool.id)).toMatchObject({ state: 'error', cluster_id: null });
     expect((await world.substrate(pool.id)).message).toMatch(/kubernetes\(\{ substrate \}\)/);
     expect(world.cloud.calls).toEqual([]);
+    // Settled on the pool's version: the 30 s sweep leaves it to the 2 minute refresh until the pool changes.
+    const { rows: versions } = await world.fixture.database.query<{ pool: string; substrate: string | null }>(
+      `SELECT p.version::text AS pool, s.pool_version::text AS substrate
+         FROM pools p JOIN kubernetes_pool_substrates s ON s.pool_id = p.id WHERE p.id = $1`,
+      [pool.id],
+    );
+    expect(versions[0]!.substrate).toBe(versions[0]!.pool);
     // Doctor says why: pools declare substrates the module cannot run, and a substrate is in error.
     const findings = await world.module.selfCheck!({ sql: world.fixture.database } as never);
     expect(findings).toEqual(

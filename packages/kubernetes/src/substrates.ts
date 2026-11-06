@@ -859,6 +859,15 @@ async function prepare(
     }
     const wanted = pool !== undefined && !pool.archived && (substrate !== undefined || parseError !== undefined);
     if (!wanted) return row && row.state !== 'deleted' ? { teardown: row } : {};
+    // An error settles the row on the pool's version: the 30 s sweep leaves it until the pool changes (the 2 minute
+    // refresh retries it).
+    const settle = async () => {
+      await tx.query(
+        `UPDATE kubernetes_pool_substrates SET pool_version = $2
+          WHERE pool_id = $1 AND pool_version IS DISTINCT FROM $2`,
+        [poolId, pool!.version],
+      );
+    };
     if (parseError !== undefined || !substrate) {
       if (row && row.state !== 'deleted' && (row.state !== 'error' || row.message !== parseError)) {
         await tx.query(
@@ -868,6 +877,7 @@ async function prepare(
         );
         await publishSubstrate(deps, tx, row, 'kubernetes.substrate.error', { message: parseError ?? '' });
       }
+      if (row && row.state !== 'deleted') await settle();
       return {};
     }
     const identity = substrateIdentity(substrate);
@@ -914,6 +924,7 @@ async function prepare(
         );
         await publishSubstrate(deps, tx, row, 'kubernetes.substrate.error', { message });
       }
+      await settle();
       return {};
     }
     if (row.cluster_id === null) {
@@ -936,6 +947,7 @@ async function prepare(
           );
           await publishSubstrate(deps, tx, row, 'kubernetes.substrate.error', { message: error.message.slice(0, 500) });
         }
+        await settle();
         return {};
       }
       row = (await readSubstrate(tx, poolId, { lock: true }))!;
@@ -960,6 +972,7 @@ async function prepare(
           );
           await publishSubstrate(deps, tx, row, 'kubernetes.substrate.error', { message });
         }
+        await settle();
         return {};
       }
       row = (await readSubstrate(tx, poolId, { lock: true }))!;
