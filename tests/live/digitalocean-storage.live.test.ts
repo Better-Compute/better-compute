@@ -314,7 +314,11 @@ describe.skipIf(!enabled)('provider-digitalocean storage live', () => {
   it('puts one CDN endpoint in front of the bucket', { timeout: 300_000 }, async () => {
     const created = await until(
       'the CDN endpoint',
-      () => resources.ensure({ kind: 'do.cdn-endpoint', name: `${prefix}-cdn`, spec: { origin } }, call('c1')),
+      () =>
+        resources.ensure(
+          { kind: 'do.cdn-endpoint', name: `${prefix}-cdn`, spec: { origin }, parent: `${region}/${bucket}` },
+          call('c1'),
+        ),
       (s) => s.state === 'ready',
       60_000,
     );
@@ -323,7 +327,13 @@ describe.skipIf(!enabled)('provider-digitalocean storage live', () => {
     const second = await api('POST', '/cdn/endpoints', { origin, ttl: 3600 });
     expect(second.status).toBeGreaterThanOrEqual(400);
     const again = await resources.ensure(
-      { kind: 'do.cdn-endpoint', name: `${prefix}-cdn`, spec: { origin, ttl: 600 }, id: created.id },
+      {
+        kind: 'do.cdn-endpoint',
+        name: `${prefix}-cdn`,
+        spec: { origin, ttl: 600 },
+        id: created.id,
+        parent: `${region}/${bucket}`,
+      },
       call('c1'),
     );
     expect(again).toMatchObject({ id: created.id, outputs: { ttl: '600' } });

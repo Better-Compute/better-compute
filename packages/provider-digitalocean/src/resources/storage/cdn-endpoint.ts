@@ -2,13 +2,18 @@ import { field, manifest, type CallContext } from '@better-compute/core';
 import type { DoClient } from '../../client/http.js';
 import { spacesBucketPattern, spacesRegionPattern, type SpacesClient } from '../../spaces/s3.js';
 import { hasCode, storageError, type DoResourceKind, type DoResourceState } from './kind.js';
-import { bucketOwnership } from './spaces-bucket.js';
+import { bucketOwnership, otherTenant, readMarker, sameTenant } from './spaces-bucket.js';
 
 // `do.cdn-endpoint`: DigitalOcean's CDN in front of a Spaces bucket (`/v2/cdn/endpoints`). The
 // origin must be a bucket this deployment manages (its marker object, see do.spaces-bucket), on
 // `ensure` and on `delete`: endpoints carry no names or tags, so the origin bucket is what ties
 // one to better-compute. DO allows one endpoint per origin, which is what makes `ensure`
 // idempotent: it looks the endpoint up by origin.
+//
+// An endpoint lives in its origin bucket (`parent: 'do.spaces-bucket'`): `ensure` requires the
+// request's `parent`, the dispatcher's own tenant-scoped bucket row, and it must be the bucket the
+// origin names (`<region>/<bucket>`). The bucket's marker must also name the request's tenant, so
+// one tenant never fronts, takes over (by origin), repoints or purges another tenant's bucket.
 
 /** The TTLs (seconds) DigitalOcean's CDN accepts. */
 export const cdnTtls = [60, 600, 3600, 86_400, 604_800] as const;
@@ -99,20 +104,15 @@ export function cdnEndpointKind(deps: {
   }
 
   /**
-   * Refuses an endpoint whose origin is not a bucket this deployment manages: on `ensure` the
-   * reason is `unmanagedOrigin` (manage the bucket first); anywhere else it is the contract's
-   * `notManaged`.
+   * Refuses (the contract's `notManaged`) an endpoint whose origin is not a bucket this deployment
+   * manages. (`ensure` checks its origin itself, with reason `unmanagedOrigin`.)
    */
-  async function requireManagedOrigin(
-    origin: string,
-    signal: AbortSignal,
-    reason: 'unmanagedOrigin' | 'notManaged' = 'notManaged',
-  ): Promise<void> {
+  async function requireManagedOrigin(origin: string, signal: AbortSignal): Promise<void> {
     if ((await originOwner(origin, signal)) !== 'mine')
       throw storageError(
         'INVALID_STATE',
         `The CDN origin ${origin} is not a bucket better-compute manages`,
-        reason,
+        'notManaged',
       );
   }
 
@@ -147,8 +147,9 @@ export function cdnEndpointKind(deps: {
     outputs: ['origin', 'endpoint', 'url', 'ttl', 'customDomain'],
     regional: false,
     updatable: ['ttl', 'customDomain', 'certificateId'],
+    parent: 'do.spaces-bucket',
 
-    async ensure({ spec, id }, ctx: CallContext) {
+    async ensure({ spec, id, parent, labels }, ctx: CallContext) {
       if (!(cdnTtls as readonly number[]).includes(spec.ttl))
         throw storageError(
           'INVALID_INPUT',
@@ -161,7 +162,34 @@ export function cdnEndpointKind(deps: {
           'customDomain and certificateId are set together or not at all',
           'customDomain',
         );
-      await requireManagedOrigin(spec.origin, ctx.signal, 'unmanagedOrigin');
+      const match = originPattern.exec(spec.origin)!;
+      const bucketId = `${match[2]}/${match[1]}`;
+      // The parent is the caller's own bucket row: without it nothing says the origin is theirs.
+      if (parent === undefined)
+        throw storageError(
+          'INVALID_INPUT',
+          'A CDN endpoint lives in its origin bucket: the request names it as its parent',
+          'parent',
+        );
+      if (parent !== bucketId)
+        throw storageError(
+          'INVALID_INPUT',
+          `The endpoint's origin is bucket ${bucketId} but it lives in ${parent}`,
+          'parent',
+        );
+      const marker = await readMarker(
+        deps.spaces(match[2]!),
+        match[1]!,
+        deps.deploymentTag,
+        ctx.signal,
+      );
+      if (marker.owner !== 'mine')
+        throw storageError(
+          'INVALID_STATE',
+          `The CDN origin ${spec.origin} is not a bucket better-compute manages`,
+          'unmanagedOrigin',
+        );
+      if (!sameTenant(marker, labels)) otherTenant(`The CDN origin ${spec.origin}`);
       // The endpoint an earlier ensure answered wins; its origin cannot change in place.
       let existing = id !== undefined ? await read(id, ctx.signal) : undefined;
       if (existing && existing.origin !== spec.origin)

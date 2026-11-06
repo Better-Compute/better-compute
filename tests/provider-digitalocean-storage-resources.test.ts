@@ -373,12 +373,13 @@ describe('refusals and discovery', () => {
       spec: { region: 'ams3' },
     });
 
-    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
+    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx(), { labels });
     const ours = await w.ensure(
       'do.cdn-endpoint',
       'bc-cdn1',
       { origin: 'tenant-a-assets.nyc3.digitaloceanspaces.com' },
       w.ctx(),
+      { parent: 'nyc3/tenant-a-assets', labels },
     );
     w.spaces.seedBucket('hand-made');
     seedCdnEndpoint(w.emu, { origin: 'hand-made.nyc3.digitaloceanspaces.com' });
