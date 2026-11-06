@@ -57,6 +57,8 @@ interface FakeVolume {
   spec: ProviderVolumeSpec;
   sizeGiB: number;
   attachedTo?: string;
+  /** An attach action still running at the provider (`slowAttach`), to this machine. */
+  attaching?: string;
 }
 interface FakeAddress {
   id: string;
@@ -80,8 +82,18 @@ const cloud = {
   counter: 0,
   /** Whether a machine delete also deletes the volumes it names (DO's selective destroy); else they are detached. */
   selective: true,
+  /** Like DO: an accepted attach runs on at the provider until `finishAttaches`; a detach meanwhile is `deleting`. */
+  slowAttach: false,
+  finishAttaches() {
+    for (const volume of this.volumes.values())
+      if (volume.attaching) {
+        volume.attachedTo = volume.attaching;
+        delete volume.attaching;
+      }
+  },
   reset() {
     this.selective = true;
+    this.slowAttach = false;
     this.volumes.clear();
     this.snapshots.clear();
     this.addresses.clear();
@@ -188,6 +200,11 @@ const doLike = defineProvider({
           throw new ComputeError('INVALID_INPUT', 'another region');
         if (volume.attachedTo && volume.attachedTo !== machineId)
           throw new ComputeError('CONFLICT', 'attached to another droplet');
+        if (volume.attachedTo === machineId) return { id: volumeId, state: 'ready' };
+        if (cloud.slowAttach || volume.attaching) {
+          volume.attaching ??= machineId;
+          return { id: volumeId, state: 'pending' };
+        }
         if (cloud.running(`attach ${volumeId}`)) return { id: volumeId, state: 'pending' };
         volume.attachedTo = machineId;
         return { id: volumeId, state: 'ready' };
@@ -195,6 +212,8 @@ const doLike = defineProvider({
       async detachVolume(volumeId, machineId) {
         cloud.call(`detachVolume ${volumeId} ${machineId}`);
         const volume = cloud.volumes.get(volumeId);
+        // An attach still running would attach it after this answer (DoVolumes.detachVolume answers deleting).
+        if (volume?.attaching) return { id: volumeId, state: 'deleting' };
         if (volume?.attachedTo === machineId) delete volume.attachedTo;
         return { id: volumeId, state: 'deleted' };
       },
@@ -719,6 +738,63 @@ describe('providerVolumes', () => {
     expect(events.at(-1)!.type).toBe('providerVolume.deleted');
     // Its name is free again.
     expect((await createVolume({ name: volume.name })).name).toBe(volume.name);
+  });
+
+  it('a detach asked while the provider still runs the attach waits for it, then detaches', async () => {
+    const instanceId = await insertInstance();
+    const machine = `droplet-${keyCounter}`;
+    cloud.slowAttach = true;
+    const volume = await createVolume({ instanceId });
+    await tick();
+    await tick();
+    const [providerVolume] = [...cloud.volumes.values()];
+    expect(providerVolume!.attaching).toBe(machine);
+    expect((await getVolume(volume.id)).attachment).toMatchObject({ state: 'pending' });
+    const ref = { tenantId: 'root', volumeId: volume.id };
+    await call('providerVolumes', 'detach', ref);
+    await tick();
+    // The provider was asked, and its attach still runs: the detach is not settled.
+    expect(cloud.calls).toContain(`detachVolume ${providerVolume!.id} ${machine}`);
+    expect((await getVolume(volume.id)).attachment).toMatchObject({ desiredState: 'deleted', state: 'deleting' });
+    // The provider finishes the attach; the next run detaches it.
+    cloud.slowAttach = false;
+    cloud.finishAttaches();
+    expect(providerVolume!.attachedTo).toBe(machine);
+    await drain();
+    expect(providerVolume!.attachedTo).toBeUndefined();
+    expect((await getVolume(volume.id)).attachment).toBeUndefined();
+    await call('providerVolumes', 'delete', ref);
+    await drain();
+    expect((await getVolume(volume.id)).state).toBe('deleted');
+    expect(cloud.volumes.size).toBe(0);
+  });
+
+  it('a volume on a machine of ours that no attachment names is detached; a machine not ours is left alone', async () => {
+    const instanceId = await insertInstance();
+    const machine = `droplet-${keyCounter}`;
+    const volume = await createVolume();
+    const other = await createVolume();
+    await drain();
+    const byName = (id: string) =>
+      [...cloud.volumes.values()].find((entry) => entry.spec.name === providerResourceName(id))!;
+    // As if an attach the tenant no longer wanted finished after its detach was settled.
+    byName(volume.id).attachedTo = machine;
+    byName(other.id).attachedTo = 'droplet-stranger';
+    await runKey('all');
+    await drain();
+    expect(byName(volume.id).attachedTo).toBeUndefined();
+    expect(cloud.calls).toContain(`detachVolume ${byName(volume.id).id} ${machine}`);
+    expect((await getVolume(volume.id)).state).toBe('ready');
+    expect(byName(other.id).attachedTo).toBe('droplet-stranger');
+    expect(cloud.calls.some((label) => label.includes('droplet-stranger'))).toBe(false);
+    // Delete finds it on our machine again: detached first, then deleted.
+    byName(volume.id).attachedTo = machine;
+    const id = byName(volume.id).id;
+    await call('providerVolumes', 'delete', { tenantId: 'root', volumeId: volume.id });
+    await drain();
+    expect((await getVolume(volume.id)).state).toBe('deleted');
+    expect(cloud.volumes.has(id)).toBe(false);
+    expect(instanceId).toMatch(/^inst_/);
   });
 
   it('a volume never sent to the provider is deleted without a provider call', async () => {

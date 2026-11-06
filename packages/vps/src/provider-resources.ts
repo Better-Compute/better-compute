@@ -2206,10 +2206,13 @@ async function convergeAttachment(
     await writeAttachment(run, attachment, { state: 'pending', machine_id: machine });
     return;
   }
-  // Detach: from the machine it was attached to, else the one its instance has, if the provider reports it there.
-  const from = attachment.machine_id ?? machine ?? attachedTo;
-  if (from === undefined || from === null || attachedTo !== from) {
-    // Attached to nothing (or to a machine this attachment never named): nothing to detach.
+  // Detach: from the machine it was sent to, else the one its instance has. The provider is asked even when it
+  // reports the volume on no machine: an attach it is still running would attach it after the detach was settled
+  // (DoVolumes.detachVolume answers `deleting` while one runs). A volume on a machine no attachment names is
+  // detachStray's.
+  const from = attachment.machine_id ?? machine ?? undefined;
+  if (from === undefined) {
+    // Never sent to a machine (its instance has none): nothing to detach.
     await settleDetached(run, attachment, volume);
     return;
   }
@@ -2227,6 +2230,45 @@ async function convergeAttachment(
   }
   run.inFlight = true;
   await markAttachment(run, attachment, 'deleting', null);
+}
+
+/**
+ * Detaches the volume from `attachedTo` when no live attachment names that machine and it is a live instance's of
+ * this deployment (an attach whose detach was settled before the provider finished it). A machine that is not one of
+ * ours is never touched. Answers where the volume still is: `on` (undefined: nowhere), `busy` while the detach runs,
+ * or the provider's refusal in `error`.
+ */
+async function detachStray(
+  run: Run,
+  volumes: ProviderVolumes,
+  volume: VolumeRow,
+  externalId: string,
+  attachments: readonly VolumeAttachment[],
+  attachedTo: string | undefined,
+): Promise<{ on?: string; busy?: boolean; error?: string }> {
+  if (attachedTo === undefined) return {};
+  if (attachments.some((a) => a.machine_id === attachedTo || a.external_id === attachedTo))
+    return { on: attachedTo };
+  const ours = await run.sql.transaction(async (tx) => {
+    const { rows } = await tx.query(
+      `SELECT 1 FROM instances WHERE provider_account_id = $1 AND external_id = $2 AND state <> 'deleted' LIMIT 1`,
+      [volume.provider_account_id, attachedTo],
+    );
+    return rows.length > 0;
+  });
+  if (!ours) return { on: attachedTo };
+  run.deps.log.warn('providerResources: detaching a volume from a machine no attachment names', {
+    volumeId: volume.id,
+    machineId: attachedTo,
+  });
+  const result = await run.attempt(`detach ${volume.id} stray`, () =>
+    volumes.detachVolume(externalId, attachedTo, run.call(`detach:${volume.id}:${attachedTo}`)),
+  );
+  if (result === undefined) return { on: attachedTo, busy: true };
+  if (result === 'missing' || result.state === 'deleted') return {};
+  if (result.state === 'error') return { on: attachedTo, error: result.message ?? 'The detach failed' };
+  run.inFlight = true;
+  return { on: attachedTo, busy: true };
 }
 
 /** Writes a detach's progress, whatever the attachment's wanted state (an instance delete detaches a wanted one). */
@@ -2414,9 +2456,22 @@ async function convergeVolume(
       state = 'updating';
     }
   }
-  const attachedTo = output(ensured, 'attachedTo');
-  for (const attachment of attachments)
-    await convergeAttachment(run, volumes, volume, externalId, attachment, attachedTo, false);
+  const stray = await detachStray(
+    run,
+    volumes,
+    volume,
+    externalId,
+    attachments,
+    output(ensured, 'attachedTo'),
+  );
+  if (stray.error !== undefined) {
+    await setVolume(run, volume, { ...observedFields, ...settled('error', stray.error) });
+    return;
+  }
+  // The attachments wait until a stray attachment is gone (an attach elsewhere would be CONFLICT meanwhile).
+  if (!stray.busy)
+    for (const attachment of attachments)
+      await convergeAttachment(run, volumes, volume, externalId, attachment, stray.on, false);
   await setVolume(run, volume, {
     ...observedFields,
     ...(size !== undefined ? { observed_size_gib: size } : {}),
@@ -2466,9 +2521,13 @@ async function teardownVolume(
     await finishVolume(run, volume);
     return;
   }
-  const attachedTo = output(observed, 'attachedTo');
+  const stray = await detachStray(run, volumes, volume, id, attachments, output(observed, 'attachedTo'));
+  if (stray.error !== undefined) {
+    await setVolume(run, volume, settled('error', stray.error));
+    return;
+  }
   for (const attachment of attachments)
-    await convergeAttachment(run, volumes, volume, id, attachment, attachedTo, true);
+    await convergeAttachment(run, volumes, volume, id, attachment, stray.on, true);
   if (run.inFlight || run.backoff || run.again) {
     await setVolume(run, volume, settled('deleting'));
     return;
