@@ -8,6 +8,7 @@ import {
 import { closeFixtures } from '@better-compute/testing';
 import {
   defineProvider,
+  eventDetails,
   instanceWork,
   interruptionCondition,
   maintenanceCondition,
@@ -384,5 +385,25 @@ describe('vps.provider-events', () => {
     // The poll saw the out-of-band stop and converged back to the desired running state.
     expect(world.cloud.requests).toContain(`power ${machine.id} on`);
     expect(world.cloud.machines.get(machine.id)!.state).toBe('running');
+  });
+
+  it('event details reach tenants only as short printable facts', () => {
+    expect(
+      eventDetails({
+        action: 'terminate',
+        long: 'x'.repeat(200),
+        'bad key!': 'v',
+        control: 'a\nb',
+        a1: '1',
+        a2: '2',
+        a3: '3',
+        a4: '4',
+        a5: '5',
+        a6: '6',
+        a7: '7',
+        a8: '8',
+      }),
+    ).toEqual({ action: 'terminate', a1: '1', a2: '2', a3: '3', a4: '4', a5: '5', a6: '6', a7: '7' });
+    expect(eventDetails(undefined)).toBeUndefined();
   });
 });

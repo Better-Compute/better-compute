@@ -297,13 +297,30 @@ export async function handleEvents(
   return handled;
 }
 
+/**
+ * The provider's short facts as tenants may see them: at most 8 string entries of printable text,
+ * keys up to 64 and values up to 128 characters; anything else is left out.
+ */
+export function eventDetails(details: ProviderEvent['details']): Record<string, string> | undefined {
+  if (!details || typeof details !== 'object') return undefined;
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(details)) {
+    if (Object.keys(out).length >= 8) break;
+    if (!/^[A-Za-z][\w.-]{0,63}$/.test(key) || typeof value !== 'string') continue;
+    if (value.length === 0 || value.length > 128 || !/^[\x20-\x7e]+$/.test(value)) continue;
+    out[key] = value;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** Event data: the account, the machine, the deadline and the provider's short facts. */
 function eventData(event: ProviderEvent, accountId: string): Record<string, Json> {
+  const details = eventDetails(event.details);
   return {
     accountId,
     ...(event.machineId !== undefined ? { machineId: event.machineId } : {}),
-    ...(event.deadline !== undefined ? { deadline: event.deadline } : {}),
-    ...(event.details ? { details: { ...event.details } } : {}),
+    ...(Number.isFinite(event.deadline) ? { deadline: event.deadline! } : {}),
+    ...(details ? { details } : {}),
   };
 }
 
@@ -345,7 +362,8 @@ async function maintenance(
   instanceId: string,
   event: ProviderEvent,
 ): Promise<void> {
-  const status = event.details?.status ?? 'scheduled';
+  const facts = eventDetails(event.details);
+  const status = facts?.status ?? 'scheduled';
   const over = /^(completed|canceled|cancelled|closed|resolved)$/i.test(status);
   const when = event.deadline === undefined ? 'soon' : `at ${iso(event.deadline)}`;
   await conditionEvent(
@@ -359,7 +377,7 @@ async function maintenance(
           set: {
             type: maintenanceCondition,
             status: 'true',
-            reason: event.details?.code?.slice(0, 64) ?? 'Scheduled',
+            reason: facts?.code?.slice(0, 64) ?? 'Scheduled',
             message: `the provider scheduled maintenance of this machine ${when}`,
           },
           type: 'instance.maintenance',
@@ -374,7 +392,7 @@ async function interruption(
   event: ProviderEvent,
   target: Target,
 ): Promise<void> {
-  const deadline = event.deadline ?? event.at;
+  const deadline = Number.isFinite(event.deadline) ? event.deadline! : event.at;
   if (target.instanceId)
     await conditionEvent(
       deps,

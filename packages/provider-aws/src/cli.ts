@@ -208,7 +208,7 @@ export function iamPolicy(
     Resource: '*',
   });
   if (options.eventQueue !== undefined) {
-    if (!/^[A-Za-z0-9_-]{1,75}(.fifo)?$/.test(options.eventQueue))
+    if (!/^[A-Za-z0-9_-]{1,75}(\.fifo)?$/.test(options.eventQueue))
       throw usage('--event-queue is the intake queue name (1 to 80 characters of [A-Za-z0-9_-])');
     statements.push({
       Sid: 'EventIntake',
