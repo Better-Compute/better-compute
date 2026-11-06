@@ -1110,7 +1110,14 @@ async function resourceProvider(
  */
 function assertVolumeSpec(
   provider: ResourceProvider,
-  input: { volumeId: string; region: string; sizeGiB: number; kind?: ProviderVolumeKind; networkId?: string; filesystem?: 'ext4' | 'xfs' | 'none' },
+  input: {
+    volumeId: string;
+    region: string;
+    sizeGiB: number;
+    kind?: ProviderVolumeKind;
+    networkId?: string;
+    filesystem?: 'ext4' | 'xfs' | 'none';
+  },
 ): void {
   const volumes = provider.client.volumes!;
   const kind = input.kind ?? 'block';
@@ -1127,7 +1134,9 @@ function assertVolumeSpec(
     sizeGiB: input.sizeGiB,
     kind,
     ...(input.filesystem !== undefined && kind === 'block' ? { filesystem: input.filesystem } : {}),
-    ...(input.networkId !== undefined ? { network: { network: providerResourceName(input.networkId) } } : {}),
+    ...(input.networkId !== undefined
+      ? { network: { network: providerResourceName(input.networkId) } }
+      : {}),
   });
 }
 
