@@ -411,8 +411,9 @@ async function interruption(
       account.id,
     );
   if (!target.nodeId) return;
-  // Reservations first (reservation → node, the placer's lock order): each holding the node past
-  // the deadline gets the spot notice, so it ends by then or is placed again elsewhere.
+  // Reservations first, then the node (reservation → node → node_resources, the placer's and host
+  // sync's lock order; noticeNodeInterruption locks the node before any release): each holding the
+  // node past the deadline gets the spot notice, so it ends by then or is placed again elsewhere.
   const noticed = await noticeNodeInterruption(deps, tx, target.nodeId, deadline, {
     reason: 'ProviderInterruption',
     message: `the machine behind node ${target.nodeId} is reclaimed by its provider at ${iso(deadline)}`,

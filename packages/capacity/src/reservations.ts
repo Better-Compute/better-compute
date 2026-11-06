@@ -1747,7 +1747,9 @@ async function noticeSpot(
  * (quota kept, placed elsewhere since the caller taints the node), a started one is cut back to end
  * at the deadline with a `Preempted` condition and released then. A reservation already ending by
  * the deadline is left alone, so a repeated notice changes nothing. Locks the reservations in id
- * order (reservation before node, the placer's order). Returns the reservations noticed.
+ * order, then the nodes they hold in id order (reservation → node → node_resources, the placer's
+ * and host sync's order), so the caller may lock the node again after. Returns the reservations
+ * noticed.
  */
 export async function noticeNodeInterruption(
   deps: Pick<ReservationDeps, 'clock' | 'events' | 'work' | 'desired'>,
@@ -1767,9 +1769,19 @@ export async function noticeNodeInterruption(
     [nodeId, new Date(at).toISOString(), [...preemptable]],
   );
   if (rows.length === 0) return [];
-  await tx.query(`SELECT id FROM reservations WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE`, [
-    rows.map((row) => row.id),
-  ]);
+  const ids = rows.map((row) => row.id);
+  await tx.query(`SELECT id FROM reservations WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE`, [ids]);
+  // Then the nodes they hold (this one and any other a gang holds), in id order, before a release
+  // writes device bookings, node_resources and the pool rollup: host sync takes nodes before
+  // node_resources, so the notice keeps that order (reservation → node → node_resources).
+  await tx.query(
+    `SELECT id FROM nodes
+      WHERE id = $1 OR id IN (SELECT node_id FROM allocations
+                               WHERE owner_kind = 'reservation' AND owner_id = ANY($2::text[])
+                                 AND released_at IS NULL)
+      ORDER BY id FOR UPDATE`,
+    [nodeId, ids],
+  );
   const noticed: string[] = [];
   for (const { id } of rows) {
     const victim = await readReservationById(tx, id, false);

@@ -2151,6 +2151,43 @@ describe('provider interruption notice (AWS A4)', () => {
     expect((await readQuotas(db, 'acme', poolId))[0]!.used).toBe(8);
     expect(await get(other.id)).toMatchObject({ state: 'placed', during: { start: T0 } });
   });
+
+  it('locks the node before its bookings and node_resources (capacity lock order)', async () => {
+    // Releasing a not-started reservation writes node_resources and pool_capacity_rollup. Host sync
+    // takes nodes then node_resources, so the notice must hold the node row first, or the two
+    // transactions can deadlock on the same node.
+    const later = (await call('reservations', 'create', four('l2', { start: T0 + 3 * HOUR }))) as Rsv;
+    const nodeId = (await nodeOf(later.id))!;
+    const statements: string[] = [];
+    const noticed = await db.transaction((tx) => {
+      const traced = new Proxy(tx, {
+        get(target, key) {
+          if (key === 'query')
+            return (sql: string, params?: unknown[]) => {
+              statements.push(sql);
+              return target.query(sql, params as never);
+            };
+          const value = Reflect.get(target, key);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      return noticeNodeInterruption(moduleContext(db), traced, nodeId, T0 + 2 * 60_000, {
+        reason: 'ProviderInterruption',
+        message: 'the machine is being reclaimed (aws spot interruption)',
+      });
+    });
+    expect(noticed).toEqual([later.id]);
+    const reservationLock = statements.findIndex((sql) => /FROM reservations[\s\S]*FOR UPDATE/.test(sql));
+    const nodeLock = statements.findIndex((sql) => /FROM nodes[\s\S]*FOR UPDATE/.test(sql));
+    // Device bookings, node_resources and the pool rollup all come after nodes in the lock order.
+    const resources = statements.findIndex((sql) =>
+      /device_bookings|node_resources|pool_capacity_rollup/.test(sql),
+    );
+    expect(reservationLock).toBeGreaterThanOrEqual(0);
+    expect(resources).toBeGreaterThan(0);
+    expect(nodeLock).toBeGreaterThan(reservationLock);
+    expect(nodeLock).toBeLessThan(resources);
+  });
 });
 
 describe('node leases: binding node (v0.5)', () => {
