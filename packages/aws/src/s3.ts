@@ -42,7 +42,10 @@ export interface S3Access {
     body?: Uint8Array | string;
     accept?: readonly number[];
   }): Promise<Response>;
-  presign(fullKey: string, input: { method: 'GET' | 'PUT'; expiresInSeconds: number; headers?: Readonly<Record<string, string>> }): Promise<string>;
+  presign(
+    fullKey: string,
+    input: { method: 'GET' | 'PUT'; expiresInSeconds: number; headers?: Readonly<Record<string, string>>; at?: number },
+  ): Promise<string>;
 }
 
 const bucketPattern = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
@@ -121,6 +124,7 @@ export function s3Access(options: S3StoreOptions): S3Access {
         expiresInSeconds: input.expiresInSeconds,
         headers: input.headers,
         s3: true,
+        ...(input.at !== undefined ? { at: input.at } : {}),
       });
     },
   };

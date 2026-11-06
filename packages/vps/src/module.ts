@@ -2042,11 +2042,10 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     // Runtime hosts' volume stores (StatusReport.volume_storage): what volumes are booked against.
     statusHandlers: [volumeStorageStatusHandler()],
     async nodeSpec(context, node) {
-      const instances = await instanceSpecs(
-        context.sql,
-        node.id,
-        options.hostNetwork ? { network: options.hostNetwork } : {},
-      );
+      const instances = await instanceSpecs(context.sql, node.id, {
+        ...(options.hostNetwork ? { network: options.hostNetwork } : {}),
+        ...(options.snapshots ? { snapshots: options.snapshots } : {}),
+      });
       // Agent memory: the volumes this host keeps (a deleted one is absent, so bcd destroys it).
       const volumes = await hostVolumeSpecs(context.sql, node.id);
       return {

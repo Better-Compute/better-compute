@@ -202,6 +202,8 @@ export interface Transport {
     headers?: Readonly<Record<string, string>>;
     s3?: boolean;
     signal?: AbortSignal;
+    /** Signing time (epoch ms) instead of the clock: a stable URL within a window. */
+    at?: number;
   }): Promise<string>;
 }
 
@@ -318,7 +320,7 @@ export function createTransport(options: TransportOptions): Transport {
       service: input.service,
       region,
       credentials: creds,
-      now: clock.now() + skewMs,
+      now: (input.at ?? clock.now()) + skewMs,
       unsignedPayload: input.s3,
       normalizePath: !input.s3,
       expiresInSeconds: input.expiresInSeconds,

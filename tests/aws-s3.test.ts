@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ComputeError, manualClock } from '@better-compute/core';
-import { s3BlobStore, type S3StoreOptions } from '@better-compute/aws';
+import { s3BlobStore, s3SnapshotStore, type S3StoreOptions } from '@better-compute/aws';
 import { AwsEmulator, recordingLogger } from './support/aws-platform-emulator/index.js';
 import { s3Fake } from './support/aws-platform-emulator/s3.js';
 
@@ -143,5 +143,61 @@ describe('S3 BlobStore', () => {
     const signature = new URL(get).searchParams.get('X-Amz-Signature')!;
     expect(log.text()).not.toContain(signature);
     expect(log.text()).not.toContain('X-Amz-');
+  });
+});
+
+describe('S3 SnapshotStore', () => {
+  function snapshotWorld() {
+    const world = s3World();
+    const store = s3SnapshotStore({ ...world.base, bucket: 'bc-blobs', prefix: 'snapshots', sse: { kind: 'aws:kms', keyId: 'alias/bc-snap' } });
+    return { ...world, snapshots: store };
+  }
+  const ids = { tenantId: 'acme', sandboxId: 'sbx_1', snapshotId: 'snap_1' };
+
+  it('presign returns a stable s3 url and a presigned upload', async () => {
+    const { snapshots, emu, s3 } = snapshotWorld();
+    const first = await snapshots.presign(ids);
+    expect(first.url).toBe('s3://bc-blobs/snapshots/acme/sbx_1/snap_1');
+    expect(first.uploadHeaders).toEqual({ 'x-amz-server-side-encryption': 'aws:kms', 'x-amz-server-side-encryption-aws-kms-key-id': 'alias/bc-snap' });
+    expect(new URL(first.uploadUrl).searchParams.get('X-Amz-SignedHeaders')).toBe(
+      'host;x-amz-server-side-encryption;x-amz-server-side-encryption-aws-kms-key-id',
+    );
+    const uploaded = await emu.fetch(first.uploadUrl, { method: 'PUT', headers: first.uploadHeaders, body: new TextEncoder().encode('disk+memory') });
+    expect(uploaded.status).toBe(200);
+    expect(s3.object('bc-blobs', 'snapshots/acme/sbx_1/snap_1')!.headers['x-amz-server-side-encryption']).toBe('aws:kms');
+    // Without the signed SSE headers the upload is refused.
+    expect((await emu.fetch(first.uploadUrl, { method: 'PUT', body: new Uint8Array([1]) })).status).toBe(403);
+    emu.clock.advance(10_000);
+    expect((await snapshots.presign(ids)).url).toBe(first.url);
+    await expect(snapshots.presign({ ...ids, tenantId: '../x' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it("downloadUrl refuses another tenant's snapshot", async () => {
+    const { snapshots, emu } = snapshotWorld();
+    const { url } = await snapshots.presign(ids);
+    await expect(snapshots.downloadUrl!({ tenantId: 'other', snapshotId: 'snap_1', url })).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    await expect(snapshots.downloadUrl!({ tenantId: 'acme', snapshotId: 'snap_2', url })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(snapshots.downloadUrl!({ tenantId: 'acme', snapshotId: 'snap_1', url: 's3://elsewhere/snapshots/acme/sbx_1/snap_1' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(snapshots.delete!({ tenantId: 'other', snapshotId: 'snap_1', url })).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    expect(emu.calls('DeleteObject')).toHaveLength(0);
+  });
+
+  it('restore after 8 days gets a fresh download URL', async () => {
+    const { snapshots, emu } = snapshotWorld();
+    const presigned = await snapshots.presign(ids);
+    await emu.fetch(presigned.uploadUrl, { method: 'PUT', headers: presigned.uploadHeaders, body: new TextEncoder().encode('state') });
+    const early = await snapshots.downloadUrl!({ tenantId: 'acme', snapshotId: 'snap_1', url: presigned.url });
+    emu.clock.advance(8 * 24 * 3600_000);
+    expect((await emu.fetch(early)).status).toBe(403);
+    const fresh = await snapshots.downloadUrl!({ tenantId: 'acme', snapshotId: 'snap_1', url: presigned.url });
+    expect(fresh).not.toBe(early);
+    const response = await emu.fetch(fresh);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('state');
+    // Stable within the window, so the host's desired spec does not churn.
+    emu.clock.advance(60_000);
+    expect(await snapshots.downloadUrl!({ tenantId: 'acme', snapshotId: 'snap_1', url: presigned.url })).toBe(fresh);
+    await snapshots.delete!({ tenantId: 'acme', snapshotId: 'snap_1', url: presigned.url });
+    expect((await emu.fetch(fresh)).status).toBe(404);
   });
 });
