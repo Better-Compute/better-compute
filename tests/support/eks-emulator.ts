@@ -150,6 +150,10 @@ export class EksEmulator {
     { clusterVersion: '1.28', status: 'UNSUPPORTED' },
   ];
   #seq = 0;
+  /** Update calls by clientRequestToken: a repeated token answers the earlier update, as on EKS. */
+  readonly updateTokens = new Map<string, string>();
+  /** The clientRequestToken of the request being handled. */
+  #token: string | undefined;
 
   constructor(
     private readonly emu: AwsEmulator,
@@ -265,6 +269,7 @@ export class EksEmulator {
       errors: [],
     };
     this.updates.set(update.id, update);
+    if (this.#token !== undefined) this.updateTokens.set(`${cluster}|${this.#token}`, update.id);
     return update;
   }
 
@@ -307,6 +312,15 @@ export class EksEmulator {
     const clusterName = p[1];
     const cluster = clusterName ? this.clusters.get(clusterName) : undefined;
     const noCluster = () => this.#error('ResourceNotFoundException', `No cluster found for name: ${clusterName}.`, 404);
+    if (
+      ['UpdateClusterVersion', 'UpdateClusterConfig', 'UpdateNodegroupConfig', 'UpdateNodegroupVersion'].includes(op) &&
+      typeof body.clientRequestToken === 'string'
+    ) {
+      const earlier = this.updates.get(this.updateTokens.get(`${clusterName}|${body.clientRequestToken}`) ?? '');
+      // EKS takes a repeated token as a retry: it answers the original update and changes nothing.
+      if (earlier) return json(200, { update: this.#updateJson(earlier) });
+    }
+    this.#token = typeof body.clientRequestToken === 'string' ? body.clientRequestToken : undefined;
     switch (op) {
       case 'DescribeClusterVersions': {
         if (url.searchParams.get('clusterType') !== 'eks')

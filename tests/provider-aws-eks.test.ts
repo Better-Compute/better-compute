@@ -315,6 +315,22 @@ describe('eks clusters', () => {
     expect(isComputeError(flipped, 'INVALID_STATE')).toBe(true);
   });
 
+  it('changes the public CIDRs A→B→A→B and the support policy back and forth', async () => {
+    const s = await setup();
+    await readyCluster(s);
+    for (const cidr of ['198.51.100.0/24', '203.0.113.0/24', '198.51.100.0/24']) {
+      await settle(() => s.k8s.ensureCluster({ ...standard, authorizedNetworks: [cidr] }, s.ctx()), 'ready');
+      expect(s.eks.clusters.get('bc-k-one')!.publicAccessCidrs).toEqual([cidr]);
+    }
+    for (const releaseChannel of ['extended', 'regular', 'extended'] as const) {
+      await settle(() => s.k8s.ensureCluster({ ...standard, releaseChannel }, s.ctx()), 'ready');
+      expect(s.eks.clusters.get('bc-k-one')!.supportType).toBe(releaseChannel === 'extended' ? 'EXTENDED' : 'STANDARD');
+    }
+    // Every transition had its own token (EKS answers a repeated one with the earlier update).
+    const tokens = s.eks.calls('UpdateClusterConfig').map((call) => JSON.parse(call.body).clientRequestToken);
+    expect(new Set(tokens).size).toBe(tokens.length);
+  });
+
   it('answers updating while an update runs, and error when it failed', async () => {
     const s = await setup();
     await readyCluster(s);
@@ -449,6 +465,19 @@ describe('eks node groups', () => {
     }
     const disk = await rejection(s.k8s.ensureNodePool(id, { ...pool, name: 'disk', diskType: 'gp3' }, s.ctx()));
     expect(isComputeError(disk, 'INVALID_INPUT')).toBe(true);
+  });
+
+  it('scales 1→2→1→2 and ends at 2 (a repeated size is a new update, not a retry)', async () => {
+    const s = await setup();
+    const id = await readyCluster(s);
+    await settle(() => s.k8s.ensureNodePool(id, pool, s.ctx()), 'ready');
+    for (const nodeCount of [2, 1, 2]) {
+      await settle(() => s.k8s.ensureNodePool(id, { ...pool, nodeCount }, s.ctx()), 'ready');
+      expect(s.eks.nodegroups.get('bc-k-one/general')!.scalingConfig.desiredSize).toBe(nodeCount * 2);
+    }
+    const tokens = s.eks.calls('UpdateNodegroupConfig').map((call) => JSON.parse(call.body).clientRequestToken);
+    expect(tokens).toHaveLength(3);
+    expect(new Set(tokens).size).toBe(3);
   });
 
   it('deletes a node group; an absent one is deleted', async () => {

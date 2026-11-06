@@ -129,6 +129,12 @@ export class AwsKubernetes implements ProviderKubernetes {
   readonly #transport: KubeTransport;
   readonly #stsEndpoint: string | undefined;
   readonly #updates: Updates;
+  /**
+   * Updates this process started, per resource: part of the next update's clientRequestToken, so a
+   * new transition never reuses an earlier one's token (EKS answers a repeated token with the
+   * original update and changes nothing), while a retry of a request whose answer was lost does.
+   */
+  readonly #started = new Map<string, number>();
   /** Clusters (by ARN) where the account principal's admin access entry was seen. */
   readonly #admitted = new Set<string>();
 
@@ -163,13 +169,20 @@ export class AwsKubernetes implements ProviderKubernetes {
     memory: string,
     id: string,
     target: { cluster: string; nodegroup?: string },
-    request: { path: string; body: Record<string, unknown>; what: string },
+    request: { path: string; body: Record<string, unknown>; what: string; from: unknown },
     context: CallContext,
   ): Promise<ProviderResourceState> {
+    // The token names the transition (what was read, what is asked) and how many updates of this
+    // resource this process started before: the reconciler's idempotency key is the resource's own
+    // id, so 1→2→1→2 would otherwise repeat the first token.
+    const started = this.#started.get(memory) ?? 0;
+    const token = clientToken(
+      `${context.idempotencyKey}:${memory}:${started}:${JSON.stringify(request.from)}->${JSON.stringify(request.body)}`,
+    );
     let answer: { update?: EksUpdate };
     try {
       answer = await this.#client.request<{ update?: EksUpdate }>('POST', request.path, {
-        body: { ...request.body, clientRequestToken: clientToken(`${context.idempotencyKey}:${memory}:${JSON.stringify(request.body)}`) },
+        body: { ...request.body, clientRequestToken: token },
         signal: context.signal,
         what: request.what,
       });
@@ -177,6 +190,7 @@ export class AwsKubernetes implements ProviderKubernetes {
       if (isBusy(error)) return resourceState(id, 'updating', { message: error.message });
       throw error;
     }
+    this.#started.set(memory, started + 1);
     if (answer.update?.id)
       this.#updates.remember(memory, {
         cluster: target.cluster,
@@ -220,6 +234,13 @@ export class AwsKubernetes implements ProviderKubernetes {
         path: `/clusters/${segment(spec.name)}/${change.kind === 'version' ? 'updates' : 'update-config'}`,
         body: change.body,
         what: `Updating EKS cluster ${id}`,
+        from: {
+          version: found.version,
+          supportType: found.upgradePolicy?.supportType,
+          publicAccessCidrs: found.resourcesVpcConfig?.publicAccessCidrs,
+          endpointPublicAccess: found.resourcesVpcConfig?.endpointPublicAccess,
+          endpointPrivateAccess: found.resourcesVpcConfig?.endpointPrivateAccess,
+        },
       },
       context,
     );
@@ -452,6 +473,7 @@ export class AwsKubernetes implements ProviderKubernetes {
         path: `/clusters/${segment(clusterName)}/node-groups/${segment(spec.name)}/update-config`,
         body: { scalingConfig: scaling },
         what: `Scaling EKS node group ${id}`,
+        from: group.scalingConfig,
       },
       context,
     );
