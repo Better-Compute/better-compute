@@ -13,6 +13,7 @@ import {
   docrImageSource,
   doStorageResources,
   managedNamePrefix,
+  parseOciReference,
   spacesBlobStore,
   spacesClient,
   xmlValues,
@@ -362,7 +363,9 @@ describe.skipIf(!enabled)('provider-digitalocean storage live', () => {
     'resolves a pushed disk image to a presigned URL a node can fetch',
     { timeout: 120_000 },
     async () => {
-      const source = docrImageSource({ token: refs.token, secrets, mirrors: false });
+      // The source reads only the registry the image names (it is the run's own).
+      const [registry] = parseOciReference(env.BC_DO_LIVE_IMAGE!).name.split('/');
+      const source = docrImageSource({ token: refs.token, secrets, mirrors: false, registries: [registry!] });
       const resolved = await source.resolve(env.BC_DO_LIVE_IMAGE!);
       const url = new URL(resolved.url);
       expect(url.protocol).toBe('https:');

@@ -24,6 +24,11 @@ import { docrCredentialSource, docrHost, type DocrCredentialSource } from './cre
 // registry credentials; nodes get only the registry's own short-lived presigned blob URL (its
 // redirect to storage, on an allowed host), and verify the layer digest the resolution returns. No
 // credential ever leaves this process, and none goes to a token realm off DigitalOcean's hosts.
+//
+// The account token and its docker credentials read every registry in the account, and registries
+// are tenant resources (do.container-registry), so the registries a resolution may read are an
+// allowlist (`registries`), default deny: a reference whose registry is not on it is refused
+// (ACCESS_DENIED, reason `registry`) before any credential is fetched or request sent.
 
 const nameComponent = '[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*';
 const referencePattern = new RegExp(
@@ -65,6 +70,12 @@ export interface DocrImageSourceOptions {
    * mirror's falls back to the source). A code-level option.
    */
   blobHosts?: readonly string[];
+  /**
+   * The registries resolutions may read (a reference's first path segment): registry names, or a
+   * predicate over the name. Default: none, so every resolution is refused until the operator
+   * lists the registries images come from (its own, and only those). A code-level option.
+   */
+  registries?: readonly string[] | ((registry: string) => boolean);
   clock?: Clock;
   log?: Logger;
 }
@@ -72,6 +83,11 @@ export interface DocrImageSourceOptions {
 /** Where an image is wanted: a region picks that region's mirror, when there is one. */
 export interface DocrResolveOptions {
   region?: string;
+  /**
+   * Narrows the source's `registries` for this resolution (a tenant's own registries, say): the
+   * reference's registry must be on both.
+   */
+  registries?: readonly string[];
 }
 
 export interface DocrImageSource extends ImageSource {
@@ -207,6 +223,22 @@ function blobHostMatcher(hosts: readonly string[]): (host: string) => boolean {
   return (host) => exact.has(host) || domains.some((domain) => host.endsWith(domain));
 }
 
+/** The predicate over registry names a `registries` option stands for (default: none). */
+function registryMatcher(
+  registries: DocrImageSourceOptions['registries'],
+): (registry: string) => boolean {
+  if (typeof registries === 'function') return registries;
+  for (const name of registries ?? [])
+    if (!registryNamePattern.test(name))
+      throw registryError(
+        'INVALID_CONFIG',
+        'A registry in the allowed list is a registry name ([a-z0-9-], 1 to 63 characters)',
+        'registries',
+      );
+  const allowed = new Set(registries ?? []);
+  return (registry) => allowed.has(registry);
+}
+
 function checkMirrors(mirrors: DocrImageSourceOptions['mirrors']): void {
   if (!mirrors) return;
   for (const [source, byRegion] of Object.entries(mirrors)) {
@@ -231,6 +263,7 @@ export function docrImageSource(options: DocrImageSourceOptions): DocrImageSourc
       'secretRef',
     );
   checkMirrors(options.mirrors);
+  const registryAllowed = registryMatcher(options.registries);
   const doFetch = options.fetch ?? globalThis.fetch.bind(globalThis);
   const clock = options.clock ?? systemClock;
   const log: Logger = options.log ?? { debug() {}, info() {}, warn() {}, error() {} };
@@ -452,6 +485,17 @@ export function docrImageSource(options: DocrImageSourceOptions): DocrImageSourc
         'UNSUPPORTED',
         `This image source serves ${registryUrl.host} only`,
         'registryHost',
+      );
+    // Before any credential: the operator's token reads every registry of the account.
+    const registry = parsed.name.slice(0, parsed.name.indexOf('/'));
+    if (
+      !registryAllowed(registry) ||
+      (resolveOptions.registries !== undefined && !resolveOptions.registries.includes(registry))
+    )
+      throw registryError(
+        'ACCESS_DENIED',
+        'This image source may not read that registry',
+        'registry',
       );
     const signal = AbortSignal.timeout(30_000);
     const scope = `repository:${parsed.name}:pull`;

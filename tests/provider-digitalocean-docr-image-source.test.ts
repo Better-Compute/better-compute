@@ -50,6 +50,7 @@ function setup() {
     secrets,
     fetch: docrFetch(emu, docr),
     clock,
+    registries: ['acme'],
   });
   const disk = new TextEncoder().encode('a disk image, compressed');
   const layer = docr.blob(disk);
@@ -167,6 +168,7 @@ describe('docrImageSource', () => {
       secrets,
       fetch: docrFetch(emu, docr2),
       clock,
+      registries: ['acme'],
       blobHosts: ['blobs.example.net', '*.cdn.example.net'],
     });
     docr2.blobOrigins.set('acme', 'https://edge-1.cdn.example.net');
@@ -194,6 +196,7 @@ describe('docrImageSource', () => {
       secrets,
       fetch: docrFetch(emu, docr),
       clock,
+      registries: ['acme'],
       mirrors: { acme: { ams3: 'acme-ams3' } },
     });
     const resolved = await source.resolve('oci://registry.digitalocean.com/acme/images/ubuntu:24.04', {
@@ -242,6 +245,60 @@ describe('docrImageSource', () => {
     expect(resolved).toMatchObject({ format: 'qcow2', compression: 'none', sizeBytes: 9 });
   });
 
+  it('reads only the registries it is allowed, before any credential or request', async () => {
+    const { emu, docr } = setup();
+    docr.push('tenant-b/images/secret', '1', {
+      schemaVersion: 2,
+      layers: [{ mediaType: 'application/vnd.better-compute.disk.raw', digest: docr.blob(new Uint8Array(1)), size: 1 }],
+    });
+    let sent = 0;
+    const inner = docrFetch(emu, docr);
+    const counting: typeof fetch = (input, init) => {
+      sent += 1;
+      return inner(input, init);
+    };
+    const reason = async (source: ImageSource, ref: string) => {
+      const error = await failure(source.resolve(ref));
+      return [error.code, error.details?.reason];
+    };
+    const ref = 'oci://registry.digitalocean.com/tenant-b/images/secret:1';
+    // No list: nothing is readable.
+    const none = docrImageSource({ token: 'secret://do/t', secrets, fetch: counting });
+    expect(await reason(none, 'oci://registry.digitalocean.com/acme/images/ubuntu:24.04')).toEqual([
+      'ACCESS_DENIED',
+      'registry',
+    ]);
+    const listed = docrImageSource({ token: 'secret://do/t', secrets, fetch: counting, registries: ['acme'] });
+    expect(await reason(listed, ref)).toEqual(['ACCESS_DENIED', 'registry']);
+    const predicate = docrImageSource({
+      token: 'secret://do/t',
+      secrets,
+      fetch: counting,
+      registries: (name) => name.startsWith('acme'),
+    });
+    expect(await reason(predicate, ref)).toEqual(['ACCESS_DENIED', 'registry']);
+    // A resolution narrowed to one tenant's registries reads nothing else.
+    expect(
+      (
+        await failure(
+          (listed as ReturnType<typeof docrImageSource>).resolve(
+            'oci://registry.digitalocean.com/acme/images/ubuntu:24.04',
+            { registries: ['tenant-c'] },
+          ),
+        )
+      ).details?.reason,
+    ).toBe('registry');
+    expect(sent).toBe(0);
+    expect(emu.requests).toHaveLength(0);
+    // An allowed registry resolves.
+    expect((await predicate.resolve('oci://registry.digitalocean.com/acme/images/ubuntu:24.04')).sha256).toMatch(
+      /^[0-9a-f]{64}$/,
+    );
+    expect(() =>
+      docrImageSource({ token: 'secret://do/t', secrets, registries: ['Bad_Name'] }),
+    ).toThrow(/registry/);
+  });
+
   it('refuses a plain token', () => {
     expect(() =>
       docrImageSource({ token: 'dop_v1_plain' as unknown as 'secret://x', secrets }),
@@ -260,6 +317,7 @@ describe('regional mirrors', () => {
       secrets,
       fetch: docrFetch(base.emu, base.docr),
       clock: base.clock,
+      registries: ['acme'],
       ...(mirrors !== undefined ? { mirrors } : {}),
     });
     base.docr.blobRegions.set('acme-ams3', 'ams3');
