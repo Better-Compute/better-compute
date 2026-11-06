@@ -52,6 +52,38 @@ describe('internal SigV4', () => {
     expect(url.endsWith('X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404')).toBe(true);
   });
 
+  // Published vectors, independent of the emulator (which checks with this signer's own
+  // canonicalRequest): POST bodies, and S3 header auth with key encoding.
+  it('matches the AWS test suite: post-vanilla and post-x-www-form-urlencoded', () => {
+    const base = { method: 'POST', url: new URL('https://example.amazonaws.com/'), service: 'service', region: 'us-east-1', credentials: suiteCredentials, now: Date.UTC(2015, 7, 30, 12, 36, 0) };
+    expect(signRequest({ ...base, headers: {} }).authorization).toBe(
+      'AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=host;x-amz-date, Signature=5da7c1a2acd57cee7505fc6676e4e544621c30862966e37dddb68e92efbe5d6b',
+    );
+    expect(signRequest({ ...base, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'Param1=value1' }).authorization).toBe(
+      'AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=ff11897932ad3f4e8b18135d722051e5ac45fc38421b1da7b9d196a0fe09473a',
+    );
+  });
+
+  it('matches the S3 documentation header-auth examples (GET with Range, PUT of test$file.text)', () => {
+    const s3Credentials = { accessKeyId: 'AKIAIOSFODNN7EXAMPLE', secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' };
+    const base = { service: 's3', region: 'us-east-1', credentials: s3Credentials, now: Date.UTC(2013, 4, 24), contentSha256Header: true, normalizePath: false };
+    const get = signRequest({ ...base, method: 'GET', url: new URL('https://examplebucket.s3.amazonaws.com/test.txt'), headers: { range: 'bytes=0-9' } });
+    expect(get.authorization).toBe(
+      'AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;range;x-amz-content-sha256;x-amz-date, Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41',
+    );
+    const put = signRequest({
+      ...base,
+      method: 'PUT',
+      url: new URL('https://examplebucket.s3.amazonaws.com/test$file.text'),
+      headers: { date: 'Fri, 24 May 2013 00:00:00 GMT', 'x-amz-storage-class': 'REDUCED_REDUNDANCY' },
+      body: 'Welcome to Amazon S3.',
+    });
+    expect(put['x-amz-content-sha256']).toBe('44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072');
+    expect(put.authorization).toBe(
+      'AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=date;host;x-amz-content-sha256;x-amz-date;x-amz-storage-class, Signature=98ad721746da40c64f1a55b78f14c238d841ea1380cd77a1b5971af0ece108bd',
+    );
+  });
+
   it('presigned URLs are bounded to 7 days', () => {
     expect(() =>
       presignUrl({
