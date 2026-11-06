@@ -16,7 +16,7 @@ import { DoEmulator, type Json, type RecordedRequest } from './support/do-emulat
 import { seedDroplet } from './support/do-emulator/droplets.js';
 import { seedShare } from './support/do-emulator/nfs.js';
 import { seedVpc } from './support/do-emulator/vpcs.js';
-import { build, ctx, freshBudgets } from './support/do-harness.js';
+import { build, ctx, doAccount, freshBudgets } from './support/do-harness.js';
 
 // provider-digitalocean Network File Storage (P6): shares as `kind: 'shared'` provider volumes
 // against the emulator. A share is found by its provider name (the vps name plus this
@@ -352,6 +352,38 @@ describe('provider-digitalocean NFS shares: attach and detach', () => {
     const actions = shareActions(emu).length;
     expect((await impl.volumes.attachVolume(id, String(second.id), ctx())).state).toBe('ready');
     expect(shareActions(emu)).toHaveLength(actions);
+  });
+
+  it('reads the share again once the Droplet is tagged: a VPC a racing detach took off is attached again', async () => {
+    const emu = emulator();
+    subnet(emu);
+    const other = subnet(emu, 'net-a-nyc3-b');
+    // A detach that read the holders before this tag landed takes the VPC off right after it.
+    let race: (() => void) | undefined;
+    const fetch = async (input: string | URL | Request, init?: RequestInit) => {
+      const response = await emu.fetch(input, init);
+      const last = emu.requests.at(-1)!;
+      if (race && last.method === 'POST' && /^\/v2\/tags\/bc-nfs-[^/]+\/resources$/.test(last.url.pathname)) {
+        const run = race;
+        race = undefined;
+        run();
+      }
+      return response;
+    };
+    const impl = await build(emu, doAccount, { fetch });
+    const first = host(emu, other);
+    const second = host(emu, other, { instance: 'ins_2' });
+    const { id } = await impl.volumes.ensureVolume(spec, ctx());
+    expect((await impl.volumes.attachVolume(id, String(first.id), ctx())).state).toBe('ready');
+    expect(shareActions(emu, 'attach')).toHaveLength(1);
+    race = () => {
+      const share = shareOf(emu, id);
+      share.vpc_ids = share.vpc_ids.filter((v: string) => v !== other.id);
+    };
+    const attached = await impl.volumes.attachVolume(id, String(second.id), ctx());
+    expect(attached.state).toBe('ready');
+    expect(shareActions(emu, 'attach')).toHaveLength(2);
+    expect(shareOf(emu, id).vpc_ids).toContain(other.id);
   });
 
   it('refuses a Droplet it may not reach the share from, before any write', async () => {

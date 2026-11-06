@@ -590,14 +590,25 @@ export class DoShares {
     }
     // The tag first: a detach running meanwhile then sees this Droplet and keeps its VPC.
     const tag = shareTag(share.id);
-    if (!hasTag(droplet, tag)) await assignTag(this.client, tag, droplet.id, signal);
+    let current = share;
+    if (!hasTag(droplet, tag)) {
+      await assignTag(this.client, tag, droplet.id, signal);
+      // A detach that read the holders before the tag landed may have taken this VPC off since the read above:
+      // read the share again, so a VPC that is gone is attached again rather than reported ready.
+      if (vpcIds.includes(vpc.id)) current = await this.ours(id, signal);
+    }
     const on = (outputs: Record<string, string> | undefined) => ({
-      ...(outputs ?? shareOutputs(share)),
+      ...(outputs ?? shareOutputs(current)),
       attachedTo: String(droplet.id),
     });
-    if (vpcIds.includes(vpc.id)) return state(sid, 'ready', on(shareOutputs(share)));
-    const action = await this.act(share, 'attach', { vpc_id: vpc.id }, signal);
-    const after = await this.after(share, action, 'pending', signal);
+    if ((current.vpc_ids ?? []).includes(vpc.id))
+      return state(sid, 'ready', on(shareOutputs(current)));
+    if (current.status !== 'ACTIVE') {
+      const now = shareState(current);
+      return now.state === 'error' ? now : state(sid, 'pending', shareOutputs(current));
+    }
+    const action = await this.act(current, 'attach', { vpc_id: vpc.id }, signal);
+    const after = await this.after(current, action, 'pending', signal);
     return after.state === 'ready' ? { ...after, outputs: on(after.outputs) } : after;
   }
 

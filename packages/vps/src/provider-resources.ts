@@ -2452,6 +2452,7 @@ async function convergeAttachment(
   attachment: VolumeAttachment,
   attachedTo: string | undefined,
   detachOnly: boolean,
+  recheckShared = false,
 ): Promise<void> {
   const machine = attachment.external_id;
   const instanceGone = attachment.instance_state === 'deleted';
@@ -2462,8 +2463,16 @@ async function convergeAttachment(
       return;
     }
     if (attachedTo === machine && attachment.state === 'ready') return;
-    // A shared volume is on many machines and its reads name none: a ready attachment to this machine is settled.
-    if (volume.kind === 'shared' && attachment.state === 'ready' && attachment.machine_id === machine) return;
+    // A shared volume is on many machines and its reads name none: a ready attachment to this machine is settled,
+    // except on a wake of a settled volume (the hourly drift pass), which asks again: an attach is idempotent and
+    // puts back the path a racing detach may have taken away.
+    if (
+      volume.kind === 'shared' &&
+      attachment.state === 'ready' &&
+      attachment.machine_id === machine &&
+      !recheckShared
+    )
+      return;
     const result = await run.attempt(`attach ${attachment.id}`, () =>
       volumes.attachVolume(
         externalId,
@@ -2768,9 +2777,24 @@ async function convergeVolume(
     return;
   }
   // The attachments wait until a stray attachment is gone (an attach elsewhere would be CONFLICT meanwhile).
+  // A shared volume that was settled when loaded was woken by the drift pass: its ready attachments are asked again.
+  const recheckShared =
+    volume.kind === 'shared' &&
+    volume.state === 'ready' &&
+    volume.desired_state === 'present' &&
+    attachments.every((a) => a.desired_state === 'present' && a.state === 'ready');
   if (!stray.busy)
     for (const attachment of attachments)
-      await convergeAttachment(run, volumes, volume, externalId, attachment, stray.on, false);
+      await convergeAttachment(
+        run,
+        volumes,
+        volume,
+        externalId,
+        attachment,
+        stray.on,
+        false,
+        recheckShared,
+      );
   await setVolume(run, volume, {
     ...observedFields,
     ...(size !== undefined ? { observed_size_gib: size } : {}),

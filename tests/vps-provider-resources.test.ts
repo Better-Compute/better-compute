@@ -1134,12 +1134,27 @@ describe('shared provider volumes (DO P6)', () => {
     expect([...share!.holders!].sort()).toEqual(
       [...(await machinesOf([first, second]))].sort(),
     );
-    // A settled shared attachment is not asked again (getVolume reports no attachedTo for a share).
-    const attaches = cloud.calls.filter((entry) => entry.startsWith('attachVolume')).length;
+    // The hourly drift pass asks every ready shared attachment again (getVolume names no machine for a share, and
+    // an attach is idempotent), which puts back a path a racing detach took away.
+    const attaches = () => cloud.calls.filter((entry) => entry.startsWith('attachVolume')).length;
+    const before = attaches();
+    share!.holders!.delete((await machinesOf([first]))[0]!);
     await driftNow();
     await drain();
-    expect(cloud.calls.filter((entry) => entry.startsWith('attachVolume')).length).toBe(attaches);
+    expect(attaches()).toBe(before + 2);
+    expect([...share!.holders!].sort()).toEqual([...(await machinesOf([first, second]))].sort());
     expect(cloud.calls.some((entry) => entry.startsWith('detachVolume'))).toBe(false);
+    expect((await getVolume(shared.id)).attachments).toEqual([
+      expect.objectContaining({ instanceId: first, state: 'ready' }),
+      expect.objectContaining({ instanceId: second, state: 'ready' }),
+    ]);
+    // While another attachment converges, the ready ones are not asked again.
+    const third = await insertInstance({ networkId });
+    await attach(shared.id, third);
+    await drain();
+    expect(attaches()).toBe(before + 3);
+    await detach(shared.id, third);
+    await drain();
 
     // Detach names the instance; the delete waits for every attachment to go.
     expect(await codeOf(detach(shared.id))).toBe('INVALID_INPUT');
