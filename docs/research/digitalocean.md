@@ -98,9 +98,28 @@ of the two labels it carries.
 | Fact | Status | Source / value |
 |---|---|---|
 | Autoscale pool members: `GET /v2/droplets/autoscale/{id}/members` → `{ droplet_id, status (provisioning/active/deleting/off), health_status }` | spec | `autoscale_pools/models/member.yml` |
-| Spot GPU Droplets (preview since 2026-08-10, daily variable pricing), and the field that signals a preemption | **unverified** | P3 |
-| Bare Metal GPU API visibility | **unverified** (no `bare_metal` resource in the spec) | Program Q1. P3 assumes manual enrolment (DO-D17's fallback) |
-| MicroVMs API (preview): `specification/resources/microvms` | spec, preview | P3 |
+| Spot GPU Droplets (preview since 2026-08-10, daily variable pricing), and the field that signals a preemption | **unverified** | P3. Rechecked 2026-11-05: `droplet_create.yml` and `size.yml` have no Spot member. The docs say a reclaim comes with at least two hours' notice **by email only**, and Spot prices are at or below on-demand and change daily. P3 keeps its assumed wire shape in `compute/spot.ts` (`verified: false`) |
+| Bare Metal GPU API visibility | **unverified** (no `bare_metal` resource in the spec; rechecked 2026-11-05) | Program Q1. P3 ships DO-D17's fallback: `digitaloceanMetal` over SSH, with operator-listed machines |
+| MicroVMs API (preview): `specification/resources/microvms` | spec, preview | P3 design gate: see below |
+| GPU Droplets boot plain OS images | docs ("GPU Droplets also work with existing Droplet images, but you need to manually install GPU drivers") | P3 refuses only AI/ML images on non-GPU or other-vendor sizes (D-P3-4) |
+
+### P3 MicroVM design gate (2026-11-05)
+
+What the spec says (`specification/resources/microvms`, read 2026-11-05):
+
+- **Endpoints:** `POST`/`GET /v2/microvms`, `GET`/`DELETE /v2/microvms/{id}`, pause, resume, exec, console, file
+  upload and download, checkpoints (create, list, get, delete) and options. Scopes `microvm:*`.
+- **Create:** `name`, `source` (`oci_ref`, a linux/amd64 container image, or `checkpoint_id`), `region`, `size`
+  (`cpu`, `memory`), `http_port`, `http_protocol`, `auto_pause.idle_timeout`, `tags`, `networking` (`public` or
+  `vpc`), `vpc_uuid`, `environment`.
+- **State:** `creating`, `running`, `pausing`, `paused`, `resuming`, `terminating`, `terminated`, `failed` (with
+  `failure_reason`), `unknown`.
+
+**Gate result: not passed, so MicroVMs move to a follow-up.** vps sandboxes run only on hosted pools
+(`sandboxes.ts` refuses a provider pool), and their runtime contract is a `RuntimeDriver` that bcd runs on a node to
+boot a catalog VM image. A DO MicroVM is neither: the control plane would drive it through DO's API, and it boots an
+OCI image or a checkpoint, not a VM image. Taking it needs a provider-backed sandbox backend contract in vps
+(create, pause and resume, exec, files, and checkpoints as snapshots), which is a design of its own.
 | The spec's resource folders match the 60 API groups in the program map | spec | `specification/resources/*` |
 
 ## Consequences for the plans (applied 2026-10-18)
