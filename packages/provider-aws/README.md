@@ -21,21 +21,23 @@ vps({ providers: [aws] });
 
 One provider account is one AWS account in one region. A fleet in several regions is several accounts with the same credentials.
 
-| Field               | Default    | Meaning                                                                                                                                         |
-| ------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `region`            | (required) | The AWS region, `us-east-1`. Checked against the region grammar: it is the only config text that reaches a host name.                           |
-| `zones`             | (required) | Availability Zone names as this account sees them (`us-east-1a`), or Local Zones (`us-west-2-lax-1a`). Offers and creates are limited to these. |
-| `credentials`       | –          | A secret reference to `{ "accessKeyId", "secretAccessKey" }`. Allowed, but a role is better.                                                    |
-| `assumeRoleArn`     | –          | The IAM role to assume, in the region's partition.                                                                                              |
-| `subnetId`          | –          | The subnet create uses (else the zone's default subnet).                                                                                        |
-| `securityGroupIds`  | –          | The security groups create uses.                                                                                                                |
-| `instanceProfile`   | –          | The instance profile ARN passed to `RunInstances`.                                                                                              |
-| `rootVolumeGiB`     | `100`      | Root EBS volume size (8–16384).                                                                                                                 |
-| `rootVolumeType`    | `gp3`      | `gp3`, `gp2` or `io2`.                                                                                                                          |
-| `kmsKeyId`          | –          | The KMS key for EBS encryption (else the account's default EBS key).                                                                            |
-| `metadataHopLimit`  | `1`        | The IMDSv2 hop limit (2 when containers on the instance need IMDS).                                                                             |
-| `associatePublicIp` | `true`     | Give instances a public IPv4 address (with a subnet).                                                                                           |
-| `discoverTag`       | –          | `key=value`: discovery yields only instances carrying this tag.                                                                                 |
+| Field                        | Default    | Meaning                                                                                                                                         |
+| ---------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `region`                     | (required) | The AWS region, `us-east-1`. Checked against the region grammar: it is the only config text that reaches a host name.                           |
+| `zones`                      | (required) | Availability Zone names as this account sees them (`us-east-1a`), or Local Zones (`us-west-2-lax-1a`). Offers and creates are limited to these. |
+| `credentials`                | –          | A secret reference to `{ "accessKeyId", "secretAccessKey" }`. Allowed, but a role is better.                                                    |
+| `assumeRoleArn`              | –          | The IAM role to assume, in the region's partition.                                                                                              |
+| `subnetId`                   | –          | The subnet create uses (else the zone's default subnet).                                                                                        |
+| `securityGroupIds`           | –          | The security groups create uses.                                                                                                                |
+| `instanceProfile`            | –          | The instance profile ARN passed to `RunInstances`.                                                                                              |
+| `rootVolumeGiB`              | `100`      | Root EBS volume size (8–16384).                                                                                                                 |
+| `rootVolumeType`             | `gp3`      | `gp3`, `gp2` or `io2`.                                                                                                                          |
+| `kmsKeyId`                   | –          | The KMS key for EBS encryption (else the account's default EBS key).                                                                            |
+| `metadataHopLimit`           | `1`        | The IMDSv2 hop limit (2 when containers on the instance need IMDS).                                                                             |
+| `associatePublicIp`          | `true`     | Give instances a public IPv4 address (with a subnet).                                                                                           |
+| `discoverTag`                | –          | `key=value`: discovery yields only instances carrying this tag.                                                                                 |
+| `ipamPoolId`                 | –          | Networks: allocate each VPC range from this Amazon VPC IPAM pool (the network's `cidr` gives the size).                                         |
+| `securityGroupsPerInterface` | `5`        | Networks: the account's security groups per network interface quota; network tags past it are `QUOTA_EXCEEDED`.                                 |
 
 `awsConfig.parse` checks field shapes (`INVALID_INPUT`); the provider checks the region, that every zone is in it, and the role ARN's shape and partition (`INVALID_CONFIG`), so `providerAccounts.create` refuses a bad account before it is stored.
 
@@ -111,13 +113,25 @@ EC2 takes at most 16 384 bytes of user data. With SSH keys, the user data is a M
 
 `discover` yields every instance that is not terminated (only those tagged `discoverTag`, when set). `claim` writes `better-compute:instance` (and `better-compute:managed` when deletion is handed over) and re-reads: EC2 tags have no compare-and-swap, so a re-read naming another instance is a lost race (`CONFLICT`). Tag reads lag behind writes too: a re-read that does not show the tag (or `managed`) yet is `UNAVAILABLE` (reason `tag-propagation`, retried), and so is a `delete` right after a managed claim that does not see `managed` yet. The vps unique index on the external id referees between control planes. `release` removes the tags only when they name the instance. Deleting an attached instance detaches it by default and leaves it running.
 
+## Networks
+
+`AwsCompute.networks` implements tenant networks (`ProviderNetworks`, AWS phase A2) with `subnetScope: 'zone'` and `denyRules: 'network-wide'`; `zoneRegion` maps `us-east-1a` and Local Zones to their region. Everything it makes is tagged `better-compute:managed=true` and `better-compute:network=<network>` and found again by tag:
+
+- `ensureNetwork`: a VPC (the spec's `cidr`, default `10.64.0.0/16`, private /16 to /28; or an `ipamPoolId` allocation), DNS support and hostnames, an internet gateway and the main route table's `0.0.0.0/0` route. The default network ACL's allow-all moves from rule 100 to 32766 (added before the old one goes), so deny entries come first.
+- `ensureSubnet`: needs a zone of the account; a range outside the VPC gets its /16 (or itself) associated first; `MapPublicIpOnLaunch` follows `associatePublicIp`; `privateGoogleAccess` adds S3 and DynamoDB gateway endpoints. A subnet that exists with another range or zone, or a range held by a subnet better-compute did not make, is `error`.
+- `ensureFirewall`: allows go to `bc-net-<network>` (no targets) or to the group named after each target tag, with one `better-compute:firewall:<name>` tag per rule that wants a security group rule; the set is diffed and revoked by `SecurityGroupRuleId`, and a rule better-compute did not make is only tagged and untagged. Denies become entries on the VPC's ACL numbered `100 + priority/10` (shifted past taken ones, `INVALID_INPUT` at 32766), each owned through the ACL tag `better-compute:deny:<direction>:<n>`, written before the entry. A targeted deny, a deny on an adopted VPC, and destinations on ingress (or sources on egress) are `error`.
+- `setTags`: the network's group and one group per tag on the primary interface, other groups kept; the instance must carry `better-compute:instance` naming it. `create` on a network launches in the network's subnet in the offer's zone (`INVALID_INPUT`, reason `subnet-zone`, otherwise) with those groups.
+- Deletes go endpoints, subnets, security groups, gateway, VPC; `DependencyViolation` is `pending`. A VPC without the network tag is never deleted.
+
+`aws iam-policy --phases A1,A2` adds the network statements (`networksIamStatements`): creates must carry `aws:RequestTag/better-compute:managed=true`, changes and deletes need the tag on the resource, rule and ACL tag edits are limited to their keys, and group swaps need `better-compute:instance` on the instance (or the primary interface). Route and ACL entry edits are not tag-scoped: AWS creates a VPC's main route table and default ACL untagged. (verify) whether `ec2:CreateAction` covers rule tags on `AuthorizeSecurityGroup*` and which resources `CreateVpcEndpoint` names, against the live suite.
+
 ## What comes next
 
-Networks (A2), capacity reservations, Capacity Blocks, Spot and prices (A3), event intake and Spot interruptions (A4), EBS volumes (A5), EC2 hosts joining as bcd nodes (A6), workload roles (A7), EKS (A9), placement groups and EFA (A10), and costs (A11), per `docs/superpowers/plans/2026-10-18-aws-integration-program.md`.
+Capacity reservations, Capacity Blocks, Spot and prices (A3), event intake and Spot interruptions (A4), EBS volumes (A5), EC2 hosts joining as bcd nodes (A6), workload roles (A7), EKS (A9), placement groups and EFA (A10), and costs (A11), per `docs/superpowers/plans/2026-10-18-aws-integration-program.md`.
 
 ## Testing
 
-`tests/support/aws-emulator` emulates STS, IMDS and EC2 in process through `fetch`. `tests/provider-aws*.test.ts` cover the config, credentials, offers, compute, attach, the CLI policies and the `providerConformanceCases()` suite; `tests/aws-end-to-end.test.ts` drives the provider through vps on PGlite. No test calls AWS.
+`tests/support/aws-emulator` emulates STS, IMDS, EC2 and VPC (`vpc.ts`, which wraps the EC2 emulator) in process through `fetch`. `tests/provider-aws*.test.ts` cover the config, credentials, offers, compute, attach, networks, the CLI policies and the `providerConformanceCases()` suite; `tests/aws-end-to-end.test.ts` and `tests/aws-networks-end-to-end.test.ts` drive the provider through vps on PGlite. No test calls AWS.
 
 ## License
 

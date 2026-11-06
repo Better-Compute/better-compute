@@ -3,6 +3,7 @@ import { ComputeError } from '@better-compute/core';
 import { assertRegion, parseArn, type AwsPartition } from '@better-compute/aws-core';
 import { parseDiscoverTag } from './config.js';
 import { tags } from './ids.js';
+import { networksIamStatements } from './networks.js';
 
 // The CLI commands that onboard an AWS account (`aws iam-policy`, `aws trust-policy`). The CLI never
 // imports providers, so an application that uses this one adds the commands to its configuration:
@@ -47,6 +48,8 @@ export function iamPolicy(
     discoverTag?: string;
     /** The customer-managed KMS key ARN of the accounts' `kmsKeyId`: adds EBS's grants on it. */
     kmsKeyArn?: string;
+    /** (A2) Adds what tenant networks need: VPCs, subnets, gateways, security groups, ACL entries. */
+    networks?: boolean;
   } = {},
 ): IamPolicyDocument {
   const partition = options.partition ?? 'aws';
@@ -198,6 +201,8 @@ export function iamPolicy(
       },
     );
   }
+  if (options.networks === true)
+    statements.push(...networksIamStatements((resource) => ec2(resource)));
   if (options.instanceProfileArn !== undefined) {
     const profile = parseArn(options.instanceProfileArn);
     if (profile.service !== 'iam' || !profile.resource.startsWith('instance-profile/'))
@@ -295,7 +300,7 @@ export function awsIamPolicyCommand() {
     group: 'Providers' as const,
     summary: 'Print the IAM permissions policy an AWS provider account needs',
     description:
-      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId.',
+      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; --phases A1,A2 adds tenant networks (VPC, subnet, gateway, security group and endpoint creates tagged better-compute:managed=true, changes and deletes only on resources so tagged, route and network ACL entry edits, and security group swaps on claimed instances).',
     target: 'none' as const,
     output: 'text' as const,
     flags: {
@@ -330,10 +335,25 @@ export function awsIamPolicyCommand() {
         value: 'KEY=VALUE',
         description: 'Attach may tag only instances carrying this tag (the account discoverTag)',
       },
+      phases: {
+        type: 'string' as const,
+        value: 'LIST',
+        description:
+          'Program phases to cover, comma-separated (A1 always; A2 adds tenant networks: VPCs, subnets, gateways, security groups, network ACL entries)',
+      },
       out: outFlag,
     },
     async run(context: AwsCommandContext): Promise<void> {
       const partition = text(context.flags.partition) as AwsPartition | undefined;
+      const phases = new Set(
+        (text(context.flags.phases) ?? 'A1')
+          .split(',')
+          .map((phase) => phase.trim().toUpperCase())
+          .filter(Boolean),
+      );
+      for (const phase of phases)
+        if (phase !== 'A1' && phase !== 'A2')
+          throw usage(`--phases knows A1 and A2, not ${phase.slice(0, 16)}`);
       await emit(
         context,
         iamPolicy({
@@ -347,6 +367,7 @@ export function awsIamPolicyCommand() {
           ...(text(context.flags['discover-tag'])
             ? { discoverTag: text(context.flags['discover-tag'])! }
             : {}),
+          ...(phases.has('A2') ? { networks: true } : {}),
         }),
       );
     },

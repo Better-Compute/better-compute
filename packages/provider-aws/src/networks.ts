@@ -11,6 +11,7 @@ import {
   type ProviderSubnetSpec,
 } from '@better-compute/core';
 import { partitionOf, type QueryParams, type XmlElement } from '@better-compute/aws-core';
+import type { IamStatement } from './cli.js';
 import type { AwsConfig } from './config.js';
 import { clientToken, parseInstanceId, tags, tagValue } from './ids.js';
 
@@ -1584,4 +1585,170 @@ function ownedEntries(acl: XmlElement): { number: number; egress: boolean; firew
       out.push({ egress: match[1] === 'egress', number: Number(match[2]), firewall: value });
   }
   return out;
+}
+
+// --- IAM -------------------------------------------------------------------------------------------
+
+/**
+ * The IAM statements tenant networks need (program Appendix B, phase A2), for `iamPolicy({ networks:
+ * true })`. `ec2(resource)` is an EC2 resource ARN in the policy's partition, region and account.
+ *
+ * - Creates must tag what they create `better-compute:managed=true` (every VPC, gateway, subnet,
+ *   security group and endpoint better-compute makes carries it), and the tags may only be written
+ *   by those creates (and the security group rule authorizations).
+ * - Changes and deletes of VPCs, gateways, subnets, security groups and endpoints need that tag on
+ *   the resource.
+ * - Routes and network ACL entries cannot be scoped by tag: AWS makes a VPC's main route table and
+ *   default network ACL untagged. Their edits are unconditioned; the ACL's own tags are limited to
+ *   the network and deny-owner keys.
+ * - A machine's groups change only on instances carrying `better-compute:instance` (claimed ones).
+ */
+export function networksIamStatements(ec2: (resource: string) => string): IamStatement[] {
+  const managed = { StringEquals: { [`ec2:ResourceTag/${tags.managed}`]: 'true' } };
+  const made = [
+    ec2('vpc/*'),
+    ec2('internet-gateway/*'),
+    ec2('subnet/*'),
+    ec2('security-group/*'),
+    ec2('vpc-endpoint/*'),
+  ];
+  return [
+    {
+      Sid: 'NetworkDescribe',
+      Effect: 'Allow',
+      Action: [
+        'ec2:DescribeVpcs',
+        'ec2:DescribeSubnets',
+        'ec2:DescribeInternetGateways',
+        'ec2:DescribeRouteTables',
+        'ec2:DescribeSecurityGroups',
+        'ec2:DescribeSecurityGroupRules',
+        'ec2:DescribeNetworkAcls',
+        'ec2:DescribeVpcEndpoints',
+      ],
+      Resource: '*',
+    },
+    {
+      Sid: 'NetworkCreateTagged',
+      Effect: 'Allow',
+      Action: [
+        'ec2:CreateVpc',
+        'ec2:CreateInternetGateway',
+        'ec2:CreateSubnet',
+        'ec2:CreateSecurityGroup',
+        'ec2:CreateVpcEndpoint',
+      ],
+      Resource: [...made, ec2('ipam-pool/*'), ec2('route-table/*')],
+      Condition: { StringEquals: { [`aws:RequestTag/${tags.managed}`]: 'true' } },
+    },
+    {
+      Sid: 'NetworkTagOnCreate',
+      Effect: 'Allow',
+      Action: 'ec2:CreateTags',
+      Resource: [...made, ec2('security-group-rule/*')],
+      Condition: {
+        StringEquals: {
+          'ec2:CreateAction': [
+            'CreateVpc',
+            'CreateInternetGateway',
+            'CreateSubnet',
+            'CreateSecurityGroup',
+            'CreateVpcEndpoint',
+            'AuthorizeSecurityGroupIngress',
+            'AuthorizeSecurityGroupEgress',
+          ],
+        },
+      },
+    },
+    {
+      Sid: 'NetworkManageOwned',
+      Effect: 'Allow',
+      Action: [
+        'ec2:DeleteVpc',
+        'ec2:ModifyVpcAttribute',
+        'ec2:AssociateVpcCidrBlock',
+        'ec2:AttachInternetGateway',
+        'ec2:DetachInternetGateway',
+        'ec2:DeleteInternetGateway',
+        'ec2:DeleteSubnet',
+        'ec2:ModifySubnetAttribute',
+        'ec2:DeleteSecurityGroup',
+        'ec2:AuthorizeSecurityGroupIngress',
+        'ec2:AuthorizeSecurityGroupEgress',
+        'ec2:RevokeSecurityGroupIngress',
+        'ec2:RevokeSecurityGroupEgress',
+        'ec2:DeleteVpcEndpoints',
+      ],
+      Resource: made,
+      Condition: managed,
+    },
+    {
+      // The other resources of a rule change: each must be allowed, so the group itself stays
+      // guarded by NetworkManageOwned.
+      Sid: 'NetworkRuleResources',
+      Effect: 'Allow',
+      Action: [
+        'ec2:AuthorizeSecurityGroupIngress',
+        'ec2:AuthorizeSecurityGroupEgress',
+        'ec2:RevokeSecurityGroupIngress',
+        'ec2:RevokeSecurityGroupEgress',
+      ],
+      Resource: ec2('security-group-rule/*'),
+    },
+    {
+      Sid: 'NetworkRuleTags',
+      Effect: 'Allow',
+      Action: ['ec2:CreateTags', 'ec2:DeleteTags'],
+      Resource: ec2('security-group-rule/*'),
+      Condition: {
+        'ForAllValues:StringLike': { 'aws:TagKeys': [`${networkTags.firewallPrefix}*`] },
+        Null: { 'aws:TagKeys': 'false' },
+      },
+    },
+    {
+      Sid: 'NetworkRoutesAndAcls',
+      Effect: 'Allow',
+      Action: [
+        'ec2:CreateRoute',
+        'ec2:ReplaceRoute',
+        'ec2:CreateNetworkAclEntry',
+        'ec2:DeleteNetworkAclEntry',
+      ],
+      Resource: [ec2('route-table/*'), ec2('network-acl/*'), ec2('internet-gateway/*')],
+    },
+    {
+      Sid: 'NetworkAclTags',
+      Effect: 'Allow',
+      Action: ['ec2:CreateTags', 'ec2:DeleteTags'],
+      Resource: ec2('network-acl/*'),
+      Condition: {
+        'ForAllValues:StringLike': {
+          'aws:TagKeys': [networkTags.network, `${networkTags.denyPrefix}*`],
+        },
+        Null: { 'aws:TagKeys': 'false' },
+      },
+    },
+    {
+      Sid: 'NetworkMachineGroups',
+      Effect: 'Allow',
+      Action: ['ec2:ModifyInstanceAttribute'],
+      Resource: ec2('instance/*'),
+      Condition: { Null: { [`ec2:ResourceTag/${tags.instance}`]: 'false' } },
+    },
+    {
+      // A multi-interface machine changes groups on its primary interface, which must carry the
+      // ownership tag too.
+      Sid: 'NetworkInterfaceGroups',
+      Effect: 'Allow',
+      Action: 'ec2:ModifyNetworkInterfaceAttribute',
+      Resource: ec2('network-interface/*'),
+      Condition: { Null: { [`ec2:ResourceTag/${tags.instance}`]: 'false' } },
+    },
+    {
+      Sid: 'NetworkMachineGroupResources',
+      Effect: 'Allow',
+      Action: ['ec2:ModifyInstanceAttribute', 'ec2:ModifyNetworkInterfaceAttribute'],
+      Resource: ec2('security-group/*'),
+    },
+  ];
 }

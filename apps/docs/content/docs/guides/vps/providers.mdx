@@ -1134,8 +1134,12 @@ in one region: a fleet in several regions is several accounts.
   `ProvisionFailed`.
 - **Attach.** `discover` yields every instance that is not terminated; `claim` writes the ownership tag and re-reads
   it, turning a lost race into `CONFLICT`; deleting an attached instance detaches it and leaves it running.
+- **Networks.** Tenant networks are VPCs with zone-scoped subnets, allow rules as security group rules and deny rules
+  as network ACL entries (network-wide only); see [tenant networks on AWS](/docs/guides/vps/networking#on-aws). The
+  account fields `ipamPoolId` (VPC ranges from Amazon VPC IPAM) and `securityGroupsPerInterface` (default 5) apply to
+  them, and `aws iam-policy --phases A1,A2` prints the permissions they need.
 
-`tests/provider-aws.test.ts`, `tests/provider-aws-credentials.test.ts`, `tests/provider-aws-attach.test.ts` and
-`tests/provider-aws-cli.test.ts` run the conformance cases and the EC2 specifics against an in-process AWS emulator
-passed as `fetch`, and `tests/aws-end-to-end.test.ts` runs the provider through vps. No live AWS suite has been run
-yet.
+`tests/provider-aws.test.ts`, `tests/provider-aws-credentials.test.ts`, `tests/provider-aws-attach.test.ts`,
+`tests/provider-aws-cli.test.ts` and `tests/provider-aws-networks.test.ts` run the conformance cases and the EC2 and VPC
+specifics against an in-process AWS emulator passed as `fetch`, and `tests/aws-end-to-end.test.ts` and
+`tests/aws-networks-end-to-end.test.ts` run the provider through vps. No live AWS suite has been run yet.

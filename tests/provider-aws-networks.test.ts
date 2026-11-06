@@ -9,6 +9,8 @@ import type {
 import {
   awsConfig,
   awsProvider,
+  awsIamPolicyCommand,
+  iamPolicy,
   type AwsCompute,
   type AwsConfig,
 } from '@better-compute/provider-aws';
@@ -798,5 +800,80 @@ describe('networks: machines', () => {
     ec2.instances.get(machine.id)!.state = 'terminated';
     expect((await networks.deleteNetwork('bc-net-1', call())).state).toBe('deleted');
     expect(vpc.groups.size).toBe(0);
+  });
+});
+
+describe('networks: IAM policy', () => {
+  it('adds the network statements only when asked, ABAC-scoped where AWS allows', () => {
+    expect(iamPolicy().Statement.some((s) => s.Sid.startsWith('Network'))).toBe(false);
+    const policy = iamPolicy({ networks: true, region: 'us-east-1', account: '222222222222' });
+    const bySid = new Map(policy.Statement.map((s) => [s.Sid, s]));
+    expect(bySid.get('NetworkCreateTagged')).toMatchObject({
+      Condition: { StringEquals: { 'aws:RequestTag/better-compute:managed': 'true' } },
+    });
+    expect(bySid.get('NetworkManageOwned')).toMatchObject({
+      Action: expect.arrayContaining(['ec2:DeleteVpc', 'ec2:RevokeSecurityGroupIngress']),
+      Resource: expect.arrayContaining(['arn:aws:ec2:us-east-1:222222222222:vpc/*']),
+      Condition: { StringEquals: { 'ec2:ResourceTag/better-compute:managed': 'true' } },
+    });
+    expect(bySid.get('NetworkMachineGroups')).toMatchObject({
+      Condition: { Null: { 'ec2:ResourceTag/better-compute:instance': 'false' } },
+    });
+    expect(bySid.get('NetworkAclTags')).toMatchObject({
+      Condition: {
+        'ForAllValues:StringLike': {
+          'aws:TagKeys': ['better-compute:network', 'better-compute:deny:*'],
+        },
+      },
+    });
+    // Every action the networks module calls is in the policy.
+    const actions = new Set(policy.Statement.flatMap((s) => [s.Action].flat()));
+    for (const action of [
+      'CreateVpc',
+      'DescribeVpcs',
+      'ModifyVpcAttribute',
+      'AssociateVpcCidrBlock',
+      'CreateInternetGateway',
+      'AttachInternetGateway',
+      'CreateRoute',
+      'ReplaceRoute',
+      'CreateSubnet',
+      'ModifySubnetAttribute',
+      'CreateVpcEndpoint',
+      'DeleteVpcEndpoints',
+      'CreateSecurityGroup',
+      'DescribeSecurityGroupRules',
+      'AuthorizeSecurityGroupIngress',
+      'RevokeSecurityGroupEgress',
+      'CreateNetworkAclEntry',
+      'DeleteNetworkAclEntry',
+      'ModifyInstanceAttribute',
+      'ModifyNetworkInterfaceAttribute',
+      'DeleteSubnet',
+      'DeleteSecurityGroup',
+      'DetachInternetGateway',
+      'DeleteInternetGateway',
+      'DeleteVpc',
+    ])
+      expect(actions.has(`ec2:${action}`), action).toBe(true);
+  });
+});
+
+describe('networks: aws iam-policy --phases', () => {
+  const run = async (phases?: string) => {
+    const out: string[] = [];
+    await awsIamPolicyCommand().run({
+      flags: phases === undefined ? {} : { phases },
+      io: { out: (message: string) => out.push(message) },
+      note() {},
+      path: (value: string) => value,
+    });
+    return JSON.parse(out.join('\n'));
+  };
+
+  it('A2 adds the network statements; unknown phases are refused', async () => {
+    expect(await run()).toEqual(iamPolicy());
+    expect(await run('a1, A2')).toEqual(iamPolicy({ networks: true }));
+    await expect(run('A9')).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
 });

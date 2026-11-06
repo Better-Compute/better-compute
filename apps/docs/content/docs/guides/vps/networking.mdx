@@ -151,7 +151,7 @@ and no other.
 
 ## Tenant networks
 
-On a provider pool whose provider supports networks (Google Compute Engine and DigitalOcean), a tenant builds its own private networks
+On a provider pool whose provider supports networks (Google Compute Engine, DigitalOcean and AWS), a tenant builds its own private networks
 through [networks](/docs/reference/api/networks) and [firewallRules](/docs/reference/api/firewall-rules), and the
 provider runs them: a VPC per network, subnets in it, and firewall rules. The calls record what the tenant wants and
 return at once; the `vps.networks` reconciler converges the provider.
@@ -252,6 +252,43 @@ tags. The tenant-facing behaviour above holds; these are the differences.
   which allows only what the rule says, so it loses egress.
 - **Only its own names are touched.** The provider replaces and deletes only firewalls whose names have exactly the
   shape above and VPCs whose description names a network. A `bc-r1.prod` firewall or a VPC made by hand is left alone.
+
+### On AWS
+
+The [AWS provider](/docs/guides/vps/providers#amazon-ec2) maps a network onto an Amazon VPC. Everything it makes is
+tagged (`better-compute:network`, `better-compute:subnet`, `better-compute:managed=true`) and found again by tag, so
+nothing depends on remembered ids. The tenant-facing behaviour above holds; these are the differences.
+
+- **A network is a VPC** with DNS support and hostnames, an internet gateway and a `0.0.0.0/0` route on its main
+  route table. `networks.create` takes an optional `cidr`, the VPC's range: a private /16 to /28, default
+  `10.64.0.0/16` (or a block from the account's `ipamPoolId`). Providers whose networks have no range ignore it.
+- **Subnets are zone-scoped.** `networks.addSubnet` needs `zone`, one of the account's zones, in `region`
+  (`us-east-1a` is in `us-east-1`); a subnet without one is `INVALID_INPUT`, and so is a zone on a region-scoped
+  provider. A range outside the VPC's ranges first gets the subnet's /16 (or the range itself, when that /16 would
+  overlap one) associated as a secondary range; AWS takes at most five per VPC. A subnet is /16 to /28. Instances go
+  on a subnet in their offer's zone: naming one in another zone is `INVALID_INPUT`, and without `subnetId` the
+  network's only subnet in that zone is used. Public IPs on launch follow the account's `associatePublicIp`.
+- **Allow rules are security group rules.** A rule with no targets goes to the network's group `bc-net-<network>`; a
+  rule that targets instances goes to the group named after each instance's tag (`bc-` and 16 hex digits). Every
+  instance on the network carries the network's group and its own from its first boot, and the reconciler keeps them
+  on its primary interface. Groups that better-compute did not make (by tag, not by name) stay on the interface.
+  More groups than the account's per-interface quota (`securityGroupsPerInterface`, default 5) is `QUOTA_EXCEEDED`.
+  Two rules that want the same security group rule share it, and the last one removed revokes it. A rule that names
+  the other side's range (destinations on an ingress rule, sources on an egress one) is `error`.
+- **Deny rules are network-wide.** Security groups only allow, so a deny becomes entries on the VPC's network ACL,
+  numbered `100 + priority/10` (taken numbers shift up); the ACL's allow-all moves to rule 32766, after every deny.
+  A deny that targets instances is refused at `firewallRules.create` and `update` with `UNSUPPORTED`. A network-wide
+  deny applies whatever the priority of a targeted allow, and ACLs are stateless: a deny on ingress ports can block the
+  replies to outbound connections that use them. An ACL holds 20 entries per direction by default; a deny that does not
+  fit is `error`. Deny rules on an adopted VPC are `error`: its ACL is never edited.
+- **Private service access.** A subnet with private Google access on GCE maps to S3 and DynamoDB gateway endpoints on
+  the VPC's main route table; they are removed with the network.
+- **Deletion** removes endpoints, subnets, security groups and the gateway, then the VPC; anything still in use
+  (`DependencyViolation`) keeps the delete `pending`. Only VPCs carrying the network tag are ever deleted. The groups
+  of instances' tags are removed with the network; on an adopted VPC they stay.
+- **IAM.** `better-compute aws iam-policy --phases A1,A2` adds the network permissions: creates must tag what they make
+  `better-compute:managed=true`, and changes and deletes need that tag. AWS creates a VPC's main route table and
+  default ACL untagged, so route and ACL entry edits are not tag-scoped.
 
 What is not there at all: IPv6 ranges, more than one range or lease per instance, and an API to manage ranges. Tunnels
 give you exec, SSH and single-port TCP access without routing to the instance network; see [tunnels](/docs/guides/access/tunnels).
