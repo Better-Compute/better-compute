@@ -408,7 +408,8 @@ export class AwsNetworks implements ProviderNetworks {
       );
     const cidr = spec.cidr ?? defaultNetworkCidr;
     vpcRange(cidr, 'network cidr');
-    const vpc = (await this.#vpc(spec.name, signal)) ?? (await this.#byRange(spec.name, cidr, signal));
+    const vpc =
+      (await this.#vpc(spec.name, signal)) ?? (await this.#byRange(spec.name, cidr, signal));
     if (!vpc) {
       const doc = await this.#call(
         'CreateVpc',

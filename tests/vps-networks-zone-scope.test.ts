@@ -211,7 +211,11 @@ describe('vps networks on a zone-scoped provider', () => {
     });
     expect(view.subnets[0]).toMatchObject({ region: 'us-west-2', zone: 'us-west-2-lax-1a' });
     await expect(
-      w.addSubnet(net.id, { region: 'us-west-2-lax-1a', zone: 'us-west-2-lax-1a', cidr: '10.3.0.0/24' }),
+      w.addSubnet(net.id, {
+        region: 'us-west-2-lax-1a',
+        zone: 'us-west-2-lax-1a',
+        cidr: '10.3.0.0/24',
+      }),
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
 

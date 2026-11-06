@@ -266,7 +266,11 @@ describe('networks: VPC', () => {
     vpc.vpcs.delete(duplicate.id);
     const lower = { ...duplicate, id: 'vpc-00000000000000001' };
     vpc.vpcs.set(lower.id, lower);
-    for (const owned of [...vpc.routeTables.values(), ...vpc.nacls.values(), ...vpc.groups.values()])
+    for (const owned of [
+      ...vpc.routeTables.values(),
+      ...vpc.nacls.values(),
+      ...vpc.groups.values(),
+    ])
       if (owned.vpcId === duplicate.id) owned.vpcId = lower.id;
     const ensured = await networks.ensureNetwork({ name: 'bc-net-1' }, call());
     expect(ensured).toMatchObject({ state: 'ready', id: first.id });
@@ -929,8 +933,9 @@ describe('networks: machines', () => {
     expect(emu.calls('ModifyInstanceAttribute')).toHaveLength(0);
     expect(instance.groups.map((g) => g.id)).toEqual([groupId('bc-net-bc-net-1'), groupId(tagB)]);
     // Already carries the tag: no tag write on the interface.
-    expect(emu.calls('CreateTags').filter((r) => r.params.get('ResourceId.1')?.startsWith('eni-')))
-      .toHaveLength(0);
+    expect(
+      emu.calls('CreateTags').filter((r) => r.params.get('ResourceId.1')?.startsWith('eni-')),
+    ).toHaveLength(0);
   });
 
   it('setTags tags the primary interface of a claimed multi-interface machine before changing it', async () => {
@@ -1250,8 +1255,10 @@ describe('networks: IAM policy against the calls the code makes', () => {
       for (let n = 1; p.has(`TagSpecification.${n}.ResourceType`); n++) {
         const type = p.get(`TagSpecification.${n}.ResourceType`)!;
         // The create itself, and tagging on create, are allowed for that resource type.
-        expect(allows(`ec2:${request.operation}`, type).length, `${request.operation} ${type}`)
-          .toBeGreaterThan(0);
+        expect(
+          allows(`ec2:${request.operation}`, type).length,
+          `${request.operation} ${type}`,
+        ).toBeGreaterThan(0);
         const onCreate = allows('ec2:CreateTags', type).filter((s) =>
           [s.Condition?.StringEquals?.['ec2:CreateAction'] ?? []]
             .flat()
