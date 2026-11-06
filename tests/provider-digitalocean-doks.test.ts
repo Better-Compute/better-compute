@@ -559,6 +559,39 @@ describe('doks node pools', () => {
     expect(posted(s, `/kubernetes/clusters/${cluster}/node_pools`)).toHaveLength(3);
   });
 
+  it("adds a GPU pool only once the cluster's own GPU device plugins are off (DO-D18)", async () => {
+    const s = await setup();
+    // An adopted cluster from before DOKS 1.37: NVIDIA's and AMD's device plugins are on.
+    const adopted = s.doks.seedCluster({ name: 'team-cluster', region: 'tor1' });
+    const refused = await failure(s.k8s.ensureNodePool(adopted.id, gpuPool, s.ctx()));
+    expect([refused.code, refused.details?.reason]).toEqual(['INVALID_STATE', 'devicePluginOn']);
+    expect(refused.details?.field).toBe('nvidia_gpu_device_plugin, amd_gpu_device_plugin');
+    expect(refused.message).toContain('nvidia_gpu_device_plugin');
+    // Someone else's cluster is never changed; a CPU pool needs no check.
+    expect(mutations(s)).toEqual([]);
+    await settle(() => s.k8s.ensureNodePool(adopted.id, cpuPool, s.ctx()), 'ready');
+    // Once its operator turns them off, the GPU pool is added.
+    adopted.nvidia_gpu_device_plugin = { enabled: false };
+    adopted.amd_gpu_device_plugin = { enabled: false };
+    await settle(() => s.k8s.ensureNodePool(adopted.id, gpuPool, s.ctx()), 'ready');
+
+    // On a cluster of ours whose plugins came back on, they are turned off first.
+    const cluster = await readyCluster(s, { ...standard, name: 'bc-k-tor', location: 'tor1' });
+    const mine = s.doks.clusters.get(cluster)!;
+    mine.nvidia_gpu_device_plugin = { enabled: true };
+    const before = mutations(s).length;
+    expect((await s.k8s.ensureNodePool(cluster, gpuPool, s.ctx())).state).toBe('pending');
+    expect(mutations(s).slice(before)).toEqual([`PUT /kubernetes/clusters/${cluster}`]);
+    expect(posted(s, `/kubernetes/clusters/${cluster}`, 'PUT').at(-1)).toMatchObject({
+      name: 'bc-k-tor',
+      nvidia_gpu_device_plugin: { enabled: false },
+      amd_gpu_device_plugin: { enabled: false },
+    });
+    expect(mine.tags).toEqual(expect.arrayContaining(ours));
+    await settle(() => s.k8s.ensureNodePool(cluster, gpuPool, s.ctx()), 'ready');
+    expect(posted(s, `/kubernetes/clusters/${cluster}/node_pools`)).toHaveLength(1);
+  });
+
   it('creates Spot GPU pools only when the account allows Spot and previews', async () => {
     const spot = { ...gpuPool, name: 'spot', spot: true };
     const plain = await setup();

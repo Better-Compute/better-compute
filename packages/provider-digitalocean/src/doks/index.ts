@@ -23,6 +23,7 @@ import {
   clusterTags,
   clusterUpdate,
   firewallOf,
+  gpuDevicePluginsOn,
   immutable,
   isOwned,
   outputsOf,
@@ -515,9 +516,9 @@ export class DoKubernetes implements ProviderKubernetes {
   /**
    * Spot and GPU sizes, checked before a create: Spot only with the account's `allowSpot` and
    * `previews` (Spot GPU is a DO preview, DO-D14/DO-D23) and only on GPU sizes; `accelerators`
-   * must be what the size carries (DO sizes come with their GPUs).
+   * must be what the size carries (DO sizes come with their GPUs). True when the size is a GPU one.
    */
-  async #checkCapacity(spec: KubernetesNodePoolSpec, signal: AbortSignal): Promise<void> {
+  async #checkCapacity(spec: KubernetesNodePoolSpec, signal: AbortSignal): Promise<boolean> {
     if (spec.spot && this.#spotDropped) throw spotUnverified();
     if (spec.spot && !(this.#config.allowSpot && this.#config.previews))
       throw fail(
@@ -525,7 +526,7 @@ export class DoKubernetes implements ProviderKubernetes {
         `Node pool ${spec.name}: Spot node pools need the account's allowSpot and previews (Spot GPU is a DigitalOcean preview)`,
         'spotDisabled',
       );
-    if (!spec.accelerators && !spec.spot && !spec.machineType.startsWith('gpu-')) return;
+    if (!spec.accelerators && !spec.spot && !spec.machineType.startsWith('gpu-')) return false;
     let size: DoSize | undefined;
     for await (const candidate of this.#client.pages<DoSize>('/sizes', 'sizes', {
       signal,
@@ -539,7 +540,7 @@ export class DoKubernetes implements ProviderKubernetes {
     const gpu = size.gpu_info;
     if (spec.spot && !gpu)
       throw invalid(`Node pool ${spec.name}: Spot node pools are GPU sizes only`, 'spot');
-    if (!spec.accelerators) return;
+    if (!spec.accelerators) return gpu !== undefined;
     const model = (gpu?.model ?? '').toLowerCase();
     const wanted = spec.accelerators.type.toLowerCase().replaceAll('-', '_');
     const sameModel = wanted === model || wanted === model.replace(/^(nvidia|amd)_/, '');
@@ -548,6 +549,38 @@ export class DoKubernetes implements ProviderKubernetes {
         `Size ${size.slug} carries ${gpu ? `${gpu.count} ${gpu.model}` : 'no GPUs'}, not ${spec.accelerators.count} ${spec.accelerators.type}`,
         'accelerators',
       );
+    return true;
+  }
+
+  /**
+   * DO-D18 before a GPU pool joins a cluster: DOKS's own GPU device plugins must be off, or they
+   * advertise the pool's GPUs next to bcd's and outside compute's booking (clusters before DOKS
+   * 1.37 turned them on). On a cluster of ours they are turned off (a PUT; the pool waits, so the
+   * answer is pending); on any other (an adopted one) INVALID_STATE (`devicePluginOn`) names the
+   * fields its operator must turn off: someone else's cluster is never changed. Undefined when
+   * they are off.
+   */
+  async #gpuPluginsOff(
+    parent: DoksCluster,
+    id: string,
+    context: CallContext,
+  ): Promise<ProviderResourceState | undefined> {
+    const on = gpuDevicePluginsOn(parent);
+    if (on.length === 0) return undefined;
+    if (!this.#owned(parent))
+      throw fail(
+        'INVALID_STATE',
+        `DOKS cluster ${parent.id} runs its own GPU device plugins (${on.join(', ')}): turn them off before a GPU node pool is added, so only better-compute's device plugin advertises the GPUs`,
+        'devicePluginOn',
+        { field: on.join(', ') },
+      );
+    context.log.info('doks.cluster.pluginsOff', { cluster: parent.id, nodePool: id });
+    await this.#client.request('PUT', `/kubernetes/clusters/${parent.id}`, {
+      body: { name: parent.name, tags: ownTags(parent), ...pluginsOff },
+      signal: context.signal,
+      budget: 'mutate',
+    });
+    return resourceState(id, 'pending');
   }
 
   /** The cluster a node pool call names, and the pool of that name in it. */
@@ -595,7 +628,10 @@ export class DoKubernetes implements ProviderKubernetes {
         );
       // A pool is added once the control plane serves (not while it provisions or upgrades).
       if (!serving) return resourceState(id, 'pending');
-      await this.#checkCapacity(spec, signal);
+      if (await this.#checkCapacity(spec, signal)) {
+        const waiting = await this.#gpuPluginsOff(parent, id, context);
+        if (waiting) return waiting;
+      }
       log.info('doks.nodePool.create', { nodePool: id, size: spec.machineType });
       try {
         const created = (
