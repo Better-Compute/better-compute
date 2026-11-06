@@ -5,6 +5,7 @@ import {
   accountCredentials,
   AwsCompute,
   awsIamPolicyCommand,
+  clientToken,
   iamPolicy,
   type IamStatement,
   awsConfig,
@@ -709,6 +710,25 @@ describe('purchases', () => {
     );
     expect(again.id).toBe(created.id);
     expect(w.capacity.reservations.size).toBe(1);
+  });
+
+  it('a shared-in reservation carrying the purchase tag is never taken for ours', async () => {
+    const w = world({ allowPurchases: true });
+    // Another account shares a reservation tagged with the token this purchase would use.
+    const token = clientToken('buy-odcr');
+    w.capacity.add({
+      id: 'cr-0eeeeeeeeeeeeeee5',
+      ownerId: '333333333333',
+      type: 'm7i.large',
+      tags: new Map([['better-compute:purchase', token]]),
+    });
+    const created = await w.compute.purchaseReservation(
+      'odcr:us-east-1a/m7i.large/1/24',
+      w.call('buy-odcr'),
+    );
+    expect(created.id).not.toBe('cr-0eeeeeeeeeeeeeee5');
+    expect(created.shared).toBe(false);
+    expect(w.emu.calls('CreateCapacityReservation')).toHaveLength(1);
   });
 
   it('refuses malformed, foreign-zone and tenant-account purchases', async () => {

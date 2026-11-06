@@ -760,9 +760,13 @@ export class AwsCompute implements ProviderImpl {
 
   /** The reservation an earlier attempt with this purchase token bought, if EC2 shows one. */
   async #purchased(token: string, signal: AbortSignal): Promise<ExternalReservation | undefined> {
-    const [found] = await this.capacityReservations(signal, undefined, [
-      { Name: `tag:${purchaseTag}`, Value: [token] },
-    ]);
+    const { account } = await this.deps.account.verify({ signal, clock: this.context.clock });
+    // Only the account's own reservations: one shared in from elsewhere is never taken for ours.
+    const found = (
+      await this.capacityReservations(signal, undefined, [
+        { Name: `tag:${purchaseTag}`, Value: [token] },
+      ])
+    ).find((info) => info.ownerId === account);
     if (!found) return undefined;
     const reservation = await this.#asReservation(found, signal);
     if (!reservation)
