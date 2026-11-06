@@ -46,6 +46,7 @@ import {
   parseCredentials,
   parseListClusters,
   parseNodePoolRef,
+  parseSubstrateRef,
   parseUpdateCluster,
   parseUpdateNodePool,
   parseVersions,
@@ -53,9 +54,16 @@ import {
 import { clustersReconciler } from './reconciler.js';
 import { clustersWork, type KubernetesDeps } from './store.js';
 import { substratePolicyValidator } from './substrate-policy.js';
-import { substratesReconciler, type SubstrateDeps, type SubstrateOptions } from './substrates.js';
+import {
+  getSubstrate,
+  substratesReconciler,
+  type SubstrateDeps,
+  type SubstrateOptions,
+  type SubstrateView,
+} from './substrates.js';
 import type {
   ClusterRef,
+  SubstrateRef,
   CreateClusterInput,
   CreateNodePoolInput,
   CredentialsInput,
@@ -114,6 +122,10 @@ export type KubernetesApi = {
     list: MethodDefinition<ClusterRef, { items: KubernetesNodePoolView[] }>;
     update: MethodDefinition<UpdateNodePoolInput, KubernetesNodePoolView>;
     delete: MethodDefinition<NodePoolRef, KubernetesNodePoolView>;
+  };
+  /** Pool substrates (`policy.substrate`): the managed cluster behind a pool, as the substrate reconciler sees it. */
+  kubernetesSubstrates: {
+    get: MethodDefinition<SubstrateRef, SubstrateView>;
   };
 };
 
@@ -322,6 +334,15 @@ export function kubernetes(
         resource: clusterResource,
         validate: describedBy(kubernetesSchemas.nodePool, parseNodePoolRef),
         handler: (context, input) => deleteNodePool(depsOf(context), context.sql, input),
+      }),
+    },
+    kubernetesSubstrates: {
+      get: defineMethod({
+        action: 'compute:kubernetes:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(kubernetesSchemas.substrate, parseSubstrateRef),
+        handler: (context, input) => getSubstrate(context.sql, input),
       }),
     },
   });

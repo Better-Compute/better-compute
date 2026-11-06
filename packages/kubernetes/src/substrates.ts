@@ -197,6 +197,8 @@ export interface SubstrateView {
   message?: string;
   nodesListed?: number;
   nodesJoined?: number;
+  /** `upgrades: 'drain'`: the version drained for, and since when, until the cluster runs it. */
+  upgrade?: { version: string; since: number };
 }
 
 export function substrateView(row: SubstrateRow): SubstrateView {
@@ -210,7 +212,23 @@ export function substrateView(row: SubstrateRow): SubstrateView {
     ...(row.message !== null ? { message: row.message } : {}),
     ...(row.nodes_listed !== null ? { nodesListed: Number(row.nodes_listed) } : {}),
     ...(row.nodes_joined !== null ? { nodesJoined: Number(row.nodes_joined) } : {}),
+    ...(row.upgrade_version !== null && row.upgrade_since !== null
+      ? { upgrade: { version: row.upgrade_version, since: new Date(row.upgrade_since).getTime() } }
+      : {}),
   };
+}
+
+/** `kubernetesSubstrates.get`: a pool's substrate, for the pool owner (never its token id or a credential). */
+export async function getSubstrate(
+  sql: Pick<SqlExecutor, 'query'>,
+  input: { tenantId: string; poolId: string },
+): Promise<SubstrateView> {
+  const { rows } = await sql.query<SubstrateRow>(
+    `SELECT ${substrateColumns} FROM kubernetes_pool_substrates WHERE pool_id = $1 AND tenant_id = $2`,
+    [input.poolId, input.tenantId],
+  );
+  if (!rows[0]) throw new ComputeError('NOT_FOUND', `Pool ${input.poolId} has no substrate`);
+  return substrateView(rows[0]);
 }
 
 export async function readSubstrate(

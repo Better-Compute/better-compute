@@ -165,6 +165,37 @@ describe('substrate: create', () => {
     expect(world.kube.get(server, '/api/v1/namespaces/bcd-system/secrets/bcd-join-token')).toBeDefined();
   });
 
+  it('reads a substrate through kubernetesSubstrates.get, for the pool owner only', async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(createSpec([gpu]));
+    await world.converge(pool.id, 6);
+    await world.joinNodes(pool.id, 1);
+    await world.converge(pool.id, 2);
+    const row = await world.substrate(pool.id);
+    const view = await world.api.kubernetesSubstrates.get(world.root, { tenantId: world.rootTenant, poolId: pool.id });
+    expect(view).toEqual({
+      poolId: pool.id,
+      tenantId: world.rootTenant,
+      providerAccountId: world.accountId,
+      mode: 'create',
+      clusterId: row.cluster_id,
+      state: 'ready',
+      nodesListed: 2,
+      nodesJoined: 1,
+    });
+    // Nothing secret in it: no token id, no credential.
+    expect(JSON.stringify(view)).not.toMatch(/token|jtk_/i);
+    await expect(
+      world.api.kubernetesSubstrates.get(world.acme, { tenantId: world.acmeTenant, poolId: pool.id }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(
+      world.api.kubernetesSubstrates.get(world.root, { tenantId: world.rootTenant, poolId: 'pool_01jz00000000000000000000zz' }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(
+      world.api.kubernetesSubstrates.get(world.root, { tenantId: world.rootTenant, poolId: 'nope' }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
   it('wakes the substrate when its cluster or a node pool changes state, not only on its own poll', async () => {
     world = await substrateWorld();
     const pool = await world.createPool(createSpec([gpu]));

@@ -131,6 +131,8 @@ export interface CreateClusterInput {
 }
 
 export type ClusterRef = { tenantId: string; clusterId: string };
+/** A pool substrate, by its pool (`kubernetesSubstrates.get`). */
+export type SubstrateRef = { tenantId: string; poolId: string };
 
 export interface ListClustersInput {
   tenantId: string;

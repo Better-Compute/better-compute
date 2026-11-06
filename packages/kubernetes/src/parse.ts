@@ -2,6 +2,7 @@ import { strictObject, type InputSchema } from '@better-compute/core';
 import { bool, fail, id, int, key, object, optional, tenant } from './input.js';
 import type {
   ClusterRef,
+  SubstrateRef,
   CreateClusterInput,
   CreateNodePoolInput,
   CredentialsInput,
@@ -274,6 +275,11 @@ export function parseCreateCluster(raw: unknown): CreateClusterInput {
 export function parseClusterRef(raw: unknown): ClusterRef {
   const input = object(raw, ['tenantId', 'clusterId']);
   return { tenantId: tenant(input.tenantId), clusterId: id(input.clusterId, 'kcl', 'clusterId') };
+}
+
+export function parseSubstrateRef(raw: unknown): SubstrateRef {
+  const input = object(raw, ['tenantId', 'poolId']);
+  return { tenantId: tenant(input.tenantId), poolId: id(input.poolId, 'pool', 'poolId') };
 }
 
 export function parseListClusters(raw: unknown): ListClustersInput {
@@ -561,6 +567,13 @@ export const kubernetesSchemas = {
     'tenantId',
     'clusterId',
   ]),
+  substrate: strictObject(
+    {
+      tenantId: tenantIdSchema,
+      poolId: idOf('pool', 'A pool of the tenant with policy.substrate'),
+    },
+    ['tenantId', 'poolId'],
+  ),
   updateCluster: strictObject(
     {
       tenantId: tenantIdSchema,

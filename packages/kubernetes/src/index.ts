@@ -23,6 +23,7 @@ export {
 export {
   reconcileSubstrate,
   readSubstrate,
+  getSubstrate,
   substrateView,
   substratesReconciler,
   substrateClusterName,
