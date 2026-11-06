@@ -204,7 +204,9 @@ keys, guardrails, the Managed Agents objects; `resources/kinds/named.ts`).
   Wiring it to a route is the host's: the server does not import providers.
 - **Knowledge bases:** `do.knowledge-base`, an embedding model (uuid) over `webSources` and `spacesSources`,
   indexed into an OpenSearch database DigitalOcean makes (or `database`). Sources change in place (added and removed,
-  then one indexing job); Spaces sources, `database` and `vpc` are account-wide. Delete leaves the database.
+  then one indexing job, owed until it starts: a failed start is retried); Spaces sources, `database` and `vpc`
+  are account-wide. Delete also removes the OpenSearch database DigitalOcean made for it (never a named one, one
+  another resource manages, or one another knowledge base uses).
 - **Guardrails:** `do.guardrail` (`type` jailbreak, sensitive-data or content-moderation; `defaultResponse` and
   `description` change in place). No agents are deployed through the deprecated ADK (DO-D21).
 - **Managed Agents (previews):** `do.agent-harness` (a model, `instructions`, knowledge bases, guardrails and an

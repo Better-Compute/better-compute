@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { DoEmulator, RouteContext } from './index.js';
+import { seedDatabase } from './databases.js';
 import { touchTags } from './tags.js';
 import type { DoState, Json } from './state.js';
 
@@ -7,7 +8,8 @@ import type { DoState, Json } from './state.js';
 // suite captures real bodies before release. A new knowledge base's database is CREATING for
 // `emulator.knowledgeBaseReads` reads, then ONLINE; an indexing job (started at create and by
 // POST /gen-ai/indexing_jobs) is INDEX_JOB_STATUS_RUNNING for as many reads, then INDEX_JOB_STATUS_COMPLETED. The list
-// answers every knowledge base (no tag filter); names are unique per account.
+// answers every knowledge base (no tag filter); names are unique per account. A create that names no `database_id`
+// makes an OpenSearch database for the knowledge base (online at once), which stays when the knowledge base goes.
 
 function kbBody(kb: Json): Json {
   const { _reads, _sources, _status, ...rest } = kb;
@@ -97,11 +99,21 @@ export function registerKnowledgeBases(emulator: DoEmulator): void {
       return emulator.error('422-name-in-use');
     const tags = Array.isArray(input.tags) ? (input.tags as string[]) : [];
     touchTags(context.state, tags);
+    const database =
+      typeof input.database_id === 'string'
+        ? input.database_id
+        : seedDatabase(context.state, {
+            name: `genai-${randomUUID().slice(0, 8)}`,
+            engine: 'opensearch',
+            version: '2',
+            region: input.region,
+            size: 'db-s-2vcpu-4gb',
+          }).id;
     const kb = seedKnowledgeBase(context.state, {
       name: input.name,
       region: input.region,
       embedding_model_uuid: input.embedding_model_uuid,
-      database_id: typeof input.database_id === 'string' ? input.database_id : randomUUID(),
+      database_id: database,
       ...(typeof input.vpc_uuid === 'string' ? { vpc_uuid: input.vpc_uuid } : {}),
       tags,
       last_indexing_job: { uuid: randomUUID(), status: 'INDEX_JOB_STATUS_RUNNING' },

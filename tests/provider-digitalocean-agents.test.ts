@@ -12,6 +12,7 @@ import {
   tagFor,
 } from '@better-compute/provider-digitalocean';
 import { seedGuardrail } from './support/do-emulator/guardrails.js';
+import { seedDatabase } from './support/do-emulator/databases.js';
 import { seedKnowledgeBase } from './support/do-emulator/knowledge-bases.js';
 import { DoEmulator, type RecordedRequest } from './support/do-emulator/index.js';
 import {
@@ -187,6 +188,90 @@ describe('do.knowledge-base', () => {
       ),
     );
     expect(error.details).toMatchObject({ reason: 'replaceRequired', field: 'embeddingModel' });
+  });
+
+  it('a reindex whose start failed after the sources changed is started on the next ensure, exactly once', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const ready = await settle(resources, request());
+    const changed = { ...kbSpec, webSources: ['https://blog.example.com/'] };
+    emu.failNext({ method: 'POST', path: /^\/gen-ai\/indexing_jobs$/ }, 503, {
+      id: 'service_unavailable',
+      message: 'try again later',
+    });
+    await failure(resources.ensure(request({ id: ready.id, spec: changed }), call()));
+    // The sources changed at DigitalOcean; the job did not start.
+    const kb = emu.state.knowledgeBases.get(ready.id)!;
+    expect(kb._sources.map((source: any) => source.web_crawler_data_source.base_url)).toEqual([
+      'https://blog.example.com/',
+    ]);
+    expect(kb.last_indexing_job.status).toBe('INDEX_JOB_STATUS_COMPLETED');
+    // The next run has nothing to add or remove, and still starts the job.
+    const retried = await resources.ensure(request({ id: ready.id, spec: changed }), call());
+    expect(retried.state).toBe('updating');
+    expect(emu.state.knowledgeBases.get(ready.id)!.last_indexing_job.status).toBe(
+      'INDEX_JOB_STATUS_RUNNING',
+    );
+    const after = await settle(resources, request({ id: ready.id, spec: changed }));
+    expect(after).toMatchObject({ state: 'ready', spec: changed });
+    // One failed start, one job: nothing more once it is indexed.
+    expect(mutations(emu, 'POST', /indexing_jobs$/)).toHaveLength(2);
+    await resources.ensure(request({ id: ready.id, spec: changed }), call());
+    expect(mutations(emu, 'POST', /indexing_jobs$/)).toHaveLength(2);
+    expect(mutations(emu, 'POST', /data_sources$/)).toHaveLength(1);
+    expect(mutations(emu, 'DELETE', /data_sources\//)).toHaveLength(1);
+  });
+
+  it('delete removes the OpenSearch database DigitalOcean made for it, after the knowledge base', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const ready = await settle(resources, request());
+    const made = emu.state.knowledgeBases.get(ready.id)!.database_id as string;
+    expect(emu.state.databases.get(made)?.engine).toBe('opensearch');
+    let state = await resources.delete('do.knowledge-base', ready.id, call());
+    for (let round = 0; round < 5 && state.state !== 'deleted'; round++)
+      state = await resources.delete('do.knowledge-base', ready.id, call());
+    expect(state.state).toBe('deleted');
+    expect(emu.state.knowledgeBases.has(ready.id)).toBe(false);
+    expect(emu.state.databases.has(made)).toBe(false);
+    expect(mutations(emu, 'DELETE', /\/databases\//).map((r) => r.url.pathname)).toEqual([
+      expect.stringMatching(new RegExp(`/databases/${made}$`)),
+    ]);
+    // Deleting again sends nothing more.
+    expect((await resources.delete('do.knowledge-base', ready.id, call())).state).toBe('deleted');
+    expect(mutations(emu, 'DELETE', /\/databases\//)).toHaveLength(1);
+  });
+
+  it('delete leaves a database the tenant named, one another resource manages, or one another knowledge base uses', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const drain = async (id: string) => {
+      let state = await resources.delete('do.knowledge-base', id, call());
+      for (let round = 0; round < 5 && state.state !== 'deleted'; round++)
+        state = await resources.delete('do.knowledge-base', id, call());
+      return state;
+    };
+    // Named in the spec (the tenant's own account): the tenant's database, never removed.
+    const named = seedDatabase(emu.state, { engine: 'opensearch', region: 'tor1' });
+    const own = await settle(
+      resources,
+      request({ accountScope: 'tenant', spec: { ...kbSpec, database: named.id } }),
+    );
+    expect((await drain(own.id)).state).toBe('deleted');
+    expect(emu.state.databases.has(named.id)).toBe(true);
+    // Made by DigitalOcean, but since taken over as a cloud resource of its own: left to that resource.
+    const adopted = await settle(resources, request());
+    const adoptedDb = emu.state.knowledgeBases.get(adopted.id)!.database_id as string;
+    emu.state.databases.get(adoptedDb)!.tags = [managedTag, deploymentTag('default')];
+    expect((await drain(adopted.id)).state).toBe('deleted');
+    expect(emu.state.databases.has(adoptedDb)).toBe(true);
+    // Made by DigitalOcean, and used by another knowledge base too: left alone.
+    const shared = await settle(resources, request({ name: 'bc-r-kb2' }));
+    const sharedDb = emu.state.knowledgeBases.get(shared.id)!.database_id as string;
+    seedKnowledgeBase(emu.state, { database_id: sharedDb });
+    expect((await drain(shared.id)).state).toBe('deleted');
+    expect(emu.state.databases.has(sharedDb)).toBe(true);
+    expect(mutations(emu, 'DELETE', /\/databases\//)).toEqual([]);
   });
 
   it('refuses before any call: no sources, and an account-wide source on a shared account', async () => {

@@ -125,9 +125,12 @@ const response = await proxy({ path: '/v1/chat/completions', body, key, meta: { 
 
 A **knowledge base** indexes web pages and Spaces objects with an embedding model into an OpenSearch database
 DigitalOcean makes for it (or one the tenant names). Its sources change in place: they are added and removed one by
-one, then one indexing job runs, and the resource is `updating` until it finishes. Spaces sources, a named database and
+one, then one indexing job runs, and the resource is `updating` until it finishes. The knowledge base is marked at
+DigitalOcean before its sources change, so a job whose start failed is started by the next reconcile. Spaces sources, a named database and
 a VPC are account-wide objects, so only a knowledge base on the tenant's own account may name them; on a shared
-account they are refused with `accountWide`. Deleting a knowledge base leaves the OpenSearch database it used.
+account they are refused with `accountWide`. Deleting a knowledge base also deletes the OpenSearch database
+DigitalOcean made for it, once the knowledge base is gone. A database the spec named is left alone. So is one that a
+cloud resource or another deployment manages, or that another knowledge base uses.
 
 A **guardrail** checks for jailbreaks, sensitive data or harmful content, and answers `defaultResponse` when it
 trips. Guardrails carry no tags, so ownership lives in the name: `<name>-bc<deployment hash>`. One made by hand or by

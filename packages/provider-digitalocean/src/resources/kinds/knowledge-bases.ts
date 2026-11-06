@@ -17,6 +17,7 @@ import {
   ownTags,
   replaceRequired,
   strings,
+  tagResource,
   type DoKind,
   type DoKindEnv,
 } from '../kind.js';
@@ -28,8 +29,15 @@ import {
 // name them. Ownership by tags (DO-D5), idempotency by the key tag (DO-D4); adopt and release write and take off the
 // ownership tags. No agents are deployed (DO-D21). Shapes follow the API reference (genai), not a recording.
 //
-// Deleting a knowledge base leaves the OpenSearch database DigitalOcean made for it: it holds the tenant's indexed
-// data, and is removed (or kept) through the database's own resource.
+// A source change is added and removed one by one, then one indexing job. Whether a job is still owed is DigitalOcean
+// state, not this run's diff: the knowledge base carries `reindexTag` from before the first source change until the
+// job started, so a run whose job start failed (or whose answer was lost) leaves it there and the next run starts it.
+//
+// The OpenSearch database DigitalOcean makes for a knowledge base that names none (the only form on a shared account)
+// holds the tenant's indexed data and bills on its own, and no cloud resource records it. Such a knowledge base carries
+// `madeDatabaseTag` from its create; deleting it tags its database `better-compute-kb:<knowledge base>` first, then
+// deletes the knowledge base, and once that is gone deletes the database found by that tag. A database the spec named,
+// one a cloud resource or another deployment manages, or one another knowledge base uses is left alone.
 
 export const knowledgeBaseKindName = 'do.knowledge-base';
 /** One per knowledge base per hour while it exists. */
@@ -64,6 +72,19 @@ interface DoKnowledgeBase {
   tags?: string[] | null;
   created_at: string;
   last_indexing_job?: { uuid?: string; status?: string } | null;
+}
+
+/** On a knowledge base whose OpenSearch database DigitalOcean made for it (the spec named none). */
+export const madeDatabaseTag = 'better-compute-kb-database:made';
+/** On a knowledge base whose sources changed and whose indexing job has not started yet. */
+export const reindexTag = 'better-compute-kb-reindex:pending';
+/** On the database DigitalOcean made for a knowledge base being deleted: it goes once the knowledge base is gone. */
+const madeForTag = (kb: string) => `better-compute-kb:${kb}`;
+
+interface DoDatabase {
+  id: string;
+  engine?: string;
+  tags?: string[] | null;
 }
 
 const base = '/gen-ai/knowledge_bases';
@@ -195,6 +216,9 @@ async function byKey(env: DoKindEnv, context: CallContext): Promise<DoKnowledgeB
   )[0];
 }
 
+const tagged = (tags: readonly string[] | null | undefined, tag: string) =>
+  (tags ?? []).some((entry) => entry.toLowerCase() === tag);
+
 function accountWide(spec: unknown): string[] {
   const wanted = spec as Partial<KnowledgeBaseSpec> | undefined;
   return [
@@ -302,7 +326,10 @@ export function knowledgeBaseKind(): DoKind {
                 datasources: [...sources.values()],
                 ...(wanted.database !== undefined ? { database_id: wanted.database } : {}),
                 ...(wanted.vpc !== undefined ? { vpc_uuid: wanted.vpc } : {}),
-                tags: ownershipTags(env, request.labels, context),
+                tags: [
+                  ...ownershipTags(env, request.labels, context),
+                  ...(wanted.database === undefined ? [madeDatabaseTag] : []),
+                ],
               },
               signal: context.signal,
               budget: 'mutate',
@@ -333,7 +360,10 @@ export function knowledgeBaseKind(): DoKind {
         const key = sourceKey(source);
         return key !== undefined && !sources.has(key);
       });
-      if (add.length === 0 && remove.length === 0) return current;
+      const owed = tagged(kb.tags, reindexTag);
+      if (add.length === 0 && remove.length === 0 && !owed) return current;
+      // Recorded at DigitalOcean before the sources change: the job is owed until it has started.
+      if (!owed) await tags(env, kb, [...(kb.tags ?? []), reindexTag], context.signal);
       for (const [, body] of add)
         await env.client.request('POST', `${path(kb.uuid)}/data_sources`, {
           body,
@@ -356,6 +386,12 @@ export function knowledgeBaseKind(): DoKind {
         signal: context.signal,
         budget: 'mutate',
       });
+      await tags(
+        env,
+        kb,
+        (kb.tags ?? []).filter((tag) => tag.toLowerCase() !== reindexTag),
+        context.signal,
+      );
       return { ...current, state: 'updating', spec: specOf(kb, [...sources.keys()].map(fromKey)) };
     },
 
@@ -371,12 +407,31 @@ export function knowledgeBaseKind(): DoKind {
 
     async delete(env, id, context) {
       const current = await read(env, id, context.signal);
-      if (!current) return { id, state: 'deleted' };
-      assertOwned(env, current.kb.tags, what(id));
-      await found(() =>
-        env.client.request('DELETE', path(id), { signal: context.signal, budget: 'mutate' }),
+      if (current) {
+        assertOwned(env, current.kb.tags, what(id));
+        // Marked before the knowledge base goes, so a lost answer still finds the database afterwards.
+        if (tagged(current.kb.tags, madeDatabaseTag) && current.kb.database_id)
+          await markMadeDatabase(env, current.kb, context.signal);
+        await found(() =>
+          env.client.request('DELETE', path(id), { signal: context.signal, budget: 'mutate' }),
+        );
+        return { id, state: 'deleting' };
+      }
+      // The knowledge base is gone: the database DigitalOcean made for it goes next.
+      const reply = await env.client.request<{ databases?: DoDatabase[] | null }>(
+        'GET',
+        '/databases',
+        { query: { tag_name: madeForTag(id) }, signal: context.signal, budget: 'observe' },
       );
-      return { id, state: 'deleting' };
+      const left = (reply.databases ?? []).filter((database) => removable(env, database));
+      for (const database of left)
+        await found(() =>
+          env.client.request('DELETE', `/databases/${encodeURIComponent(database.id)}`, {
+            signal: context.signal,
+            budget: 'mutate',
+          }),
+        );
+      return { id, state: left.length > 0 ? 'deleting' : 'deleted' };
     },
 
     async *discover(env, context): AsyncIterable<ProviderDiscoveredResource> {
@@ -432,6 +487,37 @@ export function knowledgeBaseKind(): DoKind {
       );
     },
   };
+}
+
+/** An OpenSearch database no cloud resource and no other deployment manages: one DigitalOcean made may go. */
+function removable(env: DoKindEnv, database: DoDatabase): boolean {
+  return database.engine === 'opensearch' && managedBy(env, database.tags) === undefined;
+}
+
+/**
+ * Tags the database DigitalOcean made for `kb` for removal once `kb` is gone, unless it is not removable or another
+ * knowledge base of the account uses it too.
+ */
+async function markMadeDatabase(
+  env: DoKindEnv,
+  kb: DoKnowledgeBase,
+  signal: AbortSignal,
+): Promise<void> {
+  const id = kb.database_id!;
+  const reply = await found(() =>
+    env.client.request<{ database: DoDatabase }>('GET', `/databases/${encodeURIComponent(id)}`, {
+      signal,
+      budget: 'observe',
+    }),
+  );
+  const database = reply?.database;
+  if (!database || !removable(env, database) || tagged(database.tags, madeForTag(kb.uuid))) return;
+  for await (const other of env.client.pages<DoKnowledgeBase>(base, 'knowledge_bases', {
+    signal,
+    budget: 'observe',
+  }))
+    if (other.uuid !== kb.uuid && other.database_id === id) return;
+  await tagResource(env.client, 'database', id, [madeForTag(kb.uuid)], signal);
 }
 
 /** A data source from its spec key (to report the spec a change is converging to). */
