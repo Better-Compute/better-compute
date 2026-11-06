@@ -17,6 +17,42 @@ Returns the tenant's provider accounts, sorted by name.
 
 Each `config` holds only secret references.
 
+## connectSetup
+
+Returns the provider's authorization URL for connecting an account with OAuth (`{ authorizeUrl }`): the person's browser goes there, signs in at the provider and comes back to `redirectUri` with a code and the caller's `state`. See [Connect a DigitalOcean account](/docs/operations/digitalocean).
+
+- **Input.** `tenantId`, `provider`, `redirectUri` (one the platform registered for the provider's OAuth app, exactly as written) and `state` (16 to 256 URL-safe characters: the caller's anti-forgery value, which it keeps and compares on the way back). Nothing is stored and no provider is called.
+- **IAM.** Decided as `compute:providers:read` on the tenant.
+- **Errors.** `UNSUPPORTED` for a provider without a connect flow (DigitalOcean has one only when the host registers at least one redirect URI). `INVALID_INPUT` for an unknown provider, an invalid `state`, or a redirect URI the platform did not register.
+
+## connect
+
+Stores a provider account whose credential comes from an OAuth authorization code; returns the account, as `create` does.
+
+- **Input.** `tenantId`, `provider`, `name`, `code` (the code the redirect carried; single use), `redirectUri` (the one `connectSetup` was given), `config` (the rest of the account's config, without the credential field: naming it is `INVALID_INPUT`) and an optional `idempotencyKey`.
+- **Flow.** With no transaction open, the provider trades the code for a credential (DigitalOcean: a refresh token), which is sealed in the deployment's secret store for the tenant and named in the provider's credential field (`refreshToken`); the account's config is then checked as in `create` and the account stored. The credential is never stored elsewhere, logged or answered. When the account is not stored (a refused check, a name the tenant already uses, a failed transaction, or a request that never reaches the store) the sealed credential is deleted again.
+- **Idempotency.** As `create`: with a key, a repeat returns the stored account without spending another code; a different `provider` or `name` under the same key is `CONFLICT`. A retry without the key needs a new code.
+- **IAM.** Decided as `compute:providers:manage` on the tenant.
+- **Errors.** `UNSUPPORTED` for a provider without a connect flow. `INVALID_INPUT` for a code the provider refuses, a redirect URI the platform did not register, or a config naming the credential field. `INVALID_CONFIG` when the host runs no secret broker, or as in `create`. `CONFLICT` for a name the tenant already uses.
+
+## check
+
+Asks the provider what a stored account's credential may do, read-only at the provider; returns `{ accountId, provider, checkedAt, ok, missing, optional?, details? }`.
+
+- **Output.** `ok` is true when the credential may do everything instances need (`missing` is empty). `missing` lists the permissions instances need that it lacks, `optional` those only optional features need (costs, metrics, security findings), in the provider's own names (DigitalOcean: token scopes such as `droplet:read`). `details` is the provider's own detail (DigitalOcean: the account's status and per-family results), never a secret.
+- **Reads.** The stored config is validated and its secret references checked again, exactly as for a client. A provider with no probe but an account check answers `ok` when the check passes. The call stops reaching the provider when the request is cancelled.
+- **IAM.** Decided as `compute:providers:read` on the provider account.
+- **Errors.** `NOT_FOUND` for a missing account. `UNSUPPORTED` for a provider that cannot check an account. `INVALID_CONFIG` when the provider refuses the credential outright (a revoked DigitalOcean token, or an OAuth grant that must be connected again, `details.reason` `oauthGrant`); `UNAVAILABLE` or `RATE_LIMITED` when the provider cannot be asked (an OAuth refresh token another process may still be rotating is `UNAVAILABLE`, `oauthRace`, the first time).
+
+## findings
+
+Returns what the provider says an operator should look at on a stored account (DigitalOcean: its latest security scan), read-only at the provider: `{ accountId, provider, readAt, items }`.
+
+- **Items.** Each is `{ id, kind, severity, title, detail?, at?, group? }`: `id` is stable across reads (the provider's rule id) and unique in one answer, `kind` says what it is about (`security`), `severity` is `critical`, `warning` or `info`, and `group` joins findings that read as one. Malformed findings and repeated ids are left out, and at most 200 are kept. A part of the account the credential may not read is itself a finding (DigitalOcean without `security:read`: `security:unreadable`), never an empty answer that looks clean. Never a secret.
+- **Reads.** With the account's own credential, as `check`; the call stops reaching the provider when the request is cancelled. The admin panel reads it at most every ten minutes per account.
+- **IAM.** Decided as `compute:providers:read` on the provider account.
+- **Errors.** `NOT_FOUND` for a missing account; `UNSUPPORTED` for a provider that reports no findings; the provider's errors as in `check`.
+
 ## federationSetup
 
 Returns what a tenant sets up at its cloud to give a provider account keyless sign-in (Google Cloud workload identity federation), for the account it is about to create: `{ issuer, jwksUri, subject, attributeCondition, allowedAudienceHint }`.
