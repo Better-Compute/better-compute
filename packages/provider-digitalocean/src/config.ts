@@ -39,6 +39,16 @@ export const doConfig = manifest({
     .boolean()
     .default(false)
     .describe('Offer products that DigitalOcean still marks as previews'),
+  spacesAccessKey: field
+    .secret()
+    .optional()
+    .describe(
+      'A Spaces access key id, as a secret reference: the S3 credential that manages tenant buckets',
+    ),
+  spacesSecretKey: field
+    .secret()
+    .optional()
+    .describe('The Spaces secret key that goes with spacesAccessKey, as a secret reference'),
 });
 
 /** The validated account configuration. */
@@ -52,6 +62,9 @@ export interface DoConfig {
   allowSpot?: boolean;
   discoverTag?: string;
   previews?: boolean;
+  /** Spaces (S3) key pair for bucket management; both or neither. */
+  spacesAccessKey?: SecretRef;
+  spacesSecretKey?: SecretRef;
 }
 
 export interface DoProviderOptions {
