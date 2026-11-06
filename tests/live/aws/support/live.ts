@@ -63,6 +63,8 @@ export interface LiveDeps {
   fetch?: typeof fetch;
   clock?: Clock;
   endpoint?: string;
+  /** How cleanup waits between polls (default a timer); tests advance `clock` instead. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 function transport(config: LiveConfig, deps: LiveDeps, region = config.region) {

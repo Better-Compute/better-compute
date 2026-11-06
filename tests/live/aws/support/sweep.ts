@@ -8,7 +8,7 @@
 // S3 ARNs name no account, so every S3 request carries x-amz-expected-bucket-owner set to the
 // sandbox account: S3 itself then refuses (403) to touch a bucket any other account owns.
 import { createHash } from 'node:crypto';
-import { ComputeError, systemClock } from '@better-compute/core';
+import { ComputeError, systemClock, type Clock } from '@better-compute/core';
 import { parseXml, serializeEc2Query, type QueryParams, type XmlElement } from '@better-compute/aws-core';
 import { createTransport, jsonClient, queryClient, serviceEndpoint, type Transport } from '../../../../packages/aws/src/internal/transport.js';
 import { liveIdentity, sweepAfterMs, testRunStartedAt, testRunTagKey, type LiveConfig, type LiveDeps } from './live.js';
@@ -328,20 +328,72 @@ async function sandboxTransport(config: LiveConfig, deps: LiveDeps): Promise<Tra
   });
 }
 
-/** Deletes `queue` in rank order; one already gone counts as deleted, one that fails is pending. */
-async function runDeletes(api: Clients, queue: Queued[], report: Pick<SweepReport, 'deleted' | 'pending'>): Promise<void> {
-  for (const entry of [...queue].sort((a, b) => a.deleter.rank - b.deleter.rank || a.order - b.order)) {
+interface Failure {
+  entry: Queued;
+  code: string;
+  reason: string;
+}
+
+const inRankOrder = (queue: readonly Queued[]) => [...queue].sort((a, b) => a.deleter.rank - b.deleter.rank || a.order - b.order);
+
+/** Deletes `queue` in rank order; one already gone counts as deleted. Returns what failed. */
+async function attemptDeletes(api: Clients, queue: readonly Queued[], deleted: string[]): Promise<Failure[]> {
+  const failures: Failure[] = [];
+  for (const entry of inRankOrder(queue)) {
     try {
       await entry.deleter.remove(api, entry.arn, entry.text);
-      report.deleted.push(entry.text);
+      deleted.push(entry.text);
     } catch (error) {
       if (error instanceof ComputeError && error.code === 'NOT_FOUND') {
-        report.deleted.push(entry.text);
+        deleted.push(entry.text);
         continue;
       }
       const code = error instanceof ComputeError ? String(error.details?.code ?? error.code) : 'error';
-      report.pending.push({ arn: entry.text, reason: `${code}: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}` });
+      failures.push({ entry, code, reason: `${code}: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}` });
     }
+  }
+  return failures;
+}
+
+/** Deletes `queue` in rank order; one already gone counts as deleted, one that fails is pending. */
+async function runDeletes(api: Clients, queue: Queued[], report: Pick<SweepReport, 'deleted' | 'pending'>): Promise<void> {
+  for (const failure of await attemptDeletes(api, queue, report.deleted)) report.pending.push({ arn: failure.entry.text, reason: failure.reason });
+}
+
+/** Codes that mean "still in use": the delete can succeed once whatever holds the resource is gone. */
+const stillInUse = new Set([
+  'DependencyViolation',
+  'InvalidGroup.InUse',
+  'InvalidIPAddress.InUse',
+  'VolumeInUse',
+  'IncorrectState',
+  'ResourceInUse',
+  'ResourceInUseException',
+]);
+
+/** How long a live file's cleanup waits for terminations and in-use resources before leaving them to the sweeper. */
+export const cleanUpSettleMs = 5 * 60_000;
+const cleanUpPollMs = 10_000;
+
+/**
+ * Polls DescribeInstances until every instance is `terminated` (or gone), or until the deadline.
+ * TerminateInstances returns while instances are still shutting-down and holding their network
+ * interfaces. Any other answer stops the wait; the in-use retries still cover what follows.
+ */
+async function untilTerminated(api: Clients, ids: readonly string[], wait: { deadline: number; pollMs: number; clock: Clock; sleep: (ms: number) => Promise<void> }) {
+  for (;;) {
+    let running: number;
+    try {
+      const described = await api.ec2('DescribeInstances', { InstanceId: [...ids] });
+      running = described
+        .items('reservationSet')
+        .flatMap((reservation) => reservation.items('instancesSet'))
+        .filter((instance) => instance.child('instanceState')?.textOf('name') !== 'terminated').length;
+    } catch {
+      return;
+    }
+    if (running === 0 || wait.clock.now() + wait.pollMs > wait.deadline) return;
+    await wait.sleep(wait.pollMs);
   }
 }
 
@@ -397,14 +449,21 @@ export async function sweepTestRuns(options: SweepOptions): Promise<SweepReport>
 /**
  * A live file's `afterAll`: deletes the resources it created, by ARN, right away (the Tagging API
  * lags by minutes, so a fresh resource may not be listed yet), with the sweeper's deleters, order
- * and account rules. What it cannot delete stays tagged for the scheduled sweep.
+ * and account rules. Unlike one sweep pass, it waits (up to `settleMs`, default five minutes) for
+ * the instances it terminated to reach `terminated` before deleting the security groups, addresses,
+ * subnets and VPCs their network interfaces hold, and retries a delete that is still in use
+ * (DependencyViolation and the like) every `pollMs` until then. What it cannot delete stays tagged
+ * for the scheduled sweep.
  */
 export async function deleteLiveResources(options: {
   config: LiveConfig;
   deps?: LiveDeps;
   arns: readonly string[];
+  settleMs?: number;
+  pollMs?: number;
 }): Promise<Pick<SweepReport, 'deleted' | 'pending' | 'skipped'>> {
-  const transport = await sandboxTransport(options.config, options.deps ?? {});
+  const deps = options.deps ?? {};
+  const transport = await sandboxTransport(options.config, deps);
   const report: Pick<SweepReport, 'deleted' | 'pending' | 'skipped'> = { deleted: [], pending: [], skipped: [] };
   const queue: Queued[] = [];
   for (const text of options.arns) {
@@ -412,6 +471,39 @@ export async function deleteLiveResources(options: {
     if ('reason' in placed) report.skipped.push({ arn: text, reason: placed.reason });
     else queue.push({ text, ...placed, order: queue.length });
   }
-  await runDeletes(clients(transport, options.config.account), queue, report);
+  const api = clients(transport, options.config.account);
+  const clock = deps.clock ?? systemClock;
+  const wait = {
+    deadline: clock.now() + (options.settleMs ?? cleanUpSettleMs),
+    pollMs: options.pollMs ?? cleanUpPollMs,
+    clock,
+    sleep: deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
+  };
+
+  // Stacks and instances first; then wait for the instances to let go of their network interfaces.
+  const instanceRank = ec2Deleters.instance!.rank;
+  const isInstance = (entry: Queued) => entry.arn.service === 'ec2' && entry.arn.resource.startsWith('instance/');
+  const first = queue.filter((entry) => entry.deleter.rank <= instanceRank);
+  const rest = queue.filter((entry) => entry.deleter.rank > instanceRank);
+  const failures = await attemptDeletes(api, first, report.deleted);
+  const terminating = first.filter((entry) => isInstance(entry) && report.deleted.includes(entry.text)).map((entry) => id(entry.arn));
+  if (terminating.length > 0 && rest.length > 0) await untilTerminated(api, terminating, wait);
+  failures.push(...(await attemptDeletes(api, rest, report.deleted)));
+
+  // Whatever is still in use gets retried, in rank order, until the deadline.
+  let retry = failures.filter((failure) => stillInUse.has(failure.code));
+  const final = failures.filter((failure) => !stillInUse.has(failure.code));
+  while (retry.length > 0 && clock.now() + wait.pollMs <= wait.deadline) {
+    await wait.sleep(wait.pollMs);
+    const again = await attemptDeletes(
+      api,
+      retry.map((failure) => failure.entry),
+      report.deleted,
+    );
+    final.push(...again.filter((failure) => !stillInUse.has(failure.code)));
+    retry = again.filter((failure) => stillInUse.has(failure.code));
+  }
+  const left = [...final, ...retry].sort((a, b) => a.entry.deleter.rank - b.entry.deleter.rank || a.entry.order - b.entry.order);
+  for (const failure of left) report.pending.push({ arn: failure.entry.text, reason: failure.reason });
   return report;
 }

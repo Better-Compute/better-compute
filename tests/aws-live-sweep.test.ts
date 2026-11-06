@@ -63,7 +63,7 @@ function world(
   const order = () => emu.requests.filter((request) => !['GetResources', 'GetCallerIdentity'].includes(request.operation)).map((request) => request.operation);
   const cleanUp = (arns: string[]) =>
     deleteLiveResources({ config: gate.config, deps: { fetch: emu.fetch, clock: emu.clock, endpoint: 'http://emu.local' }, arns });
-  return { emu, log, tagging, s3, sweep, cleanUp, order };
+  return { emu, log, tagging, s3, sweep, cleanUp, order, gate };
 }
 
 const tagged = (resource: string, run = oldRun) => ({ arn: resource, tags: { [testRunTagKey]: run, 'better-compute:managed': 'true' } });
@@ -281,6 +281,79 @@ describe('deleteLiveResources', () => {
     expect(emu.calls('GetResources')).toHaveLength(0);
     // Same rank keeps the given order; the bus (rank 3) waits for its rule.
     expect(order()).toEqual(['ListObjectVersions', 'DeleteObjects', 'DeleteBucket', 'ListTargetsByRule', 'RemoveTargets', 'DeleteRule', 'DeleteEventBus']);
+  });
+
+  // TerminateInstances returns while the instances are still shutting-down, holding their network
+  // interfaces: a security group, Elastic IP, subnet or VPC beside them answers DependencyViolation
+  // until they are terminated.
+  const describeInstances = (states: string[]) => {
+    let call = 0;
+    return () => {
+      const state = states[Math.min(call++, states.length - 1)]!;
+      return `<DescribeInstancesResponse><reservationSet><item><instancesSet><item><instanceId>i-1</instanceId><instanceState><code>0</code><name>${state}</name></instanceState></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`;
+    };
+  };
+  const network = [arn('ec2', 'instance/i-1'), arn('ec2', 'security-group/sg-1'), arn('ec2', 'subnet/subnet-1'), arn('ec2', 'vpc/vpc-1')];
+
+  it('waits for terminated instances before deleting what their network interfaces hold', async () => {
+    const { emu, log, order, gate } = world([], { ec2Answers: { DescribeInstances: describeInstances(['shutting-down', 'shutting-down', 'terminated']) } });
+    const slept: number[] = [];
+    const sleep = async (ms: number) => {
+      slept.push(ms);
+      emu.clock.advance(ms);
+    };
+    const report = await deleteLiveResources({
+      config: gate.config,
+      deps: { fetch: emu.fetch, clock: emu.clock, endpoint: 'http://emu.local', sleep },
+      arns: network,
+    });
+    expect(report.pending).toEqual([]);
+    expect(report.deleted).toEqual(network);
+    expect(order()).toEqual(['TerminateInstances', 'DescribeInstances', 'DescribeInstances', 'DescribeInstances', 'DeleteSecurityGroup', 'DeleteSubnet', 'DeleteVpc']);
+    expect(log.find((entry) => entry.operation === 'DescribeInstances')?.params).toMatchObject({ 'InstanceId.1': 'i-1' });
+    expect(slept).toEqual([10_000, 10_000]);
+  });
+
+  it('retries a delete that is still in use until it goes through', async () => {
+    const { emu, order, gate } = world([], { ec2Answers: { DescribeInstances: describeInstances(['terminated']) } });
+    // The instance is terminated, but its interface lingers for a moment.
+    emu.failNext('DeleteSecurityGroup', 'DependencyViolation', 400, 2);
+    const sleep = async (ms: number) => void emu.clock.advance(ms);
+    const report = await deleteLiveResources({
+      config: gate.config,
+      deps: { fetch: emu.fetch, clock: emu.clock, endpoint: 'http://emu.local', sleep },
+      arns: network,
+    });
+    expect(report.pending).toEqual([]);
+    expect([...report.deleted].sort()).toEqual([...network].sort());
+    expect(order().filter((operation) => operation === 'DeleteSecurityGroup')).toHaveLength(3);
+  });
+
+  it('stops waiting at its deadline and leaves what is still in use pending for the sweeper', async () => {
+    const { emu, gate } = world([], { ec2Answers: { DescribeInstances: describeInstances(['shutting-down']) } });
+    emu.failNext('DeleteSecurityGroup', 'DependencyViolation', 400, 1000);
+    const sleep = async (ms: number) => void emu.clock.advance(ms);
+    const started = emu.clock.now();
+    const report = await deleteLiveResources({
+      config: gate.config,
+      deps: { fetch: emu.fetch, clock: emu.clock, endpoint: 'http://emu.local', sleep },
+      arns: network,
+      settleMs: 60_000,
+      pollMs: 5_000,
+    });
+    expect(report.pending).toEqual([{ arn: arn('ec2', 'security-group/sg-1'), reason: expect.stringContaining('DependencyViolation') }]);
+    expect(emu.clock.now() - started).toBeLessThanOrEqual(60_000);
+    expect(emu.calls('DescribeInstances').length).toBeLessThanOrEqual(13);
+    // Something that is not merely in use fails at once, without retries.
+    const other = world([], { ec2Answers: { DescribeInstances: describeInstances(['terminated']) } });
+    other.emu.failNext('DeleteVpc', 'UnauthorizedOperation', 403);
+    const refused = await deleteLiveResources({
+      config: other.gate.config,
+      deps: { fetch: other.emu.fetch, clock: other.emu.clock, endpoint: 'http://emu.local', sleep: async (ms) => void other.emu.clock.advance(ms) },
+      arns: [arn('ec2', 'vpc/vpc-1')],
+    });
+    expect(refused.pending).toEqual([{ arn: arn('ec2', 'vpc/vpc-1'), reason: expect.stringContaining('UnauthorizedOperation') }]);
+    expect(other.emu.calls('DeleteVpc')).toHaveLength(1);
   });
 
   it('refuses the wrong account and skips what it cannot delete', async () => {

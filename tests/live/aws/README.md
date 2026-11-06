@@ -65,5 +65,8 @@ creates is recorded at once and tagged with the run's tags.
 
 Files create their fixtures through `support/resources.ts` (`liveAws`): each is tagged with the run's tags and its
 ARN is recorded as soon as it exists, so `afterAll` (`cleanUp`, the sweeper's deleters by ARN) deletes it even when
-a later step failed. What `cleanUp` cannot delete stays tagged for the sweeper. `tests/aws-live-resources.test.ts`
+a later step failed. TerminateInstances returns while instances are still shutting down and holding their network
+interfaces, so `cleanUp` polls DescribeInstances (up to five minutes) until they are terminated before it deletes
+security groups, addresses, subnets and VPCs, and retries a delete that is still in use (DependencyViolation) until
+then. What `cleanUp` cannot delete stays tagged for the sweeper. `tests/aws-live-resources.test.ts`
 pins those requests on the emulator.
