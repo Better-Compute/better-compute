@@ -180,3 +180,8 @@ is gone) leaves its machine running. Its volumes are only detached, `deleteWithI
 
 `list` is decided on the tenant. A create is decided on the new resource, a restore on the snapshot and a snapshot on
 its volume.
+
+`providerVolumes.attach`, `providerVolumes.create` with an `instanceId` and `providerAddresses.assign` put the volume
+or address on an instance, so they are also decided on that instance: the caller needs `instances:update` on
+`instance/{instanceId}` as well, with its own credential. A role that manages volumes in one project cannot attach one
+to an instance it cannot change.

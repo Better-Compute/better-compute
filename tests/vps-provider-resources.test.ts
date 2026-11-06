@@ -332,6 +332,9 @@ const events: { type: string; subject: string; data: Record<string, unknown> }[]
 const authzOps: { op: string; resource: string; row?: Record<string, unknown> }[] = [];
 const projected = new Map<string, string>();
 const queue = new Map<string, number>();
+/** IAM resources (`type/id`) the caller holds no right on: `iam.require` refuses them. */
+const deniedResources = new Set<string>();
+const required: string[] = [];
 
 function moduleContext(sql: SqlExecutor): ModuleContext {
   return {
@@ -364,7 +367,15 @@ function moduleContext(sql: SqlExecutor): ModuleContext {
       },
     },
     desired: { async invalidate() {} },
-    iam: { rootTenantId: 'root' },
+    iam: {
+      rootTenantId: 'root',
+      async require(_credential: unknown, request: { action: string; resource: { type: string; id: string } }) {
+        const resource = `${request.resource.type}/${request.resource.id}`;
+        required.push(`${request.action} ${resource}`);
+        if (deniedResources.has(resource))
+          throw new ComputeError('ACCESS_DENIED', `denied ${request.action} on ${resource}`);
+      },
+    },
   } as unknown as ModuleContext;
 }
 function within(tx: SqlTx): SqlExecutor {
@@ -394,6 +405,7 @@ type Definition = {
     ): Promise<{ status: string; result?: unknown; resource?: { type: string; id: string } }>;
     denied?(context: MethodContext, input: unknown, tx: SqlTx, error: unknown): Promise<void>;
     abandoned?(context: MethodContext, input: unknown, tx: SqlTx, error: unknown): Promise<void>;
+    check?(context: MethodContext, input: unknown, resource: unknown): Promise<void>;
   };
 };
 /** As the envelope runs a method: tenant pre-check, admission, decision on the projected resource, handler. */
@@ -401,7 +413,7 @@ async function run(definition: Definition, raw: unknown, who: Caller): Promise<a
   const input = definition.validate(raw);
   const tenantId = (input as { tenantId: string }).tenantId;
   const context = (tx: SqlTx) =>
-    ({ ...moduleContext(within(tx)), caller: who, requestId: 'req' }) as MethodContext;
+    ({ ...moduleContext(within(tx)), caller: who, credential: { kind: 'test' }, requestId: 'req' }) as MethodContext;
   if (who.tenantId !== tenantId)
     throw new ComputeError('ACCESS_DENIED', 'The caller belongs to another tenant');
   const admission = definition.admission;
@@ -418,6 +430,13 @@ async function run(definition: Definition, raw: unknown, who: Caller): Promise<a
       await db.transaction((tx) => admission.denied!(context(tx), input, tx, error));
     throw error;
   }
+  // The admission's own checks (IAM on other resources), with no transaction open.
+  if (admission?.check)
+    await admission.check(
+      { ...moduleContext(db), caller: who, credential: { kind: 'test' }, requestId: 'req' } as MethodContext,
+      input,
+      resource,
+    );
   try {
     return await db.transaction((tx) => definition.handler(context(tx), input));
   } catch (error) {
@@ -589,6 +608,8 @@ beforeEach(async () => {
     await tx.query(`UPDATE quota_usage SET used = 0 WHERE pool_id = $1`, [doPool]);
   });
   projected.clear();
+  deniedResources.clear();
+  required.length = 0;
   events.length = 0;
   authzOps.length = 0;
   queue.clear();
@@ -720,6 +741,36 @@ describe('providerVolumes', () => {
         call('providerVolumes', 'get', { tenantId: 'other', volumeId: volume.id }, mallory),
       ),
     ).toBe('ACCESS_DENIED');
+  });
+
+  it('attach, create attached and assign also decide compute:instances:update on the instance', async () => {
+    const instanceId = await insertInstance();
+    const volume = await createVolume();
+    const address = await createAddress();
+    deniedResources.add(`compute-instance/${instanceId}`);
+    expect(
+      await codeOf(call('providerVolumes', 'attach', { tenantId: 'root', volumeId: volume.id, instanceId })),
+    ).toBe('ACCESS_DENIED');
+    expect((await getVolume(volume.id)).attachment).toBeUndefined();
+    expect(await codeOf(createVolume({ instanceId, sizeGiB: 7 }))).toBe('ACCESS_DENIED');
+    expect(
+      Number((await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM provider_volumes`)).rows[0]!.n),
+    ).toBe(1);
+    expect(await quotaUsed('diskGiB')).toBe(10);
+    expect(
+      await codeOf(call('providerAddresses', 'assign', { tenantId: 'root', addressId: address.id, instanceId })),
+    ).toBe('ACCESS_DENIED');
+    expect((await getAddress(address.id)).instanceId).toBeUndefined();
+    expect(required).toContain(`compute:instances:update compute-instance/${instanceId}`);
+    // With the right on the instance, the same calls go through.
+    deniedResources.clear();
+    expect(
+      (await call('providerVolumes', 'attach', { tenantId: 'root', volumeId: volume.id, instanceId })).attachment,
+    ).toMatchObject({ instanceId });
+    expect(
+      (await call('providerAddresses', 'assign', { tenantId: 'root', addressId: address.id, instanceId }))
+        .instanceId,
+    ).toBe(instanceId);
   });
 
   it('delete: INVALID_STATE while attached; detach then delete removes it and refunds its quota', async () => {

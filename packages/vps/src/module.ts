@@ -1019,6 +1019,32 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     return decided;
   };
   /**
+   * (DO P2) A provider volume attached to an instance, or an address assigned to one, reaches that instance's guest:
+   * besides the decision on the volume or address, the caller must be able to change the instance
+   * (`compute:instances:update` on it), decided on its own credential with no transaction open. Without an instance
+   * nothing more is decided.
+   */
+  const targetInstanceCheck = async (
+    context: MethodContext,
+    tenantId: string,
+    instanceId: string | undefined,
+  ): Promise<void> => {
+    if (instanceId === undefined) return;
+    if (!context.credential)
+      throw new ComputeError(
+        'ACCESS_DENIED',
+        'Attaching a volume or assigning an address to an instance is decided on the caller’s own credential',
+        undefined,
+        { reason: 'credential-required' },
+      );
+    const prefix = context.typePrefix ?? typePrefix;
+    await context.iam.require(context.credential, {
+      tenantId,
+      action: 'compute:instances:update',
+      resource: { type: `${prefix}instance`, id: instanceId },
+    });
+  };
+  /**
    * An update that changes what the guest runs (image, flavor, user data, env, network) hands the
    * template's secrets to new code, even when it names none itself: decided on the resulting
    * template's secrets. Read outside any transaction (this is the admission `check`). Its volumes
@@ -1968,6 +1994,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           denied: (context, input, tx) => clearStagedProviderVolume(context, input, tx),
           // Transaction 2 threw (QUOTA_EXCEEDED, CONFLICT): the projection row staged for it goes.
           abandoned: (context, input, tx) => clearStagedProviderVolume(context, input, tx),
+          // Created attached: the instance is decided too.
+          check: (context, input) => targetInstanceCheck(context, input.tenantId, input.instanceId),
         },
         handler: (context, input) => createProviderVolume(networkDeps(context), context, input),
       }),
@@ -1990,6 +2018,13 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         kind: 'mutation',
         resource: providerVolumeResource,
         validate: describedBy(providerResourceSchemas.attachVolume, parseAttachProviderVolume),
+        admission: {
+          prepare: async (_context, input) => ({
+            status: 'decide',
+            resource: providerVolumeResource(input),
+          }),
+          check: (context, input) => targetInstanceCheck(context, input.tenantId, input.instanceId),
+        },
         handler: (context, input) =>
           attachProviderVolume(networkDeps(context), context.sql, input),
       }),
@@ -2097,6 +2132,13 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         kind: 'mutation',
         resource: providerAddressResource,
         validate: describedBy(providerResourceSchemas.assignAddress, parseAssignProviderAddress),
+        admission: {
+          prepare: async (_context, input) => ({
+            status: 'decide',
+            resource: providerAddressResource(input),
+          }),
+          check: (context, input) => targetInstanceCheck(context, input.tenantId, input.instanceId),
+        },
         handler: (context, input) =>
           assignProviderAddress(networkDeps(context), context.sql, input),
       }),
