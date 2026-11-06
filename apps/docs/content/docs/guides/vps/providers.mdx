@@ -1,6 +1,6 @@
 ---
 title: Providers
-description: Provider accounts, the defineProvider contract, the Hetzner Cloud, Proxmox VE, Google Compute Engine and DigitalOcean providers, discovery and attach, provider reservations, platform-issued compute and its tenant isolation, billing (modes, attach billing, reservation grants, provider costs and pass-through), conformance cases, and secret references for credentials.
+description: Provider accounts, the defineProvider contract, the Hetzner Cloud, Proxmox VE, Google Compute Engine, DigitalOcean and Amazon EC2 providers, discovery and attach, provider reservations, platform-issued compute and its tenant isolation, billing (modes, attach billing, reservation grants, provider costs and pass-through), conformance cases, and secret references for credentials.
 metaTitle: VPS providers and provider accounts
 icon: Cloud
 status: beta
@@ -11,6 +11,7 @@ packages:
     '@better-compute/provider-proxmox',
     '@better-compute/provider-gcp',
     '@better-compute/provider-digitalocean',
+    '@better-compute/provider-aws',
   ]
 sources:
   [
@@ -55,6 +56,9 @@ sources:
     'tests/gcp-federation.test.ts',
     'tests/vps-account-federation.test.ts',
     'packages/provider-digitalocean/README.md',
+    'packages/provider-aws/README.md',
+    'packages/provider-aws/src/compute.ts',
+    'packages/provider-aws/src/account.ts',
     'packages/provider-digitalocean/src/config.ts',
     'packages/provider-digitalocean/src/compute/droplets.ts',
     'packages/provider-digitalocean/src/networks/index.ts',
@@ -1021,3 +1025,117 @@ filter lists GPU Droplets, the text of some 422 messages); an opt-in live suite,
 (`BC_DO_LIVE`, `BC_DO_TOKEN`, `BC_DO_SSH_KEY_FINGERPRINT`), covers them and has not been run yet. Neither it nor
 the emulator checks yet that DigitalOcean honours a rule's `deny`, that a firewall on a tag covers a new Droplet before
 it serves traffic, or that a `PUT` renames a firewall; see the package README.
+
+## Amazon EC2
+
+`@better-compute/provider-aws` exports `aws` and `awsProvider(options)` (id `aws`, `provides: ['vps']`, capabilities
+`power`, `reinstall`, `list`, `discover`, `claim`). EC2 instances, GPU instances included, become the instances of
+provider pools, and it serves [discovery and attach](#discovery-and-attach). It calls AWS over plain `fetch` through
+`@better-compute/aws-core` (SigV4, the EC2 protocol, STS); there is no AWS SDK. One provider account is one AWS account
+in one region: a fleet in several regions is several accounts.
+
+```json title="fleet.json"
+{
+  "version": 1,
+  "providerAccounts": [
+    {
+      "name": "aws-use1",
+      "provider": "aws",
+      "config": {
+        "region": "us-east-1",
+        "zones": ["us-east-1a", "us-east-1b"],
+        "assumeRoleArn": "arn:aws:iam::222222222222:role/better-compute"
+      }
+    }
+  ]
+}
+```
+
+<TypeTable
+  type={{
+    region: {
+      type: 'string',
+      description:
+        'The AWS region. It must match the AWS region grammar: it is the only config text that reaches a host name.',
+      required: true,
+    },
+    zones: {
+      type: 'string[]',
+      description:
+        'Availability Zone names as this account sees them, or Local Zones (us-west-2-lax-1a). Offers and creates are limited to these.',
+      required: true,
+    },
+    credentials: {
+      type: 'SecretRef',
+      description:
+        'An access key JSON { accessKeyId, secretAccessKey }. Allowed; a role is better.',
+    },
+    assumeRoleArn: {
+      type: 'string',
+      description:
+        "The IAM role to assume, in the region's partition. better-compute sends a platform-assigned ExternalId.",
+    },
+    subnetId: {
+      type: 'string',
+      description: "The subnet create uses (else the zone's default subnet).",
+    },
+    securityGroupIds: { type: 'string[]', description: 'The security groups create uses.' },
+    instanceProfile: {
+      type: 'string',
+      description: 'The instance profile ARN passed to RunInstances.',
+    },
+    rootVolumeGiB: { type: 'number', description: 'Root EBS volume size.', default: '100' },
+    rootVolumeType: {
+      type: "'gp3' | 'gp2' | 'io2'",
+      description: 'Root EBS volume type.',
+      default: "'gp3'",
+    },
+    kmsKeyId: {
+      type: 'string',
+      description: "The KMS key for EBS encryption (else the account's default).",
+    },
+    metadataHopLimit: { type: 'number', description: 'The IMDSv2 hop limit.', default: '1' },
+    associatePublicIp: {
+      type: 'boolean',
+      description: 'Give instances a public IPv4 address.',
+      default: 'true',
+    },
+    discoverTag: {
+      type: 'string',
+      description: '"key=value": discovery yields only instances carrying this tag.',
+    },
+  }}
+/>
+
+- **Credentials.** A platform (root-tenant) account may sign in as the host's own identity (environment, web
+  identity, container or IMDSv2 credentials, or `awsProvider({ credentials })`). A tenant's account names an
+  `assumeRoleArn` (or a static key): without either it is `INVALID_CONFIG` (`ambientCredentials`), because ambient
+  credentials are the platform's. Every AssumeRole sends the ExternalId `better-compute:<providerAccountId>`, assigned
+  by the platform and never configurable, so a tenant naming another tenant's role is refused by STS. A role in one of
+  `awsProvider({ platformAccounts })`, or in the platform identity's own account, is refused, and after AssumeRole the
+  identity must be the role's own account.
+- **Onboarding a tenant.** `better-compute aws iam-policy` prints the role's permissions policy and
+  `better-compute aws trust-policy --platform-principal <arn> --external-id better-compute:<providerAccountId>` its
+  trust policy. Both commands ship with the provider; add `awsIamPolicyCommand()` and `awsTrustPolicyCommand()` to
+  your configuration's `commands`.
+- **Tags and the guard.** Instances and root volumes are tagged `better-compute:managed=true` and
+  `better-compute:instance=<id>`. `delete` needs the first, `power` and `reinstall` the second, and the generated
+  policy makes AWS enforce the same rules (ABAC).
+- **Offers and images.** An offer is `<zone>/<instanceType>` (bare metal is not offered; reservation and Spot offers
+  are `UNSUPPORTED` until a later phase). An image is an `ami-…`, a `resolve:ssm:<parameter>`, or one of the aliases
+  `ubuntu-24.04`, `ubuntu-22.04`, `al2023`, `dlami-gpu` and `eks-al2023-<k8s>`, resolved for the instance type's
+  architecture.
+- **Hardened defaults.** IMDSv2 only, hop limit 1, instance metadata tags off, an encrypted root volume, and a
+  shutdown from inside the instance stops it.
+- **Creates.** `RunInstances` carries a `ClientToken` derived from the instance id, so a retried create is the same
+  instance. `get` rides out EC2's eventual consistency after a launch (by id, then by client token, then `pending`
+  for two minutes). User data over 16 KiB is gzipped, and refused (`user-data-too-large`) if still over. An instance
+  EC2 ends for capacity after accepting it is `CAPACITY_UNAVAILABLE`, and the instance ends in `error` with
+  `ProvisionFailed`.
+- **Attach.** `discover` yields every instance that is not terminated; `claim` writes the ownership tag and re-reads
+  it, turning a lost race into `CONFLICT`; deleting an attached instance detaches it and leaves it running.
+
+`tests/provider-aws.test.ts`, `tests/provider-aws-credentials.test.ts`, `tests/provider-aws-attach.test.ts` and
+`tests/provider-aws-cli.test.ts` run the conformance cases and the EC2 specifics against an in-process AWS emulator
+passed as `fetch`, and `tests/aws-end-to-end.test.ts` runs the provider through vps. No live AWS suite has been run
+yet.
