@@ -869,6 +869,27 @@ describe('provider-aws volumes: snapshots and restores', () => {
     await rejects(volumes.deleteSnapshot('not-a-snapshot', call()), 'INVALID_INPUT');
   });
 
+  it('a public or shared snapshot of another account is never used, whatever its tags', async () => {
+    const { volumes, call, spec, ebs, emu } = world();
+    const publicOne = ebs.addSnapshot({
+      ownerId: '999999999999',
+      volumeSize: 10,
+      tags: { 'better-compute:managed': 'true', 'better-compute:snapshot': 'bc-s-0001' },
+    });
+    await rejects(
+      volumes.ensureVolume(spec({ snapshotId: publicOne.id }), call()),
+      'INVALID_INPUT',
+      'snapshot',
+    );
+    expect(await volumes.getSnapshot(publicOne.id, call())).toBeUndefined();
+    expect((await volumes.deleteSnapshot(publicOne.id, call())).state).toBe('deleted');
+    expect(emu.calls('CreateVolume')).toHaveLength(0);
+    expect(emu.calls('DeleteSnapshot')).toHaveLength(0);
+    expect(ebs.snapshots.has(publicOne.id)).toBe(true);
+    for (const request of emu.calls('DescribeSnapshots'))
+      expect(request.params.get('Owner.1')).toBe('self');
+  });
+
   it('restores only from its own completed snapshots, at least as large', async () => {
     const { volumes, call, spec, ebs, emu } = world();
     const foreign = ebs.addSnapshot({ tags: { Name: 'public' } });

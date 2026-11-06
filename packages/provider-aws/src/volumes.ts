@@ -985,10 +985,18 @@ export class AwsVolumes implements ProviderVolumes {
 
   // --- snapshots -------------------------------------------------------------------------------
 
-  /** The snapshot by id; undefined when EBS says it does not exist. */
+  /**
+   * The snapshot by id, of this account only; undefined when EBS says it does not exist. A public or
+   * shared snapshot of another account reads as missing whatever its tags (Owner=self), so it is
+   * never restored from, reported or deleted.
+   */
   protected async snapshot(id: string, signal: AbortSignal): Promise<EbsSnapshot | undefined> {
     try {
-      const doc = await this.deps.call('DescribeSnapshots', { SnapshotId: [id] }, signal);
+      const doc = await this.deps.call(
+        'DescribeSnapshots',
+        { SnapshotId: [id], Owner: ['self'] },
+        signal,
+      );
       return doc
         .items('snapshotSet')
         .map(parseSnapshot)
