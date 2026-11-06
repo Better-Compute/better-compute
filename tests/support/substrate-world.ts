@@ -107,6 +107,10 @@ export async function substrateWorld(
            VALUES ($1, $2, $3, $4, 'host', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 1, 0, 1)`,
           [id, rows[0]!.site_id, poolId, rows[0]!.owner_tenant_id],
         );
+        await world.fixture.database.query(
+          `INSERT INTO node_sessions (node_id, session_epoch, connected_at) VALUES ($1, 1, compute_now())`,
+          [id],
+        );
         ids.push(id);
       }
       return ids;
