@@ -10,6 +10,7 @@ import {
   cfnEquals,
   cfnGetAtt,
   cfnIf,
+  cfnNoValue,
   cfnImport,
   cfnJoin,
   cfnRef,
@@ -74,6 +75,14 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
       ConstraintDescription: 'empty, or an image reference pinned by digest',
     },
     CpuArchitecture: { Type: 'String', Description: 'The image architecture', Default: 'X86_64', AllowedValues: ['X86_64', 'ARM64'] },
+    AccessLogsBucket: {
+      Type: 'String',
+      Description:
+        'A bucket in this account and region, prepared for ALB and S3 server access log delivery (its policy grants the ELB and logging.s3.amazonaws.com principals), or empty for none',
+      Default: '',
+      AllowedPattern: '^$|^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$',
+      ConstraintDescription: 'empty, or an S3 bucket name',
+    },
     ApiDomainName: {
       Type: 'String',
       Description: 'The public host of the API and console (baseURL is https://<this>)',
@@ -212,6 +221,12 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
           ...(part === 'audit' ? [] : [{ Id: 'expire-old-versions', Status: 'Enabled', NoncurrentVersionExpiration: { NoncurrentDays: 30 } }]),
         ],
       },
+      // Server access logs, when the operator names a prepared bucket (AccessLogsBucket).
+      LoggingConfiguration: cfnIf(
+        'HasAccessLogs',
+        { DestinationBucketName: cfnRef('AccessLogsBucket'), LogFilePrefix: `s3/${name}-${part}/` },
+        cfnNoValue,
+      ),
       ...extra,
       Tags: tags(part),
     },
@@ -428,6 +443,10 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
         { Key: 'routing.http.desync_mitigation_mode', Value: 'defensive' },
         // Interactive tunnels are long-lived WebSockets.
         { Key: 'idle_timeout.timeout_seconds', Value: '3600' },
+        // The NLB has none to give: it is TCP passthrough, and NLB access logs cover TLS listeners only.
+        { Key: 'access_logs.s3.enabled', Value: cfnIf('HasAccessLogs', 'true', 'false') },
+        cfnIf('HasAccessLogs', { Key: 'access_logs.s3.bucket', Value: cfnRef('AccessLogsBucket') }, cfnNoValue),
+        cfnIf('HasAccessLogs', { Key: 'access_logs.s3.prefix', Value: `alb/${name}-api` }, cfnNoValue),
       ],
       Tags: tags('api'),
     },
@@ -762,6 +781,7 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
       HasHostedZone: { 'Fn::Not': [cfnEquals(cfnRef('HostedZoneId'), '')] },
       HasAlarmEmail: { 'Fn::Not': [cfnEquals(cfnRef('AlarmEmail'), '')] },
       HasMigrateImage: { 'Fn::Not': [cfnEquals(cfnRef('MigrateImage'), '')] },
+      HasAccessLogs: { 'Fn::Not': [cfnEquals(cfnRef('AccessLogsBucket'), '')] },
     },
     Resources: resources,
     Outputs: {

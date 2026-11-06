@@ -192,6 +192,15 @@ The stack publishes to its SNS topic (optionally with an `AlarmEmail` subscripti
 responses, an api or gateway target is unhealthy, no worker task is running, or Aurora runs near its maximum
 capacity. Add your own on the same topic.
 
+## Access logs
+
+Set `AccessLogsBucket` to a bucket in the same account and region, prepared for log delivery (its policy lets the
+Elastic Load Balancing log delivery principal for your region and `logging.s3.amazonaws.com` write to it), and the
+stack turns on ALB access logs under `alb/<name>-api/` and S3 server access logs for the four buckets under
+`s3/<name>-<bucket>/`. Empty (the default) turns them off. The gateway's NLB has no access logs to give: it is a TCP
+passthrough, and NLB access logs cover TLS listeners only. Keep the logs bucket outside the stack, so its retention
+is yours and deleting the stack never deletes the evidence.
+
 ## Limits and choices
 
 - `control-plane.json` is larger than CloudFormation's 51,200-byte inline limit when pretty-printed: deploy it with

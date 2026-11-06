@@ -65,7 +65,8 @@ aws cloudformation deploy --stack-name "$NAME-control-plane" --template-file cfn
   --s3-bucket <a bucket for templates> --capabilities CAPABILITY_IAM \
   --parameter-overrides NetworkStack="$NAME-network" DataStack="$NAME-data" Image="$IMAGE" \
     ApiDomainName=compute.example.com GatewayDomainName=gw.example.com CertificateArn="$CERT" \
-    ApiCount=0 WorkerCount=0 GatewayCount=0   # HostedZoneId=Z… writes the DNS aliases, AlarmEmail=… subscribes
+    ApiCount=0 WorkerCount=0 GatewayCount=0   # HostedZoneId=Z… writes the DNS aliases, AlarmEmail=… subscribes,
+                                              # AccessLogsBucket=… (prepared for log delivery) turns on access logs
 ```
 
 ## 5. The PKI bundle

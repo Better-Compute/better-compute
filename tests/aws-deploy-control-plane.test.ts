@@ -166,6 +166,35 @@ describe('control-plane template', () => {
     expect(JSON.stringify(connect.Resource)).toContain(':dbuser:${ResourceId}/${DatabaseUser}');
   });
 
+  it('sends ALB and S3 server access logs to an operator-prepared bucket, when one is named', () => {
+    const parameter = template.Parameters!.AccessLogsBucket!;
+    expect(parameter.Default).toBe('');
+    const pattern = new RegExp(parameter.AllowedPattern!);
+    expect(pattern.test('')).toBe(true);
+    expect(pattern.test('bc-prod-access-logs')).toBe(true);
+    expect(pattern.test('Not_A_Bucket')).toBe(false);
+    expect(template.Conditions!.HasAccessLogs).toEqual({ 'Fn::Not': [{ 'Fn::Equals': [{ Ref: 'AccessLogsBucket' }, ''] }] });
+
+    const attributes = props('ApiLoadBalancer').LoadBalancerAttributes as unknown[];
+    expect(attributes).toContainEqual({ Key: 'access_logs.s3.enabled', Value: { 'Fn::If': ['HasAccessLogs', 'true', 'false'] } });
+    expect(attributes).toContainEqual({
+      'Fn::If': ['HasAccessLogs', { Key: 'access_logs.s3.bucket', Value: { Ref: 'AccessLogsBucket' } }, { Ref: 'AWS::NoValue' }],
+    });
+    expect(attributes).toContainEqual({
+      'Fn::If': ['HasAccessLogs', { Key: 'access_logs.s3.prefix', Value: 'alb/better-compute-api' }, { Ref: 'AWS::NoValue' }],
+    });
+    for (const [id, part] of [
+      ['DownloadsBucket', 'downloads'],
+      ['BlobsBucket', 'blobs'],
+      ['SnapshotsBucket', 'snapshots'],
+      ['AuditBucket', 'audit'],
+    ] as const)
+      expect(props(id).LoggingConfiguration, id).toEqual({
+        'Fn::If': ['HasAccessLogs', { DestinationBucketName: { Ref: 'AccessLogsBucket' }, LogFilePrefix: `s3/better-compute-${part}/` }, { Ref: 'AWS::NoValue' }],
+      });
+    expect(lintTemplate(template)).toEqual([]);
+  });
+
   it('scopes tenant secrets to this deployment, so two deployments in one account cannot read each other', () => {
     const secretResources = (from: CfnTemplate, role: string) => {
       const props = from.Resources[role]!.Properties!;
