@@ -8,6 +8,8 @@ import {
   type DoConfig,
   type DoOAuthOptions,
 } from '@better-compute/provider-digitalocean';
+import { runConformance } from '@better-compute/core/conformance';
+import { providerConformanceCases } from '@better-compute/vps';
 import { DoEmulator } from './support/do-emulator/index.js';
 import { OAuthEmulator, oauthOrigin } from './support/do-emulator/oauth.js';
 import { freshBudgets } from './support/do-harness.js';
@@ -361,5 +363,25 @@ describe('exchangeAuthorizationCode', () => {
     ).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
     expect(w.oauth.requests).toHaveLength(0);
     expect(oauthOrigin).toBe('https://cloud.digitalocean.com');
+  });
+});
+
+describe('conformance of the connect flow', () => {
+  it('passes the connect case, refusing an unregistered redirect URI before any request', async () => {
+    const w = world();
+    const cases = providerConformanceCases().filter((item) => item.name.startsWith('connect '));
+    expect(cases).toHaveLength(1);
+    const report = await runConformance(cases, {
+      provider: digitaloceanProvider({
+        fetch: w.oauth.fetch,
+        oauth: { ...w.hooks, redirectUris: ['https://console.example.test/cb'] },
+      }),
+      config: { token: 'secret://t/a', regions: ['nyc3'] },
+      offerId: 'nyc3/s-1vcpu-1gb',
+      image: 'ubuntu-24-04-x64',
+      context: { clock: w.clock },
+    });
+    expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
+    expect(w.oauth.requests).toHaveLength(0);
   });
 });
