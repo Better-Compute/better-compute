@@ -3,3 +3,4 @@ export * from './options.js';
 export * from './policy.js';
 export * from './network.js';
 export * from './data.js';
+export * from './control-plane.js';
