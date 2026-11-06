@@ -256,6 +256,23 @@ describe('cloud-resources/0002_metering', () => {
       expect(rows[0]!.def).toContain(`'${kind}'`);
     expect(rows[0]!.def).toContain('NOT VALID');
   });
+
+  it('keeps cloud-resource when kubernetes/0001 runs after it (cloudResources registered first)', async () => {
+    const module = cloudResources();
+    const fixture = await computeFixture({
+      clock: 'sim',
+      modules: [vps({ providers: [] }), module, kubernetes()],
+    });
+    const { rows } = await fixture.database.query<{ def: string }>(
+      `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+        WHERE conname = 'usage_windows_source_kind_ck' AND conrelid = 'usage_windows'::regclass`,
+    );
+    expect(rows).toHaveLength(1);
+    for (const kind of ['instance', 'cost', 'kubernetes', 'cloud-resource'])
+      expect(rows[0]!.def).toContain(`'${kind}'`);
+    const findings = await module.selfCheck!({ sql: fixture.database } as never);
+    expect(findings.map((finding) => finding.check)).not.toContain('cloud-resources.usage-source');
+  });
 });
 
 describe('selfCheck', () => {
