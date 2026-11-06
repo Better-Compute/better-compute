@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { liveGate, liveTags, newTestRunId, testRunTagKey } from './live/aws/support/live.js';
 import { liveAws } from './live/aws/support/resources.js';
 import { AwsEmulator, testAccessKeyId, testSecret } from './support/aws-platform-emulator/index.js';
-import { recorderFake, s3SweepFake, stsFake, type FakeBucket, type RecordedCall } from './support/aws-live-fakes.js';
+import { fisFake, recorderFake, s3SweepFake, stsFake, type FakeBucket, type RecordedCall } from './support/aws-live-fakes.js';
 
 // The live files' own fixtures (A12): every resource is tagged with the run's liveTags, its ARN is
 // recorded as soon as it exists, and cleanUp deletes all of it through the sweeper's deleters.
@@ -53,7 +53,12 @@ function world(region = 'us-east-1') {
     AWS_SECRET_ACCESS_KEY: testSecret,
   });
   if (!gate.enabled) throw new Error('gate closed');
-  const aws = liveAws(gate.config, run, { fetch: emu.fetch, clock: emu.clock, endpoint: 'http://emu.local' });
+  recorderFake(emu, 'ec2', 'query', log, {
+    RunInstances: () =>
+      '<RunInstancesResponse><instancesSet><item><instanceId>i-0123456789abcdef0</instanceId><vpcId>vpc-0default00000000</vpcId></item></instancesSet></RunInstancesResponse>',
+  });
+  fisFake(emu, log);
+  const aws = liveAws(gate.config, run, { fetch: emu.fetch, clock: emu.clock, endpoint: 'http://emu.local', tagRetryMs: 0 });
   const call = (operation: string) => log.find((entry) => entry.operation === operation)?.params;
   return { emu, aws, buckets, s3, log, call };
 }
@@ -117,6 +122,93 @@ describe('liveAws fixtures', () => {
     const queue = await aws.createQueue('bc-live-q');
     emu.clock.advance(1);
     await expect(aws.receive(queue, () => false, 0)).rejects.toThrow(/no matching message/);
+  });
+
+  describe('ec2Fetch', () => {
+    // What a provider sends through it: `signed` builds a real signed EC2 request on the emulator.
+    async function runInstances(aws: ReturnType<typeof world>['aws'], type: string) {
+      const guarded = aws.ec2Fetch();
+      const transport = aws.transport;
+      const { createTransport } = await import('../packages/aws/src/internal/transport.js');
+      const { serializeEc2Query } = await import('@better-compute/aws-core');
+      const providerTransport = createTransport({
+        region: transport.region,
+        credentials: aws.config.credentials,
+        fetch: guarded,
+        clock: transport.clock,
+        endpoint: 'http://emu.local',
+      });
+      return providerTransport.send({
+        method: 'POST',
+        url: new URL('http://emu.local/'),
+        headers: { 'content-type': 'application/x-www-form-urlencoded; charset=utf-8' },
+        body: serializeEc2Query('RunInstances', '2016-11-15', { InstanceType: type, MinCount: 1, MaxCount: 1, ImageId: 'ami-1' }),
+        service: 'ec2',
+        operation: 'RunInstances',
+        protocol: 'query',
+      });
+    }
+
+    it('records and tags the instance a provider launches, retrying while EC2 catches up', async () => {
+      const { aws, emu, call } = world();
+      emu.failNext('CreateTags', 'InvalidInstanceID.NotFound');
+      await runInstances(aws, 't4g.nano');
+      expect(aws.created).toEqual([`arn:aws:ec2:us-east-1:${SANDBOX}:instance/i-0123456789abcdef0`]);
+      expect(emu.calls('CreateTags')).toHaveLength(2);
+      expect(call('CreateTags')).toEqual({
+        Action: 'CreateTags',
+        Version: '2016-11-15',
+        'ResourceId.1': 'i-0123456789abcdef0',
+        'Tag.1.Key': testRunTagKey,
+        'Tag.1.Value': run,
+        'Tag.2.Key': 'better-compute:managed',
+        'Tag.2.Value': 'true',
+      });
+      expect(aws.untagged).toEqual([]);
+    });
+
+    it('reports a resource it could not tag, still recorded for cleanUp', async () => {
+      const { aws, emu } = world();
+      emu.failNext('CreateTags', 'UnauthorizedOperation', 403);
+      await runInstances(aws, 't3.micro');
+      expect(aws.untagged).toEqual([`arn:aws:ec2:us-east-1:${SANDBOX}:instance/i-0123456789abcdef0`]);
+      expect(aws.created).toEqual(aws.untagged);
+    });
+
+    it('never sends a launch off the allow-list', async () => {
+      const { aws, emu } = world();
+      // The provider sees EC2's own refusal: final, not a network error to retry.
+      await expect(runInstances(aws, 'g6.xlarge')).rejects.toMatchObject({ code: 'ACCESS_DENIED', message: expect.stringContaining('allow-list') });
+      expect(emu.calls('RunInstances')).toHaveLength(0);
+    });
+  });
+
+  it('builds a FIS Spot interruption for one instance, tags the template, leaves experiments untagged', async () => {
+    const { aws, log } = world();
+    const instance = `arn:aws:ec2:us-east-1:${SANDBOX}:instance/i-0123456789abcdef0`;
+    const role = `arn:aws:iam::${SANDBOX}:role/bc-live-fis`;
+    const template = await aws.createSpotInterruptionTemplate(instance, role);
+    expect(aws.created).toEqual([`arn:aws:fis:us-east-1:${SANDBOX}:experiment-template/${template}`]);
+    const sent = log.find((entry) => entry.operation === 'CreateExperimentTemplate')!.params;
+    expect(sent).toMatchObject({
+      roleArn: role,
+      stopConditions: [{ source: 'none' }],
+      targets: { spot: { resourceType: 'aws:ec2:spot-instance', resourceArns: [instance], selectionMode: 'ALL' } },
+      actions: {
+        interrupt: {
+          actionId: 'aws:ec2:send-spot-instance-interruptions',
+          parameters: { durationBeforeInterruption: 'PT2M' },
+          targets: { SpotInstances: 'spot' },
+        },
+      },
+      tags: tagMap,
+    });
+    expect(await aws.startExperiment(template)).toMatch(/^EXP/);
+    const started = log.find((entry) => entry.operation === 'StartExperiment')!.params;
+    expect(started).toMatchObject({ experimentTemplateId: template });
+    expect(started).not.toHaveProperty('tags');
+    await expect(aws.createSpotInterruptionTemplate(instance, 'arn:aws:iam::x:user/me')).rejects.toThrow(/IAM role/);
+    await expect(aws.createSpotInterruptionTemplate('arn:aws:ec2:us-east-1:1:volume/vol-1', role)).rejects.toThrow(/instance ARN/);
   });
 
   it('cleans up everything it recorded, the bucket emptied first', async () => {

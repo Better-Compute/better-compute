@@ -208,17 +208,38 @@ export function s3SweepFake(
   return { requests };
 }
 
-/** FIS DeleteExperimentTemplate (rest-json DELETE /experimentTemplates/{id}), recorded in `log`. */
+/**
+ * FIS (rest-json), recorded in `log`: CreateExperimentTemplate (POST /experimentTemplates, id
+ * EXT1…), StartExperiment (POST /experiments, id EXP1…) and DeleteExperimentTemplate (DELETE
+ * /experimentTemplates/{id}, params `{ id }`).
+ */
 export function fisFake(emu: AwsEmulator, log: RecordedCall[]) {
+  let next = 1;
   emu.register('fis', {
     protocol: 'json',
-    operation: (request) =>
-      request.method === 'DELETE' && /^\/experimentTemplates\/[^/]+$/.test(request.url.pathname) ? 'DeleteExperimentTemplate' : `${request.method}?`,
+    operation(request) {
+      const path = request.url.pathname;
+      if (request.method === 'DELETE' && /^\/experimentTemplates\/[^/]+$/.test(path)) return 'DeleteExperimentTemplate';
+      if (request.method === 'POST' && path === '/experimentTemplates') return 'CreateExperimentTemplate';
+      if (request.method === 'POST' && path === '/experiments') return 'StartExperiment';
+      return `${request.method}?`;
+    },
     handle(request) {
-      const id = decodeURIComponent(request.url.pathname.split('/')[2] ?? '');
-      log.push({ service: 'fis', operation: request.operation, params: { id } });
-      if (request.operation !== 'DeleteExperimentTemplate') throw new EmuError('ValidationException', request.operation);
-      return jsonResponse({ experimentTemplate: { id } });
+      switch (request.operation) {
+        case 'DeleteExperimentTemplate': {
+          const id = decodeURIComponent(request.url.pathname.split('/')[2] ?? '');
+          log.push({ service: 'fis', operation: request.operation, params: { id } });
+          return jsonResponse({ experimentTemplate: { id } });
+        }
+        case 'CreateExperimentTemplate':
+          log.push({ service: 'fis', operation: request.operation, params: json(request) });
+          return jsonResponse({ experimentTemplate: { id: `EXT${next++}abc` } });
+        case 'StartExperiment':
+          log.push({ service: 'fis', operation: request.operation, params: json(request) });
+          return jsonResponse({ experiment: { id: `EXP${next++}abc`, state: { status: 'initiating' } } });
+        default:
+          throw new EmuError('ValidationException', request.operation);
+      }
     },
   });
 }

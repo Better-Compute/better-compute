@@ -3,10 +3,11 @@
 // recorded the moment it exists (before tagging), so `cleanUp` deletes it in `afterAll` even when a
 // later step fails; what `cleanUp` cannot delete stays tagged for scripts/aws-live-sweep.mjs.
 // tests/aws-live-resources.test.ts pins the requests on the emulator.
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { ComputeError } from '@better-compute/core';
-import { createTransport, jsonClient, type Transport } from '../../../../packages/aws/src/internal/transport.js';
-import { liveTags, type LiveConfig, type LiveDeps } from './live.js';
+import { parseXml, serializeEc2Query, type QueryParams, type XmlElement } from '@better-compute/aws-core';
+import { createTransport, jsonClient, serviceEndpoint, type Transport } from '../../../../packages/aws/src/internal/transport.js';
+import { liveEc2Fetch, liveTags, type LiveConfig, type LiveCreated, type LiveDeps } from './live.js';
 import { bucketUrl, deleteLiveResources, type SweepReport } from './sweep.js';
 
 type JsonService = 'sqs' | 'events' | 'secretsmanager';
@@ -51,13 +52,35 @@ export interface LiveAws {
   tagSecret(secretId: string): Promise<string>;
   /** Long-polls `queue` until a message satisfies `match`, deleting what it reads. */
   receive(queue: LiveQueue, match: (message: LiveMessage) => boolean, timeoutMs: number): Promise<LiveMessage>;
+  /** A raw EC2 query call (the run's own checks and fixtures). */
+  ec2(action: string, params: QueryParams): Promise<XmlElement>;
+  /**
+   * The fetch to give a provider under test: `liveEc2Fetch`'s checks, and every EC2 resource it
+   * creates is recorded at once and then tagged with the run's tags (retried while EC2 catches up).
+   */
+  ec2Fetch(base?: typeof fetch): typeof fetch;
+  /**
+   * A FIS experiment template that sends a Spot interruption (two minutes' notice) to one
+   * instance, run as `roleArn` (made by hand: FIS needs ec2:SendSpotInstanceInterruptions).
+   * Returns the template id; the template is tagged and recorded.
+   */
+  createSpotInterruptionTemplate(instanceArn: string, roleArn: string): Promise<string>;
+  /** Starts an experiment from a template (experiments cannot be deleted, so they are not tagged). */
+  startExperiment(templateId: string): Promise<string>;
+  /** Created resources the run could not tag (they are still recorded for `cleanUp`). */
+  readonly untagged: readonly string[];
   /** Deletes everything recorded, dependency order. */
   cleanUp(): Promise<Pick<SweepReport, 'deleted' | 'pending' | 'skipped'>>;
 }
 
+export interface LiveAwsDeps extends LiveDeps {
+  /** Wait between CreateTags attempts on a just-created resource (default 2000 ms). */
+  tagRetryMs?: number;
+}
+
 const partitionOf = (region: string) => (region.startsWith('cn-') ? 'aws-cn' : region.startsWith('us-gov-') ? 'aws-us-gov' : 'aws');
 
-export function liveAws(config: LiveConfig, runId: string, deps: LiveDeps = {}): LiveAws {
+export function liveAws(config: LiveConfig, runId: string, deps: LiveAwsDeps = {}): LiveAws {
   const transport = createTransport({
     region: config.region,
     credentials: config.credentials,
@@ -73,6 +96,56 @@ export function liveAws(config: LiveConfig, runId: string, deps: LiveDeps = {}):
   };
   const json = <T>(service: JsonService, operation: string, body: Record<string, unknown>) =>
     jsonClient(transport, { hostPrefix: service, ...jsonTargets[service] }).call<T>(operation, body);
+  const untagged: string[] = [];
+  const tagRetryMs = deps.tagRetryMs ?? 2_000;
+  const ec2Url = serviceEndpoint('ec2', transport.region, transport.endpointOverride);
+
+  async function ec2(action: string, params: QueryParams): Promise<XmlElement> {
+    const response = await transport.send({
+      method: 'POST',
+      url: ec2Url,
+      headers: { 'content-type': 'application/x-www-form-urlencoded; charset=utf-8' },
+      body: serializeEc2Query(action, '2016-11-15', params),
+      service: 'ec2',
+      operation: action,
+      protocol: 'query',
+    });
+    return parseXml(await response.text());
+  }
+
+  /** FIS is rest-json: POST a JSON body to a path. */
+  async function fis<T>(path: string, operation: string, body: Record<string, unknown>): Promise<T> {
+    const response = await transport.send({
+      method: 'POST',
+      url: new URL(path, serviceEndpoint('fis', transport.region, transport.endpointOverride)),
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      service: 'fis',
+      operation,
+      protocol: 'json',
+    });
+    return (await response.json()) as T;
+  }
+
+  /** Tags what a create made; EC2 may not see a fresh id yet, so NotFound is retried a few times. */
+  async function tagCreated(created: LiveCreated[]): Promise<void> {
+    const arns = created.map((item) => `arn:${partitionOf(config.region)}:ec2:${config.region}:${config.account}:${item.kind}/${item.id}`);
+    for (const arn of arns) track(arn);
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await ec2('CreateTags', { ResourceId: created.map((item) => item.id), Tag: tags });
+        return;
+      } catch (error) {
+        if (attempt < 5 && error instanceof ComputeError && error.code === 'NOT_FOUND') {
+          await new Promise<void>((resolve) => setTimeout(resolve, tagRetryMs));
+          continue;
+        }
+        // The resource is still recorded for cleanUp; the run reports it as untagged.
+        untagged.push(...arns);
+        return;
+      }
+    }
+  }
 
   async function s3(method: 'PUT', bucket: string, operation: string, query: Record<string, string>, body?: string): Promise<void> {
     const headers: Record<string, string> = {};
@@ -213,6 +286,45 @@ export function liveAws(config: LiveConfig, runId: string, deps: LiveDeps = {}):
           throw new ComputeError('UNAVAILABLE', `no matching message on the queue within ${Math.round(timeoutMs / 1000)} s`);
       }
     },
+
+    ec2,
+    ec2Fetch: (base = deps.fetch ?? fetch) => liveEc2Fetch(base, tagCreated),
+
+    async createSpotInterruptionTemplate(instanceArn, roleArn) {
+      if (!/^arn:aws[\w-]*:iam::\d{12}:role\/[\w+=,.@/-]{1,512}$/.test(roleArn))
+        throw new ComputeError('INVALID_CONFIG', 'the FIS role is not an IAM role ARN');
+      if (!/^arn:aws[\w-]*:ec2:[a-z0-9-]+:\d{12}:instance\/i-[0-9a-f]{8,17}$/.test(instanceArn))
+        throw new ComputeError('INVALID_INPUT', 'not an EC2 instance ARN');
+      const { experimentTemplate } = await fis<{ experimentTemplate?: { id?: string } }>('/experimentTemplates', 'CreateExperimentTemplate', {
+        clientToken: randomUUID(),
+        description: `better-compute live ${runId}: Spot interruption`,
+        roleArn,
+        stopConditions: [{ source: 'none' }],
+        targets: { spot: { resourceType: 'aws:ec2:spot-instance', resourceArns: [instanceArn], selectionMode: 'ALL' } },
+        actions: {
+          interrupt: {
+            actionId: 'aws:ec2:send-spot-instance-interruptions',
+            parameters: { durationBeforeInterruption: 'PT2M' },
+            targets: { SpotInstances: 'spot' },
+          },
+        },
+        tags: tagMap,
+      });
+      const id = experimentTemplate?.id;
+      if (!id) throw new ComputeError('PROVIDER_ERROR', 'CreateExperimentTemplate returned no id');
+      track(`arn:${partitionOf(config.region)}:fis:${config.region}:${config.account}:experiment-template/${id}`);
+      return id;
+    },
+
+    async startExperiment(templateId) {
+      const { experiment } = await fis<{ experiment?: { id?: string } }>('/experiments', 'StartExperiment', {
+        clientToken: randomUUID(),
+        experimentTemplateId: templateId,
+      });
+      if (!experiment?.id) throw new ComputeError('PROVIDER_ERROR', 'StartExperiment returned no id');
+      return experiment.id;
+    },
+    untagged,
 
     cleanUp: () => deleteLiveResources({ config, deps, arns: created }),
   };

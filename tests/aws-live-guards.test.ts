@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertLiveInstanceType,
+  liveEc2Fetch,
   liveGate,
   livePreflight,
   liveTags,
@@ -133,5 +134,103 @@ describe('test-run tagging and the instance allow-list', () => {
     expect(assertLiveInstanceType('t3.micro')).toBe('t3.micro');
     for (const type of ['p5.48xlarge', 't3.small', 'T3.MICRO', ''])
       expect(() => assertLiveInstanceType(type), type).toThrow(/allow-list/);
+  });
+});
+
+describe('liveEc2Fetch', () => {
+  // Wraps the fetch a provider under test gets: it refuses EC2 calls that could cost more than the
+  // allow-list before they are sent, and reports what each create made so the run can tag it.
+  const form = (action: string, params: Record<string, string> = {}) =>
+    new URLSearchParams({ Action: action, Version: '2016-11-15', ...params }).toString();
+  const ec2Url = 'https://ec2.us-east-1.amazonaws.com/';
+
+  function guarded(answer = '<Response/>', status = 200) {
+    const sent: string[] = [];
+    const created: { kind: string; id: string }[][] = [];
+    const base: typeof fetch = async (_input, init) => {
+      sent.push(String(init?.body));
+      return new Response(answer, { status, headers: { 'content-type': 'text/xml' } });
+    };
+    const guardedFetch = liveEc2Fetch(base, async (items) => {
+      created.push(items);
+    });
+    const post = (body: string | Uint8Array, url = ec2Url) => guardedFetch(url, { method: 'POST', body: body as BodyInit });
+    // A refusal is EC2's own 403 UnauthorizedOperation, so a provider sees a final ACCESS_DENIED.
+    const refused = async (body: string | Uint8Array): Promise<string> => {
+      const response = await post(body);
+      expect(response.status).toBe(403);
+      const text = await response.text();
+      expect(text).toContain('<Code>UnauthorizedOperation</Code>');
+      return text;
+    };
+    return { sent, created, post, refused };
+  }
+
+  it('refuses instance types off the allow-list, and more than one instance, before sending', async () => {
+    const { sent, refused } = guarded();
+    await expect(refused(form('RunInstances', { InstanceType: 'p5.48xlarge', MinCount: '1', MaxCount: '1' }))).resolves.toMatch(/allow-list/);
+    await expect(refused(form('RunInstances', { MinCount: '1', MaxCount: '1' }))).resolves.toMatch(/allow-list/);
+    await expect(refused(form('RunInstances', { InstanceType: 't3.micro', MinCount: '1', MaxCount: '3' }))).resolves.toMatch(/one instance/);
+    await expect(refused(form('ModifyInstanceAttribute', { 'InstanceType.Value': 'm7i.large' }))).resolves.toMatch(/allow-list/);
+    await expect(refused(new TextEncoder().encode(form('RunInstances', { InstanceType: 'c7g.large', MinCount: '1', MaxCount: '1' })))).resolves.toMatch(/allow-list/);
+    expect(sent).toEqual([]);
+  });
+
+  it('refuses purchases, hosts, reservations, NAT gateways and fleets outright', async () => {
+    const { sent, refused } = guarded();
+    for (const action of [
+      'PurchaseReservedInstancesOffering',
+      'PurchaseCapacityBlock',
+      'AllocateHosts',
+      'CreateCapacityReservation',
+      'CreateNatGateway',
+      'CreateFleet',
+      'RequestSpotFleet',
+      'RequestSpotInstances',
+    ])
+      await expect(refused(form(action)), action).resolves.toMatch(/live suite never calls EC2/);
+    expect(sent).toEqual([]);
+  });
+
+  it('passes allowed calls and other services through untouched', async () => {
+    const { sent, post } = guarded();
+    await post(form('RunInstances', { InstanceType: 't4g.nano', MinCount: '1', MaxCount: '1' }));
+    await post(form('DescribeInstances'));
+    await post(new URLSearchParams({ Action: 'GetCallerIdentity', Version: '2011-06-15' }).toString(), 'https://sts.us-east-1.amazonaws.com/');
+    await post('{"QueueUrl":"x"}', 'https://sqs.us-east-1.amazonaws.com/');
+    expect(sent).toHaveLength(4);
+  });
+
+  it('reports the instances RunInstances made, not the VPC, subnet or groups it names', async () => {
+    const { created, post } = guarded(
+      '<RunInstancesResponse><instancesSet><item><instanceId>i-0123456789abcdef0</instanceId><subnetId>subnet-0aaaaaaaaaaaaaaaa</subnetId><vpcId>vpc-0bbbbbbbbbbbbbbbb</vpcId><groupSet><item><groupId>sg-0cccccccccccccccc</groupId></item></groupSet></item></instancesSet></RunInstancesResponse>',
+    );
+    await post(form('RunInstances', { InstanceType: 't3.micro', MinCount: '1', MaxCount: '1' }));
+    expect(created).toEqual([[{ kind: 'instance', id: 'i-0123456789abcdef0' }]]);
+  });
+
+  it('reports networking and volume creates', async () => {
+    const cases: [string, string, { kind: string; id: string }][] = [
+      ['CreateVpc', '<CreateVpcResponse><vpc><vpcId>vpc-01</vpcId><dhcpOptionsId>dopt-1</dhcpOptionsId></vpc></CreateVpcResponse>', { kind: 'vpc', id: 'vpc-01' }],
+      ['CreateSubnet', '<CreateSubnetResponse><subnet><subnetId>subnet-01</subnetId><vpcId>vpc-01</vpcId></subnet></CreateSubnetResponse>', { kind: 'subnet', id: 'subnet-01' }],
+      ['CreateSecurityGroup', '<CreateSecurityGroupResponse><return>true</return><groupId>sg-01</groupId></CreateSecurityGroupResponse>', { kind: 'security-group', id: 'sg-01' }],
+      ['CreateInternetGateway', '<CreateInternetGatewayResponse><internetGateway><internetGatewayId>igw-01</internetGatewayId></internetGateway></CreateInternetGatewayResponse>', { kind: 'internet-gateway', id: 'igw-01' }],
+      ['CreateRouteTable', '<CreateRouteTableResponse><routeTable><routeTableId>rtb-01</routeTableId><vpcId>vpc-01</vpcId></routeTable></CreateRouteTableResponse>', { kind: 'route-table', id: 'rtb-01' }],
+      ['CreateNetworkAcl', '<CreateNetworkAclResponse><networkAcl><networkAclId>acl-01</networkAclId><vpcId>vpc-01</vpcId></networkAcl></CreateNetworkAclResponse>', { kind: 'network-acl', id: 'acl-01' }],
+      ['CreateVolume', '<CreateVolumeResponse><volumeId>vol-01</volumeId></CreateVolumeResponse>', { kind: 'volume', id: 'vol-01' }],
+      ['AllocateAddress', '<AllocateAddressResponse><publicIp>192.0.2.1</publicIp><allocationId>eipalloc-01</allocationId></AllocateAddressResponse>', { kind: 'elastic-ip', id: 'eipalloc-01' }],
+    ];
+    for (const [action, answer, expected] of cases) {
+      const { created, post } = guarded(answer);
+      await post(form(action));
+      expect(created, action).toEqual([[expected]]);
+    }
+  });
+
+  it('reports nothing for a failed create', async () => {
+    const { created, post } = guarded('<Response><Errors><Error><Code>VpcLimitExceeded</Code></Error></Errors></Response>', 400);
+    const response = await post(form('CreateVpc'));
+    expect(response.status).toBe(400);
+    expect(created).toEqual([]);
   });
 });

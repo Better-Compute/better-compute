@@ -45,6 +45,24 @@ Enabled but misconfigured is an error, not a skip.
 | `templates.live.test.ts` | CloudFormation `ValidateTemplate` on the three deployment templates | nothing |
 | `platform.live.test.ts` | `s3BlobStore` (single and multipart put, get, presigned GET, delete), `awsSecretsManagerStore` (put, resolve, tenant check, rotate, delete), `eventBridgeSink` through a real rule to SQS, `sqsSink` | an S3 bucket, a secret, an event bus and rule, two SQS queues, for minutes |
 
+| `ec2.live.test.ts` | provider-aws: the A1 `providerConformanceCases`, A2 network/subnet/firewall create and delete, A4 EC2 state changes through a real EventBridge rule on the default bus, and a Spot interruption sent by FIS (`aws:ec2:send-spot-instance-interruptions`) | `t4g.nano`/`t3.micro` instances for minutes, a VPC, an SQS queue and a rule, a FIS template |
+
+`ec2.live.test.ts` skips when `@better-compute/provider-aws` is not in the checkout, and each case skips when the
+provider has no such feature yet (`networks`, `pollEvents`, Spot offers). It takes these optional settings:
+
+| Variable | Meaning |
+| --- | --- |
+| `BETTER_COMPUTE_AWS_LIVE_ZONE` | Default `<region>a` |
+| `BETTER_COMPUTE_AWS_LIVE_INSTANCE_TYPE` | `t4g.nano` (default) or `t3.micro`; nothing else is accepted |
+| `BETTER_COMPUTE_AWS_LIVE_ATTACHABLE` | An instance id the conformance claim and discover cases may tag and untag |
+| `BETTER_COMPUTE_AWS_LIVE_FIS_ROLE_ARN` | A role FIS can assume, with `ec2:SendSpotInstanceInterruptions` and `ec2:DescribeInstances`; without it the Spot case skips |
+
+The provider's fetch goes through `liveEc2Fetch` (`support/live.ts`). It answers a refused call the way EC2 would
+(403 `UnauthorizedOperation`), so nothing is sent: an instance type off the allow-list in any `…InstanceType`
+parameter, a launch of more than one instance, or any purchase, dedicated host, capacity reservation, NAT gateway or
+fleet. Every instance, VPC, subnet, security group, gateway, route table, network ACL, volume and Elastic IP that EC2
+creates is recorded at once and tagged with the run's tags.
+
 Files create their fixtures through `support/resources.ts` (`liveAws`): each is tagged with the run's tags and its
 ARN is recorded as soon as it exists, so `afterAll` (`cleanUp`, the sweeper's deleters by ARN) deletes it even when
 a later step failed. What `cleanUp` cannot delete stays tagged for the sweeper. `tests/aws-live-resources.test.ts`
