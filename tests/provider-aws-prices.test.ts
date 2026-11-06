@@ -205,10 +205,10 @@ describe('vps proposals from AWS list prices', () => {
 
   it('AWS offer ids name their region and family', () => {
     expect(offerPlacement('us-east-1a/m7i.large')).toEqual({ region: 'us-east-1', family: 'm7i' });
-    expect(offerPlacement('us-west-2-lax-1a/c7i.xlarge')).toEqual({
-      region: 'us-west-2',
-      family: 'c7i',
-    });
+    // a Local Zone is priced above its parent region and has its own Price List regionCode: left unpriced,
+    // never priced from the parent region's list
+    expect(offerPlacement('us-west-2-lax-1a/c7i.xlarge')).toBeUndefined();
+    expect(offerPlacement('us-east-1-mia-1a/m7i-flex.large@cr-0123456789abcdef0')).toBeUndefined();
     // a Spot offer is not priced from on-demand list prices
     expect(offerPlacement('us-east-1a/c7i.xlarge:spot')).toBeUndefined();
     expect(offerPlacement('eu-west-1b/m7i-flex.large@cr-0123456789abcdef0')).toEqual({
