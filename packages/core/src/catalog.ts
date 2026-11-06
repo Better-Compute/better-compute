@@ -102,7 +102,7 @@ const definitions = {
       ...a('networks', 'read'),
       // Managed Kubernetes: `kubernetesClusters.list` and `versions` are gated on the tenant.
       ...a('kubernetes', 'read'),
-      // Managed data and platform services: `cloudResources.list` and `kinds` are gated on the tenant.
+      // Managed data and platform services: `cloudResources.list`, `kinds` and `discover` are gated on the tenant.
       ...a('cloud-resources', 'read'),
       // v1.0 destructive-batch quorum (§13): on top of the approvers' signatures, never instead.
       ...a('batches', 'read', 'create', 'approve'),
@@ -712,6 +712,10 @@ group('cloudResources', 'cloud-resources', [
   ['get', 'read', 'cloud-resources:read', 'cloud-resource', 'v1.0'],
   ['update', 'mutation', 'cloud-resources:update', 'cloud-resource', 'v1.0'],
   ['delete', 'mutation', 'cloud-resources:delete', 'cloud-resource', 'v1.0'],
+  // The tenant's own account only: what exists there, and taking it over or letting it go.
+  ['discover', 'read', 'cloud-resources:read', 'tenant', 'v1.0'],
+  ['adopt', 'mutation', 'cloud-resources:create', 'cloud-resource', 'v1.0'],
+  ['release', 'mutation', 'cloud-resources:delete', 'cloud-resource', 'v1.0'],
 ]);
 group('commandBatches', 'quorum', [
   ['create', 'mutation', 'batches:create', 'tenant', 'v1.0'],

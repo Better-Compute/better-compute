@@ -17,11 +17,20 @@ import {
   ProviderClients,
   type TenantVaultPaths,
 } from '@better-compute/vps';
+import {
+  adoptResource,
+  checkAdopt,
+  discoverResources,
+  prepareAdopt,
+  releaseResource,
+} from './adopt.js';
 import { cloudResourcesMigrations } from './migrations.js';
 import {
   cloudResourcesSchemas,
   kindPattern,
+  parseAdopt,
   parseCreate,
+  parseDiscover,
   parseKinds,
   parseList,
   parseRef,
@@ -41,9 +50,12 @@ import {
 } from './resources.js';
 import { resourcesWork, type CloudResourcesDeps } from './store.js';
 import type {
+  AdoptResourceInput,
   CloudResourceKindView,
   CloudResourceView,
   CreateResourceInput,
+  DiscoveredResourceView,
+  DiscoverInput,
   KindsInput,
   ListResourcesInput,
   ResourceRef,
@@ -79,6 +91,12 @@ export type CloudResourcesApi = {
     get: MethodDefinition<ResourceRef, CloudResourceView>;
     update: MethodDefinition<UpdateResourceInput, CloudResourceView>;
     delete: MethodDefinition<ResourceRef, CloudResourceView>;
+    /** The kind's resources on the tenant's own account, managed or not. */
+    discover: MethodDefinition<DiscoverInput, { items: DiscoveredResourceView[] }>;
+    /** Takes over an unmanaged resource of the tenant's own account. */
+    adopt: MethodDefinition<AdoptResourceInput, CloudResourceView>;
+    /** Lets a resource go: it keeps running at the provider, unmanaged. */
+    release: MethodDefinition<ResourceRef, CloudResourceView>;
   };
 };
 
@@ -218,6 +236,39 @@ export function cloudResources(
         resource: resourceRef,
         validate: describedBy(cloudResourcesSchemas.ref, parseRef),
         handler: (context, input) => deleteResource(depsOf(context), context.sql, input),
+      }),
+      // The provider is listed with no transaction open.
+      discover: defineMethod({
+        action: 'compute:cloud-resources:read',
+        kind: 'read',
+        resource: tenantResource,
+        transaction: 'manual',
+        validate: describedBy(cloudResourcesSchemas.discover, parseDiscover),
+        handler: (context, input) => discoverResources(depsOf(context), context, input),
+      }),
+      adopt: defineMethod({
+        action: 'compute:cloud-resources:create',
+        kind: 'mutation',
+        resource: (input: AdoptResourceInput) => ({
+          type: 'cloud-resource',
+          id: `draft:${input.idempotencyKey}`,
+        }),
+        validate: describedBy(cloudResourcesSchemas.adopt, parseAdopt),
+        admission: {
+          prepare: (context, input, tx) => prepareAdopt(depsOf(context), context, input, tx),
+          denied: (context, input, tx) => clearStaged(context, input, tx),
+          abandoned: (context, input, tx) => clearStaged(context, input, tx),
+          // The provider is asked, with no transaction open, whether the resource exists and is free to take.
+          check: (context, input) => checkAdopt(depsOf(context), context, input),
+        },
+        handler: (context, input) => adoptResource(depsOf(context), context, input),
+      }),
+      release: defineMethod({
+        action: 'compute:cloud-resources:delete',
+        kind: 'mutation',
+        resource: resourceRef,
+        validate: describedBy(cloudResourcesSchemas.ref, parseRef),
+        handler: (context, input) => releaseResource(depsOf(context), context.sql, input),
       }),
     },
   });

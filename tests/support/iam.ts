@@ -77,7 +77,7 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
         ...action('networks', 'read'),
         // Managed Kubernetes: `kubernetesClusters.list` and `versions` are gated on the tenant.
         ...action('kubernetes', 'read'),
-        // Managed data and platform services: `cloudResources.list` and `kinds` are gated on the tenant.
+        // Managed data and platform services: `cloudResources.list`, `kinds` and `discover` are gated on the tenant.
         ...action('cloud-resources', 'read'),
         // §13 destructive-batch quorum (v1.0).
         ...action('batches', 'read', 'create', 'approve'),

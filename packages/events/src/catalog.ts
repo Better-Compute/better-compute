@@ -265,7 +265,7 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     subject: 'cloud-resource/{id}',
     module: 'cloud-resources',
     description:
-      'Managed data and platform services (databases, apps, functions, …): created { poolId, providerAccountId, family, name, region? }, ready the first time { outputs, secretOutputs } (output names only, never a value), updating { fields }, updated when ready again after a change, failed { message }, deleting { reason: requested | parent-deleted | tenant-deleted }, deleted, released; data { resourceId, kind, ... }',
+      'Managed data and platform services (databases, apps, functions, …): created { poolId, providerAccountId, family, name, region? }, ready the first time { outputs, secretOutputs } (output names only, never a value), updating { fields }, updated when ready again after a change, failed { message }, deleting { reason: requested | parent-deleted | tenant-deleted }, deleted; adopted { poolId, providerAccountId, family, name, providerId } (cloudResources.adopt), releasing and released (cloudResources.release: left running, unmanaged); data { resourceId, kind, ... }',
   },
   {
     type: 'fleet.*',

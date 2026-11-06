@@ -787,6 +787,11 @@ export interface ProviderResourceState {
    * the refs: never stored, logged, published or put in an error.
    */
   secretOutputs?: Readonly<Record<string, string>>;
+  /**
+   * (cloud-resources) The spec as the provider reports it, in the kind's spec shape where it can be read back. An
+   * adopted resource's spec is recorded from it.
+   */
+  spec?: Readonly<Record<string, unknown>>;
   message?: string;
 }
 

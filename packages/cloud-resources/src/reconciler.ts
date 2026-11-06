@@ -255,6 +255,8 @@ class ResourceWorker {
     message?: string;
     outputs?: Readonly<Record<string, string>>;
     secretRefs?: Record<string, SecretRef>;
+    /** An adopted resource's spec, as the provider reports it. */
+    spec?: Readonly<Record<string, unknown>>;
   }): Promise<boolean> {
     const row = this.#row;
     const written = await this.sql.transaction(async (tx) => {
@@ -263,6 +265,7 @@ class ResourceWorker {
             SET state = $3, message = $4,
                 outputs = coalesce($5::jsonb, outputs),
                 secret_outputs = coalesce($6::jsonb, secret_outputs),
+                spec = coalesce($7::jsonb, spec),
                 updated_at = compute_now(),
                 ready_at = CASE WHEN $3 = 'ready' THEN coalesce(ready_at, compute_now()) ELSE ready_at END
           WHERE id = $1 AND version = $2
@@ -274,6 +277,7 @@ class ResourceWorker {
           update.message ?? null,
           update.outputs ? JSON.stringify(update.outputs) : null,
           update.secretRefs ? JSON.stringify(update.secretRefs) : null,
+          update.spec ? JSON.stringify(update.spec) : null,
         ],
       );
       if (rows.length === 0) return false;
@@ -344,18 +348,22 @@ class ResourceWorker {
         return this.#next();
       }
     }
+    // An adopted resource nobody changed since is observed, not ensured: its spec is the provider's.
+    const observe = row.adopted && Number(row.version) === 1;
     const ensured = await this.#attempt(() =>
-      provider.resources.ensure(
-        {
-          kind: row.kind,
-          name: row.provider_name,
-          spec: json(row.spec),
-          ...(row.provider_id !== null ? { id: row.provider_id } : {}),
-          ...(parent?.provider_id ? { parent: parent.provider_id } : {}),
-          labels: this.#labels(),
-        },
-        this.#call(),
-      ),
+      observe
+        ? this.#observe(provider)
+        : provider.resources.ensure(
+            {
+              kind: row.kind,
+              name: row.provider_name,
+              spec: json(row.spec),
+              ...(row.provider_id !== null ? { id: row.provider_id } : {}),
+              ...(parent?.provider_id ? { parent: parent.provider_id } : {}),
+              labels: this.#labels(),
+            },
+            this.#call(),
+          ),
     );
     if (!ensured) return this.#next();
     if (ensured.state === 'error') {
@@ -367,6 +375,10 @@ class ResourceWorker {
     }
     const result = ensured.result!;
     await this.#recordProviderId(result.id);
+    const adoptedSpec =
+      observe && result.spec !== undefined && Object.keys(json(row.spec)).length === 0
+        ? result.spec
+        : undefined;
     let sealed: Sealed;
     try {
       sealed = await this.#seal(kind, result.secretOutputs);
@@ -383,9 +395,24 @@ class ResourceWorker {
       state: ready ? 'ready' : this.#converging(),
       ...(Object.keys(outputs).length > 0 ? { outputs } : {}),
       ...(sealed.created.length > 0 ? { secretRefs: sealed.refs } : {}),
+      ...(adoptedSpec ? { spec: adoptedSpec } : {}),
     });
     await this.#destroy(written ? sealed.superseded : sealed.created);
     return this.#next();
+  }
+
+  /**
+   * An adopted resource: the first time, the provider writes the ownership labels (and refuses one another
+   * deployment manages); afterwards it is read. One gone at the provider is an error, never re-created.
+   */
+  async #observe(provider: ResourcesProvider): Promise<ProviderResourceState> {
+    const row = this.#row;
+    if (row.ready_at === null)
+      return provider.resources.adopt!(row.kind, row.provider_id!, this.#labels(), this.#call());
+    const found = await provider.resources.get(row.kind, row.provider_id!, this.#call());
+    if (!found)
+      throw new ComputeError('NOT_FOUND', `${row.kind} ${row.provider_id} is gone at the provider`);
+    return found;
   }
 
   /** Deletes the resource at the provider once nothing lives in it any more, then records it `deleted`. */

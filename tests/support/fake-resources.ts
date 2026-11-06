@@ -169,6 +169,7 @@ function outputs(resource: FakeResource): ProviderResourceState {
   const state: ProviderResourceState = {
     id: resource.id,
     state: resource.ready ? 'ready' : 'pending',
+    spec: { ...resource.spec },
   };
   if (!resource.ready) return state;
   if (resource.kind === 'fake.database')
