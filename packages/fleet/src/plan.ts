@@ -8,18 +8,41 @@ function apiVolumes(volumes: NonNullable<FleetSandboxTemplate['volumes']>) {
     readOnly: volume.readOnly === true,
   }));
 }
+import {
+  planKubernetes,
+  resolveSubstrateAccount,
+  substrateAccount,
+  substrateIdentity,
+} from './kubernetes.js';
 import type { FleetState, NamedKind } from './state.js';
 
 /** One planned change, for people. */
 export interface FleetChange {
-  kind: 'site' | 'providerAccount' | 'pool' | 'ownerQuota' | 'offer' | 'flavor' | 'sandboxTemplate';
-  /** The item's name; offers are `<pool> -> <tenant>`, quotas `<pool>:<resource>`, flavors `<pool>/<name>`. */
+  kind:
+    | 'site'
+    | 'providerAccount'
+    | 'pool'
+    | 'ownerQuota'
+    | 'offer'
+    | 'flavor'
+    | 'sandboxTemplate'
+    | 'kubernetesCluster'
+    | 'kubernetesNodePool';
+  /**
+   * The item's name; offers are `<pool> -> <tenant>`, quotas `<pool>:<resource>`, flavors
+   * `<pool>/<name>`, node pools `<cluster>/<name>`.
+   */
   name: string;
   action: 'create' | 'update' | 'delete' | 'unchanged';
   /** For updates: the fields that differ. */
   fields?: string[];
   /** Why this change cannot be applied (immutable fields, unknown references). */
   blocked?: string;
+  /**
+   * Planned without a call: it needs an object this plan creates first (a cluster on a new pool).
+   * The next apply makes it; until then the fleet reports it as drift.
+   */
+  deferred?: true;
   note?: string;
 }
 
@@ -172,6 +195,9 @@ export async function planFleet(
   // Pools, owner quotas and offers.
   const poolIds = new Map(state.pools.map((pool) => [pool.name, pool.id]));
   const wantedPools = new Set<string>();
+  const createdPools = new Set<string>();
+  /** The provider account each wanted pool's substrate runs on (after name resolution). */
+  const substrateAccounts = new Map<string, string>();
   const offerCalls: FleetCall[] = [];
   const unoffers: FleetCall[] = [];
   for (const pool of desired.pools ?? []) {
@@ -198,11 +224,26 @@ export async function planFleet(
       });
       continue;
     }
+    // (D25) A substrate may name its provider account by its document name.
+    const resolved = resolveSubstrateAccount(pool.policy, accountIds);
+    if (resolved.unknown !== undefined) {
+      add({
+        kind: 'pool',
+        name: pool.name,
+        action: current ? 'update' : 'create',
+        blocked: `unknown provider account ${resolved.unknown} (policy.substrate.account)`,
+      });
+      continue;
+    }
+    const policy = resolved.policy ?? {};
+    const runsOn = substrateAccount(policy);
+    if (runsOn !== undefined) substrateAccounts.set(pool.name, runsOn);
     let poolId: string;
     if (!current) {
       const key = fleetKey(tenantId, 'pool', pool.name);
       poolId = await options.idFor('pool', key);
       poolIds.set(pool.name, poolId);
+      createdPools.add(pool.name);
       add({ kind: 'pool', name: pool.name, action: 'create' });
       creates.push({
         path: 'pools/create',
@@ -213,7 +254,7 @@ export async function planFleet(
           ...(pool.gpuModel ? { gpuModel: pool.gpuModel } : {}),
           ...(pool.sharing ? { sharing: pool.sharing } : {}),
           ...(pool.agent ? { agent: pool.agent } : {}),
-          policy: pool.policy ?? {},
+          policy,
           ...(pool.ownerQuota ? { ownerQuota: pool.ownerQuota } : {}),
           ...(accountId ? { providerAccountId: accountId } : {}),
           idempotencyKey: key,
@@ -229,11 +270,16 @@ export async function planFleet(
       if (pool.agent !== undefined && current.agent !== pool.agent) immutable.push('agent');
       if ((current.providerAccountId ?? null) !== (accountId ?? null))
         immutable.push('providerAccount');
+      // A substrate is never moved to another account or cluster in place (K-D8).
+      const identity = substrateIdentity(current.policy);
+      const wantedIdentity = substrateIdentity(policy);
+      if (identity !== undefined && wantedIdentity !== undefined && identity !== wantedIdentity)
+        immutable.push('policy.substrate (account, cluster)');
       const mutable: string[] = [];
       const update: Record<string, unknown> = { tenantId, poolId };
-      if (!same(current.policy, pool.policy ?? {})) {
+      if (!same(current.policy, policy)) {
         mutable.push('policy');
-        update.policy = pool.policy ?? {};
+        update.policy = policy;
       }
       if (pool.gpuModel !== undefined && current.gpuModel !== pool.gpuModel) {
         mutable.push('gpuModel');
@@ -482,6 +528,14 @@ export async function planFleet(
     } else add({ kind: 'sandboxTemplate', name: template.name, action: 'unchanged' });
   }
 
+  // Kubernetes clusters (D25): after the pools they live on; their deletes before pools are archived.
+  const kubernetes = planKubernetes(desired, state, {
+    prune: options.prune,
+    poolIds,
+    createdPools,
+    add,
+  });
+
   // Deletes (prune), children first.
   if (options.prune) {
     if (!sandboxesMissing)
@@ -512,7 +566,10 @@ export async function planFleet(
           kind: 'pool',
           name: pool.name,
           action: 'delete',
-          note: 'archived: running reservations keep their bookings',
+          note:
+            substrateIdentity(pool.policy) !== undefined
+              ? 'archived: running reservations keep their bookings; its substrate is torn down'
+              : 'archived: running reservations keep their bookings',
         });
         deletes.push({
           path: 'pools/archive',
@@ -535,6 +592,35 @@ export async function planFleet(
           });
           continue;
         }
+        // A substrate the document keeps, or a cluster that is not gone yet (deleting ones too:
+        // the provider still has them), pins the account; a later apply deletes it.
+        const substrateUser = [...substrateAccounts].find(([, id]) => id === account.id)?.[0];
+        const cluster =
+          state.kubernetesClusters.find((item) => item.providerAccountId === account.id)?.name ??
+          state.substrateClusters.find((item) => item.providerAccountId === account.id)?.name;
+        if (substrateUser !== undefined || cluster !== undefined) {
+          add({
+            kind: 'providerAccount',
+            name: account.name,
+            action: 'unchanged',
+            note:
+              substrateUser !== undefined
+                ? `kept: the substrate of pool ${substrateUser} uses it`
+                : `kept: cluster ${cluster} uses it until it is deleted; apply again then`,
+          });
+          continue;
+        }
+        // Another tenant's cluster on a pool offered to it runs on this account too; which one is
+        // not this tenant's to know, so the note names none.
+        if (state.pinnedAccounts.includes(account.id)) {
+          add({
+            kind: 'providerAccount',
+            name: account.name,
+            action: 'unchanged',
+            note: 'kept: a Kubernetes cluster still runs on it',
+          });
+          continue;
+        }
         add({ kind: 'providerAccount', name: account.name, action: 'delete' });
         deletes.push({
           path: 'providerAccounts/delete',
@@ -553,8 +639,10 @@ export async function planFleet(
     ...offerCalls,
     ...flavorCalls,
     ...templateCalls,
+    ...kubernetes.writes,
     ...templateDeletes,
     ...flavorDeletes,
+    ...kubernetes.deletes,
     ...unoffers,
     ...deletes.filter((call) => call.path === 'pools/archive'),
     ...deletes.filter((call) => call.path === 'providerAccounts/delete'),

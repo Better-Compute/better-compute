@@ -73,6 +73,9 @@ const { kubeconfig } = await compute.api.kubernetesClusters.credentials(credenti
 - **Migration** `kubernetes/0001_clusters`: `kubernetes_clusters`, `kubernetes_node_pools`, and the `kubernetes`
   usage source kind.
 - **Tenancy**: a deleted tenant's clusters are deleted at the provider (`tenantDeleted`).
+- **FleetConfig**: `@better-compute/fleet` exports, plans and applies clusters and node pools as the document's
+  `kubernetesClusters`. `kubernetesClusters.create`'s admission is `composable` (its `denied` and `abandoned` hooks
+  only clear the staged projection row), so `fleet.apply` can compose it.
 
 ## Credentials
 

@@ -206,6 +206,32 @@ const kit = definePlugin({
         handler: async () => ({}),
       }),
     },
+    staged: {
+      // A composable admission (as kubernetesClusters.create): its hooks only clear what prepare staged.
+      create: defineMethod<ItemInput, Record<string, never>>({
+        action: 'compute:kit:order',
+        kind: 'mutation',
+        resource: tenant,
+        validate: (raw) => parse<ItemInput>(raw, ['tenantId', 'label', 'idempotencyKey']),
+        admission: {
+          async prepare(_context, input) {
+            trace.push(`staged prepare ${input.label}`);
+            return { status: 'decide', resource: tenant(input) };
+          },
+          async denied(_context, input) {
+            trace.push(`staged denied ${input.label}`);
+          },
+          async abandoned(_context, input) {
+            trace.push(`staged abandoned ${input.label}`);
+          },
+          composable: true,
+        },
+        async handler(_context, input) {
+          trace.push(`staged handler ${input.label}`);
+          return {};
+        },
+      }),
+    },
     info: {
       ping: defineMethod<Record<string, never>, { pong: true; caller: boolean }>({
         action: null,
@@ -236,6 +262,7 @@ const kit = definePlugin({
 });
 
 const NOTES = 'plugins/kit/notes/add';
+const STAGED = 'plugins/kit/staged/create';
 const ITEMS = 'plugins/kit/items/create';
 
 let store: ReturnType<typeof pglite>;
@@ -448,6 +475,62 @@ describe('composite methods: check, then invoke', () => {
     expect(requires()).toEqual([`compute:kit:compose ${ACME}`]);
     expect(trace).toEqual([]);
     expect(await notes()).toEqual([]);
+  });
+
+  it('composes a composable admission: denied after a refusal, abandoned for calls that did not run', async () => {
+    iam.allow({ token: USER });
+    // Checked and run: no hook.
+    await compose(USER, async (context) => {
+      await context.check!(STAGED, item('ran', 'k-ran'));
+      return context.sql.transaction((tx) => context.invoke!(tx, STAGED, item('ran', 'k-ran')));
+    });
+    expect(trace).toEqual(['staged prepare ran', 'staged prepare ran', 'staged handler ran']);
+
+    // Checked, never run: abandoned when the composite ends.
+    trace.length = 0;
+    await compose(USER, async (context) => {
+      await context.check!(STAGED, item('skipped', 'k-skipped'));
+      await context.check!(STAGED, item('ran', 'k-ran-2'));
+      return context.sql.transaction((tx) => context.invoke!(tx, STAGED, item('ran', 'k-ran-2')));
+    });
+    expect(trace).toEqual([
+      'staged prepare skipped',
+      'staged prepare ran',
+      'staged prepare ran',
+      'staged handler ran',
+      'staged abandoned skipped',
+    ]);
+
+    // Run, then the composite fails: its transaction rolled back, so the run call is abandoned too.
+    trace.length = 0;
+    const failed = await codeOf(
+      compose(USER, async (context) => {
+        await context.check!(STAGED, item('rolled', 'k-rolled'));
+        await context.sql.transaction(async (tx) => {
+          await context.invoke!(tx, STAGED, item('rolled', 'k-rolled'));
+          throw new ComputeError('CONFIG_DRIFT', 'moved');
+        });
+      }),
+    );
+    expect(failed).toBe('CONFIG_DRIFT');
+    expect(trace).toEqual([
+      'staged prepare rolled',
+      'staged prepare rolled',
+      'staged handler rolled',
+      'staged abandoned rolled',
+    ]);
+
+    // Refused by IAM: denied runs (and abandoned does not), then the refusal surfaces.
+    const refused = 'token-composite-staged-refused-0123456789';
+    iam.addCaller(refused, { tenantId: ACME, identityId: 'id-staged-refused' });
+    iam.allow({ token: refused });
+    iam.deny({ token: refused, action: 'compute:kit:order' });
+    trace.length = 0;
+    expect(
+      await codeOf(compose(refused, (context) => context.check!(STAGED, item('no', 'k-no')))),
+    ).toBe('ACCESS_DENIED');
+    expect(trace).toEqual(['staged prepare no', 'staged denied no']);
+    expect(insideTransaction).toEqual([]);
   });
 
   it('surfaces a sub-call refused by IAM from check, before anything runs', async () => {
