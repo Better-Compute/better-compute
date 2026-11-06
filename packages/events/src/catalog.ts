@@ -261,6 +261,13 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
       'Node pools of managed Kubernetes clusters, published on their cluster: created, ready, error { message }, deleted; data { clusterId, nodePoolId, name, ... }',
   },
   {
+    type: 'kubernetes.substrate.*',
+    subject: 'pool/{id}',
+    module: 'kubernetes',
+    description:
+      'Pool substrates (policy.substrate: the managed Kubernetes cluster behind a pool): created { providerAccountId, mode }, ready { clusterId, nodes }, error { message }, token-issued { tokenId, maxUses, ttlSeconds } and token-revoked { tokenId, reason } for the hosted join token bcd joins with (never the token itself), deleting, deleted; data { poolId, ... }',
+  },
+  {
     type: 'fleet.*',
     subject: 'fleet/{id}',
     module: 'fleet',

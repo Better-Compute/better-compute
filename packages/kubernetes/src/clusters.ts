@@ -456,7 +456,7 @@ async function openCluster(tx: SqlTx, ref: ClusterRef): Promise<ClusterRow> {
 }
 
 /** The cluster converges again: a settled one (`ready`, `error`) becomes `updating`; its version is bumped. */
-async function reopen(
+export async function reopen(
   deps: Pick<KubernetesDeps, 'work'>,
   tx: SqlTx,
   clusterId: string,

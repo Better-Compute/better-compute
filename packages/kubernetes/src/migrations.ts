@@ -138,6 +138,8 @@ CREATE TABLE kubernetes_pool_substrates (
   -- The provider id of the adopted cluster (mode adopt).
   adopt_id text,
   identity text NOT NULL,
+  -- pools.version this row last converged from: a pools.update wakes the substrate at the next sweep.
+  pool_version bigint,
   -- The kubernetes_clusters row (created, or the adopted cluster's row).
   cluster_id text,
   create_spec jsonb,
@@ -146,6 +148,8 @@ CREATE TABLE kubernetes_pool_substrates (
   desired_state text NOT NULL CHECK (desired_state IN ('present', 'deleted')),
   message text,
   join_token_id text,
+  -- The live token's Secret reached the cluster (a token minted in a run whose apply failed is replaced).
+  token_applied bool NOT NULL DEFAULT false,
   manifests_sha256 text,
   applied_at timestamptz,
   -- Nodes of the substrate's node pools the cluster last listed, and of them the ones whose bcd joined the pool.

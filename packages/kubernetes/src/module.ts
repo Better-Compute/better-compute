@@ -52,6 +52,7 @@ import {
 import { clustersReconciler } from './reconciler.js';
 import { clustersWork, type KubernetesDeps } from './store.js';
 import { substratePolicyValidator } from './substrate-policy.js';
+import { substratesReconciler, type SubstrateDeps, type SubstrateOptions } from './substrates.js';
 import type {
   ClusterRef,
   CreateClusterInput,
@@ -86,6 +87,12 @@ export interface KubernetesOptions {
   meterGraceMs?: number;
   /** The IAM resource-type prefix when the host does not name it (`ComputeOptions.typePrefix`, default `compute-`). */
   typePrefix?: string;
+  /**
+   * Pool substrates (`policy.substrate`): the agent that runs bcd on a substrate's cluster, provider-kubernetes'
+   * `kubernetesSubstrateAgent({ image, gatewayUrl, pins, … })`. Without it a pool with a substrate stays in
+   * `error` (nothing is created at the provider).
+   */
+  substrate?: SubstrateOptions;
 }
 
 /** The API groups of the kubernetes module. */
@@ -178,6 +185,20 @@ export function kubernetes(
     );
   const typePrefix = options.typePrefix ?? 'compute-';
   const clients = new ProviderClients(providers, tenantVaultPaths);
+  const substrate = options.substrate;
+  if (substrate !== undefined) {
+    if (typeof substrate?.agent?.manifests !== 'function' || typeof substrate.agent.connect !== 'function')
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'kubernetes({ substrate: { agent } }) takes a substrate agent (provider-kubernetes kubernetesSubstrateAgent)',
+      );
+    const tokenTtl = substrate.tokenTtlSeconds ?? 3600;
+    if (!Number.isSafeInteger(tokenTtl) || tokenTtl < 60 || tokenTtl > 86_400)
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'kubernetes({ substrate: { tokenTtlSeconds } }) must be an integer from 60 to 86400',
+      );
+  }
 
   const depsOf = (context: ModuleContext): KubernetesDeps => {
     const rootTenantId = (context.iam as ModuleContext['iam'] | undefined)?.rootTenantId;
@@ -195,6 +216,11 @@ export function kubernetes(
       ...(workload ? { workload } : {}),
     };
   };
+  const substrateDepsOf = (context: ModuleContext): SubstrateDeps => ({
+    ...depsOf(context),
+    ...(substrate ? { substrate } : {}),
+    ...(context.pki ? { pki: context.pki } : {}),
+  });
   const credentialOptions = { ttlSeconds: ttl, typePrefix };
 
   const api = (): KubernetesApi => ({
@@ -307,6 +333,8 @@ export function kubernetes(
     reconcilers: [
       // Clusters and node pools converged through the provider.
       clustersReconciler(depsOf),
+      // Pool substrates: the cluster behind a pool, and bcd on it.
+      substratesReconciler(substrateDepsOf),
       {
         // kubernetes.cluster.hours for clusters that exist at the provider.
         name: 'kubernetes.usage',

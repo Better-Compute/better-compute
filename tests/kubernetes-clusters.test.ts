@@ -415,6 +415,7 @@ describe('kubernetes()', () => {
     ]);
     expect(module.reconcilers!.map((reconciler) => reconciler.name)).toEqual([
       'kubernetes.clusters',
+      'kubernetes.substrates',
       'kubernetes.usage',
     ]);
     const api = module.api!({} as never);
