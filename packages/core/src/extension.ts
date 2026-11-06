@@ -795,6 +795,56 @@ export interface ProviderPlacement {
   partition?: number;
 }
 
+/**
+ * (AWS A10) A shared filesystem on one of the account's networks, as the module asks for it: `nfs`
+ * (Amazon EFS) or `lustre` (Amazon FSx for Lustre). `name` is the provider-side name the module
+ * derives (tenant-scoped); it is also the provider's idempotency token. Always encrypted at rest.
+ */
+export interface ProviderFilesystemSpec {
+  name: string;
+  kind: 'nfs' | 'lustre';
+  /** The network (a `ProviderNetworks` name) whose machines reach the filesystem. */
+  network: string;
+  /** `lustre`: the one zone it lives in; absent: the provider's default. `nfs` spans every zone of the network. */
+  zone?: string;
+  /** `lustre`: the capacity; the provider refuses sizes it cannot make. `nfs` is elastic and ignores it. */
+  sizeGiB?: number;
+  /** `lustre`: scratch (default) or persistent storage. */
+  deployment?: 'scratch' | 'persistent';
+  labels?: Readonly<Record<string, string>>;
+}
+
+/** (AWS A10) A filesystem mount a created machine performs at boot (rendered by the provider into its user data). */
+export interface ProviderMount {
+  fstype: 'nfs4' | 'lustre';
+  /** What the provider's `ProviderFilesystemState.mount` said: never a secret. */
+  source: string;
+  /** Absolute path on the machine. */
+  path: string;
+  /** Mount options, comma separated. */
+  options: string;
+}
+
+/** (AWS A10) A filesystem's state; `mount` (how a machine mounts it) once it is ready. */
+export interface ProviderFilesystemState extends ProviderResourceState {
+  mount?: Omit<ProviderMount, 'path'>;
+}
+
+/**
+ * (AWS A10) Shared filesystems on this account. `ensure*` and `delete*` are idempotent and
+ * non-blocking, like `ProviderNetworks`: `pending` or `deleting` while the provider works, and the
+ * reconciler calls again.
+ */
+export interface ProviderFilesystems {
+  /** The kinds this provider makes. */
+  readonly kinds: readonly ProviderFilesystemSpec['kind'][];
+  ensureFilesystem(
+    spec: ProviderFilesystemSpec,
+    context: CallContext,
+  ): Promise<ProviderFilesystemState>;
+  deleteFilesystem(name: string, context: CallContext): Promise<ProviderFilesystemState>;
+}
+
 export interface ProviderNetworkSpec {
   name: string;
   description?: string;
@@ -1124,6 +1174,8 @@ export interface ProviderImpl {
       network?: NetworkRef;
       /** (AWS A10) The placement group to launch into; a provider without placement groups ignores it. */
       placement?: ProviderPlacement;
+      /** (AWS A10) Filesystems the machine mounts at boot; a provider without filesystems ignores it. */
+      mounts?: readonly ProviderMount[];
       labels?: Readonly<Record<string, string>>;
       /**
        * The instance's OpenSSH public keys, also rendered into `userData` when it has none. A
@@ -1202,6 +1254,8 @@ export interface ProviderImpl {
     context: CallContext,
   ): Promise<ProviderListPrice[]>;
   networks?: ProviderNetworks;
+  /** (AWS A10) Shared filesystems (EFS, FSx for Lustre) on this account's networks. */
+  filesystems?: ProviderFilesystems;
   /** The region a zone is in, when the zone's name does not end in `-<letter>` (AWS `us-east-1a`, `us-west-2-lax-1a`). */
   zoneRegion?(zone: string): string;
   /** (kubernetes) Managed Kubernetes clusters and node pools on this account. */
