@@ -15,7 +15,15 @@ export interface DoAccountReport {
   /** `dropletLimit` is absent when the token lacks `droplet:read`: DigitalOcean then leaves it out. */
   account: { uuid: string; status: string; dropletLimit?: number };
   families: Record<
-    'compute' | 'networks' | 'keys' | 'tags' | 'storage' | 'addresses',
+    | 'compute'
+    | 'networks'
+    | 'keys'
+    | 'tags'
+    | 'storage'
+    | 'addresses'
+    | 'loadBalancers'
+    | 'dns'
+    | 'certificates',
     DoFamilyState
   >;
   /** The read scopes the token lacks, in probe order. */
@@ -35,6 +43,9 @@ const probes: readonly { family: Family; path: string; scope: string }[] = [
   { family: 'tags', path: '/tags', scope: 'tag:read' },
   { family: 'storage', path: '/volumes', scope: 'block_storage:read' },
   { family: 'addresses', path: '/reserved_ips', scope: 'reserved_ip:read' },
+  { family: 'loadBalancers', path: '/load_balancers', scope: 'load_balancer:read' },
+  { family: 'dns', path: '/domains', scope: 'domain:read' },
+  { family: 'certificates', path: '/certificates', scope: 'certificate:read' },
 ];
 
 /** How long the whole probe may take. */
@@ -52,7 +63,8 @@ function badBody(): ComputeError {
 /**
  * Read-only probe (GET account, regions, sizes, droplets?per_page=1, vpcs?per_page=1,
  * firewalls?per_page=1, account/keys?per_page=1, tags?per_page=1, volumes?per_page=1,
- * reserved_ips?per_page=1). Built the way the provider
+ * reserved_ips?per_page=1, load_balancers?per_page=1, domains?per_page=1,
+ * certificates?per_page=1). Built the way the provider
  * builds its client, so the token resolves, and is budgeted, exactly as it does for a create.
  * Throws when the token is refused or cannot read the account; any other failure of a list
  * propagates too, since it says nothing about a scope.
@@ -116,6 +128,9 @@ async function probe(client: DoClient, signal: AbortSignal): Promise<DoAccountRe
     tags: 'ok',
     storage: 'ok',
     addresses: 'ok',
+    loadBalancers: 'ok',
+    dns: 'ok',
+    certificates: 'ok',
   };
   const missing: string[] = [];
   probes.forEach(({ family, scope }, i) => {

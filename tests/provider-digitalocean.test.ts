@@ -1635,6 +1635,9 @@ describe('compute', () => {
         'networks',
         'volumes',
         'addresses',
+        'loadBalancers',
+        'dns',
+        'certificates',
       ],
     });
     const emu = emulator();
@@ -2279,6 +2282,9 @@ describe('definition', () => {
       'networks',
       'volumes',
       'addresses',
+      'loadBalancers',
+      'dns',
+      'certificates',
     ]);
     const parsed = await digitalocean.config['~standard'].validate(doAccount);
     expect(parsed).toMatchObject({
@@ -2343,6 +2349,9 @@ describe('definition', () => {
         tags: 'ok',
         storage: 'ok',
         addresses: 'ok',
+        loadBalancers: 'ok',
+        dns: 'ok',
+        certificates: 'ok',
       },
       missing: [],
     });
@@ -2351,7 +2360,10 @@ describe('definition', () => {
       [
         'GET /v2/account',
         'GET /v2/account/keys',
+        'GET /v2/certificates',
+        'GET /v2/domains',
         'GET /v2/droplets',
+        'GET /v2/load_balancers',
         'GET /v2/firewalls',
         'GET /v2/regions',
         'GET /v2/reserved_ips',
@@ -2371,6 +2383,7 @@ describe('definition', () => {
     forbidden(emu, /^\/sizes$/);
     forbidden(emu, /^\/tags$/);
     forbidden(emu, /^\/reserved_ips$/);
+    forbidden(emu, /^\/domains$/);
     const report = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
     expect(report.families).toEqual({
       compute: 'denied',
@@ -2379,8 +2392,17 @@ describe('definition', () => {
       tags: 'denied',
       storage: 'ok',
       addresses: 'denied',
+      loadBalancers: 'ok',
+      dns: 'denied',
+      certificates: 'ok',
     });
-    expect(report.missing).toEqual(['sizes:read', 'firewall:read', 'tag:read', 'reserved_ip:read']);
+    expect(report.missing).toEqual([
+      'sizes:read',
+      'firewall:read',
+      'tag:read',
+      'reserved_ip:read',
+      'domain:read',
+    ]);
     expect(report.account.status).toBe('active');
   });
 
@@ -2434,6 +2456,9 @@ describe('definition: scoped account bodies and timeouts', () => {
       tags: 'ok',
       storage: 'ok',
       addresses: 'ok',
+      loadBalancers: 'ok',
+      dns: 'ok',
+      certificates: 'ok',
     });
     expect(report.missing).toEqual(['droplet:read']);
     expect(report.account.dropletLimit).toBeUndefined();

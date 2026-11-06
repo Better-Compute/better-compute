@@ -1,6 +1,6 @@
 # @better-compute/provider-digitalocean
 
-A DigitalOcean provider for better-compute: Droplets as VPS instances and offers (GPU Droplets included), with attach, tenant networks, Block Storage volumes and snapshots, and reserved IPs. It talks to the DigitalOcean API v2 over plain `fetch` and has no npm dependencies beyond `@better-compute/core` and `@better-compute/vps`.
+A DigitalOcean provider for better-compute: Droplets as VPS instances and offers (GPU Droplets included), with attach, tenant networks (with NAT gateways, peerings and, as a preview, routes), Block Storage volumes and snapshots, reserved IPs (BYOIP as a preview), load balancers, DNS zones and records, and certificates. It talks to the DigitalOcean API v2 over plain `fetch` and has no npm dependencies beyond `@better-compute/core` and `@better-compute/vps`.
 
 It is not part of the `better-compute` umbrella: install it next to `better-compute`.
 
@@ -22,7 +22,8 @@ An account is data, validated by the provider's manifest:
 | `ipv6`              | Give new Droplets an IPv6 address (default `false`).                                                                                          |
 | `allowSpot`         | Accepted, default `false`; reserved for Spot capacity, which P1 does not create (see [Machines](#machines)).                                  |
 | `discoverTag`       | A tag: discovery yields only Droplets that carry it. Lower-case `[a-z0-9:_-]`, at most 255 characters (else `INVALID_CONFIG`, `discoverTag`). |
-| `previews`          | Accepted, default `false`; reserved for products that DigitalOcean still marks as previews. It has no effect yet.                             |
+| `previews`          | Default `false`. `true` offers what DigitalOcean still marks as previews: BYOIP addresses and VPC routes.                                     |
+| `networkModel`      | Default `vpc-per-subnet` (a VPC per subnet). `vpc-subnets` is reserved for DO's VPC Subnets preview and refused (`INVALID_CONFIG`) for now.   |
 
 ## Usage
 
@@ -65,6 +66,11 @@ Create the token as a custom-scope token with at least:
 | `block_storage:read,create,update,delete`, `block_storage_action:create`, `block_storage_snapshot:read,create,delete` | Volumes, their attach/detach/resize actions and their snapshots.                                                                     |
 | `reserved_ip:read,create,update,delete`                                                                               | Reserving, assigning, unassigning and releasing reserved IPv4 and IPv6 addresses.                                                    |
 | `firewall:read,create,update,delete`                                                                                  | The base firewall and the firewall behind each tenant rule.                                                                          |
+| `load_balancer:read,create,update,delete`                                                                             | Regional and global load balancers.                                                                                                   |
+| `domain:read,create,update,delete`                                                                                    | DNS zones (DO domains), their records and the ownership marker.                                                                       |
+| `certificate:read,create,delete`                                                                                      | Let's Encrypt and custom certificates for load balancers.                                                                             |
+| `vpc:read,create,update,delete` (NAT, peering, routes)                                                                | NAT gateways, VPC peerings and (preview) routes; DO may name separate NAT gateway scopes (unverified).                                |
+| `byoip_prefix:read` (preview, unverified name)                                                                        | Reading BYOIP prefixes; the provider never changes one.                                                                               |
 
 A token without a scope fails the call that needs it with `ACCESS_DENIED` (`details.reason` `scope`); `probeAccount` names the missing read scopes up front.
 
@@ -135,9 +141,28 @@ DigitalOcean has no network object, so a tenant network is built from a VPC per 
 
 `impl.addresses` is the `ProviderAddresses` contract over reserved IPv4 (`/v2/reserved_ips`) and IPv6 (`/v2/reserved_ipv6`) addresses. The address is its own id.
 
-- **No tags, so the control plane is the record.** DigitalOcean gives a reserved IP no name and no tags. `ensureAddress` finds an address only by the `id` an earlier ensure returned (one that is gone is `NOT_FOUND`, `addressGone`, never replaced silently), and without an `id` it reserves a new one. A reserve whose answer never arrives is not retried: the error stands and the call is logged (`digitalocean.reserveUnconfirmed`), so at worst one address is left for the operator rather than two tenants sharing one. BYOIP is `UNSUPPORTED` for now.
+- **No tags, so the control plane is the record.** DigitalOcean gives a reserved IP no name and no tags. `ensureAddress` finds an address only by the `id` an earlier ensure returned (one that is gone is `NOT_FOUND`, `addressGone`, never replaced silently), and without an `id` it reserves a new one. A reserve whose answer never arrives is not retried: the error stands and the call is logged (`digitalocean.reserveUnconfirmed`), so at worst one address is left for the operator rather than two tenants sharing one.
+- **BYOIP (preview).** With `source: 'byoip'` and a `prefix` (its CIDR or uuid), an IPv4 address is drawn from one of the account's own prefixes. It needs `previews: true` (else `UNSUPPORTED`, `preview`). The prefix is only read (`GET /v2/byoip_prefixes`) and must be the account's (`INVALID_INPUT`, `prefix`), active (`INVALID_STATE`, `prefixNotActive`) and in the spec's region, all before the reserve. The reserve request (`POST /v2/reserved_ips` with `byoip_prefix_uuid`) is unverified; an answer outside the prefix is `PROVIDER_ERROR` and never handed out. A drawn address is then a reserved IP like any other.
 - **Assign** goes only to a Droplet of an instance of this deployment in the address's region (checked before any write), and an address assigned to another Droplet is `CONFLICT` (`assignedElsewhere`): DigitalOcean's assign would move it. **Unassign** never touches an address on a Droplet that is not this deployment's (`INVALID_STATE`, `notInstance`), and an assigned address is never deleted (`INVALID_STATE`, `assigned`). Deleting a Droplet unassigns its addresses.
 - **Non-blocking.** Assign and unassign are actions. A v4 address is `locked` while one runs; v6 answers a second action with the 422 `has a pending event` (`CONFLICT`, `actionPending`), which a call reads as still running. Either way a call starts at most one action.
+
+## Edge: load balancers, DNS and certificates
+
+`impl.loadBalancers`, `impl.dns` and `impl.certificates` are the provider-neutral edge contracts (P4). None of these DigitalOcean objects carries tags, so ownership is in the name or a marker, and anything that is not ours is never changed or deleted.
+
+- **Load balancers** are named `<name>-<hash12>` (vps's name plus this deployment's hash); an ensure finds one by the id it returned, else by that exact name, and two of ours with one name converge on the oldest. Targets are explicit Droplet ids, never a tag: each must be an instance of this deployment in the load balancer's region (checked before any write), so a load balancer can't reach another tenant's Droplets. A change is one `PUT` of the whole configuration, not sent while the load balancer is still `new`; type, region, VPC and network don't change in place. A global load balancer fronts regional ones of ours and serves domains it does not manage: the record pointing a name at it is published through `impl.dns`.
+- **DNS zones** carry a marker, the TXT record `_better-compute.<zone>` = `deployment=<hash12>`. A zone without it is someone else's: `ensureZone` refuses it (`CONFLICT`, `zoneExists`) unless asked to `adopt` it, and an adopted zone is never deleted. A zone of ours that still holds records other than the apex NS and SOA and the marker is not deleted (`CONFLICT`, `zoneNotEmpty`). Records are found by id, else by identical name, type and data, and change in place.
+- **Certificates** are named `<name>-<hash12>` (DigitalOcean keeps names unique). `managed` (Let's Encrypt) is issued only for names in a zone the account hosts at DigitalOcean (`INVALID_INPUT` before any request); `custom` uploads PEMs resolved from secret references in the call and never kept, logged or returned. A certificate never changes in place (`INVALID_STATE`, `replace`).
+
+## NAT gateways, peerings and routes
+
+These are optional members of `impl.networks`. A subnet is a VPC, so each serves one subnet's VPC, and each name carries this deployment's hash.
+
+- **NAT gateways** (`ensureNatGateway`) carry a subnet's egress, so its Droplets need no public address (isolated pools). One per subnet; `pending` until DigitalOcean makes it, then `ready` with its egress `address`.
+- **Peerings** (`ensurePeering`) join two subnets of this deployment's networks; a VPC that is not one is never peered. A delete is `deleting`, then `deleted`.
+- **Routes** (`ensureRoute`, preview: offered only with `previews: true`) add a static route to a subnet's VPC. The next hop is a NAT gateway of ours that serves the VPC, a Droplet of this deployment in it, or an address in its range, all checked before any write. A route never changes in place (`INVALID_STATE`, `replace`). The VPC Routes request shapes are unverified.
+- **Ordered teardown.** `deleteSubnet` first deletes the subnet's NAT gateways, peerings and routes of ours and stays `pending` while any is left; one that is not ours keeps the subnet and is never touched.
+- **Network model.** `networkModel: 'vpc-subnets'` (subnets inside one VPC per network and region, DigitalOcean's VPC Subnets preview) is reserved and refused for now. When it lands, moving an account to it will be an operator step, not automatic: the account's existing VPCs stay as they are.
 
 ## Rate budget
 
@@ -155,13 +180,13 @@ DigitalOcean errors map to `ComputeError` codes: 401 `INVALID_CONFIG` (`token`),
 
 ## Tests, and what is not yet verified
 
-The tests run against an in-memory emulator of the endpoints the provider uses (`tests/support/do-emulator/`), plugged in through the `fetch` option. `tests/provider-digitalocean.test.ts`, `tests/provider-digitalocean-networks.test.ts`, `tests/provider-digitalocean-volumes.test.ts` and `tests/provider-digitalocean-addresses.test.ts` run the conformance cases (volumes, snapshots and addresses included) and the DigitalOcean specifics, and `tests/do-end-to-end.test.ts` runs the provider and the emulator through vps: create, stop and delete; discover, attach and detach; auto-attach; a tenant network with its base firewall and a rule; and a create DigitalOcean refuses for capacity.
+The tests run against an in-memory emulator of the endpoints the provider uses (`tests/support/do-emulator/`), plugged in through the `fetch` option. `tests/provider-digitalocean.test.ts`, `tests/provider-digitalocean-networks.test.ts`, `tests/provider-digitalocean-volumes.test.ts`, `tests/provider-digitalocean-addresses.test.ts` and the edge suites (`-load-balancers`, `-dns`, `-certificates`, `-nat`, `-peering`, `-routes`) run the conformance cases (volumes, snapshots, addresses and the edge members included; the conformance run uses `previews: true`) and the DigitalOcean specifics, and `tests/do-end-to-end.test.ts` runs the provider and the emulator through vps: create, stop and delete; discover, attach and detach; auto-attach; a tenant network with its base firewall and a rule; and a create DigitalOcean refuses for capacity.
 
 The emulator's bodies are shaped like the fixtures in `tests/fixtures/digitalocean/`, which come from DigitalOcean's published OpenAPI specification. Some behaviours are not in the specification (`docs/research/digitalocean.md` marks them **unverified**): whether a `tag_name` list includes GPU Droplets, the exact text of the 422 messages for capacity and the Droplet limit, whether Droplet names may repeat, the limits on firewall rules, the MTU of a VPC, the text of the Block Storage and reserved IP 422s, the volume action type names (`attach_volume`, …), and the token scope names for Block Storage and reserved IPs. The provider handles both outcomes of each, and an opt-in live suite settles them. **The live suite has not been run yet.**
 
 Three more facts are neither in the specification nor asserted by the live suite yet, and the provider relies on them without a guard: that DigitalOcean honours a firewall rule's `action: deny` (the OpenAPI schema has the field), that a firewall targeting a tag covers a new Droplet with that tag before the Droplet serves traffic (a network is `ready` once its base firewall exists, not once it is applied), and that a `PUT` renames a firewall (a priority change renames the rule's firewall in place). Check them against a real account before the first production use.
 
-`tests/live/digitalocean.live.test.ts` runs the account probe, the provider conformance cases (with claim and discover, when an attachable Droplet is given) and a tenant network (VPC, base firewall and a rule) against a real account; the conformance cases include a 1 GiB volume, a snapshot and a reserved IPv4 address, which the sweep also removes (reserved IPs by the addresses the run reserved, since DigitalOcean gives them no tag). It is off unless both `BC_DO_LIVE` and `BC_DO_TOKEN` are set, because it creates billable Droplets (it always sweeps them, and deletes only resources that carry the run's own tag or name prefix):
+`tests/live/digitalocean.live.test.ts` runs the account probe, the provider conformance cases (with claim and discover, when an attachable Droplet is given) and a tenant network (VPC, base firewall and a rule) against a real account; the conformance cases include a 1 GiB volume, a snapshot and a reserved IPv4 address, which the sweep also removes (reserved IPs by the addresses the run reserved, since DigitalOcean gives them no tag), and the edge cases a load balancer, a NAT gateway and a peering, which the sweep finds by the run deployment's name suffix (DNS zones by their marker). It is off unless both `BC_DO_LIVE` and `BC_DO_TOKEN` are set, because it creates billable Droplets (it always sweeps them, and deletes only resources that carry the run's own tag or name prefix):
 
 ```sh
 BC_DO_LIVE=1 BC_DO_TOKEN=<token> BC_DO_SSH_KEY_FINGERPRINT=<md5 fingerprint of an account key> \

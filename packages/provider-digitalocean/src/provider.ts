@@ -15,8 +15,8 @@ function invalidConfig(message: string, reason: string): ComputeError {
 }
 
 /**
- * A DigitalOcean provider definition: Droplets, tenant networks, Block Storage volumes and
- * reserved IPs. Pass `fetch` to emulate the API; `deployment` names the
+ * A DigitalOcean provider definition: Droplets, tenant networks (with NAT gateways, peerings and,
+ * as a preview, routes), Block Storage volumes, reserved IPs, load balancers, DNS and certificates. Pass `fetch` to emulate the API; `deployment` names the
  * trust domain whose Droplets this control plane may delete.
  *
  * `create` builds a client without a request and without resolving the token (vps builds clients
@@ -40,6 +40,9 @@ export function digitaloceanProvider(
       'networks',
       'volumes',
       'addresses',
+      'loadBalancers',
+      'dns',
+      'certificates',
     ],
     create: (config: DoConfig, context: ProviderContext) => {
       if (config.regions.length === 0)
