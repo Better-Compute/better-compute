@@ -8,6 +8,7 @@ import {
   type PowerAction,
   type ProviderContext,
   type ProviderImpl,
+  type ProviderKubernetes,
 } from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
 import type { DoConfig, DoProviderOptions } from '../config.js';
@@ -174,6 +175,8 @@ export class DoCompute implements ProviderImpl {
   protected readonly deploymentTag: string;
   /** Tenant networks: VPCs, Cloud Firewalls and Droplet tags. */
   readonly networks: DoNetworks;
+  /** Managed Kubernetes (DOKS clusters and node pools); the provider sets it. */
+  kubernetes?: ProviderKubernetes;
 
   constructor(
     config: DoConfig,

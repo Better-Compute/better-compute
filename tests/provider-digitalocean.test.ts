@@ -1626,7 +1626,7 @@ describe('compute', () => {
       id: 'digitalocean',
       version: '0.1.0',
       provides: ['vps'],
-      capabilities: ['power', 'reinstall', 'list', 'discover', 'claim', 'networks'],
+      capabilities: ['power', 'reinstall', 'list', 'discover', 'claim', 'networks', 'kubernetes'],
     });
     const emu = emulator();
     let resolved = 0;
@@ -2230,6 +2230,7 @@ describe('definition', () => {
       'discover',
       'claim',
       'networks',
+      'kubernetes',
     ]);
     const parsed = await digitalocean.config['~standard'].validate(doAccount);
     expect(parsed).toMatchObject({
