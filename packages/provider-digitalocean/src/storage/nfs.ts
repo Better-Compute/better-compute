@@ -13,7 +13,7 @@ import type { DoDroplet } from '../compute/types.js';
 import type { DoConfig } from '../config.js';
 import { deploymentTag, labels, parseMachineId, tagFor } from '../ids.js';
 import { networkOfVpc, vpcForNetwork, vpcLookup } from '../networks/vpcs.js';
-import type { DoShare, DoShareAction } from './types.js';
+import type { DoShare, DoShareAction, DoShareSnapshot } from './types.js';
 
 // Network File Storage shares as `kind: 'shared'` provider volumes (P6). The API's shapes are
 // unverified (the nfs fixture's provenance says why), so the provider reads only the fields it
@@ -56,6 +56,8 @@ const maxShareName = 64;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const regionPattern = /^[a-z][a-z0-9]{0,15}$/;
 const sharePrefix = 'nfs:';
+const snapshotNamePattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}$/;
+const maxSnapshotName = 255;
 
 function fail(
   code: 'INVALID_INPUT' | 'INVALID_STATE' | 'UNSUPPORTED' | 'CONFLICT' | 'NOT_FOUND',
@@ -98,6 +100,29 @@ export function parseShareId(id: string): { region: string; uuid: string } | und
   return { region, uuid: uuid.toLowerCase() };
 }
 
+const snapshotPrefix = 'nfssnap:';
+
+/** A share snapshot's provider id: `nfssnap:<region>:<uuid>`. */
+export function shareSnapshotId(region: string, uuid: string): string {
+  return `${snapshotPrefix}${region}:${uuid.toLowerCase()}`;
+}
+
+/** Whether a provider snapshot id names a share snapshot (`nfssnap:`), well formed or not. */
+export function isShareSnapshotId(id: string): boolean {
+  return id.startsWith(snapshotPrefix);
+}
+
+/** The region and uuid of a share snapshot id; undefined when it is not one. */
+export function parseShareSnapshotId(id: string): { region: string; uuid: string } | undefined {
+  return isShareSnapshotId(id)
+    ? parseShareId(`${sharePrefix}${id.slice(snapshotPrefix.length)}`)
+    : undefined;
+}
+
+/** What a mount source may hold: an address or host name, and an absolute export path. */
+const hostPattern = /^[A-Za-z0-9.-]{1,253}$/;
+const mountPathPattern = /^\/[A-Za-z0-9._/-]{0,1023}$/;
+
 const state = (
   id: string,
   value: ProviderResourceState['state'],
@@ -110,11 +135,18 @@ const state = (
   ...(message !== undefined ? { message } : {}),
 });
 
-/** A share's outputs (plain values only): the mount source appears once DO gives one. */
+/**
+ * A share's outputs (plain values only). The mount source appears once DO gives one, and only
+ * when it is plainly an address and a path: it ends up in a guest's mount line, so a value with
+ * anything else in it is left out, never passed on.
+ */
 export function shareOutputs(share: DoShare): Record<string, string> {
-  const host = typeof share.host === 'string' && share.host !== '' ? share.host : undefined;
+  const host =
+    typeof share.host === 'string' && hostPattern.test(share.host) ? share.host : undefined;
   const path =
-    typeof share.mount_path === 'string' && share.mount_path.startsWith('/')
+    typeof share.mount_path === 'string' &&
+    mountPathPattern.test(share.mount_path) &&
+    !share.mount_path.split('/').includes('..')
       ? share.mount_path
       : undefined;
   return {
@@ -575,5 +607,164 @@ export class DoShares {
     const action = await this.act(share, 'detach', { vpc_id: vpcId }, signal);
     const after = await this.after(share, action, 'deleting', signal);
     return after.state === 'ready' ? state(sid, 'deleted') : after;
+  }
+
+  // -------------------------------------------------------------------------------- snapshots
+
+  /** Whether a share snapshot is ours: named by this deployment, like a share. */
+  protected ownedSnapshot(snapshot: DoShareSnapshot): boolean {
+    return (
+      typeof snapshot.name === 'string' &&
+      snapshot.name.endsWith(this.suffix) &&
+      snapshotNamePattern.test(snapshot.name.slice(0, -this.suffix.length))
+    );
+  }
+
+  protected snapshotState(snapshot: DoShareSnapshot): ProviderResourceState {
+    const id = shareSnapshotId(snapshot.region, snapshot.id);
+    const outputs = {
+      kind: 'shared',
+      volume: shareId(snapshot.region, snapshot.share_id),
+      region: snapshot.region,
+      sizeGiB: String(snapshot.size_gib),
+    };
+    switch (snapshot.status) {
+      case 'ACTIVE':
+        return state(id, 'ready', outputs);
+      case 'DELETED':
+        return state(id, 'deleted');
+      case 'FAILED':
+        return state(id, 'error', outputs, `DigitalOcean reports snapshot ${snapshot.id} failed`);
+      default:
+        return state(id, 'pending', outputs);
+    }
+  }
+
+  /** The share's snapshots named `name`, oldest first. */
+  protected async snapshotsNamed(
+    share: DoShare,
+    name: string,
+    signal: AbortSignal,
+  ): Promise<DoShareSnapshot[]> {
+    const out: DoShareSnapshot[] = [];
+    for await (const snapshot of this.client.pages<DoShareSnapshot>('/nfs/snapshots', 'snapshots', {
+      query: { region: share.region, share_id: share.id },
+      signal,
+      budget: 'observe',
+    }))
+      if (snapshot.name === name && snapshot.share_id === share.id && snapshot.status !== 'DELETED')
+        out.push(snapshot);
+    return out.sort((a, b) => {
+      const at = Date.parse(a.created_at) - Date.parse(b.created_at);
+      return Number.isFinite(at) && at !== 0 ? at : a.id.localeCompare(b.id);
+    });
+  }
+
+  protected async destroySnapshot(snapshot: DoShareSnapshot, signal: AbortSignal): Promise<void> {
+    try {
+      await this.client.request('DELETE', `/nfs/snapshots/${encodeURIComponent(snapshot.id)}`, {
+        query: { region: snapshot.region },
+        signal,
+        budget: 'mutate',
+      });
+    } catch (error) {
+      if (!isComputeError(error, 'NOT_FOUND')) throw error;
+    }
+  }
+
+  /** The oldest of the found snapshots (all ours by name); later ones (a racing call) go. */
+  protected async converge(
+    found: DoShareSnapshot[],
+    signal: AbortSignal,
+  ): Promise<DoShareSnapshot | undefined> {
+    const [oldest, ...others] = found;
+    for (const duplicate of others) {
+      this.log.info('digitalocean.duplicateShareSnapshotReaped', {
+        kept: oldest!.id,
+        deleted: duplicate.id,
+      });
+      await this.destroySnapshot(duplicate, signal);
+    }
+    return oldest;
+  }
+
+  async snapshot(id: string, name: string, ctx: CallContext): Promise<ProviderResourceState> {
+    this.parse(id);
+    const full = `${name}${this.suffix}`;
+    if (!snapshotNamePattern.test(name) || full.length > maxSnapshotName)
+      throw fail(
+        'INVALID_INPUT',
+        `${JSON.stringify(name)} is not a snapshot name: a letter or digit, then [a-zA-Z0-9._-], at most ${maxSnapshotName - this.suffix.length} characters`,
+        'name',
+      );
+    const { signal } = ctx;
+    const share = await this.ours(id, signal);
+    const existing = await this.converge(await this.snapshotsNamed(share, full, signal), signal);
+    if (existing) return this.snapshotState(existing);
+    if (share.status === 'ACTIVE') {
+      const action = await this.act(share, 'snapshot', { name: full }, signal);
+      if (action !== 'busy' && action.status === 'errored')
+        throw new ComputeError(
+          'PROVIDER_ERROR',
+          `DigitalOcean's snapshot action on share ${share.id} errored`,
+          undefined,
+          { provider: 'digitalocean', reason: 'actionErrored' },
+        );
+      // The action makes the snapshot: it may already be there, or not yet.
+      const kept = await this.converge(await this.snapshotsNamed(share, full, signal), signal);
+      if (kept) return this.snapshotState(kept);
+    }
+    throw new ComputeError(
+      'UNAVAILABLE',
+      `DigitalOcean has not made the snapshot ${name} of share ${share.id} yet; the next call looks again`,
+      undefined,
+      { provider: 'digitalocean', reason: 'snapshotUnconfirmed' },
+    );
+  }
+
+  /** The snapshot, or undefined when it does not exist. */
+  protected async findSnapshot(
+    ref: { region: string; uuid: string },
+    signal: AbortSignal,
+  ): Promise<DoShareSnapshot | undefined> {
+    try {
+      const reply = await this.client.request<{ snapshot: DoShareSnapshot }>(
+        'GET',
+        `/nfs/snapshots/${encodeURIComponent(ref.uuid)}`,
+        { query: { region: ref.region }, signal, budget: 'observe' },
+      );
+      return reply.snapshot?.status === 'DELETED' ? undefined : reply.snapshot;
+    } catch (error) {
+      if (isComputeError(error, 'NOT_FOUND')) return undefined;
+      throw error;
+    }
+  }
+
+  async getSnapshot(id: string, ctx: CallContext): Promise<ProviderResourceState | undefined> {
+    const ref = parseShareSnapshotId(id);
+    if (!ref) return undefined;
+    const snapshot = await this.findSnapshot(ref, ctx.signal);
+    return snapshot ? this.snapshotState(snapshot) : undefined;
+  }
+
+  async deleteSnapshot(id: string, ctx: CallContext): Promise<ProviderResourceState> {
+    const ref = parseShareSnapshotId(id);
+    if (!ref)
+      throw fail(
+        'INVALID_INPUT',
+        `${JSON.stringify(id)} is not a DigitalOcean share snapshot id`,
+        'snapshotId',
+      );
+    const sid = shareSnapshotId(ref.region, ref.uuid);
+    const snapshot = await this.findSnapshot(ref, ctx.signal);
+    if (!snapshot) return state(sid, 'deleted');
+    if (!this.ownedSnapshot(snapshot))
+      throw fail(
+        'INVALID_STATE',
+        `snapshot ${snapshot.id} is not a share snapshot managed by this better-compute deployment and is never deleted by it`,
+        'notManaged',
+      );
+    await this.destroySnapshot(snapshot, ctx.signal);
+    return state(sid, 'deleted');
   }
 }

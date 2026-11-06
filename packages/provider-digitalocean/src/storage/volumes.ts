@@ -11,7 +11,7 @@ import type { DoClient } from '../client/http.js';
 import type { DoAction, DoDroplet } from '../compute/types.js';
 import type { DoConfig } from '../config.js';
 import { deploymentTag, labels, parseMachineId, tagFor } from '../ids.js';
-import { DoShares, isShareId } from './nfs.js';
+import { DoShares, isShareId, isShareSnapshotId } from './nfs.js';
 import type { DoSnapshot, DoVolume } from './types.js';
 
 // Block Storage volumes as provider volumes (P2). A volume is found by its name, which is unique
@@ -642,6 +642,7 @@ export class DoVolumes implements ProviderVolumes {
     name: string,
     ctx: CallContext,
   ): Promise<ProviderResourceState> {
+    if (isShareId(volumeId)) return this.shares.snapshot(volumeId, name, ctx);
     const id = parseVolumeId(volumeId);
     if (!snapshotNamePattern.test(name))
       throw fail(
@@ -683,6 +684,7 @@ export class DoVolumes implements ProviderVolumes {
   }
 
   async getSnapshot(id: string, ctx: CallContext): Promise<ProviderResourceState | undefined> {
+    if (isShareSnapshotId(id)) return this.shares.getSnapshot(id, ctx);
     if (!uuidPattern.test(id)) return undefined;
     const snapshot = await this.snapshot(id.toLowerCase(), ctx.signal);
     if (!snapshot || snapshot.resource_type !== 'volume') return undefined;
@@ -690,6 +692,7 @@ export class DoVolumes implements ProviderVolumes {
   }
 
   async deleteSnapshot(snapshotId: string, ctx: CallContext): Promise<ProviderResourceState> {
+    if (isShareSnapshotId(snapshotId)) return this.shares.deleteSnapshot(snapshotId, ctx);
     if (!uuidPattern.test(snapshotId))
       throw fail(
         'INVALID_INPUT',

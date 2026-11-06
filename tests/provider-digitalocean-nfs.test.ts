@@ -6,6 +6,8 @@ import {
   networkDescription,
   shareId,
   shareName,
+  shareOutputs,
+  shareSnapshotId,
   shareTag,
   tagFor,
   type DoCompute,
@@ -455,5 +457,145 @@ describe('provider-digitalocean NFS shares: attach and detach', () => {
     expect(emu.state.nfsShares.size).toBe(1);
     await impl.volumes.detachVolume(id, String(droplet.id), ctx());
     expect((await impl.volumes.deleteVolume(id, ctx())).state).toBe('deleted');
+  });
+});
+
+describe('provider-digitalocean NFS shares: snapshots', () => {
+  const snapName = shareName('bc-psnap-1', 'default');
+
+  it('snapshots a share by name through a snapshot action, and a second call finds it', async () => {
+    const { emu, impl } = await setup();
+    const { id } = await impl.volumes.ensureVolume(spec, ctx());
+    const taken = await impl.volumes.snapshotVolume(id, 'bc-psnap-1', ctx());
+    const stored = [...emu.state.nfsSnapshots.values()][0]!;
+    expect(taken).toEqual({
+      id: shareSnapshotId('nyc3', stored.id),
+      state: 'ready',
+      outputs: { kind: 'shared', volume: id, region: 'nyc3', sizeGiB: '100' },
+    });
+    expect(stored.name).toBe(snapName);
+    expect(shareActions(emu, 'snapshot')[0]!.body).toEqual({
+      type: 'snapshot',
+      region: 'nyc3',
+      params: { name: snapName },
+    });
+    expect(await impl.volumes.snapshotVolume(id, 'bc-psnap-1', ctx())).toEqual(taken);
+    expect(shareActions(emu, 'snapshot')).toHaveLength(1);
+    expect(await impl.volumes.getSnapshot(taken.id, ctx())).toEqual(taken);
+  });
+
+  it('is UNAVAILABLE while the snapshot action has not made one yet, then ready', async () => {
+    const emu = emulator();
+    emu.nfsActionReads = 2;
+    const { impl } = await setup(emu);
+    const { id } = await impl.volumes.ensureVolume(spec, ctx());
+    const first = await failure(impl.volumes.snapshotVolume(id, 'bc-psnap-1', ctx()));
+    expect([first.code, first.details?.reason]).toEqual(['UNAVAILABLE', 'snapshotUnconfirmed']);
+    let got;
+    for (let i = 0; i < 3 && got === undefined; i++)
+      got = await impl.volumes.snapshotVolume(id, 'bc-psnap-1', ctx()).catch(() => undefined);
+    expect(got?.state).toBe('ready');
+    expect(emu.state.nfsSnapshots.size).toBe(1);
+  });
+
+  it('reports a CREATING snapshot as pending and a FAILED one as error', async () => {
+    const { emu, impl } = await setup();
+    const { id } = await impl.volumes.ensureVolume(spec, ctx());
+    const share = shareOf(emu, id);
+    const { seedShareSnapshot } = await import('./support/do-emulator/nfs.js');
+    seedShareSnapshot(emu.state, { share, name: snapName, status: 'CREATING' });
+    expect((await impl.volumes.snapshotVolume(id, 'bc-psnap-1', ctx())).state).toBe('pending');
+    seedShareSnapshot(emu.state, {
+      share,
+      name: shareName('bc-psnap-2', 'default'),
+      status: 'FAILED',
+    });
+    expect((await impl.volumes.snapshotVolume(id, 'bc-psnap-2', ctx())).state).toBe('error');
+    expect(shareActions(emu, 'snapshot')).toHaveLength(0);
+  });
+
+  it('two racing snapshots of a name converge on the oldest', async () => {
+    const { emu, impl } = await setup();
+    const { id } = await impl.volumes.ensureVolume(spec, ctx());
+    const share = shareOf(emu, id);
+    const { seedShareSnapshot } = await import('./support/do-emulator/nfs.js');
+    const oldest = seedShareSnapshot(emu.state, {
+      share,
+      name: snapName,
+      created_at: '2026-11-05T09:00:00Z',
+    });
+    const later = seedShareSnapshot(emu.state, {
+      share,
+      name: snapName,
+      created_at: '2026-11-05T09:30:00Z',
+    });
+    const got = await impl.volumes.snapshotVolume(id, 'bc-psnap-1', ctx());
+    expect(got.id).toBe(shareSnapshotId('nyc3', oldest.id));
+    expect(emu.state.nfsSnapshots.has(later.id)).toBe(false);
+  });
+
+  it('deletes a snapshot of ours, idempotently, and never one that is not ours', async () => {
+    const { emu, impl } = await setup();
+    const { id } = await impl.volumes.ensureVolume(spec, ctx());
+    const taken = await impl.volumes.snapshotVolume(id, 'bc-psnap-1', ctx());
+    expect(await impl.volumes.deleteSnapshot(taken.id, ctx())).toEqual({
+      id: taken.id,
+      state: 'deleted',
+    });
+    expect(emu.state.nfsSnapshots.size).toBe(0);
+    expect((await impl.volumes.deleteSnapshot(taken.id, ctx())).state).toBe('deleted');
+    const { seedShareSnapshot } = await import('./support/do-emulator/nfs.js');
+    const theirs = seedShareSnapshot(emu.state, { share: shareOf(emu, id), name: 'nightly' });
+    const error = await failure(
+      impl.volumes.deleteSnapshot(shareSnapshotId('nyc3', theirs.id), ctx()),
+    );
+    expect([error.code, error.details?.reason]).toEqual(['INVALID_STATE', 'notManaged']);
+    expect(emu.state.nfsSnapshots.has(theirs.id)).toBe(true);
+    const malformed = await failure(impl.volumes.deleteSnapshot('nfssnap:nyc3:x', ctx()));
+    expect(malformed.code).toBe('INVALID_INPUT');
+    expect(await impl.volumes.getSnapshot('nfssnap:nyc3:x', ctx())).toBe(undefined);
+  });
+
+  it('refuses a snapshot of a share that is not ours, and a bad name, before any write', async () => {
+    const { emu, impl } = await setup();
+    const { id } = await impl.volumes.ensureVolume(spec, ctx());
+    const foreign = seedShare(emu.state, { name: 'their-share' });
+    const before = writes(emu).length;
+    const notOurs = await failure(
+      impl.volumes.snapshotVolume(shareId('nyc3', foreign.id), 'bc-psnap-1', ctx()),
+    );
+    expect([notOurs.code, notOurs.details?.reason]).toEqual(['INVALID_STATE', 'notManaged']);
+    const bad = await failure(impl.volumes.snapshotVolume(id, 'bad name!', ctx()));
+    expect([bad.code, bad.details?.reason]).toEqual(['INVALID_INPUT', 'name']);
+    expect(writes(emu)).toHaveLength(before);
+  });
+});
+
+describe('provider-digitalocean NFS shares: the mount source', () => {
+  it('passes on only a plain address and path, never one a mount line could not carry', () => {
+    const base = {
+      id: '0b7d9b2c-0000-4000-8000-000000000000',
+      name: 'x',
+      size_gib: 100,
+      region: 'nyc3',
+      status: 'ACTIVE',
+      created_at: '2026-11-05T10:00:00Z',
+      vpc_ids: ['v1', 'v2'],
+    };
+    expect(shareOutputs({ ...base, host: '10.0.0.2', mount_path: '/1/abc' })).toMatchObject({
+      device: '10.0.0.2:/1/abc',
+      vpcs: 'v1,v2',
+    });
+    for (const [host, path] of [
+      ['10.0.0.2 nfs4', '/1/abc'],
+      ['10.0.0.2', '/1/abc defaults'],
+      ['10.0.0.2\n', '/1/abc'],
+      ['10.0.0.2', 'relative/path'],
+      ['10.0.0.2', '/1/../../etc'],
+      ['$(reboot)', '/1/abc'],
+    ]) {
+      const outputs = shareOutputs({ ...base, host, mount_path: path });
+      expect(outputs.device, `${host} ${path}`).toBe(undefined);
+    }
   });
 });
