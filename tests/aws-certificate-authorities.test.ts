@@ -35,8 +35,9 @@ const nodeProfile: CertificateProfile = {
   ttlSeconds: 3600,
 };
 
-function pcaWorld(options: { issueWaitMs?: number } = {}) {
+function pcaWorld(options: { issueWaitMs?: number; sleep?: (ms: number) => Promise<void> } = {}) {
   const emu = new AwsEmulator();
+  const revocations = createRevocationSet();
   const root = createRootCa({ clock: emu.clock });
   const nodeCa = createNodeCa({ issuer: root, clock: emu.clock });
   const fake = acmPcaFake(emu, { arn: caArn, ca: nodeCa });
@@ -48,9 +49,10 @@ function pcaWorld(options: { issueWaitMs?: number } = {}) {
     clock: emu.clock,
     id: 'node',
     certificateAuthorityArn: caArn,
+    revocations,
     ...options,
   });
-  return { emu, root, nodeCa, fake, ca };
+  return { emu, root, nodeCa, fake, ca, revocations };
 }
 
 describe('ACM Private CA', () => {
@@ -103,10 +105,16 @@ describe('ACM Private CA', () => {
   });
 
   it('waits for pending issuance, and past the wait is UNAVAILABLE', async () => {
-    const { ca, fake } = pcaWorld({ issueWaitMs: 1000 });
+    // The poll waits on the injected sleep (the host's scheduler), never on wall time.
+    const slept: number[] = [];
+    const sleep = async (ms: number) => {
+      slept.push(ms);
+    };
+    const { ca, fake } = pcaWorld({ issueWaitMs: 1000, sleep });
     fake.pendingPolls = 2;
     await expect(ca.sign(createCsr(generateP256KeyPair().privateKey), nodeProfile)).resolves.toMatchObject({ serial: expect.any(String) });
-    const slow = pcaWorld({ issueWaitMs: 300 });
+    expect(slept).toEqual([250, 250]);
+    const slow = pcaWorld({ issueWaitMs: 300, sleep });
     slow.fake.pendingPolls = 10;
     const error = (await slow.ca.sign(createCsr(generateP256KeyPair().privateKey), nodeProfile).catch((e: unknown) => e)) as ComputeError;
     expect(error).toBeInstanceOf(ComputeError);
@@ -146,6 +154,32 @@ describe('ACM Private CA', () => {
     expect(() =>
       acmPcaCertificateAuthority({ region: 'us-east-1', credentials: emu.credentials, id: 'node', kind: 'bogus' as never, certificateAuthorityArn: caArn }),
     ).toThrow(ComputeError);
+  });
+
+  it('a node PCA without the verifiers revocation set is refused (review: fail closed)', () => {
+    const emu = new AwsEmulator();
+    const common = { region: 'us-east-1', credentials: emu.credentials, certificateAuthorityArn: caArn };
+    expect(() => acmPcaCertificateAuthority({ ...common, id: 'node' })).toThrow(/revocations/);
+    expect(() => acmPcaCertificateAuthority({ ...common, id: 'agents', kind: 'node' })).toThrow(/revocations/);
+    try {
+      acmPcaCertificateAuthority({ ...common, id: 'node' });
+    } catch (error) {
+      expect((error as ComputeError).code).toBe('INVALID_CONFIG');
+    }
+    // Serving and internal PCAs still publish revocations through the CA's CRL or OCSP.
+    expect(() => acmPcaCertificateAuthority({ ...common, id: 'serving' })).not.toThrow();
+  });
+
+  it('a revoke reaches the shared set before AWS, so a failed or repeated AWS call never loses it (review)', async () => {
+    const { ca, emu, fake, revocations } = pcaWorld();
+    emu.failNext('RevokeCertificate', 'InvalidStateException', 400);
+    await expect(ca.revoke!('a1b2c3', 'keyCompromise')).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    expect(revocations.has('a1b2c3')).toBe(true);
+    expect(fake.revoked).toEqual([]);
+    // A retry AWS answers with RequestAlreadyProcessedException (already revoked) is success.
+    emu.failNext('RevokeCertificate', 'RequestAlreadyProcessedException', 400);
+    await expect(ca.revoke!('0b0c', 'superseded')).resolves.toBeUndefined();
+    expect(revocations.has('0b0c')).toBe(true);
   });
 
   it('a revoke also lands in the shared revocation set when one is given', async () => {

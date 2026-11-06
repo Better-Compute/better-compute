@@ -26,8 +26,16 @@ export interface AcmPcaCertificateAuthorityOptions extends AwsServiceOptions {
   kind?: CaKind;
   /** Lowers the kind's lifetime cap (node 1 d, serving 30 d, internal 7 d). */
   maxTtlSeconds?: number;
-  /** When given, `revoke` also records the serial here for verifiers (the gateway) to read. */
+  /**
+   * The set `revoke` writes first (before RevokeCertificate), which the host must also hand its
+   * verifiers (the gateway's `revocations`, `certificateAuthenticate`). Required for kind 'node':
+   * the gateway checks node certificates against this set, not the CA's CRL or OCSP, so a node
+   * revoke without it would leave the certificate working. Optional for serving and internal, whose
+   * revocations AWS Private CA publishes through its CRL or OCSP.
+   */
   revocations?: RevocationSet;
+  /** Waits between GetCertificate polls (default: a timer). Injected so hosts and tests drive time. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 const pollMs = 250;
@@ -59,7 +67,7 @@ function pemList(text: string | undefined): Uint8Array[] {
   return text ? fromPem(text) : [];
 }
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const timerSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
  * AWS Private CA as a `CertificateAuthority`. Certificates are issued from the API-passthrough
@@ -79,6 +87,10 @@ export function acmPcaCertificateAuthority(options: AcmPcaCertificateAuthorityOp
   const organization = options.organization ?? 'better-compute';
   const kind = checkCaKind(options.kind ?? ((caKinds as readonly string[]).includes(options.id) ? options.id : 'internal'));
   const maxTtl = caMaxTtl(kind, options.maxTtlSeconds);
+  // Fail closed: a node revoke into no set the gateway reads would leave the certificate working.
+  if (kind === 'node' && !options.revocations)
+    throw new ComputeError('INVALID_CONFIG', 'a node ACM Private CA needs the revocations set its verifiers read (options.revocations)');
+  const sleep = options.sleep ?? timerSleep;
   const client = jsonClient(transportFor(options), { hostPrefix: 'acm-pca', jsonVersion: '1.1', targetPrefix: 'ACMPrivateCA' });
   let cached: { at: number; certificates: Uint8Array[] } | undefined;
 
@@ -169,12 +181,21 @@ export function acmPcaCertificateAuthority(options: AcmPcaCertificateAuthorityOp
 
     async revoke(serial, reason) {
       const key = normalizeSerial(serial);
-      await client.call('RevokeCertificate', {
-        CertificateAuthorityArn: caArn,
-        CertificateSerial: colonSerial(serial),
-        RevocationReason: (reason && revocationReasons[reason.toLowerCase().replace(/[\s-]/g, '')]) ?? 'UNSPECIFIED',
-      });
+      const colon = colonSerial(serial);
+      // The verifiers' set first: if the AWS call fails, or the process dies after it, the
+      // certificate is already refused locally (a set entry for a never-revoked serial is harmless).
       options.revocations?.add(key, { at: clock.now(), ...(reason !== undefined ? { reason } : {}) });
+      try {
+        await client.call('RevokeCertificate', {
+          CertificateAuthorityArn: caArn,
+          CertificateSerial: colon,
+          RevocationReason: (reason && revocationReasons[reason.toLowerCase().replace(/[\s-]/g, '')]) ?? 'UNSPECIFIED',
+        });
+      } catch (error) {
+        // Already revoked (a retry after a lost response): the outcome the caller asked for.
+        if (error instanceof ComputeError && error.details?.code === 'RequestAlreadyProcessedException') return;
+        throw error;
+      }
     },
   };
 }
