@@ -85,6 +85,42 @@ interface Admitted {
   spec: Record<string, unknown>;
   region?: string;
   parent?: ResourceRow;
+  /** The kind's identity of the spec within the parent (`ProviderResourceKind.identity`). */
+  identity?: string;
+}
+
+/** A child's identity within its parent, when its kind declares one: a non-empty string, else none. */
+function identityOf(kind: ProviderResourceKind, spec: unknown): string | undefined {
+  if (kind.parent === undefined || typeof kind.identity !== 'function') return undefined;
+  const value = kind.identity(spec);
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * CONFLICT when another live resource of the kind in the parent has the identity: both would manage one provider
+ * resource (two firewalls of a cluster, two users of one name), each re-applying its own spec over the other's.
+ */
+async function assertIdentityFree(
+  tx: SqlTx,
+  parentId: string,
+  kind: string,
+  identity: string,
+  except?: string,
+): Promise<void> {
+  const { rows } = await tx.query<{ id: string }>(
+    `SELECT id FROM cloud_resources
+      WHERE parent_id = $1 AND kind = $2 AND identity = $3 AND state NOT IN ('deleted', 'released')
+        AND ($4::text IS NULL OR id <> $4)
+      LIMIT 1`,
+    [parentId, kind, identity, except ?? null],
+  );
+  if (rows[0])
+    throw new ComputeError(
+      'CONFLICT',
+      `Cloud resource ${rows[0].id} already manages that ${kind} of ${parentId}; a provider resource has one cloud resource`,
+      undefined,
+      { reason: 'identity', resourceId: rows[0].id, kind },
+    );
 }
 
 /** The spec through the kind's manifest: INVALID_INPUT with the manifest's issues, prefixed `spec.`. */
@@ -203,7 +239,13 @@ async function parentOf(
       undefined,
       { field: 'parentId', parent: kind.parent },
     );
-  const parent = await readResource(tx, { resourceId: input.parentId, tenantId: input.tenantId });
+  // FOR SHARE: a concurrent delete or release of the parent (FOR UPDATE) either sees this child once it commits, or
+  // committed first and its desired_state is seen here.
+  const parent = await readResource(
+    tx,
+    { resourceId: input.parentId, tenantId: input.tenantId },
+    { lock: 'share' },
+  );
   if (!parent || parent.state === 'deleted' || parent.state === 'released')
     throw new ComputeError(
       'INVALID_INPUT',
@@ -237,12 +279,15 @@ async function admit(
   assertAccountScope(provider, input.tenantId, kind, spec);
   const region = regionOf(provider, kind, spec);
   const parent = await parentOf(tx, input, kind, provider.account.id);
+  const identity = parent ? identityOf(kind, spec) : undefined;
+  if (parent && identity !== undefined) await assertIdentityFree(tx, parent.id, kind.kind, identity);
   return {
     provider,
     kind,
     spec,
     ...(region !== undefined ? { region } : {}),
     ...(parent ? { parent } : {}),
+    ...(identity !== undefined ? { identity } : {}),
   };
 }
 
@@ -386,9 +431,9 @@ export async function createResource(
     await tx.query(
       `INSERT INTO cloud_resources (id, tenant_id, project_id, pool_id, provider_account_id, provider, kind, family,
                                     name, description, region, parent_id, spec, provider_name, state, desired_state,
-                                    created_by, idempotency_key, request_hash, version)
+                                    created_by, idempotency_key, request_hash, version, identity)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, 'pending', 'present', $15, $16,
-               decode($17, 'hex'), 1)`,
+               decode($17, 'hex'), 1, $18)`,
       [
         resourceId,
         input.tenantId,
@@ -407,11 +452,19 @@ export async function createResource(
         caller.identityId,
         input.idempotencyKey,
         hash,
+        admitted.identity ?? null,
       ],
     );
   } catch (error) {
     if (uniqueViolation(error)) {
       const constraint = (error as { constraint?: string }).constraint ?? '';
+      if (constraint.includes('identity'))
+        throw new ComputeError(
+          'CONFLICT',
+          `Another cloud resource already manages that ${input.kind} of ${input.parentId}`,
+          undefined,
+          { reason: 'identity', kind: input.kind },
+        );
       if (constraint.includes('name'))
         throw new ComputeError('CONFLICT', `${input.kind} ${input.name} already exists`);
       throw new ComputeError(
@@ -491,6 +544,15 @@ export async function updateResource(
   const row = await openResource(tx, input);
   const stored = json(row.spec);
   let spec = stored;
+  let identity = row.identity;
+  if (input.spec !== undefined && row.adopted && row.ready_at === null)
+    // Its spec is the provider's until the takeover reads it back: a change before that has nothing to apply to.
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Cloud resource ${row.id} is still being adopted; change its spec once it is ready`,
+      undefined,
+      { reason: 'adopting' },
+    );
   if (input.spec !== undefined) {
     const provider = await poolResources(deps, tx, row.tenant_id, row.pool_id).catch(
       async (error) => {
@@ -516,19 +578,26 @@ export async function updateResource(
         undefined,
         { reason: 'replaceRequired', fields: fixed, updatable: [...kind.updatable] },
       );
+    if (row.parent_id !== null) {
+      identity = identityOf(kind, spec) ?? null;
+      if (identity !== null && identity !== row.identity)
+        await assertIdentityFree(tx, row.parent_id, row.kind, identity, row.id);
+    }
   }
   const providerChange = !same(stored, spec);
   await tx.query(
     `UPDATE cloud_resources
         SET spec = $2::jsonb, description = $3, version = version + 1, updated_at = compute_now(),
             state = CASE WHEN $4 AND state IN ('ready', 'error') THEN 'updating' ELSE state END,
-            message = CASE WHEN $4 AND state IN ('ready', 'error') THEN NULL ELSE message END
+            message = CASE WHEN $4 AND state IN ('ready', 'error') THEN NULL ELSE message END,
+            spec_changed = spec_changed OR $4, identity = $5
       WHERE id = $1`,
     [
       row.id,
       JSON.stringify(spec),
       input.description !== undefined ? input.description : row.description,
       providerChange,
+      identity,
     ],
   );
   if (providerChange) {

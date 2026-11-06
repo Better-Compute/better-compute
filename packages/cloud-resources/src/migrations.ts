@@ -115,7 +115,27 @@ END $$;
 `,
 };
 
+/**
+ * One provider resource, one live row; and adoption that does not hang on the row's version.
+ *
+ * - `identity`: the kind's `identity(spec)` for a resource with a parent (a database user's name, `firewall` for a
+ *   cluster's single firewall). At most one live resource of a kind has it in one parent, so two rows never fight
+ *   over one provider resource (each re-applying its own spec).
+ * - `spec_changed`: the tenant changed the spec of an adopted resource (`cloudResources.update`). Until then it is
+ *   observed, its spec the provider's; a description change does not count.
+ */
+export const cloudResourcesIdentityMigration: Migration = {
+  name: 'cloud-resources/0003_identity',
+  sql: `
+ALTER TABLE cloud_resources ADD COLUMN identity text;
+ALTER TABLE cloud_resources ADD COLUMN spec_changed bool NOT NULL DEFAULT false;
+CREATE UNIQUE INDEX cloud_resources_identity ON cloud_resources (parent_id, kind, identity)
+  WHERE parent_id IS NOT NULL AND identity IS NOT NULL AND state NOT IN ('deleted', 'released');
+`,
+};
+
 export const cloudResourcesMigrations: readonly Migration[] = Object.freeze([
   cloudResourcesMigration,
   cloudResourcesMeteringMigration,
+  cloudResourcesIdentityMigration,
 ]);

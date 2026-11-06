@@ -24,6 +24,7 @@ import {
   type ResourceRow,
   type ResourcesProvider,
 } from './store.js';
+import { markDeleted } from './resources.js';
 import type { CloudResourceState } from './types.js';
 import { meterRates } from './usage.js';
 
@@ -82,6 +83,10 @@ export async function reconcileResource(
   if (row.desired_state !== 'present' && row.provider_id === null && snapshot.liveChildren === 0)
     // The provider never answered for it: nothing to delete or release there.
     return worker.finish(row.desired_state === 'released' ? 'released' : 'deleted');
+  if (row.desired_state !== 'present' && row.adopted && row.ready_at === null && snapshot.liveChildren === 0)
+    // An adoption whose takeover never completed: the resource never became ours (a delete would be refused as not
+    // managed here, and must not succeed either), so it is let go here, with no provider call.
+    return worker.finish('released');
   const provider = await worker.provider();
   if (!provider) return undefined;
   if (row.desired_state === 'deleted') return worker.teardown(provider);
@@ -176,17 +181,24 @@ class ResourceWorker {
    * The provider's id, recorded as soon as the provider answers one, whatever the row's version: it is a fact
    * about the provider, and a resource whose id was lost could not be deleted.
    */
-  async #recordProviderId(id: string): Promise<void> {
-    if (this.#row.provider_id !== null) return;
-    await this.sql.transaction((tx) =>
-      tx.query(
-        `UPDATE cloud_resources
-            SET provider_id = $2, provisioned_at = coalesce(provisioned_at, compute_now())
-          WHERE id = $1 AND provider_id IS NULL`,
-        [this.#row.id, id],
-      ),
-    );
+  async #recordProviderId(id: string): Promise<boolean> {
+    if (this.#row.provider_id !== null) return true;
+    try {
+      await this.sql.transaction((tx) =>
+        tx.query(
+          `UPDATE cloud_resources
+              SET provider_id = $2, provisioned_at = coalesce(provisioned_at, compute_now())
+            WHERE id = $1 AND provider_id IS NULL`,
+          [this.#row.id, id],
+        ),
+      );
+    } catch (error) {
+      // Another live row records that provider resource (cloud_resources_provider_id): this one never takes it.
+      if ((error as { code?: string } | undefined)?.code !== '23505') throw error;
+      return false;
+    }
     this.#row.provider_id = id;
+    return true;
   }
 
   /**
@@ -353,8 +365,9 @@ class ResourceWorker {
         return this.#next();
       }
     }
-    // An adopted resource nobody changed since is observed, not ensured: its spec is the provider's.
-    const observe = row.adopted && Number(row.version) === 1;
+    // An adopted resource is taken over first, whatever its version (a description change does not count), and then
+    // observed, not ensured, until the tenant changes its spec: until then its spec is the provider's.
+    const observe = row.adopted && (row.ready_at === null || !row.spec_changed);
     const ensured = await this.#attempt(() =>
       observe
         ? this.#observe(provider)
@@ -380,7 +393,14 @@ class ResourceWorker {
       return this.#next();
     }
     const result = ensured.result!;
-    await this.#recordProviderId(result.id);
+    if (!(await this.#recordProviderId(result.id))) {
+      // Nothing of what it answered is kept (its secrets are the other resource's).
+      await this.#set({
+        state: 'error',
+        message: `Another cloud resource already manages ${result.id}`.slice(0, 500),
+      });
+      return this.#next();
+    }
     const adoptedSpec =
       observe && result.spec !== undefined && Object.keys(json(row.spec)).length === 0
         ? result.spec
@@ -397,6 +417,8 @@ class ResourceWorker {
     );
     const ready = result.state === 'ready';
     if (!ready) this.#inFlight = true;
+    // Taken over with a spec change already waiting: ensure it next.
+    else if (observe && row.spec_changed) this.#again = true;
     const written = await this.#set({
       state: ready ? 'ready' : this.#converging(),
       ...(Object.keys(outputs).length > 0 ? { outputs } : {}),
@@ -432,7 +454,17 @@ class ResourceWorker {
   }): Promise<number | undefined> {
     const row = this.#row;
     if (this.snapshot.liveChildren > 0) {
-      // Its users, pools and firewall rules go first.
+      // Its users, pools and firewall rules go first. One still wanted (a create that committed under this parent
+      // after its delete marked the tree) is marked now, so the parent never waits on it forever.
+      await this.sql.transaction(async (tx) => {
+        const { rows } = await tx.query<{ id: string; tenant_id: string; kind: string }>(
+          `SELECT id, tenant_id, kind FROM cloud_resources
+            WHERE parent_id = $1 AND desired_state = 'present' AND state NOT IN ('deleted', 'released')
+            ORDER BY id FOR UPDATE`,
+          [row.id],
+        );
+        for (const child of rows) await markDeleted(this.deps, tx, child, 'parent-deleted');
+      });
       this.#inFlight = true;
       if (row.state !== 'deleting') await this.#set({ state: 'deleting' });
       return this.#next();
@@ -470,6 +502,14 @@ class ResourceWorker {
     kind: ProviderResourceKind;
   }): Promise<number | undefined> {
     const row = this.#row;
+    if (this.snapshot.liveChildren > 0) {
+      // A child created as the release was asked for: it is deleted (through this parent, still managed) first.
+      await this.#set({
+        state: 'error',
+        message: 'Resources still live in it; delete them before it can be released',
+      });
+      return this.#next();
+    }
     if (typeof provider.resources.release !== 'function') {
       await this.#set({
         state: 'error',

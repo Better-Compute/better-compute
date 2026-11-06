@@ -247,9 +247,9 @@ export async function adoptResource(
     await tx.query(
       `INSERT INTO cloud_resources (id, tenant_id, project_id, pool_id, provider_account_id, provider, kind, family,
                                     name, description, spec, provider_name, provider_id, state, desired_state, adopted,
-                                    created_by, idempotency_key, request_hash, version, provisioned_at)
+                                    created_by, idempotency_key, request_hash, version)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '{}'::jsonb, $11, $12, 'pending', 'present', true, $13, $14,
-               decode($15, 'hex'), 1, compute_now())`,
+               decode($15, 'hex'), 1)`,
       [
         resourceId,
         input.tenantId,

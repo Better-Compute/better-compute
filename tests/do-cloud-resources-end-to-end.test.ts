@@ -248,6 +248,40 @@ describe('DigitalOcean Managed Databases through cloudResources', () => {
       w.emu.requests.filter((request) => request.url.pathname.endsWith('/firewall')),
     ).toEqual([]);
 
+    // A cluster has one firewall: a second trusted-sources resource on it is refused, so two never fight over it.
+    const trusted = await w.api.cloudResources.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      kind: 'do.database.pg.firewall',
+      name: 'fw-a',
+      parentId: database.id,
+      spec: { ipAddresses: ['203.0.113.0/24'] },
+      idempotencyKey: 'fw-a',
+    });
+    const second = await w.api.cloudResources
+      .create(w.acme, {
+        tenantId: w.acmeTenant,
+        poolId: w.poolId,
+        kind: 'do.database.pg.firewall',
+        name: 'fw-b',
+        parentId: database.id,
+        spec: { ipAddresses: ['198.51.100.0/24'] },
+        idempotencyKey: 'fw-b',
+      })
+      .then(
+        () => undefined,
+        (failure: { code?: string; details?: Record<string, unknown> }) => failure,
+      );
+    expect(second).toMatchObject({
+      code: 'CONFLICT',
+      details: { reason: 'identity', resourceId: trusted.id },
+    });
+    await w.until(trusted.id, 'ready');
+    const cluster = w.emu.state.databases.get(providerId)!;
+    expect(cluster._firewall.map((rule: { value: string }) => rule.value)).toEqual([
+      '203.0.113.0/24',
+    ]);
+
     await w.api.cloudResources.delete(w.acme, { tenantId: w.acmeTenant, resourceId: database.id });
     await w.until(database.id, 'deleted');
     expect((await w.get(admin.id)).state).toBe('deleted');

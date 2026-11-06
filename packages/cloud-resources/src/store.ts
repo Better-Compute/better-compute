@@ -76,6 +76,10 @@ export interface ResourceRow {
   outputs: Record<string, string> | string;
   secret_outputs: Record<string, SecretRef> | string;
   adopted: boolean;
+  /** An adopted resource whose spec the tenant changed since (until then it is observed). */
+  spec_changed: boolean;
+  /** The kind's `identity(spec)` within the parent, when it declares one. */
+  identity: string | null;
   created_by: string;
   request_hash: string;
   version: string | number;
@@ -88,7 +92,7 @@ export interface ResourceRow {
 
 export const resourceColumns = `id, tenant_id, project_id, pool_id, provider_account_id, provider, kind, family, name,
   description, region, parent_id, spec, provider_name, provider_id, state, desired_state, message, outputs,
-  secret_outputs, adopted, created_by, encode(request_hash, 'hex') AS request_hash, version, created_at, updated_at,
+  secret_outputs, adopted, spec_changed, identity, created_by, encode(request_hash, 'hex') AS request_hash, version, created_at, updated_at,
   provisioned_at, ready_at, deleted_at`;
 
 export const json = <T>(value: T | string): T =>
@@ -124,14 +128,17 @@ export function resourceView(row: ResourceRow): CloudResourceView {
   };
 }
 
+/** `lock: true` (or `'update'`) reads the row FOR UPDATE; `'share'` FOR SHARE (a child's create holds its parent). */
 export async function readResource(
   tx: SqlTx,
   ref: { resourceId: string; tenantId?: string },
-  options: { lock?: boolean } = {},
+  options: { lock?: boolean | 'update' | 'share' } = {},
 ): Promise<ResourceRow | undefined> {
+  const lock =
+    options.lock === 'share' ? ' FOR SHARE' : options.lock ? ' FOR UPDATE' : '';
   const { rows } = await tx.query<ResourceRow>(
     `SELECT ${resourceColumns} FROM cloud_resources
-      WHERE id = $1 AND ($2::text IS NULL OR tenant_id = $2)${options.lock ? ' FOR UPDATE' : ''}`,
+      WHERE id = $1 AND ($2::text IS NULL OR tenant_id = $2)${lock}`,
     [ref.resourceId, ref.tenantId ?? null],
   );
   return rows[0];

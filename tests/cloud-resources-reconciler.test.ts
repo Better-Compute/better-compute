@@ -302,3 +302,105 @@ describe('cloud.resources: children and deletion', () => {
     ).toBe(true);
   });
 });
+
+describe('cloud.resources: one provider resource, one live row', () => {
+  const user = (parentId: string, name: string, login: string, key = name) =>
+    world.api.cloudResources.create(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: world.poolId,
+      kind: 'fake.database-user',
+      name,
+      spec: { user: login },
+      parentId,
+      idempotencyKey: `id-${key}`,
+    });
+  const failure = (promise: Promise<unknown>) =>
+    promise.then(
+      () => ({ code: 'resolved', details: undefined as any }),
+      (error: { code?: string; details?: any }) => ({ code: error.code, details: error.details }),
+    );
+
+  it('a second live child with the same identity in one parent is CONFLICT; free again once the first is gone', async () => {
+    const database = await create({ name: 'ident-db' });
+    const other = await create({ name: 'ident-db-2' });
+    const first = await user(database.id, 'ident-a', 'app');
+    expect(await failure(user(database.id, 'ident-b', 'app'))).toMatchObject({
+      code: 'CONFLICT',
+      details: { reason: 'identity', resourceId: first.id },
+    });
+    // Another parent, or another identity, is a resource of its own.
+    await user(other.id, 'ident-c', 'app');
+    await user(database.id, 'ident-d', 'reporting');
+    await world.api.cloudResources.delete(world.acme, {
+      tenantId: world.acmeTenant,
+      resourceId: first.id,
+    });
+    await settled(first.id, 'deleted');
+    const again = await user(database.id, 'ident-e', 'app');
+    expect(again.state).toBe('pending');
+  });
+
+  it('a row the provider answers another row’s id for goes to error; the first keeps it', async () => {
+    const database = await create({ name: 'dup-db' });
+    const first = await user(database.id, 'dup-a', 'app');
+    await settled(first.id, 'ready');
+    const providerId = (await get(first.id)).providerId!;
+    // A row the identity check never saw (made before it existed): the provider answers the first one's user.
+    const db = world.fixture.database;
+    const dup = 'crs_duplicaterowfortest0000';
+    await db.query(
+      `INSERT INTO cloud_resources (id, tenant_id, project_id, pool_id, provider_account_id, provider, kind, family,
+                                    name, description, region, parent_id, spec, provider_name, state, desired_state,
+                                    created_by, idempotency_key, request_hash, version)
+       SELECT $2, tenant_id, project_id, pool_id, provider_account_id, provider, kind, family, 'dup-b', NULL, region,
+              parent_id, spec, 'bc-r-duplicaterow', 'pending', 'present', created_by, 'dup-b', request_hash, 1
+         FROM cloud_resources WHERE id = $1`,
+      [first.id, dup],
+    );
+    await world.fixture.compute.context.sql.transaction((tx) =>
+      world.fixture.compute.context.work.enqueue(tx, 'cloud.resources', dup),
+    );
+    await world.until(async () => (await stateOf(dup)) === 'error');
+    const row = (
+      await db.query<{ message: string; provider_id: string | null; secret_outputs: unknown }>(
+        `SELECT message, provider_id, secret_outputs FROM cloud_resources WHERE id = $1`,
+        [dup],
+      )
+    ).rows[0]!;
+    expect(row.message).toBe(`Another cloud resource already manages ${providerId}`);
+    expect(row.provider_id).toBeNull();
+    // It never holds a secret of the first one's user.
+    expect(row.secret_outputs).toEqual({});
+    expect((await get(first.id)).state).toBe('ready');
+  });
+});
+
+describe('cloud.resources: a child the parent’s delete did not see', () => {
+  it('a live child under a parent being deleted is deleted too, so the parent never waits on it forever', async () => {
+    const database = await create({ name: 'missed-db' });
+    await settled(database.id, 'ready');
+    const child = await world.api.cloudResources.create(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: world.poolId,
+      kind: 'fake.database-user',
+      name: 'missed-user',
+      spec: { user: 'missed' },
+      parentId: database.id,
+      idempotencyKey: 'missed-user',
+    });
+    await settled(child.id, 'ready');
+    await world.api.cloudResources.delete(world.acme, {
+      tenantId: world.acmeTenant,
+      resourceId: database.id,
+    });
+    // As a create that committed under the parent after its delete marked the tree.
+    await world.fixture.database.query(
+      `UPDATE cloud_resources SET desired_state = 'present', state = 'ready' WHERE id = $1`,
+      [child.id],
+    );
+    await settled(database.id, 'deleted');
+    expect(await stateOf(child.id)).toBe('deleted');
+    const providerId = (await get(child.id)).providerId!;
+    expect(world.cloud.calls).toContain(`delete fake.database-user ${providerId}`);
+  });
+});

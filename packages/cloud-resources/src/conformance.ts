@@ -252,6 +252,11 @@ export function providerResourcesConformanceCases(): ConformanceCase<ProviderRes
               kinds.some((entry) => entry.kind === kind.parent),
               `${kind.kind}: parent ${kind.parent} is listed`,
             );
+          if (kind.identity !== undefined)
+            check(
+              kind.parent !== undefined && typeof kind.identity === 'function',
+              `${kind.kind}: identity is a function, declared only by a kind with a parent`,
+            );
           const meters = new Set<string>();
           for (const entry of kind.meters ?? []) {
             check(

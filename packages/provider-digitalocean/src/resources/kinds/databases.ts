@@ -481,6 +481,9 @@ function clusterKind(info: EngineInfo): DoKind {
 
 // --- resources living in a cluster -----------------------------------------------------------------------------
 
+/** A child's identity in its cluster (`ProviderResourceKind.identity`): its name. */
+const byName = (spec: unknown) => (spec as { name?: string } | undefined)?.name;
+
 /** The parent cluster, managed by this deployment; `notManaged` otherwise (nothing is sent). */
 async function ownedParent(
   env: DoKindEnv,
@@ -543,6 +546,8 @@ function userKind(info: EngineInfo): DoKind {
       regional: false,
       updatable: [],
       parent: databaseKind(info.engine),
+      // One of a name per cluster: a second resource of the name would manage the same one.
+      identity: byName,
     },
     async ensure(env, request, context) {
       const name = (request.spec as { name: string }).name;
@@ -665,6 +670,8 @@ function poolKind(): DoKind {
       regional: false,
       updatable: ['mode', 'size', 'database', 'user'],
       parent: 'do.database.pg',
+      // One of a name per cluster: a second resource of the name would manage the same one.
+      identity: byName,
     },
     async ensure(env, request, context) {
       const wanted = request.spec as {
@@ -793,6 +800,8 @@ function replicaKind(info: EngineInfo): DoKind {
       regional: true,
       updatable: [],
       parent: databaseKind(info.engine),
+      // One of a name per cluster: a second resource of the name would manage the same one.
+      identity: byName,
       meters: [{ meter: nodeHoursMeter(info.engine), unit: 'hour' }],
     },
     async ensure(env, request, context) {
@@ -923,6 +932,8 @@ function firewallKind(info: EngineInfo): DoKind {
       regional: false,
       updatable: ['ipAddresses', 'tags', 'droplets'],
       parent: databaseKind(info.engine),
+      // A cluster has one firewall: one resource manages it.
+      identity: () => 'firewall',
       // Droplet ids and tags name objects of the whole account: on a shared (hosted) account they would reach other
       // tenants' Droplets, and a refused id would tell which exist.
       accountWide: firewallAccountWide,

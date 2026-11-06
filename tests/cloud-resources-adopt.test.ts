@@ -192,3 +192,80 @@ describe('cloudResources.release', () => {
     ).toBe('INVALID_STATE');
   });
 });
+
+describe('an adoption whose takeover has not completed', () => {
+  const row = async (resourceId: string) =>
+    (
+      await world.fixture.database.query<{ provisioned_at: unknown; ready_at: unknown }>(
+        `SELECT provisioned_at, ready_at FROM cloud_resources WHERE id = $1`,
+        [resourceId],
+      )
+    ).rows[0]!;
+
+  it('a description change before the takeover still takes the resource over', async () => {
+    const legacy = world.cloud.seed({ kind: 'fake.database', name: 'desc', spec, owner: 'none' });
+    const adopted = await adopt(legacy.id);
+    // It bills from its first ready, not from the adopt call.
+    expect((await row(adopted.id)).provisioned_at).toBeNull();
+    await world.api.cloudResources.update(world.acme, {
+      tenantId: world.acmeTenant,
+      resourceId: adopted.id,
+      description: 'the orders database',
+    });
+    await world.until(async () => (await get(adopted.id)).state === 'ready');
+    expect(world.cloud.calls).toContain(`adopt fake.database ${legacy.id}`);
+    expect(await get(adopted.id)).toMatchObject({ spec, description: 'the orders database' });
+    expect(legacy.labels['better-compute-resource']).toBe(adopted.id);
+    expect((await row(adopted.id)).ready_at).not.toBeNull();
+  });
+
+  it('a spec change before the takeover is refused', async () => {
+    const legacy = world.cloud.seed({ kind: 'fake.database', name: 'early', spec, owner: 'none' });
+    const adopted = await adopt(legacy.id);
+    expect(
+      await failure(
+        world.api.cloudResources.update(world.acme, {
+          tenantId: world.acmeTenant,
+          resourceId: adopted.id,
+          spec: { size: 'large' },
+        }),
+      ),
+    ).toMatchObject({ code: 'INVALID_STATE', details: { reason: 'adopting' } });
+  });
+
+  it('deleted before (or after a failed) takeover, it is let go here: nothing deleted at the provider, nothing billed', async () => {
+    for (const failed of [false, true]) {
+      const legacy = world.cloud.seed({
+        kind: 'fake.database',
+        name: `gone-${failed}`,
+        spec,
+        owner: 'none',
+      });
+      const adopted = await adopt(legacy.id, { idempotencyKey: `gone-${failed}` });
+      if (failed) {
+        // Another deployment took it meanwhile: the takeover is refused.
+        legacy.owner = 'other';
+        await world.until(async () => (await get(adopted.id)).state === 'error');
+        legacy.owner = 'none';
+      }
+      await world.api.cloudResources.delete(world.acme, {
+        tenantId: world.acmeTenant,
+        resourceId: adopted.id,
+      });
+      await world.until(async () => (await get(adopted.id)).state === 'released');
+      expect(world.cloud.calls).not.toContain(`delete fake.database ${legacy.id}`);
+      expect(legacy.deleted).toBe(false);
+      expect((await row(adopted.id)).provisioned_at).toBeNull();
+      await world.tick('cloud.resources.usage', 1, 2 * 3_600_000);
+      const windows = await world.fixture.database.query(
+        `SELECT 1 FROM usage_windows WHERE source_kind = 'cloud-resource' AND source_id = $1`,
+        [adopted.id],
+      );
+      expect(windows.rows).toEqual([]);
+      // Recorded nowhere any more: it can be adopted again.
+      expect((await adopt(legacy.id, { idempotencyKey: `gone-again-${failed}` })).state).toBe(
+        'pending',
+      );
+    }
+  });
+});

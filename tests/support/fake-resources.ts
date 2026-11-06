@@ -141,6 +141,8 @@ export const fakeKinds: readonly ProviderResourceKind[] = Object.freeze([
     regional: false,
     updatable: [],
     parent: 'fake.database',
+    // One user of a name per database, as at a real provider.
+    identity: (spec) => (spec as { user: string }).user,
   },
   {
     kind: 'fake.app',
@@ -275,7 +277,11 @@ export function fakeProviderResources(
           (entry) =>
             !entry.deleted &&
             entry.kind === request.kind &&
-            entry.idempotencyKey === context.idempotencyKey,
+            (entry.idempotencyKey === context.idempotencyKey ||
+              // A user is found by its database and name, whoever asked for it.
+              (request.kind === 'fake.database-user' &&
+                entry.parent === request.parent &&
+                entry.spec.user === spec.user)),
         );
       if (!resource) {
         if (request.kind === 'fake.database-user') {

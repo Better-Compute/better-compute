@@ -843,6 +843,13 @@ export interface ProviderResourceKind {
    * `ensure` refuses it again. Absent: the kind reaches none.
    */
   accountWide?(spec: unknown): readonly string[];
+  /**
+   * (Pure, no I/O.) For a kind with a `parent`: what the resource is at the provider within its parent, when the
+   * provider allows one of it per parent (a database user by its name, a cluster's single firewall). Two live
+   * resources of the kind in one parent with the same identity would be one provider resource managed twice: the
+   * caller refuses the second (`CONFLICT`, `reason 'identity'`). Absent or undefined: each resource is its own.
+   */
+  identity?(spec: unknown): string | undefined;
 }
 
 /** (cloud-resources) What `ProviderResources.ensure` is asked for. */

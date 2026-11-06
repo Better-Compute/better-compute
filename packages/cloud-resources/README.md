@@ -54,7 +54,16 @@ betterCompute({
   `family`, `provider`, `providerAccountId`, `poolId`, `region` and `projectId`: `resource.family == 'data'`
   allows databases without allowing apps.
 - **Desired state.** `update` changes a kind's `updatable` fields in place and refuses any other change
-  (`replaceRequired`). `delete` removes the resources living in one (database users, pools) first.
+  (`replaceRequired`). `delete` removes the resources living in one (database users, pools) first; a child whose
+  create raced the parent's delete is deleted too, so a parent never waits on one forever.
+- **One provider resource, one cloud resource.** A kind with a parent may declare a pure `identity(spec)` (a
+  database user's name; `firewall` for a cluster's single firewall): a second live resource of the kind with the
+  same identity in one parent is `CONFLICT` (`reason 'identity'`). A row the provider answers an id for that another
+  live row already records goes to `error` instead.
+- **Adoption** takes the resource over in its first run, whatever its version (a description change before it
+  does not count); its spec stays the provider's (observed) until the tenant changes it. A spec change before the
+  takeover is `INVALID_STATE` (`adopting`). One deleted or released before the takeover completed (or after it
+  failed) is let go here (`released`) with no provider call. An adopted resource bills from its first `ready`.
 - **Whose account.** Every `ensure` says `accountScope: 'tenant'` on the tenant's own (BYO) account and
   `'shared'` on a hosted pool. A kind names the spec fields that reach account-wide objects (a VPC, a registry,
   linked repositories, another resource by name) through its pure `accountWide(spec)`: on a shared account
@@ -72,9 +81,10 @@ betterCompute({
   (`ProviderResourceState.usage`, kept in `meter_rates`), but only those named in `kindMeters`: better-iam prices
   only meters it defines (100 per tenant), so define them there first. What the provider charges reaches a hosted
   tenant through the account's cost pass-through rules.
-- **Migrations** `cloud-resources/0001_resources` (one `cloud_resources` table) and `0002_metering` (the
+- **Migrations** `cloud-resources/0001_resources` (one `cloud_resources` table), `0002_metering` (the
   watermark, the rates, and `cloud-resource` appended to the usage source CHECK; selfCheck
-  `cloud-resources.usage-source` reports a later migration that dropped it).
+  `cloud-resources.usage-source` reports a later migration that dropped it) and `0003_identity` (`identity`, its
+  unique index under a parent, and `spec_changed`).
 
 ## Conformance
 

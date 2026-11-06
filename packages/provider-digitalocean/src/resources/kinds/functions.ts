@@ -338,6 +338,8 @@ function triggerKind(): DoKind {
       regional: false,
       updatable: ['cron', 'body', 'enabled'],
       parent: namespaceKindName,
+      // One trigger of a name per namespace.
+      identity: (spec: unknown) => (spec as { name?: string } | undefined)?.name,
     },
 
     async ensure(env, request, context) {
