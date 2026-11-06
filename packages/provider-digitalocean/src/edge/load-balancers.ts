@@ -31,6 +31,11 @@ import { carries } from '../storage/volumes.js';
 // change is one replace (PUT) of the whole configuration: it carries what the spec sets and keeps
 // every field the spec leaves alone (size, timeouts, a health check vps does not set), and is not
 // sent while the load balancer is still `new`. Type, region, VPC and network don't change in place.
+//
+// A global load balancer (DO `GLOBAL`) has no region and no VPC; it fronts regional load balancers
+// of ours (`target_load_balancer_ids`, each checked as a Droplet target is) and serves domains. Its
+// domains are not DO-managed: the record that points a name at it is vps's to publish through
+// `ProviderDns`, so DO never writes into a tenant's zone on its own.
 
 /** A forwarding rule as DO writes it. */
 export interface DoForwardingRule {
@@ -74,6 +79,8 @@ export interface DoLoadBalancer {
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const namePattern = /^[a-z0-9](?:[a-z0-9-]{0,49}[a-z0-9])?$/;
+const hostPattern =
+  /^(?:\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/i;
 const cookiePattern = /^[A-Za-z0-9_-]{1,64}$/;
 const protocols = new Set(['http', 'https', 'http2', 'tcp', 'udp']);
 const tlsEntries = new Set(['https', 'http2']);
@@ -167,41 +174,48 @@ function ruleKey(rule: DoForwardingRule): string {
 const sorted = <T>(values: readonly T[]): T[] =>
   [...values].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 
-/** The part of a load balancer the spec sets. */
+/** The part of a load balancer the spec sets: regional and global ones set different parts. */
 interface Desired {
   forwarding_rules: DoForwardingRule[];
   health_check?: Record<string, unknown>;
-  sticky_sessions: { type: string; cookie_name?: string; cookie_ttl_seconds?: number };
   redirect_http_to_https: boolean;
-  firewall: { allow: string[]; deny: string[] };
-  droplet_ids: number[];
+  /** Regional. */
+  sticky_sessions?: { type: string; cookie_name?: string; cookie_ttl_seconds?: number };
+  firewall?: { allow: string[]; deny: string[] };
+  droplet_ids?: number[];
+  /** Global. */
+  domains?: { name: string; is_managed: boolean; certificate_id?: string }[];
+  glb_settings?: { target_protocol: string; target_port: number };
+  target_load_balancer_ids?: string[];
 }
 
-function desiredOf(spec: ProviderLoadBalancerSpec, droplets: readonly number[]): Desired {
-  const check = spec.healthCheck;
+function healthCheckBody(
+  check: ProviderLoadBalancerSpec['healthCheck'],
+): Record<string, unknown> | undefined {
+  if (!check) return undefined;
+  return {
+    protocol: check.protocol,
+    port: check.port,
+    ...(check.path !== undefined ? { path: check.path } : {}),
+    ...(check.intervalSeconds !== undefined
+      ? { check_interval_seconds: check.intervalSeconds }
+      : {}),
+    ...(check.timeoutSeconds !== undefined
+      ? { response_timeout_seconds: check.timeoutSeconds }
+      : {}),
+    ...(check.healthyThreshold !== undefined ? { healthy_threshold: check.healthyThreshold } : {}),
+    ...(check.unhealthyThreshold !== undefined
+      ? { unhealthy_threshold: check.unhealthyThreshold }
+      : {}),
+  };
+}
+
+/** A regional load balancer's settings, in front of `droplets`. */
+function regionalDesired(spec: ProviderLoadBalancerSpec, droplets: readonly number[]): Desired {
+  const check = healthCheckBody(spec.healthCheck);
   return {
     forwarding_rules: spec.forwarding.map(ruleBody),
-    ...(check
-      ? {
-          health_check: {
-            protocol: check.protocol,
-            port: check.port,
-            ...(check.path !== undefined ? { path: check.path } : {}),
-            ...(check.intervalSeconds !== undefined
-              ? { check_interval_seconds: check.intervalSeconds }
-              : {}),
-            ...(check.timeoutSeconds !== undefined
-              ? { response_timeout_seconds: check.timeoutSeconds }
-              : {}),
-            ...(check.healthyThreshold !== undefined
-              ? { healthy_threshold: check.healthyThreshold }
-              : {}),
-            ...(check.unhealthyThreshold !== undefined
-              ? { unhealthy_threshold: check.unhealthyThreshold }
-              : {}),
-          },
-        }
-      : {}),
+    ...(check ? { health_check: check } : {}),
     sticky_sessions: spec.stickySessions
       ? {
           type: 'cookies',
@@ -218,6 +232,32 @@ function desiredOf(spec: ProviderLoadBalancerSpec, droplets: readonly number[]):
   };
 }
 
+/**
+ * A global load balancer's settings, in front of regional load balancers. Its domains are not
+ * DO-managed: the DNS record that points a name at it is vps's (`ProviderDns`), so DO never
+ * writes records into a tenant's zone. Traffic reaches the regional ones on the first rule's target.
+ */
+function globalDesired(spec: ProviderLoadBalancerSpec): Desired {
+  const check = healthCheckBody(spec.healthCheck);
+  const first = spec.forwarding[0]!;
+  return {
+    forwarding_rules: spec.forwarding.map(ruleBody),
+    ...(check ? { health_check: check } : {}),
+    redirect_http_to_https: spec.redirectHttpToHttps === true,
+    domains: [...(spec.domains ?? [])]
+      .map((domain) => ({
+        name: domain.name.toLowerCase(),
+        is_managed: false,
+        ...(domain.certificate !== undefined ? { certificate_id: domain.certificate } : {}),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    glb_settings: { target_protocol: first.targetProtocol, target_port: first.targetPort },
+    target_load_balancer_ids: sorted(
+      [...new Set(spec.targets.loadBalancers ?? [])].map((id) => id.toLowerCase()),
+    ),
+  };
+}
+
 /** Whether DO's load balancer differs from what the spec sets (only what it sets). */
 function differs(lb: DoLoadBalancer, want: Desired): boolean {
   const rules = (rules: readonly DoForwardingRule[]) => sorted(rules.map(ruleKey)).join('|');
@@ -225,20 +265,46 @@ function differs(lb: DoLoadBalancer, want: Desired): boolean {
   if (want.health_check)
     for (const [key, value] of Object.entries(want.health_check))
       if (lb.health_check?.[key] !== value) return true;
-  const sticky = lb.sticky_sessions ?? { type: 'none' };
-  if (sticky.type !== want.sticky_sessions.type) return true;
-  if (
-    want.sticky_sessions.type === 'cookies' &&
-    (sticky.cookie_name !== want.sticky_sessions.cookie_name ||
-      sticky.cookie_ttl_seconds !== want.sticky_sessions.cookie_ttl_seconds)
-  )
-    return true;
   if ((lb.redirect_http_to_https === true) !== want.redirect_http_to_https) return true;
-  const list = (values: readonly string[] | undefined) => sorted(values ?? []).join(',');
-  if (list(lb.firewall?.allow) !== list(want.firewall.allow)) return true;
-  if (list(lb.firewall?.deny) !== list(want.firewall.deny)) return true;
-  if (lb.tag) return true;
-  return sorted(lb.droplet_ids ?? []).join(',') !== want.droplet_ids.join(',');
+  const list = (values: readonly (string | number)[] | undefined) => sorted(values ?? []).join(',');
+  if (want.sticky_sessions) {
+    const sticky = lb.sticky_sessions ?? { type: 'none' };
+    if (sticky.type !== want.sticky_sessions.type) return true;
+    if (
+      want.sticky_sessions.type === 'cookies' &&
+      (sticky.cookie_name !== want.sticky_sessions.cookie_name ||
+        sticky.cookie_ttl_seconds !== want.sticky_sessions.cookie_ttl_seconds)
+    )
+      return true;
+  }
+  if (want.firewall) {
+    if (list(lb.firewall?.allow) !== list(want.firewall.allow)) return true;
+    if (list(lb.firewall?.deny) !== list(want.firewall.deny)) return true;
+  }
+  if (want.droplet_ids) {
+    if (lb.tag) return true;
+    if (list(lb.droplet_ids) !== list(want.droplet_ids)) return true;
+  }
+  if (want.domains) {
+    const domains = (
+      values: readonly { name: string; certificate_id?: string; is_managed?: boolean }[],
+    ) =>
+      sorted(
+        values.map(
+          (d) => `${d.name.toLowerCase()}=${d.certificate_id || ''}=${d.is_managed === true}`,
+        ),
+      ).join(',');
+    if (domains(lb.domains ?? []) !== domains(want.domains)) return true;
+  }
+  if (want.glb_settings) {
+    if (lb.glb_settings?.target_protocol !== want.glb_settings.target_protocol) return true;
+    if (lb.glb_settings?.target_port !== want.glb_settings.target_port) return true;
+  }
+  if (want.target_load_balancer_ids) {
+    if (lb.droplet_ids?.length || lb.tag) return true;
+    if (list(lb.target_load_balancer_ids) !== list(want.target_load_balancer_ids)) return true;
+  }
+  return false;
 }
 
 /** A load balancer's outputs (plain values only). */
@@ -374,31 +440,22 @@ export class DoLoadBalancers implements ProviderLoadBalancers {
         'name',
       );
     if (spec.id !== undefined) parseLoadBalancerId(spec.id);
-    if (spec.scope === 'global')
-      throw fail(
-        'UNSUPPORTED',
-        'global load balancers are not supported on DigitalOcean yet',
-        'globalLoadBalancer',
-      );
-    if (spec.scope !== 'regional')
+    if (spec.scope === 'global') this.validateGlobal(spec);
+    else if (spec.scope === 'regional') this.validateRegional(spec);
+    else
       throw fail('INVALID_INPUT', `scope ${String(spec.scope)} is not regional or global`, 'scope');
-    if (spec.region === undefined || !this.config.regions.includes(spec.region))
-      throw fail(
-        'INVALID_INPUT',
-        `a regional load balancer names a region this account uses (got ${String(spec.region)})`,
-        'region',
-      );
-    if (spec.domains !== undefined)
-      throw fail('INVALID_INPUT', 'only a global load balancer serves domains', 'domains');
-    if (spec.targets.loadBalancers !== undefined)
-      throw fail(
-        'INVALID_INPUT',
-        'a regional load balancer targets machines, not load balancers',
-        'targets',
-      );
     if (!Array.isArray(spec.forwarding) || spec.forwarding.length === 0)
       throw fail('INVALID_INPUT', 'a load balancer has at least one forwarding rule', 'forwarding');
     for (const rule of spec.forwarding) this.validateRule(rule);
+    if (spec.scope === 'global') {
+      const first = spec.forwarding[0]!;
+      if (first.targetProtocol !== 'http' && first.targetProtocol !== 'https')
+        throw fail(
+          'INVALID_INPUT',
+          'a global load balancer reaches its targets over http or https',
+          'protocol',
+        );
+    }
     const check = spec.healthCheck;
     if (check) {
       if (
@@ -418,6 +475,23 @@ export class DoLoadBalancers implements ProviderLoadBalancers {
           'healthCheck',
         );
     }
+  }
+
+  protected validateRegional(spec: ProviderLoadBalancerSpec): void {
+    if (spec.region === undefined || !this.config.regions.includes(spec.region))
+      throw fail(
+        'INVALID_INPUT',
+        `a regional load balancer names a region this account uses (got ${String(spec.region)})`,
+        'region',
+      );
+    if (spec.domains !== undefined)
+      throw fail('INVALID_INPUT', 'only a global load balancer serves domains', 'domains');
+    if (spec.targets.loadBalancers !== undefined)
+      throw fail(
+        'INVALID_INPUT',
+        'a regional load balancer targets machines, not load balancers',
+        'targets',
+      );
     const sticky = spec.stickySessions;
     if (
       sticky &&
@@ -440,6 +514,47 @@ export class DoLoadBalancers implements ProviderLoadBalancers {
         'targets',
       );
     for (const machine of machines) parseMachineId(machine);
+  }
+
+  /**
+   * A global load balancer: anycast, no region and no VPC, in front of regional load balancers of
+   * ours, serving at least one domain. What only a regional one has is refused, not dropped.
+   */
+  protected validateGlobal(spec: ProviderLoadBalancerSpec): void {
+    if (spec.region !== undefined)
+      throw fail('INVALID_INPUT', 'a global load balancer has no region', 'region');
+    const regionalOnly: [unknown, string][] = [
+      [spec.network, 'network'],
+      [spec.internal, 'internal'],
+      [spec.stickySessions, 'stickySessions'],
+      [spec.sourceRanges, 'sourceRanges'],
+    ];
+    for (const [value, field] of regionalOnly)
+      if (value !== undefined)
+        throw fail('INVALID_INPUT', `a global load balancer takes no ${field}`, 'globalField');
+    if (spec.targets.machines !== undefined)
+      throw fail(
+        'INVALID_INPUT',
+        'a global load balancer targets regional load balancers, not machines',
+        'targets',
+      );
+    const targets = spec.targets.loadBalancers ?? [];
+    if (targets.length === 0)
+      throw fail(
+        'INVALID_INPUT',
+        'a global load balancer targets at least one regional load balancer',
+        'targets',
+      );
+    for (const target of targets) parseLoadBalancerId(target);
+    const domains = spec.domains ?? [];
+    if (domains.length === 0)
+      throw fail('INVALID_INPUT', 'a global load balancer serves at least one domain', 'domains');
+    for (const domain of domains) {
+      if (!hostPattern.test(domain.name))
+        throw fail('INVALID_INPUT', `${JSON.stringify(domain.name)} is not a host name`, 'domains');
+      if (domain.certificate !== undefined && !uuidPattern.test(domain.certificate))
+        throw fail('INVALID_INPUT', 'a domain names its certificate by its id', 'certificate');
+    }
   }
 
   protected validateRule(rule: ProviderLoadBalancerRule): void {
@@ -547,20 +662,52 @@ export class DoLoadBalancers implements ProviderLoadBalancers {
 
   // ------------------------------------------------------------------------- ensure, get, find
 
+  /**
+   * The regional load balancers a global one targets, each checked: it exists, is ours, and is
+   * regional. A global load balancer never fronts one better-compute did not make.
+   */
+  protected async targetLoadBalancers(ids: readonly string[], signal: AbortSignal): Promise<void> {
+    for (const id of new Set(ids.map(parseLoadBalancerId))) {
+      const target = await this.loadBalancer(id, signal);
+      if (!target)
+        throw fail('NOT_FOUND', `target load balancer ${id} does not exist`, 'loadBalancer');
+      if (!this.owned(target))
+        throw fail(
+          'INVALID_STATE',
+          `load balancer ${id} is not managed by this better-compute deployment; a global load balancer never targets it`,
+          'notManaged',
+        );
+      if (target.type === 'GLOBAL')
+        throw fail(
+          'INVALID_INPUT',
+          `load balancer ${id} is global; a global one targets regional ones`,
+          'targets',
+        );
+    }
+  }
+
   async ensureLoadBalancer(
     spec: ProviderLoadBalancerSpec,
     ctx: CallContext,
   ): Promise<ProviderResourceState> {
     this.validate(spec);
     const { signal } = ctx;
-    const region = spec.region!;
+    const global = spec.scope === 'global';
+    const region = spec.region;
     const doName = `${spec.name}${this.suffix}`;
     // Before any write: the targets, and the VPC a network names.
-    const droplets = await this.targetDroplets(spec.targets.machines ?? [], region, signal);
-    const vpc = spec.network
-      ? (await vpcForNetwork(this.client, spec.network, region, signal)).id
-      : undefined;
-    const want = desiredOf(spec, droplets);
+    let want: Desired;
+    let vpc: string | undefined;
+    if (global) {
+      await this.targetLoadBalancers(spec.targets.loadBalancers ?? [], signal);
+      want = globalDesired(spec);
+    } else {
+      const droplets = await this.targetDroplets(spec.targets.machines ?? [], region!, signal);
+      vpc = spec.network
+        ? (await vpcForNetwork(this.client, spec.network, region!, signal)).id
+        : undefined;
+      want = regionalDesired(spec, droplets);
+    }
     const network = spec.internal ? 'INTERNAL' : 'EXTERNAL';
 
     let current: DoLoadBalancer | undefined;
@@ -571,22 +718,20 @@ export class DoLoadBalancers implements ProviderLoadBalancers {
     current ??= await this.survivor(doName, signal);
 
     if (!current) {
-      const body = {
-        name: doName,
-        type: 'REGIONAL',
-        region,
-        network,
-        ...(vpc !== undefined ? { vpc_uuid: vpc } : {}),
-        ...want,
-      };
+      const body = global
+        ? { name: doName, type: 'GLOBAL', ...want }
+        : {
+            name: doName,
+            type: 'REGIONAL',
+            region,
+            network,
+            ...(vpc !== undefined ? { vpc_uuid: vpc } : {}),
+            ...want,
+          };
       const reply = await this.client.request<{ load_balancer: DoLoadBalancer }>(
         'POST',
         '/load_balancers',
-        {
-          body,
-          signal,
-          budget: 'mutate',
-        },
+        { body, signal, budget: 'mutate' },
       );
       const made = reply.load_balancer;
       this.log.info('digitalocean.loadBalancerCreated', { loadBalancer: made.id, name: doName });
@@ -600,41 +745,39 @@ export class DoLoadBalancers implements ProviderLoadBalancers {
         `load balancer ${current!.id} differs in ${what}, which DigitalOcean does not change in place; replace it`,
         'replace',
       );
-    if (current.type === 'GLOBAL') throw replace('scope');
-    if (current.region?.slug !== region) throw replace('region');
-    if ((current.network ?? 'EXTERNAL') !== network) throw replace('network (internal)');
-    if (vpc !== undefined && current.vpc_uuid !== vpc) throw replace('network');
+    if ((current.type === 'GLOBAL') !== global) throw replace('scope');
+    if (!global) {
+      if (current.region?.slug !== region) throw replace('region');
+      if ((current.network ?? 'EXTERNAL') !== network) throw replace('network (internal)');
+      if (vpc !== undefined && current.vpc_uuid !== vpc) throw replace('network');
+    }
 
     if (current.status !== 'active' || !differs(current, want)) return statusState(current);
+    // A replace: what the spec sets, over everything DO has that it leaves alone.
+    const kept = current;
+    const keep = (key: keyof DoLoadBalancer) =>
+      kept[key] !== undefined && kept[key] !== null ? { [key]: kept[key] } : {};
     const body = {
       name: current.name,
       type: current.type ?? 'REGIONAL',
-      region,
-      network,
-      ...(current.vpc_uuid ? { vpc_uuid: current.vpc_uuid } : {}),
-      ...(current.size_unit !== undefined ? { size_unit: current.size_unit } : {}),
-      ...(current.network_stack !== undefined ? { network_stack: current.network_stack } : {}),
-      ...(current.enable_proxy_protocol !== undefined
-        ? { enable_proxy_protocol: current.enable_proxy_protocol }
-        : {}),
-      ...(current.enable_backend_keepalive !== undefined
-        ? { enable_backend_keepalive: current.enable_backend_keepalive }
-        : {}),
-      ...(current.http_idle_timeout_seconds !== undefined
-        ? { http_idle_timeout_seconds: current.http_idle_timeout_seconds }
-        : {}),
-      ...(current.disable_lets_encrypt_dns_records !== undefined
-        ? { disable_lets_encrypt_dns_records: current.disable_lets_encrypt_dns_records }
-        : {}),
+      ...(global
+        ? {}
+        : { region, network, ...(current.vpc_uuid ? { vpc_uuid: current.vpc_uuid } : {}) }),
+      ...keep('size_unit'),
+      ...keep('network_stack'),
+      ...keep('enable_proxy_protocol'),
+      ...keep('enable_backend_keepalive'),
+      ...keep('http_idle_timeout_seconds'),
+      ...keep('disable_lets_encrypt_dns_records'),
+      ...want,
       // The spec's health check over DO's: fields the spec leaves out keep their value.
       ...(current.health_check || want.health_check
         ? { health_check: { ...(current.health_check ?? {}), ...(want.health_check ?? {}) } }
         : {}),
-      forwarding_rules: want.forwarding_rules,
-      sticky_sessions: want.sticky_sessions,
-      redirect_http_to_https: want.redirect_http_to_https,
-      firewall: want.firewall,
-      droplet_ids: want.droplet_ids,
+      // A global one's CDN, region priorities and failover threshold are DO's to keep.
+      ...(want.glb_settings
+        ? { glb_settings: { ...(current.glb_settings ?? {}), ...want.glb_settings } }
+        : {}),
     };
     const reply = await this.client.request<{ load_balancer: DoLoadBalancer }>(
       'PUT',

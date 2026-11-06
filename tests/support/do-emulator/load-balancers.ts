@@ -116,6 +116,11 @@ function refusal(
     if (!target || target.type === 'GLOBAL')
       return unprocessable(`Target load balancer ${id} was not found`);
   }
+  for (const domain of (body.domains ?? []) as Json[])
+    if (domain.certificate_id && !state.certificates.has(domain.certificate_id))
+      return unprocessable('The certificate was not found');
+  if (type === 'GLOBAL' && (body.domains ?? []).length === 0)
+    return unprocessable('A global load balancer needs at least one domain');
   for (const entry of [...(body.firewall?.allow ?? []), ...(body.firewall?.deny ?? [])] as string[])
     if (!/^(ip|cidr):\S+$/.test(entry)) return unprocessable(`Firewall rule ${entry} is invalid`);
   return undefined;

@@ -534,3 +534,188 @@ it('never logs the token', async () => {
   expect(lines.length).toBeGreaterThan(0);
   expect(lines.join('\n')).not.toContain('do-token');
 });
+
+describe('provider-digitalocean load balancers: global', () => {
+  async function regional(emu: DoEmulator, impl: DoCompute, name = 'bc-lb1', region = 'nyc3') {
+    const target = host(emu, { region, instance: `ins-${name}` });
+    const made = await impl.loadBalancers.ensureLoadBalancer(
+      spec([target], { name, region }),
+      ctx(),
+    );
+    await impl.loadBalancers.getLoadBalancer(made.id, ctx());
+    return made.id;
+  }
+
+  const global = (targets: string[], extra: Partial<ProviderLoadBalancerSpec> = {}) =>
+    ({
+      name: 'bc-glb1',
+      scope: 'global',
+      forwarding: [
+        { entryProtocol: 'http', entryPort: 80, targetProtocol: 'http', targetPort: 80 },
+      ],
+      targets: { loadBalancers: targets },
+      domains: [{ name: 'app.example.com' }],
+      ...extra,
+    }) as ProviderLoadBalancerSpec;
+
+  it('fronts regional load balancers of ours, with unmanaged domains', async () => {
+    const { emu, impl } = await setup();
+    emu.state.certificates.set(certId, { id: certId, name: 'c' });
+    const nyc = await regional(emu, impl);
+    const sfo = await regional(emu, impl, 'bc-lb2', 'sfo3');
+    emu.requests.length = 0;
+    const made = await impl.loadBalancers.ensureLoadBalancer(
+      global([sfo, nyc], { domains: [{ name: 'App.Example.com', certificate: certId }] }),
+      ctx(),
+    );
+    expect(made).toEqual({
+      id: expect.any(String),
+      state: 'pending',
+      outputs: { scope: 'global' },
+    });
+    const [post] = calls(emu, 'POST', /^\/v2\/load_balancers$/);
+    expect(post!.body).toEqual({
+      name: loadBalancerName('bc-glb1', 'default'),
+      type: 'GLOBAL',
+      forwarding_rules: [
+        { entry_protocol: 'http', entry_port: 80, target_protocol: 'http', target_port: 80 },
+      ],
+      redirect_http_to_https: false,
+      domains: [{ name: 'app.example.com', is_managed: false, certificate_id: certId }],
+      glb_settings: { target_protocol: 'http', target_port: 80 },
+      target_load_balancer_ids: [nyc, sfo].sort(),
+    });
+    const ready = await impl.loadBalancers.getLoadBalancer(made.id, ctx());
+    expect(ready).toEqual({
+      id: made.id,
+      state: 'ready',
+      outputs: { scope: 'global', address: expect.stringMatching(/^192\.0\.2\./) },
+    });
+    // The regional one it fronts is in use: deleting it is CONFLICT until the global one goes.
+    expect((await failure(impl.loadBalancers.deleteLoadBalancer(nyc, ctx()))).code).toBe(
+      'CONFLICT',
+    );
+    expect(await impl.loadBalancers.deleteLoadBalancer(made.id, ctx())).toEqual({
+      id: made.id,
+      state: 'deleted',
+    });
+    expect((await impl.loadBalancers.deleteLoadBalancer(nyc, ctx())).state).toBe('deleted');
+  });
+
+  it('changes targets and domains in one PUT that keeps the CDN and region priorities', async () => {
+    const { emu, impl } = await setup();
+    const nyc = await regional(emu, impl);
+    const sfo = await regional(emu, impl, 'bc-lb2', 'sfo3');
+    const { id } = await impl.loadBalancers.ensureLoadBalancer(global([nyc]), ctx());
+    await impl.loadBalancers.getLoadBalancer(id, ctx());
+    const stored = emu.state.loadBalancers.get(id)!;
+    stored.glb_settings = {
+      ...stored.glb_settings,
+      cdn: { is_enabled: true },
+      region_priorities: { nyc3: 1 },
+    };
+    emu.requests.length = 0;
+    const changed = global([nyc, sfo], {
+      domains: [{ name: 'app.example.com' }, { name: 'www.example.com' }],
+    });
+    expect((await impl.loadBalancers.ensureLoadBalancer({ ...changed, id }, ctx())).state).toBe(
+      'updating',
+    );
+    const [put] = calls(emu, 'PUT', /load_balancers/);
+    expect(put!.body).toMatchObject({
+      type: 'GLOBAL',
+      target_load_balancer_ids: [nyc, sfo].sort(),
+      glb_settings: {
+        target_protocol: 'http',
+        target_port: 80,
+        cdn: { is_enabled: true },
+        region_priorities: { nyc3: 1 },
+      },
+    });
+    expect(put!.body).not.toHaveProperty('region');
+    expect((await impl.loadBalancers.ensureLoadBalancer({ ...changed, id }, ctx())).state).toBe(
+      'ready',
+    );
+    expect(calls(emu, 'PUT', /load_balancers/)).toHaveLength(1);
+  });
+
+  it('never fronts a load balancer that is not ours, a global one, or a missing one', async () => {
+    const { emu, impl } = await setup();
+    const hand = seedLoadBalancer(emu.state, { name: 'their-lb' });
+    const otherGlobal = seedLoadBalancer(emu.state, {
+      type: 'GLOBAL',
+      name: loadBalancerName('bc-glb9', 'default'),
+    });
+    emu.requests.length = 0;
+    const foreign = await failure(impl.loadBalancers.ensureLoadBalancer(global([hand.id]), ctx()));
+    expect([foreign.code, foreign.details?.reason]).toEqual(['INVALID_STATE', 'notManaged']);
+    const nested = await failure(
+      impl.loadBalancers.ensureLoadBalancer(global([otherGlobal.id]), ctx()),
+    );
+    expect([nested.code, nested.details?.reason]).toEqual(['INVALID_INPUT', 'targets']);
+    const missing = await failure(
+      impl.loadBalancers.ensureLoadBalancer(
+        global(['3c6d6c1a-0000-4000-8000-000000000001']),
+        ctx(),
+      ),
+    );
+    expect([missing.code, missing.details?.reason]).toEqual(['NOT_FOUND', 'loadBalancer']);
+    expect(writes(emu)).toHaveLength(0);
+  });
+
+  it('refuses what only a regional one has, before any request', async () => {
+    const { emu, impl } = await setup();
+    const target = '3c6d6c1a-0000-4000-8000-000000000001';
+    const tcp = [{ entryProtocol: 'tcp', entryPort: 80, targetProtocol: 'tcp', targetPort: 80 }];
+    const refusals: [ProviderLoadBalancerSpec, string, string][] = [
+      [global([target], { region: 'nyc3' }), 'INVALID_INPUT', 'region'],
+      [global([target], { internal: true }), 'INVALID_INPUT', 'globalField'],
+      [
+        global([target], { sourceRanges: { allow: ['198.51.100.0/24'] } }),
+        'INVALID_INPUT',
+        'globalField',
+      ],
+      [
+        global([target], { stickySessions: { cookieName: 'c', ttlSeconds: 1 } }),
+        'INVALID_INPUT',
+        'globalField',
+      ],
+      [global([target], { network: { network: 'n' } }), 'INVALID_INPUT', 'globalField'],
+      [{ ...global([]), targets: { machines: ['1'] } }, 'INVALID_INPUT', 'targets'],
+      [global([]), 'INVALID_INPUT', 'targets'],
+      [global([target], { domains: [] }), 'INVALID_INPUT', 'domains'],
+      [global([target], { domains: [{ name: 'not a host' }] }), 'INVALID_INPUT', 'domains'],
+      [
+        global([target], { domains: [{ name: 'a.example.com', certificate: 'x' }] }),
+        'INVALID_INPUT',
+        'certificate',
+      ],
+      [global([target], { forwarding: tcp } as never), 'INVALID_INPUT', 'protocol'],
+    ];
+    for (const [bad, code, reason] of refusals) {
+      const error = await failure(impl.loadBalancers.ensureLoadBalancer(bad, ctx()));
+      expect([error.code, error.details?.reason], JSON.stringify(bad)).toEqual([code, reason]);
+    }
+    expect(emu.requests).toHaveLength(0);
+  });
+
+  it('a regional spec for a global load balancer, or the other way round, is INVALID_STATE (replace)', async () => {
+    const { emu, impl } = await setup();
+    const nyc = await regional(emu, impl);
+    const { id } = await impl.loadBalancers.ensureLoadBalancer(global([nyc]), ctx());
+    const toRegional = await failure(
+      impl.loadBalancers.ensureLoadBalancer(
+        { ...spec([host(emu)], { name: 'bc-glb1' }), id },
+        ctx(),
+      ),
+    );
+    expect([toRegional.code, toRegional.details?.reason]).toEqual(['INVALID_STATE', 'replace']);
+    const toGlobal = await failure(
+      impl.loadBalancers.ensureLoadBalancer(
+        { ...global([nyc], { name: 'bc-lb1' }), id: nyc },
+        ctx(),
+      ),
+    );
+    expect([toGlobal.code, toGlobal.details?.reason]).toEqual(['INVALID_STATE', 'replace']);
+  });
+});
