@@ -261,6 +261,13 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
       'Node pools of managed Kubernetes clusters, published on their cluster: created, ready, error { message }, deleted; data { clusterId, nodePoolId, name, ... }',
   },
   {
+    type: 'cloud.resource.*',
+    subject: 'cloud-resource/{id}',
+    module: 'cloud-resources',
+    description:
+      'Managed data and platform services (databases, apps, functions, …): created { poolId, providerAccountId, family, name, region? }, ready the first time { outputs, secretOutputs } (output names only, never a value), updating { fields }, updated when ready again after a change, failed { message }, deleting { reason: requested | parent-deleted | tenant-deleted }, deleted, released; data { resourceId, kind, ... }',
+  },
+  {
     type: 'fleet.*',
     subject: 'fleet/{id}',
     module: 'fleet',

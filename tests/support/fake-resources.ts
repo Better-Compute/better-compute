@@ -28,6 +28,8 @@ export interface FakeResource {
   ready: boolean;
   deleted: boolean;
   idempotencyKey?: string;
+  /** The parent resource's id (a database user's database). */
+  parent?: string;
   password?: string;
 }
 
@@ -110,7 +112,6 @@ export const fakeKinds: readonly ProviderResourceKind[] = Object.freeze([
     family: 'data',
     description: 'A user of a managed database',
     spec: manifest({
-      database: field.string().describe('The database cluster id'),
       user: field.string({ pattern: /^[a-z][a-z0-9_]{0,31}$/ }).describe('User name'),
     }),
     outputs: ['user'],
@@ -230,11 +231,11 @@ export function fakeProviderResources(
         );
       if (!resource) {
         if (request.kind === 'fake.database-user') {
-          const parent = live('fake.database', String(spec.database));
+          const parent = request.parent ? live('fake.database', request.parent) : undefined;
           if (!parent || !parent.ready)
             throw new ComputeError(
               'INVALID_STATE',
-              `database ${String(spec.database)} is not ready`,
+              `database ${String(request.parent)} is not ready`,
             );
         }
         resource = {
@@ -247,6 +248,7 @@ export function fakeProviderResources(
           ready: false,
           deleted: false,
           idempotencyKey: context.idempotencyKey,
+          ...(request.parent !== undefined ? { parent: request.parent } : {}),
         };
         if (kind.secretOutputs?.includes('password')) {
           resource.password = `pw-${counter}-${Math.random().toString(36).slice(2, 10)}`;

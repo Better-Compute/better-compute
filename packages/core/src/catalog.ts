@@ -41,6 +41,7 @@ export const computeResourceKinds = [
   'sandbox-volume',
   'network',
   'kubernetes-cluster',
+  'cloud-resource',
 ] as const;
 export type ComputeResourceKind = (typeof computeResourceKinds)[number];
 
@@ -101,6 +102,8 @@ const definitions = {
       ...a('networks', 'read'),
       // Managed Kubernetes: `kubernetesClusters.list` and `versions` are gated on the tenant.
       ...a('kubernetes', 'read'),
+      // Managed data and platform services: `cloudResources.list` and `kinds` are gated on the tenant.
+      ...a('cloud-resources', 'read'),
       // v1.0 destructive-batch quorum (§13): on top of the approvers' signatures, never instead.
       ...a('batches', 'read', 'create', 'approve'),
     ],
@@ -255,6 +258,21 @@ const definitions = {
       location: 'string',
     },
   },
+  'cloud-resource': {
+    description:
+      'A managed data or platform service (a database, an app, a functions namespace) on a provider account; policies narrow it by kind and family',
+    parent: 'tenant',
+    actions: a('cloud-resources', 'create', 'read', 'update', 'delete'),
+    attributes: {
+      kind: 'string',
+      family: 'string',
+      provider: 'string',
+      providerAccountId: 'string',
+      poolId: 'string',
+      region: 'string',
+      projectId: 'string',
+    },
+  },
 } as const satisfies Record<ComputeResourceKind, KindDefinition>;
 
 /** Every compute action. */
@@ -323,6 +341,8 @@ export type ApiModule =
   | 'tunnels'
   /** `@better-compute/kubernetes` (managed Kubernetes clusters on provider accounts); an injected module. */
   | 'kubernetes'
+  /** `@better-compute/cloud-resources` (managed data and platform services on provider accounts); an injected module. */
+  | 'cloud-resources'
   /** The server's quorum module (`commandBatches`, v1.0 §13), always hosted. */
   | 'quorum';
 
@@ -683,6 +703,15 @@ group('kubernetesNodePools', 'kubernetes', [
   ['list', 'read', 'kubernetes:read', 'kubernetes-cluster', 'v1.0'],
   ['update', 'mutation', 'kubernetes:update', 'kubernetes-cluster', 'v1.0'],
   ['delete', 'mutation', 'kubernetes:update', 'kubernetes-cluster', 'v1.0'],
+]);
+// Managed data and platform services (databases, apps, functions) on a provider account (cloud-resources module).
+group('cloudResources', 'cloud-resources', [
+  ['kinds', 'read', 'cloud-resources:read', 'tenant', 'v1.0'],
+  ['create', 'mutation', 'cloud-resources:create', 'cloud-resource', 'v1.0'],
+  ['list', 'read', 'cloud-resources:read', 'tenant', 'v1.0', list],
+  ['get', 'read', 'cloud-resources:read', 'cloud-resource', 'v1.0'],
+  ['update', 'mutation', 'cloud-resources:update', 'cloud-resource', 'v1.0'],
+  ['delete', 'mutation', 'cloud-resources:delete', 'cloud-resource', 'v1.0'],
 ]);
 group('commandBatches', 'quorum', [
   ['create', 'mutation', 'batches:create', 'tenant', 'v1.0'],

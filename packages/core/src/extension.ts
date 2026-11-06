@@ -835,6 +835,8 @@ export interface ProviderResourceRequest {
   spec: unknown;
   /** The provider id an earlier `ensure` answered; absent until the provider accepted the resource once. */
   id?: string;
+  /** For a kind with a `parent` (a database user): the provider id of the resource it lives in. */
+  parent?: string;
   /** Ownership labels (`better-compute-managed`, `-resource`, `-tenant`), written as the provider writes labels. */
   labels?: Readonly<Record<string, string>>;
 }
