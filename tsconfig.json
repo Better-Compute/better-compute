@@ -30,6 +30,7 @@
     { "path": "./packages/provider-gcp" },
     { "path": "./packages/provider-digitalocean" },
     { "path": "./packages/aws-core" },
+    { "path": "./packages/aws" },
     {
       "path": "./packages/provider-proxmox"
     },
