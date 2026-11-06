@@ -101,6 +101,13 @@ gap over `max(leakToleranceHours, 5%)` of the billed hours raises `billing.leak`
 `billing.leaks` lists the raised ones for root. A leak usually means a Droplet compute no longer tracks: find it
 with `better-compute digitalocean discover <account>`, then attach or delete it.
 
+DigitalOcean spend reaches tenants' budgets through `billing.passThrough` rules on the platform account
+([Billing](/docs/guides/vps/providers#billing)): an item of a tenant's Droplet that compute does not meter itself,
+such as `Droplet Backups`, is billed to that tenant at cost times the rule's multiplier on a `reported` meter, so its
+Better IAM budgets and budget alerts count it with the rest of its usage. Droplet hours, volumes and reserved IPs are
+compute's own meters: a rule whose pattern matches them (`Droplets`) is `INVALID_CONFIG`, and they are never billed
+twice. Items no tenant's Droplet explains (Spaces, an account-level charge) stay the platform's.
+
 `providerAccounts.billing` reads the account's own bill at DigitalOcean (balance, month to date, final invoices and the
 newest 50 billing history entries, scope `billing:read`), read-only, in micros of USD. Its history names payments, so
 it is decided as `compute:providers:manage` on the account. A leak is what compute meters against what DigitalOcean
