@@ -47,9 +47,50 @@ describe('provider-aws month-to-date spend', () => {
       TimePeriod: { Start: '2026-10-01', End: '2026-10-11' },
       Granularity: 'DAILY',
       Metrics: ['UnblendedCost'],
-      Filter: { Dimensions: { Key: 'LINKED_ACCOUNT', Values: [platformAccount] } },
+      Filter: {
+        And: [
+          { Dimensions: { Key: 'LINKED_ACCOUNT', Values: [platformAccount] } },
+          { Not: { Dimensions: { Key: 'RECORD_TYPE', Values: ['Credit', 'Refund'] } } },
+        ],
+      },
     });
     expect(ce.queries[0]!.GroupBy).toBeUndefined();
+  });
+
+  it('compares gross spend: credits and refunds never offset usage', async () => {
+    const { ce, options } = world();
+    ce.lines.push(
+      {
+        account: platformAccount,
+        region: 'us-east-1',
+        service: 'Amazon EC2',
+        usageType: '',
+        recordType: 'Credit',
+        day: '2026-10-05',
+        cost: '-1.75',
+      },
+      {
+        account: platformAccount,
+        region: 'us-east-1',
+        service: 'Amazon EC2',
+        usageType: '',
+        recordType: 'Refund',
+        day: '2026-10-06',
+        cost: '-0.5',
+      },
+    );
+    const over = await assertAwsSpendBelow({
+      ...options,
+      account: platformAccount,
+      limitUsd: 1.5,
+    }).catch((error: unknown) => error);
+    expect(isComputeError(over, 'QUOTA_EXCEEDED')).toBe(true);
+    // without an account the filter is the record type alone
+    const all = await awsMonthToDateCost(options);
+    expect(all.amountMicros).toBe(101_750_000);
+    expect(ce.queries.at(-1)!.Filter).toEqual({
+      Not: { Dimensions: { Key: 'RECORD_TYPE', Values: ['Credit', 'Refund'] } },
+    });
   });
 
   it('refuses to start over the budget, and on a malformed account or budget', async () => {

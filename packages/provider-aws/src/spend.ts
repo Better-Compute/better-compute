@@ -4,9 +4,12 @@ import { costMicros } from './costs.js';
 
 // Month-to-date spend of an AWS account from Cost Explorer: the A12 live suite's spend guard refuses to start a
 // run when the sandbox account is over its budget (BETTER_COMPUTE_AWS_LIVE_BUDGET_USD). One GetCostAndUsage
-// request (charged), DAILY over the current UTC month including today, summed.
+// request (charged), DAILY over the current UTC month including today, summed. The spend is gross: credits and
+// refunds are left out, so an account living on promotional credits (net about $0) still trips the guard.
 
 const DAY = 86_400_000;
+/** Record types that lower the bill without lowering what was burned. */
+const offsetRecordTypes = ['Credit', 'Refund'];
 const dayText = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 
 export interface AwsSpendOptions extends AwsCliOptions {
@@ -25,7 +28,10 @@ export interface AwsSpend {
   to: string;
 }
 
-/** The account's unblended spend this UTC month, today included, in integer micros of one currency. */
+/**
+ * The account's gross unblended spend this UTC month (credits and refunds left out), today included, in integer
+ * micros of one currency.
+ */
 export async function awsMonthToDateCost(options: AwsSpendOptions): Promise<AwsSpend> {
   if (options.account !== undefined && !/^\d{12}$/.test(options.account))
     throw new ComputeError('INVALID_INPUT', 'account is a 12-digit AWS account id');
@@ -34,6 +40,13 @@ export async function awsMonthToDateCost(options: AwsSpendOptions): Promise<AwsS
   const from = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1);
   const to = Math.floor(now / DAY) * DAY + DAY;
   const client = awsCliClient('ce', 'AWSInsightsIndexService', options.region, options);
+  const gross = { Not: { Dimensions: { Key: 'RECORD_TYPE', Values: [...offsetRecordTypes] } } };
+  const filter =
+    options.account !== undefined
+      ? {
+          And: [{ Dimensions: { Key: 'LINKED_ACCOUNT', Values: [options.account] } }, gross],
+        }
+      : gross;
   let amountMicros = 0;
   let currency: string | undefined;
   const seen = new Set<string>();
@@ -50,9 +63,7 @@ export async function awsMonthToDateCost(options: AwsSpendOptions): Promise<AwsS
         TimePeriod: { Start: dayText(from), End: dayText(to) },
         Granularity: 'DAILY',
         Metrics: ['UnblendedCost'],
-        ...(options.account !== undefined
-          ? { Filter: { Dimensions: { Key: 'LINKED_ACCOUNT', Values: [options.account] } } }
-          : {}),
+        Filter: filter,
         ...(token ? { NextPageToken: token } : {}),
       },
       { signal: options.signal ?? AbortSignal.timeout(30_000) },

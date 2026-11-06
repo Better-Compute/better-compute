@@ -339,9 +339,9 @@ describe('provider-aws costs (Cost Explorer)', () => {
       ['EC2 - Other', 'USW2-LAX1-EBS:VolumeUsage.gp3'],
     ] as const) {
       expect(new RegExp('LAX1', 'i').test(sku)).toBe(true);
-      expect(awsBilling.computeSku({ service, sku }) || awsBilling.meteredSku({ service, sku })).toBe(
-        true,
-      );
+      expect(
+        awsBilling.computeSku({ service, sku }) || awsBilling.meteredSku({ service, sku }),
+      ).toBe(true);
     }
     // a family is never mistaken for a zone segment
     expect(compute('USE1-BoxUsage:m7i.large')).toBe(true);
