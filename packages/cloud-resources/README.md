@@ -91,10 +91,11 @@ betterCompute({
 
 ## Conformance
 
-Every implementation runs the same cases:
+Every implementation runs the same cases. They live in `@better-compute/vps` (next to `providerConformance`), so a
+provider package runs them from its own tests without depending on this module, which re-exports them:
 
 ```ts
-import { providerResourcesConformanceCases } from '@better-compute/cloud-resources';
+import { providerResourcesConformanceCases } from '@better-compute/vps';
 
 for (const test of providerResourcesConformanceCases())
   it(test.name, () =>

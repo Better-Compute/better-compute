@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { isComputeError, type ComputeError, type Logger } from '@better-compute/core';
+// From vps, as a provider's own tests run them (a provider never depends on the cloud-resources module).
 import {
   providerResourcesConformanceCases,
   type ProviderResourcesConformanceSubject,
-} from '@better-compute/cloud-resources';
+} from '@better-compute/vps';
 import {
   deploymentTag,
   digitaloceanProvider,
