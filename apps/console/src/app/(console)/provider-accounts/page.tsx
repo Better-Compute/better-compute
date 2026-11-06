@@ -17,12 +17,21 @@ interface CheckResult {
   missing: string[];
   optional?: string[];
   checkedAt: number;
+  /** The provider's own detail; DigitalOcean names the team the token belongs to (P9 Organizations). */
+  details?: { account?: { status?: string; team?: { uuid?: string; name?: string } } };
+}
+
+/** The provider team a check names (DigitalOcean), read-only. */
+function teamOf(result: CheckResult): string | undefined {
+  const team = result.details?.account?.team;
+  return typeof team?.name === 'string' && team.name ? team.name : team?.uuid;
 }
 
 /**
  * The organization's provider accounts (P9), each with a read-only check of what its credential may do
  * (providerAccounts.check): ok, the permissions instances need that it lacks, and the ones only optional features
- * (costs, metrics, security findings) need. Credentials show as secret references only.
+ * (costs, metrics, security findings) need, and the team at the provider the credential belongs to (read-only).
+ * Credentials show as secret references only.
  */
 export default function ProviderAccountsPage() {
   const { api, tenantId } = useConsole();
@@ -112,6 +121,7 @@ export default function ProviderAccountsPage() {
                           {result.optional && result.optional.length > 0
                             ? ` · optional features lack ${result.optional.join(', ')}`
                             : ''}
+                          {teamOf(result) ? ` · team ${teamOf(result)}` : ''}
                         </div>
                       )}
                     </td>

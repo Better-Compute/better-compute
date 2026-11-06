@@ -2286,7 +2286,12 @@ describe('definition', () => {
     emu.account.droplet_limit = 40;
     const report = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
     expect(report).toEqual({
-      account: { uuid: emu.account.uuid, status: 'active', dropletLimit: 40 },
+      account: {
+        uuid: emu.account.uuid,
+        status: 'active',
+        dropletLimit: 40,
+        team: { uuid: emu.account.team.uuid, name: 'My Team' },
+      },
       families: { compute: 'ok', networks: 'ok', keys: 'ok', tags: 'ok' },
       missing: [],
     });
@@ -2361,6 +2366,17 @@ describe('definition: scoped account bodies and timeouts', () => {
     account: platformAccount,
   };
 
+  it('probeAccount names the team read-only, and none for an account outside a team', async () => {
+    const emu = emulator();
+    emu.account.team = { uuid: 'team-1', name: 'Ops', members: [{ email: 'a@example.com' }] };
+    const inTeam = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
+    expect(inTeam.account.team).toEqual({ uuid: 'team-1', name: 'Ops' });
+    expect(JSON.stringify(inTeam)).not.toContain('a@example.com');
+    delete emu.account.team;
+    const alone = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
+    expect(alone.account.team).toBeUndefined();
+  });
+
   it('probeAccount reports compute denied when droplet:read is missing and the body has no droplet_limit', async () => {
     const emu = emulator();
     delete emu.account.droplet_limit;
@@ -2374,7 +2390,11 @@ describe('definition: scoped account bodies and timeouts', () => {
     });
     expect(report.missing).toEqual(['droplet:read']);
     expect(report.account.dropletLimit).toBeUndefined();
-    expect(report.account).toEqual({ uuid: emu.account.uuid, status: 'active' });
+    expect(report.account).toEqual({
+      uuid: emu.account.uuid,
+      status: 'active',
+      team: { uuid: emu.account.team.uuid, name: 'My Team' },
+    });
   });
 
   it('probeAccount refuses an account body without a uuid', async () => {

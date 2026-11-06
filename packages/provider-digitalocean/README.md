@@ -69,7 +69,7 @@ Create the token as a custom-scope token with at least:
 
 The operations surfaces need more, only when they are used: `billing:read` (costs and the billing summary), `project:read,create,update` (`projectPerTenant`), `monitoring:read` (Droplet metrics) and `security:read` (security findings).
 
-A token without a scope fails the call that needs it with `ACCESS_DENIED` (`details.reason` `scope`); `probeAccount` names the missing read scopes up front, and `probeAccount(config, context, options, { operations: true })` the operations ones too.
+A token without a scope fails the call that needs it with `ACCESS_DENIED` (`details.reason` `scope`); `probeAccount` names the missing read scopes up front, and `probeAccount(config, context, options, { operations: true })` the operations ones too. Its report names the account (uuid, status, Droplet limit) and, read-only, the team the token belongs to (`team`: uuid and name, never its members), which `providerAccounts.check` answers in `details.account` and the console shows beside the check.
 
 ## Tag scheme
 

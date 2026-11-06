@@ -181,7 +181,13 @@ describe('providerAccounts.check on DigitalOcean', () => {
       missing: [],
       optional: [],
       details: {
-        account: { uuid: emu.account.uuid, status: 'active', dropletLimit: 25 },
+        account: {
+          uuid: emu.account.uuid,
+          status: 'active',
+          dropletLimit: 25,
+          // P9 Organizations: the team the token belongs to, read-only (no member's email or name).
+          team: { uuid: emu.account.team.uuid, name: 'My Team' },
+        },
         families: { compute: 'ok', networks: 'ok', keys: 'ok', tags: 'ok' },
         operations: { billing: 'ok', projects: 'ok', monitoring: 'ok', security: 'ok' },
       },
@@ -192,6 +198,7 @@ describe('providerAccounts.check on DigitalOcean', () => {
     const scoped = await check();
     expect(scoped).toMatchObject({ ok: false, missing: ['tag:read'], optional: ['billing:read'] });
     expect(JSON.stringify(scoped)).not.toContain('acme-token');
+    expect(JSON.stringify(scoped)).not.toContain(emu.account.email);
 
     // A Droplet-locked account is not ok, whatever the scopes.
     emu.account.status = 'locked';

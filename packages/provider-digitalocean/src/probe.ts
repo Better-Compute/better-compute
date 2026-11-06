@@ -18,8 +18,16 @@ export type DoFamilyState = 'ok' | 'denied';
 
 /** What `probeAccount` found. */
 export interface DoAccountReport {
-  /** `dropletLimit` is absent when the token lacks `droplet:read`: DigitalOcean then leaves it out. */
-  account: { uuid: string; status: string; dropletLimit?: number };
+  /**
+   * `dropletLimit` is absent when the token lacks `droplet:read`: DigitalOcean then leaves it out. `team` (P9
+   * Organizations) is the team the token belongs to, read-only: its id and name, never its members' details.
+   */
+  account: {
+    uuid: string;
+    status: string;
+    dropletLimit?: number;
+    team?: { uuid?: string; name?: string };
+  };
   families: Record<'compute' | 'networks' | 'keys' | 'tags', DoFamilyState>;
   /** The read scopes the token lacks, in probe order (the operations scopes last). */
   missing: string[];
@@ -116,7 +124,7 @@ async function probe(
   withOperations: boolean,
 ): Promise<DoAccountReport> {
   const { account } = await client.request<{
-    account?: { uuid?: unknown; status?: unknown; droplet_limit?: unknown };
+    account?: { uuid?: unknown; status?: unknown; droplet_limit?: unknown; team?: unknown };
   }>('GET', '/account', { signal, budget: 'observe' });
   // droplet_limit needs droplet:read in DigitalOcean's model: without it the body omits the field.
   if (typeof account?.uuid !== 'string' || typeof account.status !== 'string') throw badBody();
@@ -146,12 +154,22 @@ async function probe(
       if (refused[i]) missing.push(scope);
     });
   }
+  const rawTeam = (account.team ?? {}) as { uuid?: unknown; name?: unknown };
+  const team = {
+    ...(typeof rawTeam.uuid === 'string' && rawTeam.uuid
+      ? { uuid: rawTeam.uuid.slice(0, 64) }
+      : {}),
+    ...(typeof rawTeam.name === 'string' && rawTeam.name
+      ? { name: rawTeam.name.slice(0, 200) }
+      : {}),
+  };
   return {
     ...(operations ? { operations } : {}),
     account: {
       uuid: account.uuid,
       status: account.status,
       ...(typeof account.droplet_limit === 'number' ? { dropletLimit: account.droplet_limit } : {}),
+      ...(Object.keys(team).length ? { team } : {}),
     },
     families,
     missing,
@@ -172,7 +190,10 @@ export function checkReport(report: DoAccountReport): ProviderAccountProbe {
     missing,
     optional,
     details: {
-      account: { ...report.account },
+      account: {
+        ...report.account,
+        ...(report.account.team ? { team: { ...report.account.team } } : {}),
+      },
       families: { ...report.families },
       ...(report.operations ? { operations: { ...report.operations } } : {}),
     },
