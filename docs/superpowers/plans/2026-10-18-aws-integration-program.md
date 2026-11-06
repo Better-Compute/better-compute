@@ -598,8 +598,11 @@ These are all implementations of seams that already exist; no core changes:
 > `policy.kubernetes.eks`), the EKS DaemonSet test, and beyond the outline `ProviderKubernetes` on EKS in provider-aws
 > (`src/eks/**`: clusters, Auto Mode for `autopilot`, managed node groups, versions, access-entry credentials; config
 > `eksClusterRoleArn`/`eksNodeRoleArn`/`eksSubnetIds`; `aws iam-policy --eks-*`) and the optional
-> `ProviderKubernetes.listClusters` landed. Open: the vps `providerAccounts.clusters` method, wiring `eksUserData` into
-> provider-pool launches, and bcd's `k8s-join` converger for mode `eks` (it must not run kubeadm).
+> `ProviderKubernetes.listClusters` landed. Round 2: the vps `providerAccounts.clusters` method; provider-pool launches
+> with `policy.kubernetes.eks` carry the NodeConfig (pool owner only; `platformOperated` on platform sites); bcd's
+> `k8s-join` mode `eks` (never kubeadm: waits for nodeadm's kubelet, keeps labels); access entries for pathed roles via
+> `assumeRoleArn`; zonal locations refused at create (`regionalOnly`). Open: hosted bcd on AL2023 EKS nodes (the
+> kubelet kubeconfig's exec plugin `aws eks get-token` is not in bcd's image), EKS access entries for pool node roles.
 
 - **Hosted mode:** provider-kubernetes hosted mode works on EKS today. A9 adds docs plus a test that renders the
   DaemonSet for EKS-shaped nodes: the `eks.amazonaws.com/nodegroup` selector and the GPU taint
