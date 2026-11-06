@@ -290,7 +290,8 @@ export function spacesClient(options: SpacesClientOptions): SpacesClient {
     for (const [name, value] of Object.entries(opts.query ?? {}))
       target.searchParams.set(name, value);
     const what = `${method} ${bucket}${key === undefined ? '' : `/${key}`}`;
-    const creds = await credentials();
+    const resolving = credentials();
+    const creds = await resolving;
     const payloadHash = opts.body ? sha256Hex(opts.body) : emptyPayloadHash;
     const signed = signSigV4({
       method,
@@ -323,7 +324,11 @@ export function spacesClient(options: SpacesClientOptions): SpacesClient {
     options.log?.debug('spaces.request', { method, bucket, status: response.status });
     if (response.ok || opts.allow?.includes(response.status)) return response;
     const body = method === 'HEAD' ? '' : await readCapped(response, maxErrorBody);
-    throw mapS3Error(response.status, body, response.headers, what);
+    const error = mapS3Error(response.status, body, response.headers, what);
+    // Spaces refused the pair itself (InvalidAccessKeyId, SignatureDoesNotMatch): it may have been
+    // rotated in the SecretStore, so the next call resolves the references again.
+    if (error.details?.reason === 'spacesKeys' && pending === resolving) pending = undefined;
+    throw error;
   }
 
   async function presign(

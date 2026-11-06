@@ -87,6 +87,29 @@ describe('spacesClient', () => {
     expect(calls).toBe(2);
   });
 
+  it('resolves the key pair again after Spaces refuses it, so a rotation takes effect', async () => {
+    const emu = new SpacesEmulator({ now: () => t0 });
+    emu.seedBucket('bc-ops').objects.set('k', { body: new TextEncoder().encode('v') });
+    let secret = 'spaces-secret';
+    let calls = 0;
+    const s3 = client(emu, async () => {
+      calls += 1;
+      return { ...creds, secretAccessKey: secret };
+    });
+    await s3.request('GET', 'bc-ops', 'k');
+    // The operator rotates the pair in the SecretStore: Spaces now holds the new secret only.
+    emu.keys.set('SPACESKEY', 'rotated-secret');
+    const refused = await failure(s3.request('GET', 'bc-ops', 'k'));
+    expect(refused.details?.reason).toBe('spacesKeys');
+    secret = 'rotated-secret';
+    expect(await (await s3.request('GET', 'bc-ops', 'k')).text()).toBe('v');
+    expect(calls).toBe(2);
+    // An ordinary refusal (a missing object) keeps the pair.
+    await failure(s3.request('GET', 'bc-ops', 'missing'));
+    await s3.request('GET', 'bc-ops', 'k');
+    expect(calls).toBe(2);
+  });
+
   it('maps a network failure to UNAVAILABLE', async () => {
     const s3 = spacesClient({
       fetch: async () => {
