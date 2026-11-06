@@ -23,6 +23,7 @@ import {
   gpuModelOf,
   isManagedTag,
   keyTag,
+  kubernetesTag,
   labels,
   labelsFromTags,
   listOffers,
@@ -1626,7 +1627,7 @@ describe('compute', () => {
       id: 'digitalocean',
       version: '0.1.0',
       provides: ['vps'],
-      capabilities: ['power', 'reinstall', 'list', 'discover', 'claim', 'networks'],
+      capabilities: ['power', 'reinstall', 'list', 'discover', 'claim', 'networks', 'kubernetes'],
     });
     const emu = emulator();
     let resolved = 0;
@@ -2025,6 +2026,51 @@ describe('attach', () => {
     await compute.claim!(String(free.id), 'inst_1', ctx());
   });
 
+  it('DOKS worker droplets are never discovered, claimed, deleted or stripped of their tags', async () => {
+    const emu = emulator();
+    const compute = await build(emu);
+    const cluster = '0d0c5000-0000-4000-8000-000000000001';
+    // A worker of one of this deployment's pools carries the pool's tags, ours among them.
+    const workerTags = [
+      'k8s',
+      `k8s:${cluster}`,
+      'k8s-worker',
+      kubernetesTag,
+      deploymentTag('default'),
+    ];
+    const worker = seedDroplet(emu.state, { tags: workerTags });
+    const member = seedDroplet(emu.state, { tags: [`k8s:${cluster}`] });
+    const pooled = seedDroplet(emu.state, { tags: [kubernetesTag, deploymentTag('default')] });
+    const plain = seedDroplet(emu.state, { tags: ['k8s'] });
+
+    expect((await discovered(compute)).map((m) => m.id)).toEqual([String(plain.id)]);
+    for (const node of [worker, member, pooled])
+      for (const managed of [true, false]) {
+        const error = await failure(compute.claim!(String(node.id), 'inst_1', ctx(), { managed }));
+        expect([error.code, error.details?.reason]).toEqual(['INVALID_STATE', 'kubernetesNode']);
+      }
+    expect(tagWrites(emu)).toEqual([]);
+    // A release of a worker never takes the deployment tag off it.
+    await compute.release!(String(worker.id), 'inst_1', ctx());
+    expect(tagWrites(emu)).toEqual([]);
+    expect(worker.tags).toEqual(workerTags);
+
+    // A worker claimed before this check existed is never deleted; its release drops only the
+    // claim (the instance and managed tags), never the pool's own tags.
+    const claimed = seedDroplet(emu.state, {
+      tags: [...workerTags, managed, instanceTag('inst_2')],
+    });
+    const refused = await failure(compute.delete!(String(claimed.id), ctx()));
+    expect(refused.code).toBe('INVALID_STATE');
+    expect(
+      emu.requests.some((r) => r.method === 'DELETE' && r.url.pathname.startsWith('/v2/droplets')),
+    ).toBe(false);
+    await compute.release!(String(claimed.id), 'inst_2', ctx());
+    expect(claimed.tags).toEqual(workerTags);
+    // A droplet that only carries the plain `k8s` tag is claimable.
+    await compute.claim!(String(plain.id), 'inst_3', ctx(), { managed: true });
+  });
+
   it('pool membership is looked up once a minute for claims, and anew for each discover', async () => {
     const emu = emulator();
     const clock = manualClock(1_000_000);
@@ -2230,6 +2276,7 @@ describe('definition', () => {
       'discover',
       'claim',
       'networks',
+      'kubernetes',
     ]);
     const parsed = await digitalocean.config['~standard'].validate(doAccount);
     expect(parsed).toMatchObject({

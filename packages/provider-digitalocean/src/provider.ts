@@ -3,6 +3,7 @@ import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 import { clientFor } from './client/build.js';
 import { DoCompute } from './compute/droplets.js';
 import { doConfig, type DoConfig, type DoProviderOptions } from './config.js';
+import { DoKubernetes } from './doks/index.js';
 
 const maxInCallWaitMs = 20_000;
 const discoverTagPattern = /^[a-z0-9:_-]{1,255}$/;
@@ -30,7 +31,7 @@ export function digitaloceanProvider(
     version: '0.1.0',
     provides: ['vps'],
     config: doConfig as unknown as ProviderDefinition<DoConfig>['config'],
-    capabilities: ['power', 'reinstall', 'list', 'discover', 'claim', 'networks'],
+    capabilities: ['power', 'reinstall', 'list', 'discover', 'claim', 'networks', 'kubernetes'],
     create: (config: DoConfig, context: ProviderContext) => {
       if (config.regions.length === 0)
         throw invalidConfig('A DigitalOcean account lists at least one region', 'regions');
@@ -47,12 +48,17 @@ export function digitaloceanProvider(
           `inCallWaitMs must be a whole number of milliseconds from 0 to ${maxInCallWaitMs}`,
           'inCallWaitMs',
         );
-      return new DoCompute(
+      const deployment = options.deployment ?? 'default';
+      const client = clientFor(config, context, options);
+      const compute = new DoCompute(config, context, { deployment, inCallWaitMs }, client);
+      // Managed Kubernetes (DOKS) on the same client, token and request budget.
+      compute.kubernetes = new DoKubernetes({
+        client,
         config,
-        context,
-        { deployment: options.deployment ?? 'default', inCallWaitMs },
-        clientFor(config, context, options),
-      );
+        deployment,
+        ...(options.kubeTransport ? { kubeTransport: options.kubeTransport } : {}),
+      });
+      return compute;
     },
   });
 }

@@ -1,4 +1,5 @@
 import { field, manifest, type SecretRef } from '@better-compute/core';
+import type { KubeTransport } from './doks/transport.js';
 
 /** A DigitalOcean account's configuration: the token is a SecretRef, never a value. */
 export const doConfig = manifest({
@@ -68,4 +69,9 @@ export interface DoProviderOptions {
   inCallWaitMs?: number;
   /** Request budget per token. Defaults 250 per minute and 5000 per hour (DigitalOcean's limits). */
   budget?: { perMinute?: number; perHour?: number };
+  /**
+   * The transport to a DOKS cluster's own Kubernetes API (`kubernetes.credentials`). Default:
+   * `node:https`, trusting only the cluster's CA. Tests pass a fake.
+   */
+  kubeTransport?: KubeTransport;
 }

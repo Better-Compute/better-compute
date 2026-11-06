@@ -1,6 +1,7 @@
 /**
  * DigitalOcean provider for better-compute: Droplets as VPS instances and offers, VPC networks,
- * power, reinstall and discovery. Plain fetch against the DigitalOcean API v2; no SDK.
+ * power, reinstall, discovery and managed Kubernetes (DOKS). Plain fetch against the DigitalOcean
+ * API v2; no SDK.
  */
 export * from './client/errors.js';
 export * from './client/http.js';
@@ -10,6 +11,7 @@ export * from './compute/keys.js';
 export * from './compute/offers.js';
 export * from './compute/types.js';
 export * from './config.js';
+export * from './doks/index.js';
 export * from './ids.js';
 export * from './networks/index.js';
 export * from './probe.js';

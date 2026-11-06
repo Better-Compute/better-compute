@@ -1,5 +1,6 @@
 import { isComputeError } from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
+import { kubernetesTag } from '../doks/clusters.js';
 import type { DoDroplet } from './types.js';
 
 // Tag writes on one Droplet at a time (never the tag-scoped bulk endpoints). A tag object must
@@ -49,6 +50,18 @@ export async function unassignTag(
   } catch (error) {
     if (!isComputeError(error, 'NOT_FOUND')) throw error;
   }
+}
+
+/**
+ * Whether a Droplet is a DOKS worker node: DOKS's own `k8s-worker` or `k8s:<cluster uuid>` tag, or
+ * the ownership tag better-compute's DOKS node pools carry (DOKS puts a pool's tags on its
+ * workers). DOKS owns these Droplets: they are never claimed, managed or deleted as vps instances.
+ */
+export function isKubernetesNode(droplet: DoDroplet): boolean {
+  return (droplet.tags ?? []).some((t) => {
+    const tag = t.toLowerCase();
+    return tag === 'k8s-worker' || tag.startsWith('k8s:') || tag === kubernetesTag;
+  });
 }
 
 /** Whether a Droplet carries the (lowercase) tag, in any spelling. */
