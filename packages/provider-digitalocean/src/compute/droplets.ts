@@ -30,7 +30,7 @@ import { networkNamer, vpcForNetwork } from '../networks/vpcs.js';
 import { poolMembers } from './autoscale.js';
 import { ensureSshKeys } from './keys.js';
 import { DoCatalogImages } from './catalog.js';
-import { classifyImage, imageParam, type ImageChoice } from './images.js';
+import { checkGpuImage, classifyImage, imageParam, type ImageChoice } from './images.js';
 import { cachedSize, gpuModelOf, listOffers } from './offers.js';
 import { assignTag, ensureTag, hasTag, spelled, unassignTag } from './tags.js';
 import type { DoAction, DoDroplet, DoVpc } from './types.js';
@@ -152,7 +152,6 @@ const powerTypes: Readonly<Record<Exclude<PowerAction, 'nmi'>, string>> = {
   cycle: 'power_cycle',
   reset: 'power_cycle',
 };
-
 
 /** What a DoCompute takes from the provider options. */
 export type DoComputeOptions = Required<Pick<DoProviderOptions, 'deployment' | 'inCallWaitMs'>> &
@@ -359,6 +358,7 @@ export class DoCompute implements ProviderImpl {
       tags.push(networkMemberTag(ref.network), ...(ref.tags ?? []));
     }
     const gpu = this.isGpuSize(size);
+    checkGpuImage(imageChoice, size, gpu, cachedSize(this.client, size)?.gpu_info?.model);
 
     // 2. A retry finds the Droplet its first attempt made.
     const existing = await this.byKey(ctx.idempotencyKey, gpu, signal);
@@ -543,6 +543,8 @@ export class DoCompute implements ProviderImpl {
       message: (d) =>
         `Droplet ${d.id} is not managed by this better-compute deployment and is never rebuilt by it`,
     });
+    const gpuInfo = droplet.gpu_info ?? droplet.size?.gpu_info;
+    checkGpuImage(choice, droplet.size_slug, gpuInfo !== undefined, gpuInfo?.model);
     const param = await this.imageFor(choice, droplet.region.slug, ctx.signal);
     await this.act(droplet, { type: 'rebuild', image: param }, ctx.signal);
   }

@@ -5,6 +5,7 @@ import {
   classifyImage,
   deploymentTag,
   distributionOf,
+  gpuVendorOf,
   imageTag,
   labels,
   type CatalogImageLocation,
@@ -324,7 +325,7 @@ describe('catalog image region transfer', () => {
     expect(transfers()).toHaveLength(1);
 
     await compute.create(sfo, ctx('k'));
-    expect((dropletPosts(emu)[0]!.body as { image: unknown; region: string })).toMatchObject({
+    expect(dropletPosts(emu)[0]!.body as { image: unknown; region: string }).toMatchObject({
       image: imported.id,
       region: 'sfo3',
     });
@@ -350,5 +351,59 @@ describe('catalog image region transfer', () => {
       (r) => r.method === 'POST' && r.url.pathname === `/v2/images/${imported.id}/actions`,
     );
     expect(posts).toHaveLength(2);
+  });
+});
+
+describe('GPU image guard', () => {
+  it('vendors of sizes, models and images', () => {
+    expect(gpuVendorOf('gpu-h100x1-80gb')).toBe('nvidia');
+    expect(gpuVendorOf('gpu-l40sx1-48gb')).toBe('nvidia');
+    expect(gpuVendorOf('gpu-6000adax1-48gb')).toBe('nvidia');
+    expect(gpuVendorOf('nvidia_h100')).toBe('nvidia');
+    expect(gpuVendorOf('gpu-mi300x1-192gb')).toBe('amd');
+    expect(gpuVendorOf('amd_mi300x')).toBe('amd');
+    expect(gpuVendorOf('gpu-amd-base')).toBe('amd');
+    expect(gpuVendorOf('gpu-h100x1-base')).toBe('nvidia');
+    expect(gpuVendorOf('s-2vcpu-4gb')).toBeUndefined();
+  });
+
+  it('an AI/ML image on a size without GPUs is refused before any request', async () => {
+    const emu = new DoEmulator({ now: () => t0 });
+    const compute = await build(emu);
+    const error = await failure(compute.create(request({ image: 'gpu-h100x1-base' }), ctx()));
+    expect(error.code).toBe('INVALID_INPUT');
+    expect(error.details).toMatchObject({ provider: 'digitalocean', reason: 'gpuImage' });
+    expect(emu.requests).toHaveLength(0);
+  });
+
+  it('an AI/ML image of the other vendor is refused; plain images boot GPU sizes', async () => {
+    const emu = new DoEmulator({ now: () => t0 });
+    const compute = await build(emu, { ...doAccount, regions: ['atl1'] });
+    const amd = request({ offerId: 'atl1/gpu-mi300x1-192gb', image: 'gpu-h100x1-base' });
+    const error = await failure(compute.create(amd, ctx('a')));
+    expect(error.code).toBe('INVALID_INPUT');
+    expect(error.details).toMatchObject({ reason: 'gpuImage' });
+    expect(emu.requests).toHaveLength(0);
+    // The vendor's own AI/ML image and a plain OS image both go through.
+    await compute.create(
+      request({ offerId: 'atl1/gpu-h100x1-80gb', image: 'gpu-h100x1-base' }),
+      ctx('b'),
+    );
+    await compute.create(
+      request({ name: 'inst_2', offerId: 'atl1/gpu-mi300x1-192gb', image: 'ubuntu-24-04-x64' }),
+      ctx('c'),
+    );
+    expect(dropletPosts(emu)).toHaveLength(2);
+  });
+
+  it('reinstall refuses an AI/ML image the droplet size cannot use', async () => {
+    const emu = new DoEmulator({ now: () => t0 });
+    const compute = await build(emu);
+    const droplet = seedDroplet(emu.state, {
+      tags: ['better-compute-managed:true', deploymentTag('default')],
+    });
+    const error = await failure(compute.reinstall(String(droplet.id), 'gpu-h100x1-base', ctx()));
+    expect(error.details).toMatchObject({ reason: 'gpuImage' });
+    expect(emu.requests.some((r) => r.method === 'POST')).toBe(false);
   });
 });
