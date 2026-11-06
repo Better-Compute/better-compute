@@ -1,5 +1,14 @@
 import { manualClock, type ManualClock } from '@better-compute/core';
+import type { CredentialSource } from '@better-compute/aws-core';
+import { StsEmulator } from './sts.js';
 import { ec2Error, jsonError, queryError } from './xml.js';
+
+/** The platform (control plane) AWS account and its ambient keys. */
+export const platformAccount = '111111111111';
+export const platformKeys = {
+  accessKeyId: 'AKIATESTKEY0000000001',
+  secretAccessKey: 'testsecret-platform',
+} as const;
 
 // An in-process AWS emulator injected through `fetch` (AD17). Each service registers a handler
 // for its hosts; the router checks the SigV4 shape and clock of every signed request, records it,
@@ -56,13 +65,27 @@ export class AwsEmulator {
   #routes: { host: RegExp; handler: ServiceHandler }[] = [];
   #failures: Failure[] = [];
   #before = new Map<string, (request: EmulatorRequest) => void | Promise<void>>();
+  /** STS, with the platform identity registered. */
+  readonly sts: StsEmulator;
+  /** The control plane's ambient identity (account 111111111111). */
+  readonly ambient: CredentialSource = {
+    kind: 'ambient:test',
+    credentials: async () => ({ ...platformKeys }),
+  };
 
   constructor(options: { clock?: ManualClock } = {}) {
     this.clock = options.clock ?? manualClock(Date.UTC(2026, 9, 1));
+    this.sts = new StsEmulator(this);
+    this.sts.identities.set(platformKeys.accessKeyId, {
+      secret: platformKeys.secretAccessKey,
+      account: platformAccount,
+      arn: `arn:aws:iam::${platformAccount}:role/bc-control-plane`,
+    });
   }
 
   register(host: RegExp, handler: ServiceHandler): void {
-    this.#routes.push({ host, handler });
+    // A later registration wins, so a test can override a default service.
+    this.#routes.unshift({ host, handler });
   }
 
   /** The next `times` calls of `operation` fail with `code`. */
