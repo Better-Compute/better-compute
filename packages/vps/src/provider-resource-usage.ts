@@ -15,12 +15,15 @@ import { billingModeOf, poolAccountTenantSql } from './billing.js';
 // | snapshot | `snapshot`  | vps.snapshot.gib.hours | its GiB (what the provider reported)        |
 // | address  | `address`   | vps.address.hours      | 1                                           |
 //
-// `usage_windows.source_kind` is a CHECK that accepts `snapshot` today but not `volume` or `address`, and the
-// kubernetes module's migration rewrites that CHECK as a fixed list: whoever owns it must add both before they are
-// metered. Until then `meterProviderResources` meters `snapshot` only (`defaultProviderResourceKinds`).
+// `usage_windows.source_kind` accepts `volume` and `address` from core/0044 on (the kubernetes module's rewrite of
+// that CHECK lists them too), so every kind is metered by default.
 
-/** The provider resources metered by default: those whose source kind usage_windows accepts on every database. */
-export const defaultProviderResourceKinds: readonly ProviderResourceKind[] = Object.freeze(['snapshot']);
+/** The provider resources metered by default. */
+export const defaultProviderResourceKinds: readonly ProviderResourceKind[] = Object.freeze([
+  'volume',
+  'snapshot',
+  'address',
+]);
 
 export type ProviderResourceKind = 'volume' | 'snapshot' | 'address';
 

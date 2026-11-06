@@ -131,10 +131,7 @@ export type UsageSourceKind =
   | 'cost'
   /** A managed Kubernetes cluster (`@better-compute/kubernetes`, whose migration adds it to the CHECK). */
   | 'kubernetes'
-  /**
-   * (DO P2) A provider volume or reserved address (vps provider-resource-usage.ts). Not yet in the source_kind CHECK:
-   * vps meters them only once the CHECK owner adds them (provider snapshots use `snapshot`).
-   */
+  /** (DO P2) A provider volume or reserved address (vps provider-resource-usage.ts; core/0044 adds both). */
   | 'volume'
   | 'address';
 

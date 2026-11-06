@@ -164,8 +164,8 @@ is gone) leaves its machine running. Its volumes are only detached, `deleteWithI
 - On a metered pool, each resource bills from the moment it was `ready` until it is deleted, in whole-hour usage
   windows written by `vps.ancillary-usage`: a snapshot `vps.snapshot.gib.hours` (its GiB), a volume
   `vps.volume.gib.hours` (its GiB) and an address `vps.address.hours` (one per hour). One that never became ready never
-  bills; a BYO account's pool (platform fee) bills none of them. In this release only snapshots are metered: volume and
-  address windows need the `volume` and `address` usage source kinds, which the database does not accept yet.
+  bills; a BYO account's pool (platform fee) bills none of them. Volumes, snapshots and addresses are all metered by
+  the `vps.ancillary-usage` pass (usage source kinds `volume`, `snapshot` and `address`).
 - Events: `providerVolume.*` (created, updated, ready, attached, detached, resized, error, deleting, deleted),
   `providerVolume.snapshot.*` and `providerAddress.*` (created, updated, ready, assigned, unassigned, error, deleting,
   deleted). See the [event catalog](/docs/reference/events).

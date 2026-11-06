@@ -1195,7 +1195,7 @@ describe('usage', () => {
     );
     const top = Math.floor(clock.now() / HOUR) * HOUR;
     await advanceTo(top + 2 * HOUR + 60_000);
-    // The ancillary pass meters provider snapshots; volumes and addresses wait for the source_kind CHECK.
+    // The ancillary pass meters provider snapshots, volumes and addresses.
     await db.transaction((tx) => meterAncillaries(tx, clock.now(), { rootTenantId: 'root', meterGraceMs: 0 }));
     const written = await windows('snapshot', snapshot.id);
     expect(written.map((row) => row.meter)).toEqual(['vps.snapshot.gib.hours', 'vps.snapshot.gib.hours']);
@@ -1207,7 +1207,10 @@ describe('usage', () => {
       provider: 'fake-do',
     });
     expect(written[0]!.key).toBe(`cmp:snapshot:${snapshot.id}:${top}:vps.snapshot.gib.hours`);
-    expect(await windows('volume', volume.id)).toEqual([]);
+    expect((await windows('volume', volume.id)).map((row) => row.meter)).toEqual([
+      'vps.volume.gib.hours',
+      'vps.volume.gib.hours',
+    ]);
     // Again: nothing new.
     expect((await meter()).windows).toBe(0);
 
@@ -1228,9 +1231,9 @@ describe('usage', () => {
     );
   });
 
-  it('bills volumes in GiB-hours and addresses in hours once their source kinds are accepted', async () => {
-    // Stands in for the owner of the source_kind CHECK adding `volume` and `address` (integration).
-    await db.query(`ALTER TABLE usage_windows DROP CONSTRAINT IF EXISTS usage_windows_source_kind_ck`);
+  it('bills volumes in GiB-hours and addresses in hours, by default (core/0044 accepts their kinds)', async () => {
+    const meterAll = () =>
+      db.transaction((tx) => meterAncillaries(tx, clock.now(), { rootTenantId: 'root', meterGraceMs: 0 }));
     const volume = await createVolume({ sizeGiB: 12 });
     const address = await createAddress();
     const never = await createVolume({ sizeGiB: 5 });
@@ -1239,7 +1242,7 @@ describe('usage', () => {
     await db.query(`UPDATE provider_volumes SET ready_at = NULL, state = 'error' WHERE id = $1`, [never.id]);
     const top = Math.floor(clock.now() / HOUR) * HOUR;
     await advanceTo(top + HOUR + 1_000);
-    await meter(['volume', 'address']);
+    await meterAll();
     const volumeWindows = await windows('volume', volume.id);
     expect(volumeWindows).toHaveLength(1);
     expect(volumeWindows[0]).toMatchObject({ meter: 'vps.volume.gib.hours', tags: { source: 'provider-volume' } });
@@ -1251,9 +1254,28 @@ describe('usage', () => {
     expect(addressWindows[0]!.quantity).toBeLessThan(1);
     expect(await windows('volume', never.id)).toEqual([]);
     await advanceTo(top + 2 * HOUR + 1_000);
-    await meter(['volume', 'address']);
+    await meterAll();
     expect((await windows('volume', volume.id))[1]!.quantity).toBe(12);
     expect((await windows('address', address.id))[1]!.quantity).toBe(1);
+  });
+
+  it('volume and address windows are accepted with the kubernetes module installed after vps', async () => {
+    const { kubernetesMigrations } = await import('@better-compute/kubernetes');
+    const fresh = pglite();
+    try {
+      await fresh.migrate([...capacityMigrations, ...vpsMigrations, ...kubernetesMigrations]);
+      const insert = (kind: string) =>
+        fresh.query(
+          `INSERT INTO usage_windows (idempotency_key, source_kind, source_id, tenant_id, meter, quantity,
+                                      window_start, window_end)
+           VALUES ($1, $2, 'x', 'root', 'm', 1, $3, $4)`,
+          [`cmp:${kind}:x:0`, kind, new Date(T0).toISOString(), new Date(T0 + HOUR).toISOString()],
+        );
+      for (const kind of ['volume', 'address', 'snapshot', 'kubernetes']) await insert(kind);
+      await expect(insert('bogus')).rejects.toThrow(/usage_windows_source_kind_ck/);
+    } finally {
+      await fresh.close();
+    }
   });
 
   it('a BYO pool (platform-fee) bills nothing but advances the watermark', async () => {
