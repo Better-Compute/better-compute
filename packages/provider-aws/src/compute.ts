@@ -102,6 +102,26 @@ export class AwsCompute implements ProviderImpl {
     readonly deps: AwsComputeDeps,
   ) {}
 
+  /** How long EC2 may not yet show what this client just launched or tagged. */
+  protected get consistencyWindowMs(): number {
+    return this.options.consistencyWindowMs ?? 120_000;
+  }
+
+  /**
+   * Whether `id` is in `map` (id → time) and younger than the consistency window. Older entries
+   * are dropped on the way: they are inserted in time order, so the sweep stops at the first young
+   * one and the map holds only what the window still needs.
+   */
+  protected recent(map: Map<string, number>, id: string): boolean {
+    const now = this.context.clock.now();
+    for (const [key, at] of map) {
+      if (now - at < this.consistencyWindowMs) break;
+      map.delete(key);
+    }
+    const at = map.get(id);
+    return at !== undefined && now - at < this.consistencyWindowMs;
+  }
+
   /** Every EC2 call runs after the account's identity checks (memoized). */
   protected async ready(signal: AbortSignal): Promise<void> {
     await this.deps.account.verify({ signal, clock: this.context.clock });
@@ -371,7 +391,7 @@ export class AwsCompute implements ProviderImpl {
       throw new ComputeError('PROVIDER_ERROR', 'RunInstances returned no instance', undefined, {
         provider: 'aws',
       });
-    if (!this.#created.has(id)) this.#created.set(id, this.context.clock.now());
+    if (!this.recent(this.#created, id)) this.#created.set(id, this.context.clock.now());
     return this.machine(instance, signal);
   }
 
@@ -411,10 +431,7 @@ export class AwsCompute implements ProviderImpl {
     // EC2 is eventually consistent right after RunInstances: the ClientToken finds it sooner.
     instance ??= await this.#byClientToken(id, context);
     if (!instance) {
-      const created = this.#created.get(id);
-      const window = this.options.consistencyWindowMs ?? 120_000;
-      if (created !== undefined && this.context.clock.now() - created < window)
-        return { id, state: 'pending', addresses: [] };
+      if (this.recent(this.#created, id)) return { id, state: 'pending', addresses: [] };
       return undefined;
     }
     const machine = await this.machine(instance, context.signal);
@@ -428,8 +445,16 @@ export class AwsCompute implements ProviderImpl {
 
   async delete(id: string, context: CallContext): Promise<void> {
     parseInstanceId(id);
-    const instance = await this.describe(id, context.signal);
-    if (!instance) return;
+    // The same reads as get: by id, then by client token (EC2 lags right after RunInstances).
+    const instance =
+      (await this.describe(id, context.signal)) ?? (await this.#byClientToken(id, context));
+    if (!instance) {
+      // Never seen and not ours recently: gone. Ours and not yet visible: RunInstances tagged it
+      // managed, so terminate it rather than report a delete that leaves it running.
+      if (!this.recent(this.#created, id)) return;
+      await this.#terminate(id, context);
+      return;
+    }
     const state = instance.child('instanceState')?.textOf('name');
     if (state === 'terminated' || state === 'shutting-down') return;
     const tagged = new Map(
@@ -445,10 +470,27 @@ export class AwsCompute implements ProviderImpl {
           reason: 'not-managed',
         },
       );
+    await this.#terminate(id, context);
+  }
+
+  /**
+   * TerminateInstances. NOT_FOUND is success (already gone), except for an instance this client
+   * launched inside the consistency window: EC2 may simply not show it yet, so that is a retryable
+   * UNAVAILABLE (vps treats NOT_FOUND and success alike: deleted).
+   */
+  async #terminate(id: string, context: CallContext): Promise<void> {
     try {
       await this.call('TerminateInstances', { InstanceId: [id] }, context.signal);
     } catch (error) {
-      if (isComputeError(error, 'NOT_FOUND')) return;
+      if (isComputeError(error, 'NOT_FOUND')) {
+        if (!this.recent(this.#created, id)) return;
+        throw new ComputeError(
+          'UNAVAILABLE',
+          `instance ${id} was just launched and EC2 does not show it yet; retry the delete`,
+          undefined,
+          { provider: 'aws', reason: 'eventual-consistency' },
+        );
+      }
       if (isComputeError(error, 'INVALID_STATE') && error.details?.code === 'OperationNotPermitted')
         throw new ComputeError(
           'INVALID_STATE',

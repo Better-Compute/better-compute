@@ -640,6 +640,53 @@ describe('compute', () => {
     await impl.delete(machine.id, call('ins_del'));
   });
 
+  it('delete inside the consistency window terminates or retries, never reports success', async () => {
+    const { emu, ec2emu, create, impl, call } = await providerWorld();
+    ec2emu.newInstanceNotFound = { byId: 5, byToken: 5 };
+    const machine = await create('ins_leak');
+    // Neither read sees the instance yet: delete still terminates it (we created it, tagged managed).
+    await impl.delete(machine.id, call('ins_leak'));
+    expect(emu.calls('TerminateInstances')).toHaveLength(1);
+    expect(ec2emu.instances.get(machine.id)!.state).toBe('shutting-down');
+
+    // TerminateInstances itself not finding it yet is a retry, never NOT_FOUND or success.
+    const other = await create('ins_leak2');
+    emu.failNext('TerminateInstances', 'InvalidInstanceID.NotFound');
+    const error = await rejection(() => impl.delete(other.id, call('ins_leak2')));
+    expect(error).toMatchObject({
+      code: 'UNAVAILABLE',
+      details: { reason: 'eventual-consistency' },
+    });
+    expect(ec2emu.instances.get(other.id)!.state).toBe('pending');
+
+    // The client token finds it when the by-id read misses: the normal guarded path runs.
+    ec2emu.newInstanceNotFound = { byId: 1, byToken: 0 };
+    const third = await create('ins_leak3');
+    await impl.delete(third.id, call('ins_leak3'));
+    expect(ec2emu.instances.get(third.id)!.state).toBe('shutting-down');
+
+    // Outside the window an instance no read finds is gone.
+    emu.clock.advance(121_000);
+    await impl.delete(other.id, call('ins_leak2'));
+  });
+
+  it('the consistency-window bookkeeping drops entries older than the window', () => {
+    const { compute, emu } = directWorld();
+    const probe = compute as unknown as {
+      recent(map: Map<string, number>, id: string): boolean;
+    };
+    const map = new Map<string, number>([['i-old', emu.clock.now()]]);
+    emu.clock.advance(100_000);
+    map.set('i-young', emu.clock.now());
+    expect(probe.recent(map, 'i-old')).toBe(true);
+    emu.clock.advance(30_000);
+    expect(probe.recent(map, 'i-young')).toBe(true);
+    expect([...map.keys()]).toEqual(['i-young']);
+    emu.clock.advance(120_000);
+    expect(probe.recent(map, 'i-young')).toBe(false);
+    expect(map.size).toBe(0);
+  });
+
   it('delete reports termination protection as INVALID_STATE', async () => {
     const { impl, call, create, ec2emu } = await providerWorld();
     const machine = await create('ins_protected');
