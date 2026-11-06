@@ -7,7 +7,8 @@ import type { AwsCommandContext } from './cli.js';
 // keep messages 14 days; EventBridge rules for EC2 (state changes, Spot interruption warnings,
 // rebalance recommendations, Capacity Reservation events) and AWS Health EC2 events (plus, opted in,
 // CloudTrail EC2 API calls and GuardDuty findings) target the queue; and the queue policy lets only
-// events.amazonaws.com send, only from those rules in this account, only over TLS. The account
+// events.amazonaws.com send, only from those rules in this account, only over TLS, and denies every
+// other sender (a same-account principal with sqs:SendMessage on * included). The account
 // config then names the queue URL (stack output QueueUrl) as eventQueueUrl.
 
 const usage = (message: string) => new ComputeError('INVALID_INPUT', message);
@@ -129,6 +130,18 @@ export function eventRulesTemplate(options: EventRulesOptions): Record<string, J
                 },
               },
               {
+                // The Allow alone leaves the queue open to same-account principals whose identity
+                // policy grants sqs:SendMessage on *, and their bodies can carry the right account,
+                // region and source. Deny every send not from one of the rules: a direct send has no
+                // aws:SourceArn, and a negated operator matches a missing key (no ...IfExists).
+                Sid: 'RulesOnlySend',
+                Effect: 'Deny',
+                Principal: '*',
+                Action: 'sqs:SendMessage',
+                Resource: queueArn,
+                Condition: { ArnNotEquals: { 'aws:SourceArn': ruleArns } },
+              },
+              {
                 Sid: 'TlsOnly',
                 Effect: 'Deny',
                 Principal: '*',
@@ -161,7 +174,7 @@ export function awsEventRulesCommand() {
     group: 'Providers' as const,
     summary: "Print the CloudFormation stack that feeds an AWS account's event intake queue",
     description:
-      "aws event-rules prints a CloudFormation template (JSON) to deploy in the AWS account: the SQS intake queue --queue-name (SSE-SQS, 14-day retention, a dead-letter queue after 5 receives), EventBridge rules for EC2 state changes, Spot interruption warnings, rebalance recommendations, Capacity Reservation events and AWS Health EC2 events, and a queue policy that lets only events.amazonaws.com send, only from those rules in --account, only over TLS. --api-calls adds CloudTrail EC2 instance API calls, --guardduty GuardDuty findings (list aws.guardduty in the account's eventSources). Set the stack's QueueUrl output as the provider account's eventQueueUrl, and grant the account's role sqs:ReceiveMessage and sqs:DeleteMessage on it (aws iam-policy --event-queue).",
+      "aws event-rules prints a CloudFormation template (JSON) to deploy in the AWS account: the SQS intake queue --queue-name (SSE-SQS, 14-day retention, a dead-letter queue after 5 receives), EventBridge rules for EC2 state changes, Spot interruption warnings, rebalance recommendations, Capacity Reservation events and AWS Health EC2 events, and a queue policy that lets only events.amazonaws.com send, only from those rules in --account, only over TLS, and denies sends from anything else (same-account principals included). --api-calls adds CloudTrail EC2 instance API calls, --guardduty GuardDuty findings (list aws.guardduty in the account's eventSources). Set the stack's QueueUrl output as the provider account's eventQueueUrl, and grant the account's role sqs:ReceiveMessage and sqs:DeleteMessage on it (aws iam-policy --event-queue).",
     target: 'none' as const,
     output: 'text' as const,
     flags: {

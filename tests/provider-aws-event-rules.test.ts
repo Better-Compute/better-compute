@@ -59,9 +59,31 @@ describe('aws event-rules', () => {
         StringEquals: { 'aws:SourceAccount': '123456789012' },
       },
     });
-    expect(policy.Statement.find((s: any) => s.Effect === 'Deny')).toMatchObject({
+    expect(policy.Statement.find((s: any) => s.Sid === 'TlsOnly')).toMatchObject({
+      Effect: 'Deny',
       Condition: { Bool: { 'aws:SecureTransport': 'false' } },
     });
+    // The Allow alone does not stop a same-account principal whose identity policy grants
+    // sqs:SendMessage on *: a forged body could pass the account, region and source checks. The
+    // Deny refuses every send whose aws:SourceArn is not one of the rules; a direct send carries no
+    // aws:SourceArn, and a negated operator matches a missing key, so it is denied.
+    expect(policy.Statement.find((s: any) => s.Sid === 'RulesOnlySend')).toEqual({
+      Sid: 'RulesOnlySend',
+      Effect: 'Deny',
+      Principal: '*',
+      Action: 'sqs:SendMessage',
+      Resource: { 'Fn::GetAtt': ['IntakeQueue', 'Arn'] },
+      Condition: {
+        ArnNotEquals: {
+          'aws:SourceArn': [
+            { 'Fn::GetAtt': ['Ec2Events', 'Arn'] },
+            { 'Fn::GetAtt': ['HealthEvents', 'Arn'] },
+          ],
+        },
+      },
+    });
+    // Not ...IfExists: that would let a send without aws:SourceArn through.
+    expect(JSON.stringify(policy)).not.toContain('IfExists');
     expect(template.Outputs).toMatchObject({ QueueUrl: { Value: { Ref: 'IntakeQueue' } } });
   });
 
