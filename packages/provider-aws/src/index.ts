@@ -1,3 +1,5 @@
 export * from './config.js';
 export * from './ids.js';
 export * from './account.js';
+export * from './shapes.js';
+export * from './compute.js';
