@@ -14,6 +14,7 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { refundQuota } from '@better-compute/capacity';
+import { eksNodeUserData, poolEksJoin } from './eks-nodes.js';
 import { readPoolAccount } from './accounts.js';
 import {
   attachConflictCondition,
@@ -532,16 +533,21 @@ async function reconcileProvider(
         throw new ComputeError('INVALID_STATE', `Attached instance ${row.id} is never created`);
       if (!row.shape.offerId)
         throw new ComputeError('INVALID_STATE', `Flavor ${row.shape.name} names no offer`);
+      // (AWS A9) A pool that joins an EKS cluster: nodeadm's NodeConfig goes first in the user data.
+      const eks = await poolEksJoin(sql, row.poolId, row.tenantId);
       machine = await client.create(
         {
           offerId: row.shape.offerId,
           image: row.imageId,
           // A tenant's secret:// ref (checked to be its own at create) is resolved for the provider.
-          userData: isSecretRef(row.userData)
-            ? await deps.secrets.resolve(row.userData)
-            : renderUserData(row),
+          userData: eksNodeUserData(
+            eks,
+            isSecretRef(row.userData) ? await deps.secrets.resolve(row.userData) : renderUserData(row),
+          ),
           name: row.id,
           ...(row.sshKeys.length ? { sshKeys: row.sshKeys } : {}),
+          // Only an EKS node launch gets the account's EKS node identity (eksNodeInstanceProfile).
+          ...(eks ? { kubernetesNode: 'eks' as const } : {}),
           // The tenant's labels; the provider's own ownership labels win over them.
           ...(row.labels !== undefined ? { labels: row.labels } : {}),
           // (v1.0) On a tenant network: its subnet, and the tag the firewall rules target.

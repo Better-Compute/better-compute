@@ -153,6 +153,12 @@ export interface PoolPolicy {
     /** `sha256:<hex>` of the cluster CA's public key (kubeadm's `--discovery-token-ca-cert-hash`). */
     caCertSha256?: string;
     joinTokenRef?: string;
+    /**
+     * (AWS A9) The machines join this EKS cluster through nodeadm (`k8s-join` mode `eks`: a NodeConfig in their
+     * user data, AL2023 EKS AMIs), authenticating as their instance profile's role; instead of `apiServer`,
+     * `caCertSha256`, `joinTokenRef` and `kubernetesVersion`. The values are DescribeCluster's.
+     */
+    eks?: { name: string; apiServerEndpoint: string; certificateAuthority: string; cidr: string };
     /** Extra labels for the machines' Node objects (keys under `bcd.dev/` are bcd's own). */
     labels?: Record<string, string>;
     /** Taints as `key=value:Effect`. */

@@ -189,6 +189,13 @@ async function admit(
 ): Promise<Admitted> {
   const provider = await poolKubernetes(deps, tx, input.tenantId, input.poolId);
   const region = regionOf(provider, input.location);
+  if (provider.kubernetes.regionalOnly === true && input.location !== region)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `Clusters on this provider are regional: location must be the region ${region}, not the zone ${input.location} (node pools take zones)`,
+      undefined,
+      { field: 'location', region },
+    );
   assertZones(input.nodePools, region, provider.zones);
   const admitted: Admitted = { accountId: provider.account.id, region };
   if (input.networkId !== undefined)

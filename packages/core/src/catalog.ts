@@ -610,6 +610,7 @@ group('providerAccounts', 'vps', [
     { or: [['flavors:manage', 'pool']] },
   ],
   ['unbindReservation', 'mutation', 'providers:manage', 'provider-account', 'v1.0'],
+  ['clusters', 'read', 'providers:read', 'provider-account', 'v1.0'],
 ]);
 group('reservationGrants', 'vps', [
   ['create', 'mutation', 'providers:manage', 'provider-account', 'v1.0'],

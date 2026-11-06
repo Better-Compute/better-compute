@@ -311,9 +311,13 @@ export async function accountKubernetes(
     Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [];
   return {
     account,
-    // GCP configures zones; providers without zones (DigitalOcean) configure regions.
+    // GCP configures zones; providers without zones (DigitalOcean) configure regions; an AWS account is one
+    // region (`region`) with zones.
     zones: strings(account.config.zones),
-    regions: strings(account.config.regions),
+    regions: [
+      ...strings(account.config.regions),
+      ...(typeof account.config.region === 'string' ? [account.config.region] : []),
+    ],
     kubernetes: client.kubernetes,
     client,
   };

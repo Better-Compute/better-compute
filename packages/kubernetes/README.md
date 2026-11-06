@@ -1,7 +1,8 @@
 # @better-compute/kubernetes
 
-Managed Kubernetes clusters for better-compute: GKE Standard and Autopilot (and later other providers' managed
-Kubernetes) on the provider accounts `@better-compute/vps` manages. The provider runs the control plane;
+Managed Kubernetes clusters for better-compute: GKE Standard and Autopilot, and Amazon EKS (managed node groups, and
+EKS Auto Mode for `autopilot`; see [provider-aws](../provider-aws#managed-kubernetes-eks)), on the provider accounts
+`@better-compute/vps` manages. The provider runs the control plane;
 better-compute never runs one itself. It records what the tenant wants, converges it through
 `ProviderImpl.kubernetes`, issues short-lived kubeconfigs and meters cluster hours.
 

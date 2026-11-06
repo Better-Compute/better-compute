@@ -460,6 +460,7 @@ describe('apiSurface (§9.2)', () => {
       'providerAccounts.machines': 'v1.0',
       'providerAccounts.discover': 'v1.0',
       'providerAccounts.federationSetup': 'v1.0',
+      'providerAccounts.clusters': 'v1.0',
       'instances.attach': 'v1.0',
       'instances.detach': 'v1.0',
       'instances.reboot': 'v1.0',

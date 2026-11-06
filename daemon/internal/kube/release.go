@@ -39,7 +39,7 @@ func (u JoinUnit) Clean(ctx context.Context, sys hostconfig.System) ([]converge.
 		{
 			Description: "cordon Node " + name,
 			Apply: func(ctx context.Context) error {
-				_, err := sys.Run(ctx, kubectl("cordon", name))
+				_, err := sys.Run(ctx, kubectl(sys, "cordon", name))
 				// Clusters whose admission forbids a node to change its own spec still get drained.
 				if err != nil && !strings.Contains(strings.ToLower(err.Error()), "forbidden") {
 					return err
@@ -55,7 +55,7 @@ func (u JoinUnit) Clean(ctx context.Context, sys hostconfig.System) ([]converge.
 					return err
 				}
 				for _, p := range pods {
-					if _, err := sys.Run(ctx, kubectl("delete", "pod", "--namespace", p[0], p[1], "--wait=false", "--ignore-not-found", releaseGraceArg)); err != nil {
+					if _, err := sys.Run(ctx, kubectl(sys, "delete", "pod", "--namespace", p[0], p[1], "--wait=false", "--ignore-not-found", releaseGraceArg)); err != nil {
 						return fmt.Errorf("delete pod %s/%s: %w", p[0], p[1], err)
 					}
 				}
@@ -103,7 +103,7 @@ type podList struct {
 // not static (mirror) pods (the API cannot stop them: InUse's process backstop sees what they hold),
 // not finished ones.
 func workloadPods(ctx context.Context, sys hostconfig.System, node string) ([][2]string, error) {
-	out, err := sys.Run(ctx, kubectl("get", "pods", "--all-namespaces", "--field-selector", "spec.nodeName="+node, "-o", "json"))
+	out, err := sys.Run(ctx, kubectl(sys, "get", "pods", "--all-namespaces", "--field-selector", "spec.nodeName="+node, "-o", "json"))
 	if err != nil {
 		return nil, fmt.Errorf("list the pods on Node %s: %w", node, err)
 	}

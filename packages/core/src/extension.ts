@@ -837,8 +837,9 @@ export interface KubernetesNodePoolSpec {
 
 /**
  * (kubernetes) A credential for one principal: the module never stores one, and never holds a cluster-admin kubeconfig.
- * The provider creates (or reuses) a Kubernetes service account named `subject`, binds it to the built-in role for
- * `role` (`view`, `edit`, `cluster-admin`) and mints a bound token through the TokenRequest API.
+ * The provider creates (or reuses) a Kubernetes service account named `subject`, binds it to a ClusterRole for
+ * `role` (`view`, an edit role, `cluster-admin`) and mints a bound token through the TokenRequest API. An edit
+ * subject must not be able to act as another subject's service account (EKS: `better-compute:edit` and an admission guard).
  */
 export interface KubernetesCredentialRequest {
   /** A DNS-1123 label the module derives from the IAM identity (`bc-u-…`). */
@@ -899,6 +900,29 @@ export interface ProviderKubernetes {
     context: CallContext,
   ): Promise<KubernetesCredentials>;
   versions(location: string, context: CallContext): Promise<KubernetesVersions>;
+  /**
+   * (AWS A9) The clusters on the account, whoever created them, with what machines need to join one
+   * (`policy.kubernetes`): for EKS, nodeadm's cluster (`eks`). Plain values only, never credentials.
+   */
+  listClusters?(context: CallContext): Promise<ProviderKubernetesCluster[]>;
+  /** (AWS A9) Clusters are regional only (EKS): a zone as a cluster location is refused at create. */
+  readonly regionalOnly?: boolean;
+}
+
+/** (AWS A9) One cluster of `ProviderKubernetes.listClusters`. */
+export interface ProviderKubernetesCluster {
+  /** The provider-side name, and the `cluster` id `getCluster` takes. */
+  name: string;
+  id: string;
+  location: string;
+  state: ProviderResourceState['state'];
+  version?: string;
+  /** `https://…` of the control plane. */
+  endpoint?: string;
+  /** better-compute created it (its managed tag or label). */
+  managed: boolean;
+  /** EKS: `policy.kubernetes.eks` for machines that join it through nodeadm (`k8s-join` mode `eks`). */
+  eks?: { name: string; apiServerEndpoint: string; certificateAuthority: string; cidr: string };
 }
 
 /**
@@ -990,6 +1014,12 @@ export interface ProviderImpl {
        * provider that can install keys without cloud-init (Compute Engine's `ssh-keys`) does.
        */
       sshKeys?: readonly string[];
+      /**
+       * (AWS A9) The machine is a node of the account's EKS cluster (its user data carries nodeadm's
+       * NodeConfig; vps sets this only for the pool owner's instances): the provider launches it with
+       * its EKS node identity, which no other launch of the account ever gets.
+       */
+      kubernetesNode?: 'eks';
     },
     context: CallContext,
   ): Promise<ExternalMachine>;

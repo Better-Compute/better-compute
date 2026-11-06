@@ -1948,6 +1948,7 @@ A phase closes only when its exit tests are green in CI. `bench/REFERENCE.md` de
   - tenant networks: `networks.*` and `firewallRules.*` with the `vps.networks` reconciler, instances on a tenant network's subnet, rules targeting instances by network tag;
   - failed provider creates (capacity, quota) end in `error`/`ProvisionFailed` instead of retrying;
   - `provider-digitalocean` (P1, landed 2026-10-18): Droplets (GPU Droplets included) as VPS instances and offers, create made idempotent by a tag, discovery and attach, and tenant networks (a VPC per subnet, Cloud Firewalls); its live suite has not been run yet.
+  - `aws-core` and `provider-aws` (AWS A0/A1): SigV4, the EC2/query/JSON/REST protocol clients and the credential chain with no AWS SDK; EC2 instances as VPS instances and offers through provider pools, ClientToken-idempotent creates that ride out EC2's eventual consistency, IMDSv2 and encrypted EBS by default, discovery and attach, the F1/ExternalId credential rules, and the `aws iam-policy`/`aws trust-policy` commands; emulator-tested only, no live suite yet.
 - *Deliverables:* API/proto freeze; the N−2 skew guarantee; generated docs; an external security review; SLSA L3; npm publish with provenance after better-iam publishes.
 - *Acceptance:* upgrading from v0.5 disturbs no running allocation; no open critical or high findings.
 

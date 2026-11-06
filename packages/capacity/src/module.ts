@@ -833,7 +833,8 @@ export interface CapacityModuleOptions extends PlacementOptions {
  */
 async function assertKubernetesJoin(tx: SqlTx, siteId: string, policy: PoolPolicy): Promise<void> {
   const kubernetes = policy.kubernetes;
-  if (!kubernetes?.apiServer || kubernetes.platformOperated === true) return;
+  // (AWS A9) An EKS cluster (`eks`, nodeadm) is joined as well as a kubeadm one (`apiServer`).
+  if (!(kubernetes?.apiServer || kubernetes?.eks) || kubernetes.platformOperated === true) return;
   const { rows } = await tx.query<{ kind: string }>(`SELECT kind FROM sites WHERE id = $1`, [siteId]);
   if (rows[0] && rows[0].kind !== 'custom')
     throw new ComputeError(

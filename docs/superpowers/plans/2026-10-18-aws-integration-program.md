@@ -594,6 +594,25 @@ These are all implementations of seams that already exist; no core changes:
 
 ### A9 — Kubernetes on AWS (EKS)
 
+> **Status (wf/aws-eks, 2026-11-05):** eksToken, k8s-join mode `eks` (provision `eksNodeConfig`/`eksUserData`,
+> `policy.kubernetes.eks`), the EKS DaemonSet test, and beyond the outline `ProviderKubernetes` on EKS in provider-aws
+> (`src/eks/**`: clusters, Auto Mode for `autopilot`, managed node groups, versions, access-entry credentials; config
+> `eksClusterRoleArn`/`eksNodeRoleArn`/`eksSubnetIds`; `aws iam-policy --eks-*`) and the optional
+> `ProviderKubernetes.listClusters` landed. Round 2: the vps `providerAccounts.clusters` method; provider-pool launches
+> with `policy.kubernetes.eks` carry the NodeConfig (pool owner only; `platformOperated` on platform sites); bcd's
+> `k8s-join` mode `eks` (never kubeadm: waits for nodeadm's kubelet, keeps labels); access entries for pathed roles via
+> `assumeRoleArn`; zonal locations refused at create (`regionalOnly`). Open: hosted bcd on AL2023 EKS nodes (the
+> kubelet kubeconfig's exec plugin `aws eks get-token` is not in bcd's image), EKS access entries for pool node roles.
+> Review round (2026-11-05): every EKS call runs the account guards first (§8 #1); EKS node launches carry
+> `eksNodeInstanceProfile` only (core `create` gains optional `kubernetesNode: 'eks'`; `instanceProfile` must never
+> hold an `EC2_LINUX` entry); update tokens name the transition (1→2→1→2 converges); `edit` binds
+> `better-compute:edit` (no serviceaccount impersonate/token) plus the `better-compute-access-guard`
+> ValidatingAdmissionPolicy over `bc-access` and `kube-system` (credentials need Kubernetes ≥ 1.30); the IAM policy's own
+> access entry needs `better-compute:managed` (`--eks-adopt-clusters` to opt out); node groups follow control-plane
+> upgrades; Neuron taint; non-owner EKS-pool instances refused at `instances.create`. The GKE driver binds the built-in
+> `edit` the same way and should port the guard (provider-gcp owner). `docs-generate` lists `providerAccounts ## clusters`
+> as unknown until `generated/api.json` is regenerated at integration.
+
 - **Hosted mode:** provider-kubernetes hosted mode works on EKS today. A9 adds docs plus a test that renders the
   DaemonSet for EKS-shaped nodes: the `eks.amazonaws.com/nodegroup` selector and the GPU taint
   `nvidia.com/gpu=:NoSchedule`.
@@ -605,7 +624,7 @@ These are all implementations of seams that already exist; no core changes:
     certificateAuthority,cidr}`) as a MIME part of the user data, for AL2023 EKS AMIs (alias `eks-al2023-<k8s>`).
   - The existing kubeadm mode is unchanged.
 - **provider-aws config:** `instanceProfile?: string`, the ARN passed as `IamInstanceProfile` (the IAM policy scopes
-  `iam:PassRole` to it).
+  `iam:PassRole` to it). EKS nodes use `eksNodeInstanceProfile` instead, on their launches only (review round).
 - **`providerAccounts.clusters`** (optional): `ListClusters`/`DescribeCluster`, to fill `k8s-join`.
 
 **Tests:**

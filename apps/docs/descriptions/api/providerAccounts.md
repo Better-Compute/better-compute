@@ -75,6 +75,15 @@ Makes the account's next discovery pass due now and wakes the worker; returns `q
 - **Errors.** `UNSUPPORTED` when the account's provider cannot list its machines. An account of another tenant, or none, is `NOT_FOUND`.
 - **Events.** The pass publishes `provider.machine.discovered`, `provider.machine.changed` (with `changes`) and `provider.machine.gone`.
 
+## clusters
+
+Lists the managed Kubernetes clusters the account's provider can see, whoever created them, live from the provider; returns `items`. A pool's `policy.kubernetes` names one of them to join its machines to it (for EKS, `policy.kubernetes.eks`).
+
+- **Input.** `tenantId` and `accountId`. Nothing is stored; no transaction is open while the provider is read, and the listing has 55 seconds.
+- **Output.** Each item has `name`, `id` (on EKS `<region>/<name>`), `location`, `state` (`pending`, `ready`, `updating`, `deleting`, `error`), `version` and `endpoint` when the provider reports them, and `managed` (`true` when better-compute created it: on AWS the tag `better-compute:managed=true`). A ready EKS cluster also has `eks`: `{ name, apiServerEndpoint, certificateAuthority, cidr }`, the nodeadm settings `k8s-join` mode `eks` takes. Only these plain fields are returned: no token or kubeconfig. On AWS at most 100 clusters of the account's region are listed.
+- **IAM.** Decided as `compute:providers:read` on the account.
+- **Errors.** An account of another tenant, or none, is `NOT_FOUND`. `UNSUPPORTED` when the provider cannot list clusters. Provider failures pass through (`ACCESS_DENIED` when the account's identity may not list or describe clusters, or fails the account guards; `UNAVAILABLE` or `RATE_LIMITED`, retryable).
+
 ## reservations
 
 Returns the account's provider capacity reservations (for example GCE reservations) as the `vps.reservations` worker last saw them, as `items`.

@@ -19,6 +19,10 @@ import (
 const (
 	// KubeletConf is the kubelet's kubeconfig, written by kubeadm join: its presence means joined.
 	KubeletConf = "/etc/kubernetes/kubelet.conf"
+	// EksKubeletConf is the kubelet's kubeconfig on an EKS node (mode "eks"), written by nodeadm: its
+	// user is an exec credential plugin (`aws eks get-token`) with the instance role, and its CA is
+	// /etc/kubernetes/pki/ca.crt.
+	EksKubeletConf = "/var/lib/kubelet/kubeconfig"
 	// StateFile records what the unit manages: the cluster, the Node name, the labels and taints it
 	// set, and whether the device plugin may run (Manager reads it, unprivileged: 0644). Everything
 	// the unit writes lives in root's hostconfig.StateDir: under bcd helper it runs as root on the
@@ -46,6 +50,8 @@ const BcdLabelPrefix = "bcd.dev/"
 
 // State is StateFile's content.
 type State struct {
+	// Mode is Settings.Mode ("eks": nodeadm joined it); empty for kubeadm.
+	Mode     string `json:"mode,omitempty"`
 	Server   string `json:"server"`
 	NodeName string `json:"nodeName"`
 	// Labels and Taints are what the unit set, so it can remove what the spec drops.
@@ -112,6 +118,9 @@ func (u JoinUnit) Plan(ctx context.Context, sys hostconfig.System, settings json
 	if err := u.allowedCluster(p); err != nil {
 		return nil, err
 	}
+	if p.eks {
+		return u.planEks(ctx, sys, p)
+	}
 	var actions []converge.Action
 	if steps, err := planPackages(sys, p); err != nil {
 		return nil, err
@@ -160,7 +169,7 @@ func (u JoinUnit) Plan(ctx context.Context, sys hostconfig.System, settings json
 	}
 	if state.Released {
 		// The unit is back after a release: the Node takes pods again.
-		actions = append(actions, runCmd(sys, kubectl("uncordon", name)))
+		actions = append(actions, runCmd(sys, kubectl(sys, "uncordon", name)))
 	}
 	steps, err = planNode(ctx, sys, name, state, labels)
 	if err != nil {
@@ -185,6 +194,10 @@ func PendingToken(sys hostconfig.System, settings json.RawMessage) (ref string, 
 	p, err := parseSettings(settings)
 	if err != nil {
 		return "", err
+	}
+	if p.eks {
+		// nodeadm joins with the instance role: there is no token to stage.
+		return "", nil
 	}
 	// Listing, not reading: an unprivileged node may list /etc/kubernetes and the token's directory
 	// but cannot read the root-only files in them.
@@ -504,7 +517,11 @@ func active(ctx context.Context, sys hostconfig.System, unit string) bool {
 // kubeletServer reads the API server the kubelet's kubeconfig points at; joined is false when there
 // is no kubeconfig.
 func kubeletServer(sys hostconfig.System) (joined bool, server string, err error) {
-	b, err := sys.ReadFile(KubeletConf)
+	return kubeletServerIn(sys, KubeletConf)
+}
+
+func kubeletServerIn(sys hostconfig.System, kubeconfig string) (joined bool, server string, err error) {
+	b, err := sys.ReadFile(kubeconfig)
 	if errors.Is(err, fs.ErrNotExist) {
 		return false, "", nil
 	}
@@ -521,7 +538,65 @@ func kubeletServer(sys hostconfig.System) (joined bool, server string, err error
 
 func sameServer(server string, p *parsed) bool {
 	s := strings.TrimSuffix(server, "/")
+	if p.eks {
+		// DNS and TLS ignore case; EKS endpoints carry an upper-case id that nodeadm may write either way.
+		return strings.EqualFold(s, p.Server) || strings.EqualFold(s, "https://"+p.endpoint)
+	}
 	return s == strings.TrimSuffix(p.Server, "/") || s == "https://"+p.endpoint
+}
+
+// planEks converges an EKS node (mode "eks"): nodeadm joined it at boot from the NodeConfig in its
+// user data, with the instance role, so there is nothing to install, no kernel or containerd setting
+// to make (the AMI's) and no kubeadm to run. bcd waits for the kubelet's kubeconfig, refuses one of
+// another cluster, keeps the kubelet running and the Node's labels in step; taints are registered
+// by nodeadm (the NodeConfig's kubelet flags) and drift is reported as with kubeadm.
+func (u JoinUnit) planEks(ctx context.Context, sys hostconfig.System, p *parsed) ([]converge.Action, error) {
+	joined, server, err := kubeletServerIn(sys, EksKubeletConf)
+	if err != nil {
+		return nil, err
+	}
+	if !joined {
+		return nil, fmt.Errorf("%s: waiting for nodeadm to join %s (no %s yet): EKS nodes join at boot from the NodeConfig in their user data", UnitName, p.Cluster.Name, EksKubeletConf)
+	}
+	if !sameServer(server, p) {
+		return nil, terminal("this node's kubelet belongs to %s, not %s (%s); nodeadm joined it elsewhere", server, p.Server, p.Cluster.Name)
+	}
+	state, _, err := ReadState(sys)
+	if err != nil {
+		return nil, err
+	}
+	name := state.NodeName
+	if name == "" {
+		if name, err = u.nodeName(sys); err != nil {
+			return nil, err
+		}
+	}
+	var actions []converge.Action
+	if !active(ctx, sys, "kubelet") {
+		actions = append(actions, runCmd(sys, hostconfig.Cmd{Name: "systemctl", Args: []string{"enable", "--now", "kubelet"}}))
+	}
+	if state.Released {
+		actions = append(actions, runCmd(sys, kubectl(sys, "uncordon", name)))
+	}
+	labels := u.desiredLabels(p)
+	steps, err := planNode(ctx, sys, name, state, labels)
+	if err != nil {
+		return nil, err
+	}
+	actions = append(actions, steps...)
+	// The taints nodeadm registered are the NodeConfig's, which carried the pool's at launch.
+	registered := state.Taints
+	if state.Mode != ModeEKS {
+		registered = taintStrings(p.taints)
+	}
+	if registered == nil {
+		registered = []string{}
+	}
+	want := State{Mode: ModeEKS, Server: p.Server, NodeName: name, Labels: keys(labels), Taints: registered, GPU: p.gpu, GPUAPI: p.GPUAPI}
+	if !equalState(state, want) {
+		actions = append(actions, writeState(sys, want))
+	}
+	return actions, nil
 }
 
 var nodeNameInvalid = strings.NewReplacer("_", "-", " ", "-")
@@ -662,15 +737,27 @@ type nodeObject struct {
 	} `json:"spec"`
 }
 
-func kubectl(args ...string) hostconfig.Cmd {
-	return hostconfig.Cmd{Name: "kubectl", Args: append([]string{"--kubeconfig", KubeletConf}, args...)}
+// kubectl runs kubectl with the kubelet's own credentials: kubeadm's kubeconfig, or nodeadm's on an
+// EKS node (listed, not read: an unprivileged node cannot read either).
+func kubectl(sys hostconfig.System, args ...string) hostconfig.Cmd {
+	return hostconfig.Cmd{Name: "kubectl", Args: append([]string{"--kubeconfig", kubeletKubeconfig(sys)}, args...)}
+}
+
+func kubeletKubeconfig(sys hostconfig.System) string {
+	if names, _ := sys.ReadDir(path.Dir(KubeletConf)); contains(names, path.Base(KubeletConf)) {
+		return KubeletConf
+	}
+	if names, _ := sys.ReadDir(path.Dir(EksKubeletConf)); contains(names, path.Base(EksKubeletConf)) {
+		return EksKubeletConf
+	}
+	return KubeletConf
 }
 
 // planNode keeps the Node's labels: the spec's and bcd.dev/*, with the kubelet's own
 // credentials (NodeRestriction lets a node label itself outside kubernetes.io and k8s.io). It
 // removes only what bcd set before (State) or owns (bcd.dev/*).
 func planNode(ctx context.Context, sys hostconfig.System, name string, state State, labels map[string]string) ([]converge.Action, error) {
-	out, err := sys.Run(ctx, kubectl("get", "node", name, "-o", "json"))
+	out, err := sys.Run(ctx, kubectl(sys, "get", "node", name, "-o", "json"))
 	if err != nil {
 		// Registering right after the join, or the API server unreachable: retry.
 		return nil, fmt.Errorf("read Node %s: %w", name, err)
@@ -703,7 +790,7 @@ func planNode(ctx context.Context, sys hostconfig.System, name string, state Sta
 		}
 	}
 	if len(set)+len(remove) > 0 {
-		actions = append(actions, runCmd(sys, kubectl(append([]string{"label", "node", name, "--overwrite"}, append(set, remove...)...)...)))
+		actions = append(actions, runCmd(sys, kubectl(sys, append([]string{"label", "node", name, "--overwrite"}, append(set, remove...)...)...)))
 	}
 	// Taints: NodeRestriction forbids a kubelet to change its Node's taints, so they are set only at
 	// registration (the JoinConfiguration); a later difference is reported (Conditions), not retried.
@@ -752,7 +839,7 @@ func (u JoinUnit) Conditions(ctx context.Context, sys hostconfig.System, setting
 	if err != nil || !ok || state.Released || state.NodeName == "" {
 		return nil
 	}
-	out, err := sys.Run(ctx, kubectl("get", "node", state.NodeName, "-o", "json"))
+	out, err := sys.Run(ctx, kubectl(sys, "get", "node", state.NodeName, "-o", "json"))
 	if err != nil {
 		return nil
 	}

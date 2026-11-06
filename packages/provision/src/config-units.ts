@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   ComputeError,
   field,
@@ -257,14 +258,28 @@ function validateKernelModules(settings: Record<string, Json>): Record<string, J
   return out;
 }
 
-/** `k8s-join` settings: the API server, its CA pin, the bootstrap token by reference, labels and taints. */
+/**
+ * `k8s-join` settings. `mode: 'kubeadm'` (the default): the API server, its CA pin, the bootstrap token by
+ * reference, the kubelet release. `mode: 'eks'` (AWS A9): the EKS cluster nodeadm joins (`cluster`), with no
+ * token (the node authenticates as its instance profile's role through an EC2_LINUX access entry). Both: labels,
+ * taints, `gpu` and `gpuApi`.
+ */
 function validateK8sJoin(settings: Record<string, Json>): Record<string, Json> {
   const bad = (message: string): never => {
     throw new ComputeError('INVALID_INPUT', `hostConfig.k8s-join.${message}`);
   };
-  const allowed = new Set(['server', 'caCertSha256', 'tokenRef', 'kubernetesVersion', 'nodeLabels', 'taints', 'gpu', 'gpuApi']);
+  const { mode } = settings;
+  if (mode !== undefined && mode !== 'kubeadm' && mode !== 'eks') bad('mode must be kubeadm or eks');
+  if (mode === 'eks') {
+    const allowed = new Set(['mode', 'cluster', 'nodeLabels', 'taints', 'gpu', 'gpuApi']);
+    for (const key of Object.keys(settings)) if (!allowed.has(key)) bad(`${key} is not a setting of mode eks (${[...allowed].join(', ')})`);
+    const out: Record<string, Json> = { mode: 'eks', cluster: checkEksCluster(settings.cluster, 'hostConfig.k8s-join.cluster') };
+    joinGpu(settings, out, bad);
+    return joinLabels(settings, out, bad);
+  }
+  const allowed = new Set(['mode', 'server', 'caCertSha256', 'tokenRef', 'kubernetesVersion', 'nodeLabels', 'taints', 'gpu', 'gpuApi']);
   for (const key of Object.keys(settings)) if (!allowed.has(key)) bad(`${key} is not a setting (${[...allowed].join(', ')})`);
-  const { server, caCertSha256, tokenRef, kubernetesVersion, nodeLabels, taints, gpu, gpuApi } = settings;
+  const { server, caCertSha256, tokenRef, kubernetesVersion } = settings;
   let url: URL | undefined;
   try {
     url = typeof server === 'string' ? new URL(server) : undefined;
@@ -280,17 +295,35 @@ function validateK8sJoin(settings: Record<string, Json>): Record<string, Json> {
   // which releases secret:// refs only.
   if (typeof tokenRef !== 'string' || !isSecretRef(tokenRef) || !tokenRef.startsWith('secret://'))
     bad('tokenRef must be a secret:// reference to the bootstrap token (the broker releases secret:// refs only)');
-  const out: Record<string, Json> = { server: url!.origin, caCertSha256: pin, tokenRef: tokenRef as string, gpu: gpu ?? true };
+  const out: Record<string, Json> = {
+    ...(mode === 'kubeadm' ? { mode: 'kubeadm' } : {}),
+    server: url!.origin,
+    caCertSha256: pin,
+    tokenRef: tokenRef as string,
+  };
+  joinGpu(settings, out, bad);
+  if (kubernetesVersion !== undefined) {
+    if (typeof kubernetesVersion !== 'string' || !/^1\.[0-9]{2}\.[0-9]{1,3}$/.test(kubernetesVersion)) bad('kubernetesVersion must be a release such as 1.34.1');
+    out.kubernetesVersion = kubernetesVersion as string;
+  }
+  return joinLabels(settings, out, bad);
+}
+
+/** `k8s-join` `gpu` and `gpuApi` (both modes), validated into `out`. */
+function joinGpu(settings: Record<string, Json>, out: Record<string, Json>, bad: (message: string) => never): void {
+  const { gpu, gpuApi } = settings;
+  out.gpu = gpu ?? true;
   if (typeof out.gpu !== 'boolean') bad('gpu must be true or false');
   // How GPUs reach the kubelet: bcd's device plugins (default) or its DRA driver (gpu.bcd.dev), never both.
   if (gpuApi !== undefined) {
     if (gpuApi !== 'device-plugin' && gpuApi !== 'dra') bad('gpuApi must be device-plugin or dra');
     out.gpuApi = gpuApi as string;
   }
-  if (kubernetesVersion !== undefined) {
-    if (typeof kubernetesVersion !== 'string' || !/^1\.[0-9]{2}\.[0-9]{1,3}$/.test(kubernetesVersion)) bad('kubernetesVersion must be a release such as 1.34.1');
-    out.kubernetesVersion = kubernetesVersion as string;
-  }
+}
+
+/** `k8s-join` `nodeLabels` and `taints` (both modes), validated into `out`. */
+function joinLabels(settings: Record<string, Json>, out: Record<string, Json>, bad: (message: string) => never): Record<string, Json> {
+  const { nodeLabels, taints } = settings;
   if (nodeLabels !== undefined) {
     if (!nodeLabels || typeof nodeLabels !== 'object' || Array.isArray(nodeLabels)) bad('nodeLabels must be an object of label: value');
     const labels = nodeLabels as Record<string, Json>;
@@ -388,7 +421,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> => !!value &
 /**
  * The config units a pool's policy asks for on every machine of the pool (PLAN.md §3.8):
  * - `policy.kubernetes` { apiServer, caCertSha256, joinTokenRef, labels?, taints?, kubernetesVersion?, gpu? }
- *   → `k8s-join`;
+ *   → `k8s-join`; with `eks` { name, apiServerEndpoint, certificateAuthority, cidr } instead of the first three,
+ *   `k8s-join` mode `eks` (nodeadm, AWS A9);
  * - `policy.hugepages` { size: '2Mi' | '1Gi', count, perNuma? } (core PoolPolicy) → `hugepages`
  *   { pages2m | pages1g: count, perNuma };
  * - `policy.kernelModules` { load?, options? } → `kernel-modules`;
@@ -412,7 +446,7 @@ export function poolHostConfig(
   const kubernetes = policy?.kubernetes;
   if (kubernetes !== undefined) {
     if (!isRecord(kubernetes)) throw new ComputeError('INVALID_INPUT', 'policy.kubernetes must be an object');
-    const { apiServer, caCertSha256, joinTokenRef, labels, taints, kubernetesVersion, gpu, gpuApi, platformOperated, ...rest } = kubernetes;
+    const { apiServer, caCertSha256, joinTokenRef, labels, taints, kubernetesVersion, gpu, gpuApi, platformOperated, eks, ...rest } = kubernetes;
     const unknown = Object.keys(rest);
     if (unknown.length) throw new ComputeError('INVALID_INPUT', `policy.kubernetes.${unknown[0]} is not a setting`);
     if (platformOperated !== undefined && typeof platformOperated !== 'boolean')
@@ -423,6 +457,22 @@ export function poolHostConfig(
         'INVALID_INPUT',
         'policy.kubernetes needs apiServer, caCertSha256 and joinTokenRef together (machines join that cluster), or none of them (bcd runs inside the cluster as a DaemonSet)',
       );
+    if (eks !== undefined && (given !== 0 || kubernetesVersion !== undefined))
+      throw new ComputeError(
+        'INVALID_INPUT',
+        'policy.kubernetes.eks joins an EKS cluster through nodeadm: it does not take apiServer, caCertSha256, joinTokenRef or kubernetesVersion (the AMI ships the kubelet)',
+      );
+  }
+  if (isRecord(kubernetes) && kubernetes.eks !== undefined) {
+    const { eks, labels, taints, gpu, gpuApi } = kubernetes;
+    config['k8s-join'] = {
+      mode: 'eks',
+      cluster: eks as Json,
+      ...(labels !== undefined ? { nodeLabels: labels as Json } : {}),
+      ...(taints !== undefined ? { taints: taints as Json } : {}),
+      ...(gpu !== undefined ? { gpu: gpu as Json } : {}),
+      ...(gpuApi !== undefined ? { gpuApi: gpuApi as Json } : {}),
+    };
   }
   // Machines join the cluster only when the pool names it: a pool whose bcd runs as a DaemonSet inside the
   // cluster (hosted, provider-kubernetes) is in it already, and kubeadm join would fail there.
@@ -533,4 +583,140 @@ export function provisionNodeSpec(units?: readonly ConfigUnitDefinition[], image
     if (node.role === 'site') part.site = { cacheImages: await siteCacheImagesFor(context.sql, node.id, images) };
     return part;
   };
+}
+
+// --- k8s-join mode 'eks' (AWS A9): nodeadm's NodeConfig in the user data --------------------------
+
+/** The EKS cluster a `k8s-join` mode `eks` node joins (nodeadm's `spec.cluster`). */
+export interface EksJoinCluster {
+  /** The EKS cluster name. */
+  name: string;
+  /** `https://<id>.<gr>.<region>.eks.amazonaws.com` (DescribeCluster `endpoint`). */
+  apiServerEndpoint: string;
+  /** The cluster CA, base64 PEM (DescribeCluster `certificateAuthority.data`). */
+  certificateAuthority: string;
+  /** The cluster's service CIDR (DescribeCluster `kubernetesNetworkConfig.serviceIpv4Cidr` or `serviceIpv6Cidr`). */
+  cidr: string;
+}
+
+/** `k8s-join` settings of mode `eks`, as `resolveHostConfig` returns them. */
+export interface EksJoinSettings {
+  mode: 'eks';
+  cluster: EksJoinCluster;
+  nodeLabels?: Readonly<Record<string, string>>;
+  taints?: readonly string[];
+  gpu?: boolean;
+  gpuApi?: 'device-plugin' | 'dra';
+}
+
+const eksClusterName = /^[0-9A-Za-z][A-Za-z0-9_-]{0,99}$/;
+const base64Text = /^[A-Za-z0-9+/]{1,16384}={0,2}$/;
+const hostName = /^[A-Za-z0-9](?:[-A-Za-z0-9.]{0,251}[A-Za-z0-9])?$/;
+
+function isCidrText(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(value);
+  if (v4) return v4.slice(1, 5).every((octet) => Number(octet) <= 255) && Number(v4[5]) <= 32;
+  const v6 = /^([0-9a-fA-F:]{2,39})\/(\d{1,3})$/.exec(value);
+  return !!v6 && v6[1]!.includes(':') && Number(v6[2]) <= 128;
+}
+
+/** Validates an EKS cluster for nodeadm; every value is one plain token, so none can add YAML. */
+export function checkEksCluster(value: unknown, what = 'cluster'): Record<string, Json> {
+  const bad = (message: string): never => {
+    throw new ComputeError('INVALID_INPUT', `${what}.${message}`);
+  };
+  if (!isRecord(value)) return bad('must be an object { name, apiServerEndpoint, certificateAuthority, cidr }');
+  const allowed = ['name', 'apiServerEndpoint', 'certificateAuthority', 'cidr'];
+  for (const key of Object.keys(value)) if (!allowed.includes(key)) bad(`${key} is not a setting (${allowed.join(', ')})`);
+  const { name, apiServerEndpoint, certificateAuthority, cidr } = value;
+  if (typeof name !== 'string' || !eksClusterName.test(name)) bad('name must be an EKS cluster name (letters, digits, - and _, at most 100)');
+  let url: URL | undefined;
+  try {
+    url = typeof apiServerEndpoint === 'string' ? new URL(apiServerEndpoint) : undefined;
+  } catch {
+    url = undefined;
+  }
+  if (
+    !url ||
+    url.protocol !== 'https:' ||
+    url.username ||
+    url.password ||
+    url.pathname !== '/' ||
+    url.search ||
+    url.hash ||
+    !hostName.test(url.hostname) ||
+    (apiServerEndpoint as string).replace(/\/$/, '').toLowerCase() !== url.origin
+  )
+    bad('apiServerEndpoint must be the cluster endpoint as https://host');
+  if (typeof certificateAuthority !== 'string' || !base64Text.test(certificateAuthority))
+    bad('certificateAuthority must be the cluster CA as base64 PEM (DescribeCluster certificateAuthority.data)');
+  const pem = Buffer.from(certificateAuthority as string, 'base64').toString('utf8');
+  if (!pem.includes('-----BEGIN CERTIFICATE-----') || !pem.includes('-----END CERTIFICATE-----'))
+    bad('certificateAuthority must decode to a PEM certificate');
+  if (!isCidrText(cidr)) bad('cidr must be the cluster service CIDR (172.20.0.0/16)');
+  return {
+    name: name as string,
+    // As DescribeCluster wrote it: EKS endpoints carry an upper-case id, which TLS and DNS ignore.
+    apiServerEndpoint: (apiServerEndpoint as string).replace(/\/$/, ''),
+    certificateAuthority: certificateAuthority as string,
+    cidr: cidr as string,
+  };
+}
+
+/**
+ * nodeadm's `NodeConfig` (`node.eks.aws/v1alpha1`) for a node of an AL2023 EKS AMI (`eks-al2023-<k8s>`):
+ * the cluster, and the node's labels and taints as kubelet flags. Settings are validated as `resolveHostConfig`
+ * validates them; every value is written as a JSON string (valid YAML), so none can add keys.
+ */
+export function eksNodeConfig(settings: EksJoinSettings): string {
+  const valid = validateK8sJoin({ ...(settings as unknown as Record<string, Json>), mode: 'eks' });
+  const cluster = valid.cluster as unknown as EksJoinCluster;
+  const q = (text: string) => JSON.stringify(text);
+  const lines = [
+    '---',
+    'apiVersion: node.eks.aws/v1alpha1',
+    'kind: NodeConfig',
+    'spec:',
+    '  cluster:',
+    `    name: ${q(cluster.name)}`,
+    `    apiServerEndpoint: ${q(cluster.apiServerEndpoint)}`,
+    `    certificateAuthority: ${q(cluster.certificateAuthority)}`,
+    `    cidr: ${q(cluster.cidr)}`,
+  ];
+  const flags: string[] = [];
+  const labels = Object.entries((valid.nodeLabels ?? {}) as Record<string, string>);
+  if (labels.length) flags.push(`--node-labels=${labels.map(([key, value]) => `${key}=${value}`).join(',')}`);
+  const taints = (valid.taints ?? []) as string[];
+  if (taints.length) flags.push(`--register-with-taints=${taints.join(',')}`);
+  if (flags.length) lines.push('  kubelet:', '    flags:', ...flags.map((flag) => `      - ${q(flag)}`));
+  return `${lines.join('\n')}\n`;
+}
+
+function userDataPartType(payload: string): string {
+  if (payload.startsWith('#cloud-config')) return 'text/cloud-config';
+  if (payload.startsWith('#!')) return 'text/x-shellscript';
+  if (payload.startsWith('#cloud-boothook')) return 'text/cloud-boothook';
+  return 'text/plain';
+}
+
+/**
+ * EC2 user data for an EKS node: a MIME multipart whose first part is the NodeConfig
+ * (`application/node.eks.aws`, which nodeadm reads) and whose second is `userData` (cloud-init: bcd's own
+ * install and join), when there is one. The boundary derives from the content, so the same input packs to
+ * the same bytes. A multipart `userData` is refused (nodeadm and cloud-init read one level).
+ */
+export function eksUserData(settings: EksJoinSettings, userData: string): string {
+  if (/^\s*(MIME-Version:|Content-Type:\s*multipart\/)/i.test(userData))
+    throw new ComputeError('INVALID_INPUT', 'eksUserData: the user data is already a MIME multipart; pass its single document');
+  const nodeConfig = eksNodeConfig(settings);
+  const boundary = `bc-eks-${createHash('sha256').update(nodeConfig).update('\0').update(userData).digest('hex').slice(0, 32)}`;
+  const part = (type: string, body: string) =>
+    `--${boundary}\nContent-Type: ${type}; charset="utf-8"\nMIME-Version: 1.0\nContent-Transfer-Encoding: 7bit\n\n${body}${body.endsWith('\n') ? '' : '\n'}`;
+  return (
+    `MIME-Version: 1.0\nContent-Type: multipart/mixed; boundary="${boundary}"\n\n` +
+    part('application/node.eks.aws', nodeConfig) +
+    (userData === '' ? '' : part(userDataPartType(userData), userData)) +
+    `--${boundary}--\n`
+  );
 }
