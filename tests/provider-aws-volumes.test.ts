@@ -457,6 +457,26 @@ describe('provider-aws volumes: attach, detach', () => {
     await rejects(volumes.detachVolume(theirs.id, a.id, call()), 'INVALID_STATE', 'not-managed');
   });
 
+  it('a volume attached to an instance that terminates reads detached, not deleted', async () => {
+    const { volumes, call, ebs, ec2, managed } = world();
+    const a = owned(ec2, 'ins_a');
+    const volume = ebs.addVolume({
+      tags: managed,
+      attachedTo: { instanceId: a.id, device: '/dev/sdf' },
+    });
+    expect((await volumes.getVolume(volume.id, call()))?.outputs?.attachedTo).toBe(a.id);
+    // AttachVolume leaves DeleteOnTermination false: EC2 detaches the volume and keeps it.
+    a.state = 'shutting-down';
+    ebs.tick();
+    expect(ebs.volumes.get(volume.id)!.attachment?.state).toBe('detaching');
+    ec2.tick();
+    ebs.tick();
+    const read = await volumes.getVolume(volume.id, call());
+    expect(read).toMatchObject({ state: 'ready' });
+    expect(read?.outputs?.attachedTo).toBeUndefined();
+    expect(ebs.volumes.get(volume.id)!.state).toBe('available');
+  });
+
   it('force: a detach stuck in detaching is forced (DetachVolume Force=true), once', async () => {
     const { volumes, call, ebs, ec2, emu, managed } = world();
     const a = owned(ec2, 'ins_a');

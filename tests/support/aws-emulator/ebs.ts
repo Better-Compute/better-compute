@@ -9,6 +9,7 @@ import { ec2Error, ec2Response, el, items } from './xml.js';
 // DescribeSnapshots / DeleteSnapshot. Like EBS: a volume attaches only in its own zone and to one
 // instance, a device name is used once per instance, an attached volume is not deleted, and a
 // volume only grows. Knobs: settleOnRead (every Describe* moves transitional states one step),
+// A terminating instance detaches its volumes (DeleteOnTermination is false for AttachVolume).
 // newVolumeNotFound (eventual consistency right after CreateVolume), cooldownCode, stuckDetach (a
 // guest that never releases the volume: only DetachVolume Force=true lets it go), addVolume and
 // addSnapshot (foreign resources), and tick.
@@ -188,6 +189,18 @@ export class EbsEmulator {
       else if (volume.state === 'deleting') volume.state = 'deleted';
       else if (volume.state === 'deleted') this.volumes.delete(volume.id);
       const attachment = volume.attachment;
+      // AttachVolume leaves DeleteOnTermination false: a terminating instance lets its volumes go
+      // (detaching while it shuts down, available once it is terminated), stuck guest or not.
+      const host = attachment ? this.ec2.instances.get(attachment.instanceId) : undefined;
+      if (attachment && (!host || host.state === 'terminated')) {
+        delete volume.attachment;
+        volume.state = 'available';
+        continue;
+      }
+      if (attachment && host?.state === 'shutting-down') {
+        attachment.state = 'detaching';
+        continue;
+      }
       if (attachment?.state === 'attaching') attachment.state = 'attached';
       else if (attachment?.state === 'detaching' && !this.stuckDetach.has(volume.id)) {
         delete volume.attachment;
