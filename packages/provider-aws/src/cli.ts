@@ -318,6 +318,7 @@ function eksStatements(
         'eks:UpdateClusterConfig',
         'eks:DeleteCluster',
         'eks:UpdateNodegroupConfig',
+        'eks:UpdateNodegroupVersion',
         'eks:DeleteNodegroup',
       ],
       Resource: [clusters, nodegroups],

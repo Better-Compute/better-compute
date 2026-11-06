@@ -803,6 +803,7 @@ describe('eks IAM policy', () => {
     expect(by('EksManageOwned').Condition).toEqual({
       StringEquals: { 'aws:ResourceTag/better-compute:managed': 'true' },
     });
+    expect(by('EksManageOwned').Action).toContain('eks:UpdateNodegroupVersion');
     expect(by('EksManageOwned').Resource).toContain('arn:aws:eks:us-east-1:111111111111:cluster/*');
     // Its own principal, and only on clusters (and entries) better-compute manages: never
     // cluster-admin on every cluster of a BYO account.
