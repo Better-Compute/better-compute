@@ -845,6 +845,19 @@ describe('do.partner-attachment', () => {
     expect(error.details?.reason).toBe('replaceRequired');
   });
 
+  it('an error echoing the chosen BGP key is scrubbed in its message and details', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    emu.failNext({ method: 'POST', path: /partner_network_connect\/attachments$/ }, 422, {
+      id: `bad_key_${bgpKey}`,
+      message: `bgp.auth_key "${bgpKey}" is too weak`,
+    });
+    const error = await failure(resources.ensure(request(), keyed()));
+    expect(error.code).toBe('INVALID_INPUT');
+    expect(error.message).toContain('auth_key');
+    expect(JSON.stringify([error.message, error.details])).not.toContain(bgpKey);
+  });
+
   it('delete leaves an attachment made by hand alone, and deletes its own', async () => {
     const emu = emulator();
     const { resources } = await build(emu);

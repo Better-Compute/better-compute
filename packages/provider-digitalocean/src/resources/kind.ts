@@ -103,6 +103,43 @@ export function replaceRequired(kind: string, field: string, why?: string): Comp
   );
 }
 
+/**
+ * Runs a call that carries resolved secrets. An error that echoes one of them (in its message, or anywhere in its
+ * details, keys included) is rethrown with every occurrence replaced by `********` and no cause, so the value
+ * never reaches a row, an event or a log. Any other error is rethrown as is.
+ */
+export async function scrubbing<T>(secrets: readonly string[], call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (error) {
+    const values = secrets.filter((secret) => secret.length > 0);
+    if (values.length === 0 || !(error instanceof Error)) throw error;
+    const mask = (text: string) =>
+      values.reduce((out, secret) => out.split(secret).join('********'), text);
+    const leaks = (text: string) => values.some((secret) => text.includes(secret));
+    const scrub = (value: unknown): unknown => {
+      if (typeof value === 'string') return mask(value);
+      if (Array.isArray(value)) return value.map(scrub);
+      if (value !== null && typeof value === 'object')
+        return Object.fromEntries(
+          Object.entries(value).map(([key, entry]) => [mask(key), scrub(entry)]),
+        );
+      return value;
+    };
+    const details = error instanceof ComputeError ? error.details : undefined;
+    const detailsLeak = details !== undefined && JSON.stringify(scrub(details)) !== JSON.stringify(details);
+    if (!leaks(error.message) && !detailsLeak) throw error;
+    if (error instanceof ComputeError)
+      throw new ComputeError(
+        error.code,
+        mask(error.message),
+        error.status,
+        details === undefined ? undefined : (scrub(details) as Record<string, unknown>),
+      );
+    throw new Error(mask(error.message));
+  }
+}
+
 /** A GET that answers undefined for a resource that is gone. */
 export async function found<T>(read: () => Promise<T>): Promise<T | undefined> {
   try {

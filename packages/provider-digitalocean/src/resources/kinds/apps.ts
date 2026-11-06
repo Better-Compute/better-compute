@@ -16,6 +16,7 @@ import {
   managedBy,
   ownershipTags,
   replaceRequired,
+  scrubbing,
   strings,
   type DoKind,
   type DoKindEnv,
@@ -354,23 +355,14 @@ async function sendSpec(
   sending: { spec: Json; secrets: readonly string[] },
   signal: AbortSignal,
 ): Promise<DoApp> {
-  try {
-    const reply = await env.client.request<{ app: DoApp }>(method, path, {
+  const reply = await scrubbing(sending.secrets, () =>
+    env.client.request<{ app: DoApp }>(method, path, {
       body: { spec: sending.spec },
       signal,
       budget: 'mutate',
-    });
-    return reply.app;
-  } catch (error) {
-    if (!(error instanceof ComputeError)) throw error;
-    const mask = (text: string) =>
-      sending.secrets.reduce((out, secret) => out.split(secret).join('********'), text);
-    const details = error.details ? JSON.parse(mask(JSON.stringify(error.details))) : undefined;
-    const masked = mask(error.message);
-    if (masked === error.message && JSON.stringify(details) === JSON.stringify(error.details))
-      throw error;
-    throw new ComputeError(error.code, masked, undefined, details);
-  }
+    }),
+  );
+  return reply.app;
 }
 
 /** The spec DO reports, as a tenant spec: no name, no ownership envs, no secret values (not even ciphertext). */

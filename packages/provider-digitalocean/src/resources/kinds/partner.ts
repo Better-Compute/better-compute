@@ -8,7 +8,14 @@ import {
   type ProviderResourceState,
   type SecretRef,
 } from '@better-compute/core';
-import { found, replaceRequired, strings, type DoKind, type DoKindEnv } from '../kind.js';
+import {
+  found,
+  replaceRequired,
+  scrubbing,
+  strings,
+  type DoKind,
+  type DoKindEnv,
+} from '../kind.js';
 
 // Partner Network Connect (`do.partner-attachment`): a private interconnect between VPCs of the account and a
 // network-as-a-service partner (Megaport and the like). It joins account VPCs to an outside network, so it exists
@@ -239,10 +246,8 @@ export function partnerKind(): DoKind {
               }
             : {};
         try {
-          const created = await env.client.request<{ partner_attachment: DoAttachment }>(
-            'POST',
-            base,
-            {
+          const created = await scrubbing(authKey ? [authKey] : [], () =>
+            env.client.request<{ partner_attachment: DoAttachment }>('POST', base, {
               body: {
                 name,
                 region: wanted.region,
@@ -253,17 +258,10 @@ export function partnerKind(): DoKind {
               },
               signal: context.signal,
               budget: 'mutate',
-            },
+            }),
           );
           return await state(env, created.partner_attachment, context.signal);
         } catch (error) {
-          if (authKey && error instanceof ComputeError && error.message.includes(authKey))
-            throw new ComputeError(
-              error.code,
-              error.message.split(authKey).join('********'),
-              undefined,
-              error.details,
-            );
           if (!isComputeError(error, 'CONFLICT')) throw error;
           attachment = await byName(env, name, context);
           if (!attachment) throw error;
