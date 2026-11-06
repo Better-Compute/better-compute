@@ -135,6 +135,13 @@ DigitalOcean has no network object, so a tenant network is built from a VPC per 
   `better-compute-instance:<id>` tag, which only that Droplet carries. A `.user` is never bound to the cluster's admin user (role
   `primary`, `doadmin`): that is `INVALID_INPUT` (`primaryUser`), and a delete of it answers `deleted` without a call,
   since it goes with the cluster.
+- **User options by engine.** Kafka `acl` (`<admin|consume|produce|produceconsume>:<topic pattern>`) and OpenSearch
+  `acl` (`<deny|admin|read|readwrite|write>:<index pattern>`) and PostgreSQL `replication` change in place
+  (`PUT …/users/{name}`, settings only). A MySQL `authPlugin` (`caching_sha2_password`, `mysql_native_password`)
+  change goes through `reset_auth`: DigitalOcean issues a new password, sealed in the same run. A MongoDB user's
+  `readonly` is fixed at create. A Kafka user's client certificate and key are secret outputs (`accessCert`,
+  `accessKey`) next to its password. These bodies follow the API reference, not a recording; MongoDB's newer
+  `settings.mongo_user_settings` (role, databases) is not mapped yet.
 - **Ownership.** A cluster carries `better-compute-managed:true`, this deployment's tag, the idempotency key's tag and
   the module's `better-compute-resource:<id>` and `better-compute-tenant:<t>` tags. A create first looks the key's tag
   up (only among clusters this deployment manages: another deployment's cluster with the same key tag is never

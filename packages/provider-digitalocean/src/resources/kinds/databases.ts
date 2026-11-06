@@ -4,6 +4,7 @@ import {
   isComputeError,
   manifest,
   type CallContext,
+  type FieldShape,
   type ProviderDiscoveredResource,
   type ProviderResourceRequest,
   type ProviderResourceState,
@@ -507,7 +508,131 @@ interface DoUser {
   name: string;
   role?: string;
   password?: string;
+  /** Kafka: the client certificate and its private key. */
+  access_cert?: string;
+  access_key?: string;
+  mysql_settings?: { auth_plugin?: string };
+  readonly?: boolean;
+  settings?: {
+    acl?: { id?: string; topic: string; permission: string }[];
+    opensearch_acl?: { index: string; permission: string }[];
+    pg_allow_replication?: boolean;
+  };
 }
+
+/** A user's engine options, as the spec writes them: an ACL entry is `<permission>:<topic or index pattern>`. */
+interface UserOptions {
+  acl?: string[];
+  authPlugin?: string;
+  replication?: boolean;
+  readonly?: boolean;
+}
+
+const mysqlAuthPlugins = ['caching_sha2_password', 'mysql_native_password'] as const;
+
+/** Each engine's own user options: the manifest fields and what changes in place. */
+function userOptions(engine: DoEngine): { fields: FieldShape; updatable: string[] } {
+  switch (engine) {
+    case 'kafka':
+      return {
+        fields: {
+          acl: field
+            .list(
+              field.string({
+                pattern: /^(admin|consume|produce|produceconsume):[A-Za-z0-9._*-]{1,249}$/,
+              }),
+              { max: 100 },
+            )
+            .optional()
+            .describe('Topic ACLs, `<admin|consume|produce|produceconsume>:<topic pattern>`'),
+        },
+        updatable: ['acl'],
+      };
+    case 'opensearch':
+      return {
+        fields: {
+          acl: field
+            .list(
+              field.string({ pattern: /^(deny|admin|read|readwrite|write):[a-z0-9._*+-]{1,255}$/ }),
+              { max: 100 },
+            )
+            .optional()
+            .describe('Index ACLs, `<deny|admin|read|readwrite|write>:<index pattern>`'),
+        },
+        updatable: ['acl'],
+      };
+    case 'mysql':
+      return {
+        fields: {
+          authPlugin: field
+            .option(mysqlAuthPlugins)
+            .optional()
+            .describe('Authentication plugin; a change resets the password'),
+        },
+        updatable: ['authPlugin'],
+      };
+    case 'pg':
+      return {
+        fields: {
+          replication: field.boolean().optional().describe('May open replication connections'),
+        },
+        updatable: ['replication'],
+      };
+    case 'mongodb':
+      return {
+        fields: {
+          readonly: field.boolean().optional().describe('A read-only user (fixed at create)'),
+        },
+        updatable: [],
+      };
+    default:
+      return { fields: {}, updatable: [] as string[] };
+  }
+}
+
+const aclEntry = (entry: string) => {
+  const at = entry.indexOf(':');
+  return { permission: entry.slice(0, at), pattern: entry.slice(at + 1) };
+};
+
+/** The `settings` a user's options make, for the engine (only what the spec states). */
+function userSettings(engine: DoEngine, options: UserOptions): DoUser['settings'] | undefined {
+  if (engine === 'kafka' && options.acl)
+    return {
+      acl: options.acl
+        .map(aclEntry)
+        .map(({ permission, pattern }) => ({ topic: pattern, permission })),
+    };
+  if (engine === 'opensearch' && options.acl)
+    return {
+      opensearch_acl: options.acl
+        .map(aclEntry)
+        .map(({ permission, pattern }) => ({ index: pattern, permission })),
+    };
+  if (engine === 'pg' && options.replication !== undefined)
+    return { pg_allow_replication: options.replication };
+  return undefined;
+}
+
+/** A user's options as DO reports them (the spec's form). */
+function observedOptions(engine: DoEngine, user: DoUser): UserOptions {
+  const settings = user.settings ?? {};
+  if (engine === 'kafka' && Array.isArray(settings.acl))
+    return { acl: settings.acl.map((entry) => `${entry.permission}:${entry.topic}`) };
+  if (engine === 'opensearch' && Array.isArray(settings.opensearch_acl))
+    return {
+      acl: settings.opensearch_acl.map((entry) => `${entry.permission}:${entry.index}`),
+    };
+  if (engine === 'pg' && typeof settings.pg_allow_replication === 'boolean')
+    return { replication: settings.pg_allow_replication };
+  if (engine === 'mysql' && typeof user.mysql_settings?.auth_plugin === 'string')
+    return { authPlugin: user.mysql_settings.auth_plugin };
+  if (engine === 'mongodb' && typeof user.readonly === 'boolean') return { readonly: user.readonly };
+  return {};
+}
+
+const sameList = (a: readonly string[] | undefined, b: readonly string[] | undefined) =>
+  JSON.stringify([...(a ?? [])].sort()) === JSON.stringify([...(b ?? [])].sort());
 
 /** The cluster's admin user (role `primary`) is DigitalOcean's: no user resource is ever bound to it. */
 const primaryUser = (name: string) =>
@@ -520,13 +645,21 @@ const primaryUser = (name: string) =>
 
 function userKind(info: EngineInfo): DoKind {
   const kind = `${databaseKind(info.engine)}.user`;
-  const state = (parent: string, user: DoUser): ProviderResourceState => ({
-    id: childId(parent, user.name),
-    state: 'ready',
-    outputs: strings({ user: user.name, role: user.role }),
-    ...(user.password ? { secretOutputs: { password: user.password } } : {}),
-    spec: { name: user.name },
-  });
+  const options = userOptions(info.engine);
+  const state = (parent: string, user: DoUser): ProviderResourceState => {
+    const sealed = strings({
+      password: user.password,
+      accessKey: user.access_key,
+      accessCert: user.access_cert,
+    });
+    return {
+      id: childId(parent, user.name),
+      state: 'ready',
+      outputs: strings({ user: user.name, role: user.role }),
+      ...(Object.keys(sealed).length > 0 ? { secretOutputs: sealed } : {}),
+      spec: { name: user.name, ...observedOptions(info.engine, user) },
+    };
+  };
   const read = (env: DoKindEnv, parent: string, name: string, signal: AbortSignal) =>
     found(() =>
       env.client.request<{ user: DoUser }>(
@@ -535,6 +668,47 @@ function userKind(info: EngineInfo): DoKind {
         { signal, budget: 'observe' },
       ),
     );
+  /**
+   * Brings an existing user to the spec's options: ACLs and replication through `PUT …/users/{name}` (settings
+   * only), a MySQL auth plugin through `reset_auth` (DO issues a new password, sealed in this run). A MongoDB
+   * user's read-only flag is fixed at create (the module refuses its change as replaceRequired).
+   */
+  async function converge(
+    env: DoKindEnv,
+    parent: string,
+    user: DoUser,
+    wanted: UserOptions,
+    signal: AbortSignal,
+  ): Promise<ProviderResourceState> {
+    const path = `/databases/${parent}/users/${encodeURIComponent(user.name)}`;
+    const observed = observedOptions(info.engine, user);
+    if (
+      info.engine === 'mysql' &&
+      wanted.authPlugin !== undefined &&
+      wanted.authPlugin !== observed.authPlugin
+    ) {
+      const reset = await env.client.request<{ user: DoUser }>('POST', `${path}/reset_auth`, {
+        body: { mysql_settings: { auth_plugin: wanted.authPlugin } },
+        signal,
+        budget: 'mutate',
+      });
+      return state(parent, reset.user);
+    }
+    const drifted =
+      ((info.engine === 'kafka' || info.engine === 'opensearch') &&
+        wanted.acl !== undefined &&
+        !sameList(wanted.acl, observed.acl)) ||
+      (info.engine === 'pg' &&
+        wanted.replication !== undefined &&
+        wanted.replication !== (observed.replication ?? false));
+    if (!drifted) return state(parent, user);
+    await env.client.request('PUT', path, {
+      body: { settings: userSettings(info.engine, wanted) },
+      signal,
+      budget: 'mutate',
+    });
+    return { ...state(parent, user), state: 'updating' };
+  }
   return {
     definition: {
       kind,
@@ -542,17 +716,19 @@ function userKind(info: EngineInfo): DoKind {
       description: `A user of a DigitalOcean Managed ${info.name} cluster; its password is sealed`,
       spec: manifest({
         name: field.string({ pattern: /^[a-z][a-z0-9_-]{0,62}$/ }).describe('The user name'),
+        ...options.fields,
       }),
       outputs: ['user', 'role'],
-      secretOutputs: ['password'],
+      secretOutputs:
+        info.engine === 'kafka' ? ['password', 'accessKey', 'accessCert'] : ['password'],
       regional: false,
-      updatable: [],
+      updatable: [...options.updatable],
       parent: databaseKind(info.engine),
       // One of a name per cluster: a second resource of the name would manage the same one.
       identity: byName,
     },
     async ensure(env, request, context) {
-      const name = (request.spec as { name: string }).name;
+      const { name, ...wanted } = request.spec as { name: string } & UserOptions;
       if (request.id !== undefined && parseChildId(kind, request.id).name !== name)
         throw replaceRequired(kind, 'name');
       const database = await ownedParent(env, kind, request.parent, context.signal);
@@ -565,13 +741,23 @@ function userKind(info: EngineInfo): DoKind {
       if (database.status !== 'online') return { id: childId(database.id, name), state: 'pending' };
       const existing = await read(env, database.id, name, context.signal);
       if (existing?.user.role === 'primary') throw primaryUser(name);
-      if (existing) return state(database.id, existing.user);
+      if (existing) return converge(env, database.id, existing.user, wanted, context.signal);
+      const settings = userSettings(info.engine, wanted);
       try {
         const created = await env.client.request<{ user: DoUser }>(
           'POST',
           `/databases/${database.id}/users`,
           {
-            body: { name },
+            body: {
+              name,
+              ...(info.engine === 'mysql' && wanted.authPlugin
+                ? { mysql_settings: { auth_plugin: wanted.authPlugin } }
+                : {}),
+              ...(info.engine === 'mongodb' && wanted.readonly !== undefined
+                ? { readonly: wanted.readonly }
+                : {}),
+              ...(settings ? { settings } : {}),
+            },
             signal: context.signal,
             budget: 'mutate',
           },
@@ -580,8 +766,8 @@ function userKind(info: EngineInfo): DoKind {
       } catch (error) {
         if (!isComputeError(error, 'CONFLICT')) throw error;
         const raced = await read(env, database.id, name, context.signal);
-        if (!raced) throw error;
-        return state(database.id, raced.user);
+        if (!raced || raced.user.role === 'primary') throw error;
+        return converge(env, database.id, raced.user, wanted, context.signal);
       }
     },
     async get(env, id, context) {

@@ -420,6 +420,180 @@ describe('what lives in a cluster', () => {
     expect(await resources.get('do.database.pg.user', created.id, ctx())).toBeUndefined();
   });
 
+  it('engine user options: each engine’s manifest takes only its own (Kafka/OpenSearch ACLs, MySQL auth, PG replication, MongoDB read-only)', async () => {
+    const { resources } = await build(emulator());
+    const kinds = resources.kinds();
+    const spec = (kind: string) => kinds.find((entry) => entry.kind === kind)!.spec;
+    const issues = async (kind: string, value: unknown) =>
+      (await spec(kind)['~standard'].validate(value)).issues;
+    expect(await issues('do.database.kafka.user', { name: 'app', acl: ['produce:orders.*'] })).toBe(
+      undefined,
+    );
+    expect(await issues('do.database.kafka.user', { name: 'app', acl: ['read:orders'] })).toBeDefined();
+    expect(await issues('do.database.kafka.user', { name: 'app', authPlugin: 'mysql_native_password' })).toBeDefined();
+    expect(
+      await issues('do.database.opensearch.user', { name: 'app', acl: ['readwrite:logs-*'] }),
+    ).toBe(undefined);
+    expect(await issues('do.database.opensearch.user', { name: 'app', acl: ['consume:logs'] })).toBeDefined();
+    expect(
+      await issues('do.database.mysql.user', { name: 'app', authPlugin: 'caching_sha2_password' }),
+    ).toBe(undefined);
+    expect(await issues('do.database.mysql.user', { name: 'app', authPlugin: 'plain' })).toBeDefined();
+    expect(await issues('do.database.pg.user', { name: 'app', replication: true })).toBe(undefined);
+    expect(await issues('do.database.pg.user', { name: 'app', readonly: true })).toBeDefined();
+    expect(await issues('do.database.mongodb.user', { name: 'app', readonly: true })).toBe(undefined);
+    expect(kinds.find((entry) => entry.kind === 'do.database.kafka.user')).toMatchObject({
+      updatable: ['acl'],
+      secretOutputs: ['password', 'accessKey', 'accessCert'],
+    });
+    expect(kinds.find((entry) => entry.kind === 'do.database.mysql.user')!.updatable).toEqual([
+      'authPlugin',
+    ]);
+    expect(kinds.find((entry) => entry.kind === 'do.database.pg.user')!.updatable).toEqual([
+      'replication',
+    ]);
+    expect(kinds.find((entry) => entry.kind === 'do.database.mongodb.user')!.updatable).toEqual([]);
+  });
+
+  it('Kafka user ACLs: sent on create, changed in place with PUT settings; the access key is sealed', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const kafka = seedDatabase(emu.state, { tags: ours, engine: 'kafka', num_nodes: 3 });
+    const request = {
+      kind: 'do.database.kafka.user',
+      name: 'bc-r-k',
+      spec: { name: 'app', acl: ['produce:orders.*', 'consume:events'] },
+      parent: kafka.id,
+    };
+    const created = await resources.ensure(request, ctx('crs_k'));
+    expect(mutations(emu, 'POST', /\/users$/)[0]!.body).toEqual({
+      name: 'app',
+      settings: {
+        acl: [
+          { topic: 'orders.*', permission: 'produce' },
+          { topic: 'events', permission: 'consume' },
+        ],
+      },
+    });
+    expect(created).toMatchObject({ state: 'ready', spec: request.spec });
+    const user = kafka._users.find((u: any) => u.name === 'app');
+    expect(created.secretOutputs).toEqual({
+      password: user.password,
+      accessKey: user.access_key,
+      accessCert: user.access_cert,
+    });
+    expect(JSON.stringify(created.outputs)).not.toContain(user.access_key);
+    // Converged: nothing sent.
+    await resources.ensure({ ...request, id: created.id }, ctx('crs_k'));
+    expect(mutations(emu, 'PUT', /\/users\//)).toEqual([]);
+    // An ACL change goes in place.
+    const changed = await resources.ensure(
+      { ...request, id: created.id, spec: { name: 'app', acl: ['admin:orders.*'] } },
+      ctx('crs_k'),
+    );
+    expect(changed.state).toBe('updating');
+    expect(mutations(emu, 'PUT', /\/users\/app$/).map((r) => r.body)).toEqual([
+      { settings: { acl: [{ topic: 'orders.*', permission: 'admin' }] } },
+    ]);
+    const after = await resources.ensure(
+      { ...request, id: created.id, spec: { name: 'app', acl: ['admin:orders.*'] } },
+      ctx('crs_k'),
+    );
+    expect(after).toMatchObject({ state: 'ready', spec: { name: 'app', acl: ['admin:orders.*'] } });
+    expect(mutations(emu, 'PUT', /\/users\//)).toHaveLength(1);
+  });
+
+  it('OpenSearch ACLs and PostgreSQL replication go in settings; MongoDB read-only on create', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const search = seedDatabase(emu.state, { tags: ours, engine: 'opensearch' });
+    await resources.ensure(
+      {
+        kind: 'do.database.opensearch.user',
+        name: 'bc-r-o',
+        spec: { name: 'reader', acl: ['read:logs-*'] },
+        parent: search.id,
+      },
+      ctx('crs_o'),
+    );
+    const pgCluster = seedDatabase(emu.state, { tags: ours });
+    const replicator = await resources.ensure(
+      {
+        kind: 'do.database.pg.user',
+        name: 'bc-r-p',
+        spec: { name: 'repl', replication: true },
+        parent: pgCluster.id,
+      },
+      ctx('crs_p'),
+    );
+    expect(replicator.spec).toEqual({ name: 'repl', replication: true });
+    const mongo = seedDatabase(emu.state, { tags: ours, engine: 'mongodb' });
+    await resources.ensure(
+      {
+        kind: 'do.database.mongodb.user',
+        name: 'bc-r-m',
+        spec: { name: 'ro', readonly: true },
+        parent: mongo.id,
+      },
+      ctx('crs_m'),
+    );
+    expect(mutations(emu, 'POST', /\/users$/).map((r) => r.body)).toEqual([
+      { name: 'reader', settings: { opensearch_acl: [{ index: 'logs-*', permission: 'read' }] } },
+      { name: 'repl', settings: { pg_allow_replication: true } },
+      { name: 'ro', readonly: true },
+    ]);
+    // Turning replication off is a settings change in place.
+    await resources.ensure(
+      {
+        kind: 'do.database.pg.user',
+        name: 'bc-r-p',
+        id: replicator.id,
+        spec: { name: 'repl', replication: false },
+        parent: pgCluster.id,
+      },
+      ctx('crs_p'),
+    );
+    expect(mutations(emu, 'PUT', /\/users\/repl$/).map((r) => r.body)).toEqual([
+      { settings: { pg_allow_replication: false } },
+    ]);
+  });
+
+  it('a MySQL auth plugin change resets the user’s auth: the new password is sealed', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const mysql = seedDatabase(emu.state, { tags: ours, engine: 'mysql', version: '8' });
+    const request = {
+      kind: 'do.database.mysql.user',
+      name: 'bc-r-my',
+      spec: { name: 'legacy', authPlugin: 'mysql_native_password' },
+      parent: mysql.id,
+    };
+    const created = await resources.ensure(request, ctx('crs_my'));
+    expect(mutations(emu, 'POST', /\/users$/)[0]!.body).toEqual({
+      name: 'legacy',
+      mysql_settings: { auth_plugin: 'mysql_native_password' },
+    });
+    expect(created.spec).toEqual(request.spec);
+    const first = created.secretOutputs!.password;
+    await resources.ensure({ ...request, id: created.id }, ctx('crs_my'));
+    expect(mutations(emu, 'POST', /reset_auth$/)).toEqual([]);
+    const reset = await resources.ensure(
+      { ...request, id: created.id, spec: { name: 'legacy', authPlugin: 'caching_sha2_password' } },
+      ctx('crs_my'),
+    );
+    expect(mutations(emu, 'POST', /\/users\/legacy\/reset_auth$/).map((r) => r.body)).toEqual([
+      { mysql_settings: { auth_plugin: 'caching_sha2_password' } },
+    ]);
+    expect(reset).toMatchObject({
+      state: 'ready',
+      spec: { name: 'legacy', authPlugin: 'caching_sha2_password' },
+    });
+    expect(reset.secretOutputs!.password).not.toBe(first);
+    expect(reset.secretOutputs!.password).toBe(
+      mysql._users.find((u: any) => u.name === 'legacy').password,
+    );
+  });
+
   it('a user resource is never bound to the cluster’s primary (admin) user', async () => {
     const { emu, resources, mine } = await cluster();
     const error = await failure(
