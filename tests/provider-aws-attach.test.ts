@@ -133,9 +133,7 @@ describe('provider-aws attach', () => {
     const { ec2emu, impl, call } = await world();
     const foreign = ec2emu.addInstance({ tags: { 'better-compute:instance': 'ins_m' } });
     ec2emu.staleTagReads = 1;
-    const error = await rejection(() =>
-      impl.claim(foreign.id, 'ins_m', call(), { managed: true }),
-    );
+    const error = await rejection(() => impl.claim(foreign.id, 'ins_m', call(), { managed: true }));
     expect(error).toMatchObject({ code: 'UNAVAILABLE', details: { reason: 'tag-propagation' } });
     ec2emu.staleTagReads = 0;
     expect((await impl.claim(foreign.id, 'ins_m', call(), { managed: true })).claimedBy).toBe(

@@ -30,20 +30,59 @@ const eksAlias = /^eks-al2023-(1\.\d{2})$/;
 const amiPattern = /^ami-[0-9a-f]{8,17}$/;
 const ssmPattern = /^resolve:ssm:\/[A-Za-z0-9_./-]{1,1011}(?::\d{1,9})?$/;
 
-function invalid(): ComputeError {
+function invalid(message?: string): ComputeError {
   return new ComputeError(
     'INVALID_INPUT',
-    `an AWS image is ami-…, resolve:ssm:<parameter>, or one of ${[...Object.keys(imageAliases), 'eks-al2023-<k8s>'].join(', ')}`,
+    message ??
+      `an AWS image is ami-…, resolve:ssm:<parameter>, or one of ${[...Object.keys(imageAliases), 'eks-al2023-<k8s>'].join(', ')}`,
     undefined,
     { provider: 'aws', reason: 'image' },
   );
 }
 
-/** `ami-…` and `resolve:ssm:…` pass through; aliases expand per arch; anything else is INVALID_INPUT. */
-export function resolveImage(image: ImageRef, arch: Arch): string {
+/** The public parameters AWS and the OS vendors publish AMI ids under. */
+export const publicSsmPrefix = '/aws/service/';
+const ssmPrefixPattern = /^(\/[A-Za-z0-9_.-]+)+\/$/;
+
+/**
+ * The SSM parameter prefixes a raw `resolve:ssm:` image may name: the public `/aws/service/` and
+ * the host's `ssmImagePrefixes` (each `/a/b/`). The image id comes from the tenant, and EC2 reads the
+ * parameter as the account, so a private parameter is reachable only where the host allows it.
+ */
+export function ssmImagePrefixes(extra: readonly string[] = []): readonly string[] {
+  for (const prefix of extra)
+    if (
+      typeof prefix !== 'string' ||
+      !ssmPrefixPattern.test(prefix) ||
+      prefix.split('/').some((segment) => segment === '.' || segment === '..')
+    )
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'ssmImagePrefixes are SSM parameter path prefixes such as /my/team/ (leading and trailing /)',
+        undefined,
+        { provider: 'aws', reason: 'ssmImagePrefixes' },
+      );
+  return [publicSsmPrefix, ...extra];
+}
+
+/**
+ * `ami-…` passes through, `resolve:ssm:…` when its parameter is under one of `ssmPrefixes`; aliases
+ * expand per arch; anything else is INVALID_INPUT.
+ */
+export function resolveImage(
+  image: ImageRef,
+  arch: Arch,
+  ssmPrefixes: readonly string[] = [publicSsmPrefix],
+): string {
   if (typeof image !== 'string') throw invalid();
   if (amiPattern.test(image)) return image;
-  if (ssmPattern.test(image) && !image.includes('..')) return image;
+  if (ssmPattern.test(image) && !image.includes('..')) {
+    const path = image.slice('resolve:ssm:'.length);
+    if (ssmPrefixes.some((prefix) => path.startsWith(prefix))) return image;
+    throw invalid(
+      `a resolve:ssm: image names a parameter under ${ssmPrefixes.join(' or ')} (the host's ssmImagePrefixes)`,
+    );
+  }
   const alias = imageAliases[image];
   if (alias && Object.hasOwn(imageAliases, image)) return `resolve:ssm:${alias(arch)}`;
   const eks = eksAlias.exec(image);

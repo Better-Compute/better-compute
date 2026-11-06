@@ -15,7 +15,7 @@ import type { QueryClient, QueryParams, XmlElement } from '@better-compute/aws-c
 import type { AccountCredentials } from './account.js';
 import { parseDiscoverTag, type AwsConfig, type AwsProviderOptions } from './config.js';
 import { clientToken, offerId, parseInstanceId, parseOfferId, tags, tagValue } from './ids.js';
-import { aliasRootDeviceOf, resolveImage } from './images.js';
+import { aliasRootDeviceOf, resolveImage, ssmImagePrefixes } from './images.js';
 import {
   toMachine,
   type InstanceTypeCache,
@@ -135,13 +135,16 @@ export class AwsCompute implements ProviderImpl {
   readonly #managedClaims = new Map<string, number>();
   readonly #rootDevices = new Map<string, { device: string | undefined; at: number }>();
   readonly #loggedSsm = new Set<string>();
+  readonly #ssmPrefixes: readonly string[];
 
   constructor(
     readonly config: AwsConfig,
     readonly context: ProviderContext,
     readonly options: AwsProviderOptions,
     readonly deps: AwsComputeDeps,
-  ) {}
+  ) {
+    this.#ssmPrefixes = ssmImagePrefixes(options.ssmImagePrefixes);
+  }
 
   /** How long EC2 may not yet show what this client just launched or tagged. */
   protected get consistencyWindowMs(): number {
@@ -381,7 +384,7 @@ export class AwsCompute implements ProviderImpl {
           reason: 'instance-type',
         },
       );
-    const imageId = resolveImage(request.image, info.arch[0] ?? 'x86_64');
+    const imageId = resolveImage(request.image, info.arch[0] ?? 'x86_64', this.#ssmPrefixes);
     const rootDevice = await this.#rootDevice(request.image, imageId, signal);
     const userData = packUserData(request.userData, request.sshKeys);
     const subnet = request.network?.subnet ?? this.config.subnetId;
@@ -637,7 +640,7 @@ export class AwsCompute implements ProviderImpl {
       (instance.textOf('architecture') as 'x86_64' | 'arm64' | undefined) ??
       (type ? (await this.#types([type], context.signal)).get(type)?.arch[0] : undefined) ??
       'x86_64';
-    const imageId = resolveImage(image, arch === 'arm64' ? 'arm64' : 'x86_64');
+    const imageId = resolveImage(image, arch === 'arm64' ? 'arm64' : 'x86_64', this.#ssmPrefixes);
     await this.call(
       'CreateReplaceRootVolumeTask',
       {

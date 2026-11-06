@@ -430,7 +430,7 @@ describe('compute', () => {
     expect(emu.calls('RunInstances')[0]!.params.get('BlockDeviceMapping.1.DeviceName')).toBe(
       '/dev/xvda',
     );
-    await create('ins_ssm', { image: 'resolve:ssm:/my/team/ami' });
+    await create('ins_ssm', { image: 'resolve:ssm:/aws/service/custom/team/ami' });
     expect(emu.calls('RunInstances')[1]!.params.has('BlockDeviceMapping.1.DeviceName')).toBe(false);
     expect(records.some((line) => line.includes('unknown root device'))).toBe(true);
     expect((await rejection(() => create('ins_bad', { image: 'windows-11' }))).code).toBe(
@@ -439,6 +439,36 @@ describe('compute', () => {
     expect(
       (await rejection(() => create('ins_gone', { image: 'ami-00000000000000001' }))).code,
     ).toBe('INVALID_INPUT');
+  });
+
+  it('raw resolve:ssm: images are public /aws/service/ parameters unless the host allows more', async () => {
+    const { emu, create, impl, call } = await providerWorld();
+    for (const image of ['resolve:ssm:/my/team/ami', 'resolve:ssm:/aws/servicex/ami'])
+      expect(await rejection(() => create('ins_priv', { image }))).toMatchObject({
+        code: 'INVALID_INPUT',
+        details: { reason: 'image' },
+      });
+    expect(emu.calls('RunInstances')).toHaveLength(0);
+    const machine = await create('ins_pub', { image: 'resolve:ssm:/aws/service/custom/ami' });
+    expect(
+      (
+        await rejection(() =>
+          impl.reinstall(machine.id, 'resolve:ssm:/my/team/ami', call('ins_pub')),
+        )
+      ).details?.reason,
+    ).toBe('image');
+
+    const allowed = await providerWorld({}, { ssmImagePrefixes: ['/my/team/'] });
+    await allowed.create('ins_team', { image: 'resolve:ssm:/my/team/ami' });
+    await allowed.create('ins_team2', { image: 'resolve:ssm:/aws/service/custom/ami' });
+    expect(
+      (await rejection(() => allowed.create('ins_other', { image: 'resolve:ssm:/my/teamx/ami' })))
+        .code,
+    ).toBe('INVALID_INPUT');
+    for (const ssmImagePrefixes of [['/my/team'], ['my/team/'], ['/a/../b/'], ['']])
+      await expect(providerWorld({}, { ssmImagePrefixes })).rejects.toMatchObject({
+        code: 'INVALID_CONFIG',
+      });
   });
 
   it('create is idempotent by client token', async () => {

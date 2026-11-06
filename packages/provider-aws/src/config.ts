@@ -102,6 +102,12 @@ export interface AwsProviderOptions {
   rateLimit?: { perSecond: number; burst: number };
   /** How long `get` treats a just-created, not-yet-visible instance as pending (default 120 000). */
   consistencyWindowMs?: number;
+  /**
+   * SSM parameter prefixes (`/my/team/`) a raw `resolve:ssm:` image may name besides the public
+   * `/aws/service/`. The image comes from the tenant and EC2 reads the parameter as the account, so
+   * private parameters are refused unless listed here.
+   */
+  ssmImagePrefixes?: readonly string[];
 }
 
 function invalid(message: string, reason: string): ComputeError {
