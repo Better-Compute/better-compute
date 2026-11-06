@@ -127,6 +127,11 @@ export class Ec2Emulator {
   settleOnRead = false;
   /** After CreateTags/DeleteTags, this many by-id reads still show the tags from before the write. */
   staleTagReads = 0;
+  /** (A4) Scheduled events per instance, as DescribeInstanceStatus reports them. */
+  readonly scheduledEvents = new Map<
+    string,
+    { id: string; code: string; description: string; notBefore: number; notAfter?: number }[]
+  >();
   #next = 0;
 
   constructor(private readonly emu: AwsEmulator) {
@@ -343,6 +348,36 @@ export class Ec2Emulator {
       }
       case 'RunInstances':
         return this.#run(request);
+      case 'DescribeInstanceStatus': {
+        const codes = filtersOf(p).get('event.code');
+        const found = [...this.instances.values()].filter((instance) =>
+          (this.scheduledEvents.get(instance.id) ?? []).some(
+            (event) => !codes || codes.includes(event.code),
+          ),
+        );
+        const { page, next } = this.#page(found, p);
+        const iso = (ms: number) => new Date(ms).toISOString();
+        return ec2Response(
+          action,
+          items(
+            'instanceStatusSet',
+            page.map(
+              (instance) =>
+                `${el('instanceId', instance.id)}${el('availabilityZone', instance.zone)}` +
+                items(
+                  'eventsSet',
+                  (this.scheduledEvents.get(instance.id) ?? [])
+                    .filter((event) => !codes || codes.includes(event.code))
+                    .map(
+                      (event) =>
+                        `${el('instanceEventId', event.id)}${el('code', event.code)}${el('description', event.description)}${el('notBefore', iso(event.notBefore))}${el('notAfter', event.notAfter === undefined ? undefined : iso(event.notAfter))}`,
+                    ),
+                ) +
+                `<instanceState>${el('code', stateCodes[instance.state])}${el('name', instance.state)}</instanceState>`,
+            ),
+          ) + el('nextToken', next),
+        );
+      }
       case 'DescribeInstances': {
         if (this.settleOnRead) this.tick();
         const ids = listOf(p, 'InstanceId');

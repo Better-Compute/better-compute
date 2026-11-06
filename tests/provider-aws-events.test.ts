@@ -42,7 +42,7 @@ function envelope(
 
 async function world(overrides: Record<string, unknown> = { eventQueueUrl: queueUrl }) {
   const emu = new AwsEmulator();
-  new Ec2Emulator(emu);
+  const ec2 = new Ec2Emulator(emu);
   const sqs = new SqsEmulator(emu);
   const queue = sqs.createQueue(platformAccount, queueName);
   const records: string[] = [];
@@ -72,7 +72,7 @@ async function world(overrides: Record<string, unknown> = { eventQueueUrl: queue
     log,
   });
   const poll = (options = { waitMs: 10_000, max: 10 }) => impl.pollEvents!(call(), options);
-  return { emu, sqs, queue, impl, poll, records, config };
+  return { emu, ec2, sqs, queue, impl, poll, records, config };
 }
 
 describe('provider-aws event intake', () => {
@@ -268,5 +268,59 @@ describe('provider-aws event intake', () => {
       ),
     ).toEqual({ dropped: 'malformed' });
     expect(mapEventBridgeEnvelope({ id: 1 }, filter)).toEqual({ dropped: 'malformed' });
+  });
+
+  it('without a queue, reads scheduled events with DescribeInstanceStatus every 5 minutes', async () => {
+    const { emu, ec2, poll } = await world({});
+    const vm = ec2.addInstance({ id: 'i-0abc12345678def01' });
+    ec2.addInstance({ id: 'i-0abc12345678def02' });
+    const notBefore = emu.now() + 3 * 86_400_000;
+    ec2.scheduledEvents.set(vm.id, [
+      { id: 'instance-event-0123456789abcdef0', code: 'system-reboot', description: 'scheduled reboot', notBefore },
+    ]);
+    const first = await poll();
+    expect(first.events).toEqual([
+      {
+        id: 'status/i-0abc12345678def01/instance-event-0123456789abcdef0/scheduled',
+        kind: 'maintenance-scheduled',
+        machineId: vm.id,
+        at: emu.now(),
+        deadline: notBefore,
+        details: { code: 'system-reboot', status: 'scheduled' },
+      },
+    ]);
+    const scan = emu.calls('DescribeInstanceStatus').at(-1)!.params;
+    expect(scan.get('Filter.1.Name')).toBe('event.code');
+    expect(emu.calls('ReceiveMessage')).toHaveLength(0);
+    await first.ack();
+    // Within 5 minutes nothing is read again.
+    emu.clock.advance(60_000);
+    expect((await poll()).events).toEqual([]);
+    expect(emu.calls('DescribeInstanceStatus')).toHaveLength(1);
+    // A completed event is a new id (its status changed), so vps sees it.
+    ec2.scheduledEvents.set(vm.id, [
+      {
+        id: 'instance-event-0123456789abcdef0',
+        code: 'system-reboot',
+        description: '[Completed] scheduled reboot',
+        notBefore,
+      },
+    ]);
+    emu.clock.advance(5 * 60_000);
+    expect((await poll()).events).toMatchObject([
+      {
+        id: 'status/i-0abc12345678def01/instance-event-0123456789abcdef0/completed',
+        details: { status: 'completed' },
+      },
+    ]);
+  });
+
+  it('a failed DescribeInstanceStatus scan is retried on the next poll', async () => {
+    const { emu, ec2, poll } = await world({});
+    ec2.addInstance({ id: 'i-0abc12345678def01' });
+    emu.failNext('DescribeInstanceStatus', 'RequestLimitExceeded', 503);
+    await expect(poll()).rejects.toMatchObject({ code: 'RATE_LIMITED' });
+    await expect(poll()).resolves.toMatchObject({ events: [] });
+    expect(emu.calls('DescribeInstanceStatus')).toHaveLength(2);
   });
 });

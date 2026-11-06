@@ -16,7 +16,12 @@ import type { JsonClient, QueryClient, QueryParams, XmlElement } from '@better-c
 import type { AccountCredentials } from './account.js';
 import { parseDiscoverTag, type AwsConfig, type AwsProviderOptions } from './config.js';
 import { clientToken, offerId, parseInstanceId, parseOfferId, tags, tagValue } from './ids.js';
-import { defaultEventSources, pollQueue } from './events.js';
+import {
+  defaultEventSources,
+  pollQueue,
+  scanScheduledEvents,
+  scheduledEventScanMs,
+} from './events.js';
 import { aliasRootDeviceOf, resolveImage, ssmImagePrefixes } from './images.js';
 import {
   toMachine,
@@ -140,6 +145,8 @@ export class AwsCompute implements ProviderImpl {
   readonly #rootDevices = new Map<string, { device: string | undefined; at: number }>();
   readonly #loggedSsm = new Set<string>();
   readonly #ssmPrefixes: readonly string[];
+  /** (A4, no queue) When the last DescribeInstanceStatus scan succeeded. */
+  #scannedAt: number | undefined;
 
   constructor(
     readonly config: AwsConfig,
@@ -796,15 +803,26 @@ export class AwsCompute implements ProviderImpl {
 
   /**
    * The account's EventBridge events from its intake queue (`eventQueueUrl`), authenticated by
-   * account, region and source. Messages are deleted only by the batch's `ack`.
+   * account, region and source. Messages are deleted only by the batch's `ack`. Without a queue,
+   * the account's scheduled events (DescribeInstanceStatus) at most every 5 minutes.
    */
   async pollEvents(
     context: CallContext,
     options: { waitMs: number; max: number },
   ): Promise<ProviderEventBatch> {
     const { sqs } = this.deps;
-    if (sqs === undefined || this.config.eventQueueUrl === undefined)
-      return { events: [], ack: async () => {} };
+    if (sqs === undefined || this.config.eventQueueUrl === undefined) {
+      const now = this.context.clock.now();
+      if (this.#scannedAt !== undefined && now - this.#scannedAt < scheduledEventScanMs)
+        return { events: [], ack: async () => {} };
+      const events = await scanScheduledEvents(
+        (action, params, signal) => this.call(action, params, signal),
+        context.signal,
+        now,
+      );
+      this.#scannedAt = now;
+      return { events, ack: async () => {} };
+    }
     return pollQueue(
       {
         sqs,

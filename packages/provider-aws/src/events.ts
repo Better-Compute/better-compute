@@ -5,7 +5,12 @@ import {
   type ProviderEvent,
   type ProviderEventBatch,
 } from '@better-compute/core';
-import { partitionOf, type JsonClient } from '@better-compute/aws-core';
+import {
+  partitionOf,
+  type JsonClient,
+  type QueryParams,
+  type XmlElement,
+} from '@better-compute/aws-core';
 
 // AWS A4 event intake (AD12). A customer-owned EventBridge rule set feeds an SQS queue; `pollEvents`
 // long-polls it and maps each EventBridge envelope to a ProviderEvent. An envelope counts only when
@@ -358,4 +363,77 @@ export async function pollQueue(
         });
     },
   };
+}
+
+// --- Without a queue: DescribeInstanceStatus scheduled events --------------------------------------
+
+/** How often an account without an intake queue reads its scheduled events. */
+export const scheduledEventScanMs = 5 * 60_000;
+
+/** The scheduled-event codes EC2 reports (DescribeInstanceStatus `event.code`). */
+const scheduledCodes = [
+  'instance-reboot',
+  'system-reboot',
+  'system-maintenance',
+  'instance-retirement',
+  'instance-stop',
+];
+
+/** `scheduled`, or `completed` / `canceled` from EC2's `[Completed]` / `[Canceled]` description prefix. */
+function scheduledStatus(description: string): 'scheduled' | 'completed' | 'canceled' {
+  if (/^\[completed\]/i.test(description)) return 'completed';
+  if (/^\[cancell?ed\]/i.test(description)) return 'canceled';
+  return 'scheduled';
+}
+
+/**
+ * Every instance's scheduled events, as `maintenance-scheduled` events. The id carries the event's
+ * status, so a completion or cancellation is a new event while an unchanged one stays a duplicate.
+ */
+export async function scanScheduledEvents(
+  call: (action: string, params: QueryParams, signal: AbortSignal) => Promise<XmlElement>,
+  signal: AbortSignal,
+  now: number,
+): Promise<ProviderEvent[]> {
+  const events: ProviderEvent[] = [];
+  const seen = new Set<string>();
+  let token: string | undefined;
+  do {
+    const doc = await call(
+      'DescribeInstanceStatus',
+      {
+        Filter: [{ Name: 'event.code', Value: scheduledCodes }],
+        MaxResults: 1000,
+        NextToken: token,
+      },
+      signal,
+    );
+    for (const item of doc.items('instanceStatusSet')) {
+      const machineId = item.textOf('instanceId');
+      if (!machineId || !instancePattern.test(machineId)) continue;
+      for (const scheduled of item.items('eventsSet')) {
+        const eventId = scheduled.textOf('instanceEventId');
+        const code = scheduled.textOf('code');
+        if (!eventId || !/^instance-event-[0-9a-f]{8,17}$/.test(eventId) || !code) continue;
+        const status = scheduledStatus(scheduled.textOf('description') ?? '');
+        const notBefore = Date.parse(scheduled.textOf('notBefore') ?? '');
+        events.push({
+          id: `status/${machineId}/${eventId}/${status}`,
+          kind: 'maintenance-scheduled',
+          machineId,
+          at: now,
+          ...(Number.isFinite(notBefore) ? { deadline: notBefore } : {}),
+          details: { code: code.slice(0, 64), status },
+        });
+      }
+    }
+    token = doc.textOf('nextToken') || undefined;
+    if (token && seen.has(token))
+      throw new ComputeError('PROVIDER_ERROR', 'AWS returned a pagination token twice', undefined, {
+        provider: 'aws',
+        reason: 'pagination-loop',
+      });
+    if (token) seen.add(token);
+  } while (token);
+  return events;
 }
