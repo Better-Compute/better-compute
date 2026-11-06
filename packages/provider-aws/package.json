@@ -1,0 +1,53 @@
+{
+  "name": "@better-compute/provider-aws",
+  "version": "0.3.0",
+  "description": "Amazon EC2 provider for better-compute: instances through provider pools, offers, attach, and the IAM and trust policies an AWS account needs.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "better-compute contributors",
+  "homepage": "https://github.com/better-compute/better-compute/tree/main/packages/provider-aws#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/better-compute/better-compute.git",
+    "directory": "packages/provider-aws"
+  },
+  "bugs": {
+    "url": "https://github.com/better-compute/better-compute/issues"
+  },
+  "keywords": [
+    "better-compute",
+    "aws",
+    "ec2",
+    "cloud-provider",
+    "vps"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-compute/aws-core": "workspace:*",
+    "@better-compute/core": "workspace:*",
+    "@better-compute/vps": "workspace:*"
+  }
+}
