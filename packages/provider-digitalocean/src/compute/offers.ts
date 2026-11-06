@@ -64,6 +64,11 @@ function catalogOf(client: DoClient, signal: AbortSignal): Promise<Catalog> {
   return untilAborted(entry.catalog, signal);
 }
 
+/** Every size of the catalog, through the same ten-minute cache as the offers (list prices read it). */
+export async function catalogSizes(client: DoClient, signal: AbortSignal): Promise<DoSize[]> {
+  return (await catalogOf(client, signal)).sizes;
+}
+
 /**
  * The size `slug` from a catalog this client has already loaded, without a request or a wait:
  * undefined when it holds no fresh loaded catalog or the size isn't in it.

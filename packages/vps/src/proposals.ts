@@ -104,8 +104,9 @@ export interface ProposeInput {
 /**
  * A proposal for every provider meter of the catalog the list prices cover. `vm.vcpu.hours` and
  * `vm.memory.gib.hours` take the cheapest general-purpose family (by one vCPU and four GiB); GPU meters the cheapest
- * SKU of the model, on demand or Spot; ancillary meters the matching SKU; a flavor meter the sum of its family's vCPU,
- * memory and GPU SKUs for the flavor's shape. Meters with no basis (`vm.instance.hours`, reserved and grant meters,
+ * SKU of the model, on demand or Spot; ancillary meters the matching SKU; a flavor meter the on-demand `instance`
+ * price of its offer when the provider lists one, else the sum of its family's vCPU, memory and GPU SKUs for the
+ * flavor's shape. Meters with no basis (`vm.instance.hours`, reserved and grant meters,
  * managed VMs, networks, snapshots) are `unpriced`.
  */
 export function proposePrices(input: ProposeInput): PriceProposals {
@@ -206,8 +207,25 @@ function flavorProposal(
       flavor.gpuModel === first.gpuModel &&
       flavor.offerId === first.offerId,
   );
+  if (!same) return undefined;
+  // A provider that prices whole shapes (a DigitalOcean size) lists the offer itself: its price is the meter's
+  // basis as it is, never added to vCPU, memory or GPU parts. Listings that disagree on it price nothing.
+  const whole = onDemand.filter(
+    (price) => price.resource === 'instance' && price.offerId === first.offerId,
+  );
+  if (whole.length > 0) {
+    if (!whole.every((price) => price.unitPriceMicros === whole[0]!.unitPriceMicros))
+      return undefined;
+    const price = [...whole].sort((a, b) => a.sku.localeCompare(b.sku))[0]!;
+    return proposalOf(
+      meter,
+      [{ sku: price.sku, unitPriceMicros: price.unitPriceMicros }],
+      price.unitPriceMicros,
+      input.marginPct,
+    );
+  }
   const placement = offerPlacement(first.offerId);
-  if (!same || !placement) return undefined;
+  if (!placement) return undefined;
   const inRegion = onDemand.filter((price) => price.region === placement.region);
   const family = inRegion.filter((price) => price.machineFamily === placement.family);
   const vcpu = cheapest(family.filter((price) => price.resource === 'vcpu'));

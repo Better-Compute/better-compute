@@ -8,6 +8,7 @@ import {
   type PowerAction,
   type ProviderContext,
   type ProviderImpl,
+  type ProviderListPrice,
 } from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
 import type { DoConfig, DoProviderOptions } from '../config.js';
@@ -27,6 +28,7 @@ import {
 } from '../ids.js';
 import { DoNetworks } from '../networks/index.js';
 import { networkNamer, vpcForNetwork } from '../networks/vpcs.js';
+import { listPrices } from '../ops/prices.js';
 import { poolMembers } from './autoscale.js';
 import { ensureSshKeys } from './keys.js';
 import { cachedSize, gpuModelOf, listOffers } from './offers.js';
@@ -209,6 +211,14 @@ export class DoCompute implements ProviderImpl {
 
   async listOffers(query: OfferQuery): Promise<Offer[]> {
     return listOffers(this.client, this.config, query, new AbortController().signal);
+  }
+
+  /** (platform compute billing) Whole-size list prices, from the offers catalog (D-ops-1). */
+  async listPrices(
+    query: { regions?: readonly string[] },
+    ctx: CallContext,
+  ): Promise<ProviderListPrice[]> {
+    return listPrices(this.client, this.config.regions, query, ctx.signal);
   }
 
   // ------------------------------------------------------------------------------- create
