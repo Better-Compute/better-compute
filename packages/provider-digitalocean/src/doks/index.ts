@@ -1,6 +1,7 @@
 import {
   isComputeError,
   type CallContext,
+  type ComputeError,
   type KubernetesClusterSpec,
   type KubernetesCredentialRequest,
   type KubernetesCredentials,
@@ -95,6 +96,15 @@ function oldestFirst(a: DoksCluster, b: DoksCluster): number {
   return at(a) - at(b) || a.id.localeCompare(b.id);
 }
 
+/** UNSUPPORTED: DigitalOcean did not make a pool asked for as Spot a Spot one. */
+function spotUnverified(): ComputeError {
+  return fail(
+    'UNSUPPORTED',
+    'DigitalOcean made a node pool asked for as Spot an on-demand one (the Spot field is a preview): it was deleted, and no Spot pool is created until the provider restarts',
+    'spotUnverified',
+  );
+}
+
 export class DoKubernetes implements ProviderKubernetes {
   readonly #client: DoClient;
   readonly #config: DoConfig;
@@ -102,6 +112,14 @@ export class DoKubernetes implements ProviderKubernetes {
   readonly #transport: KubeTransport;
   /** Cluster name → uuid, so a call reads one cluster instead of listing them all. */
   readonly #names = new Map<string, string>();
+  /**
+   * Set once DigitalOcean made a pool asked for as Spot on-demand (the `spot` field is not in
+   * its published spec): from then on this process creates no Spot pool, so an unhonoured field
+   * costs at most one short-lived on-demand pool, never a loop of them.
+   */
+  #spotDropped = false;
+  /** The ids of clusters and pools made on-demand instead of Spot, deleted until they are gone. */
+  readonly #unverifiedSpot = new Set<string>();
 
   constructor(options: DoKubernetesOptions) {
     this.#client = options.client;
@@ -158,6 +176,28 @@ export class DoKubernetes implements ProviderKubernetes {
     } catch (error) {
       if (!isComputeError(error, 'NOT_FOUND')) throw error;
     }
+  }
+
+  /**
+   * Deletes a cluster or pool DigitalOcean made on-demand though it was asked for Spot, and
+   * answers UNSUPPORTED (`spotUnverified`). A delete that fails is thrown as it is, and the id is
+   * kept: the next call for it deletes again, so an on-demand GPU pool is never left billing.
+   */
+  async #dropUnverified(
+    id: string,
+    path: string,
+    what: string,
+    context: CallContext,
+  ): Promise<ComputeError> {
+    this.#spotDropped = true;
+    this.#unverifiedSpot.add(id);
+    context.log.warn(`doks.${what}.spotUnverified`, { [what]: id });
+    try {
+      await this.#client.request('DELETE', path, { signal: context.signal, budget: 'mutate' });
+    } catch (error) {
+      if (!isComputeError(error, 'NOT_FOUND')) throw error;
+    }
+    return spotUnverified();
   }
 
   /**
@@ -246,6 +286,8 @@ export class DoKubernetes implements ProviderKubernetes {
     const { id } = found;
     const state = found.status?.state;
     if (state === 'deleting') return clusterState(id, found);
+    if (this.#unverifiedSpot.has(id))
+      throw await this.#dropUnverified(id, `/kubernetes/clusters/${id}`, 'cluster', context);
     await this.#checkImmutable(spec, found, signal);
     if (state !== 'running' && state !== 'degraded') return clusterState(id, found);
     // A newer patch of the pinned minor (DOKS auto-upgraded it) satisfies the pin.
@@ -364,6 +406,19 @@ export class DoKubernetes implements ProviderKubernetes {
     if (!created?.id)
       throw fail('PROVIDER_ERROR', 'DigitalOcean created a cluster without an id', 'noId');
     this.#names.set(spec.name, created.id);
+    // Every pool asked for as Spot must have come back Spot; else the new cluster goes again.
+    const dropped = (spec.initialNodePools ?? []).some(
+      (pool) =>
+        pool.spot === true &&
+        created.node_pools?.find((made) => made.name === pool.name)?.spot !== true,
+    );
+    if (dropped)
+      throw await this.#dropUnverified(
+        created.id,
+        `/kubernetes/clusters/${created.id}`,
+        'cluster',
+        context,
+      );
     return clusterState(created.id, created);
   }
 
@@ -448,6 +503,7 @@ export class DoKubernetes implements ProviderKubernetes {
    * must be what the size carries (DO sizes come with their GPUs).
    */
   async #checkCapacity(spec: KubernetesNodePoolSpec, signal: AbortSignal): Promise<void> {
+    if (spec.spot && this.#spotDropped) throw spotUnverified();
     if (spec.spot && !(this.#config.allowSpot && this.#config.previews))
       throw fail(
         'UNSUPPORTED',
@@ -538,6 +594,18 @@ export class DoKubernetes implements ProviderKubernetes {
             },
           )
         ).node_pool;
+        if (spec.spot) {
+          // DigitalOcean must have honoured `spot`: an on-demand GPU pool is deleted at once.
+          const made = created ?? (await this.#pool(clusterId, spec.name, signal)).pool;
+          if (!made) throw spotUnverified();
+          if (made.spot !== true)
+            throw await this.#dropUnverified(
+              made.id,
+              `/kubernetes/clusters/${clusterId}/node_pools/${made.id}`,
+              'nodePool',
+              context,
+            );
+        }
         return created ? nodePoolState(id, created) : resourceState(id, 'pending');
       } catch (error) {
         // Created meanwhile: what is there is the answer, if it is ours.
@@ -549,6 +617,13 @@ export class DoKubernetes implements ProviderKubernetes {
       }
     }
     if (!this.#owned(pool)) throw this.#notOwnedPool(id);
+    if (this.#unverifiedSpot.has(pool.id))
+      throw await this.#dropUnverified(
+        pool.id,
+        `/kubernetes/clusters/${clusterId}/node_pools/${pool.id}`,
+        'nodePool',
+        context,
+      );
     checkNodePoolImmutable(id, spec, pool);
     if (!serving) return nodePoolState(id, pool);
     const update = nodePoolUpdate(spec, pool);

@@ -547,6 +547,72 @@ describe('doks node pools', () => {
     expect(switched.details).toMatchObject({ reason: 'immutable', field: 'spot' });
   });
 
+  const spotAccount = { ...doAccount, regions: ['nyc3', 'tor1'], allowSpot: true, previews: true };
+
+  it('deletes a Spot pool DigitalOcean made on-demand, and creates no more Spot pools', async () => {
+    const s = await setup(spotAccount);
+    const cluster = await readyCluster(s, torCluster);
+    s.doks.ignoresSpot = true;
+    const spot = { ...gpuPool, name: 'spot', spot: true };
+    const dropped = await failure(s.k8s.ensureNodePool(cluster, spot, s.ctx()));
+    expect([dropped.code, dropped.details?.reason]).toEqual(['UNSUPPORTED', 'spotUnverified']);
+    // The on-demand pool it got is deleted by its id at once.
+    const made = s.doks.clusters.get(cluster)!.node_pools.find((p: Json) => p.name === 'spot');
+    expect(made.spot).toBeUndefined();
+    const path = `/kubernetes/clusters/${cluster}/node_pools/${made.id}`;
+    expect(mutations(s).filter((m) => m.startsWith('DELETE'))).toEqual([`DELETE ${path}`]);
+    // While it goes, the answer stays UNSUPPORTED (never immutable `spot`, never a second pool).
+    const again = await failure(s.k8s.ensureNodePool(cluster, spot, s.ctx()));
+    expect([again.code, again.details?.reason]).toEqual(['UNSUPPORTED', 'spotUnverified']);
+    await settle(() => s.k8s.getCluster(cluster, s.ctx()), 'ready');
+    expect(s.doks.clusters.get(cluster)!.node_pools.map((p: Json) => p.name)).toEqual(['general']);
+    // Gone: no other Spot pool is created, here or on another cluster.
+    const creates = posted(s, `/kubernetes/clusters/${cluster}/node_pools`).length;
+    const later = await failure(s.k8s.ensureNodePool(cluster, spot, s.ctx()));
+    expect([later.code, later.details?.reason]).toEqual(['UNSUPPORTED', 'spotUnverified']);
+    expect(posted(s, `/kubernetes/clusters/${cluster}/node_pools`)).toHaveLength(creates);
+    // On-demand pools are unaffected.
+    await settle(() => s.k8s.ensureNodePool(cluster, { ...gpuPool, name: 'od' }, s.ctx()), 'ready');
+    expect(s.logs.some((entry) => entry.message === 'doks.nodePool.spotUnverified')).toBe(true);
+  });
+
+  it('retries the delete of a pool DigitalOcean made on-demand when it failed', async () => {
+    const s = await setup(spotAccount);
+    const cluster = await readyCluster(s, torCluster);
+    s.doks.ignoresSpot = true;
+    const spot = { ...gpuPool, name: 'spot', spot: true };
+    s.doks.do.failNext(
+      { method: 'DELETE', path: new RegExp(`^/kubernetes/clusters/${cluster}/node_pools/`) },
+      503,
+      { id: 'service_unavailable', message: 'try again' },
+    );
+    expect((await failure(s.k8s.ensureNodePool(cluster, spot, s.ctx()))).code).toBe('UNAVAILABLE');
+    const made = s.doks.clusters.get(cluster)!.node_pools.find((p: Json) => p.name === 'spot');
+    expect(made.nodes.every((node: Json) => node.status.state !== 'deleting')).toBe(true);
+    const retried = await failure(s.k8s.ensureNodePool(cluster, spot, s.ctx()));
+    expect([retried.code, retried.details?.reason]).toEqual(['UNSUPPORTED', 'spotUnverified']);
+    expect(made.nodes.every((node: Json) => node.status.state === 'deleting')).toBe(true);
+  });
+
+  it('deletes a new cluster whose initial Spot pool DigitalOcean made on-demand', async () => {
+    const s = await setup(spotAccount);
+    s.doks.ignoresSpot = true;
+    const spec: KubernetesClusterSpec = {
+      ...torCluster,
+      initialNodePools: [cpuPool, { ...gpuPool, name: 'spot', spot: true }],
+    };
+    const dropped = await failure(s.k8s.ensureCluster(spec, s.ctx()));
+    expect([dropped.code, dropped.details?.reason]).toEqual(['UNSUPPORTED', 'spotUnverified']);
+    const [made] = s.doks.byName('bc-k-tor');
+    expect(made!.status.state).toBe('deleting');
+    expect(mutations(s)).toEqual(['POST /kubernetes/clusters', `DELETE /kubernetes/clusters/${made!.id}`]);
+    // Once it is gone, a create with a Spot pool is refused before anything is sent.
+    await settle(() => s.k8s.getCluster(made!.id, s.ctx()).then((x) => x ?? { state: 'gone' }), 'gone');
+    const later = await failure(s.k8s.ensureCluster(spec, s.ctx()));
+    expect([later.code, later.details?.reason]).toEqual(['UNSUPPORTED', 'spotUnverified']);
+    expect(posted(s, '/kubernetes/clusters')).toHaveLength(1);
+  });
+
   it('refuses differences that cannot change in place with INVALID_STATE', async () => {
     const s = await setup();
     const cluster = await readyCluster(s);

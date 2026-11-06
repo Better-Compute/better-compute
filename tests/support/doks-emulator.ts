@@ -63,6 +63,11 @@ export class DoksEmulator {
   transitionReads = 1;
   /** Whether a second cluster with a taken name is refused (DO's behaviour); off to test reaping. */
   uniqueNames = true;
+  /**
+   * Drops a node pool's `spot` field, as an API that does not know it would: the pool is made
+   * on-demand. The field is not in DO's published spec, so the driver must check what it got.
+   */
+  ignoresSpot = false;
   /** What `destroy_with_associated_resources` lists per cluster (load balancers, volumes, snapshots). */
   readonly associated = new Map<string, Json>();
   /** Every cluster-admin token `/credentials` issued, with its cluster and expiry (epoch ms). */
@@ -215,7 +220,7 @@ export class DoksEmulator {
       min_nodes: body.min_nodes ?? 0,
       max_nodes: body.max_nodes ?? 0,
       nodes: [],
-      ...(body.spot !== undefined ? { spot: body.spot } : {}),
+      ...(body.spot !== undefined && !this.ignoresSpot ? { spot: body.spot } : {}),
     };
     this.#resize(cluster, pool, pool.count as number);
     return pool;
