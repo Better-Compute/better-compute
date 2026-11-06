@@ -58,6 +58,7 @@ function gkeSubject(): KubernetesProviderConformanceSubject {
     missingCluster: 'us-central1/bc-k-none',
     adoptable: 'us-central1/tenant-own',
     accepts: (credentials) => kube.issued.includes(credentials.token),
+    can: (credentials, check) => kube.can(credentials.server, credentials.token, check),
   };
 }
 
@@ -111,10 +112,13 @@ function eksSubject(): KubernetesProviderConformanceSubject {
     missingCluster: 'us-east-1/bc-k-none',
     adoptable: 'us-east-1/tenant-own',
     accepts: (credentials) => kube.issued.includes(credentials.token),
+    can: (credentials, check) => kube.can(credentials.server, credentials.token, check),
   };
 }
 
 function doksSubject(): KubernetesProviderConformanceSubject {
+  // DigitalOcean request budgets are per process: every case starts with a fresh one.
+  resetBudgets();
   const doks = new DoksEmulator(new DoEmulator());
   const own = doks.seedCluster({ name: 'tenant-own', region: 'tor1' });
   return {
@@ -138,6 +142,36 @@ function doksSubject(): KubernetesProviderConformanceSubject {
     missingCluster: '0d0c5000-0000-4000-8000-999999999999',
     adoptable: own.id as string,
     accepts: (credentials) => doks.kube.issued.includes(credentials.token),
+    can: (credentials, check) => doks.kube.can(credentials.server, credentials.token, check),
+  };
+}
+
+/** The subject's provider, offering only the newest minor version of each location. */
+function singleMinor(subject: KubernetesProviderConformanceSubject): KubernetesProviderConformanceSubject {
+  const { provider } = subject;
+  return {
+    ...subject,
+    provider: {
+      ...provider,
+      async create(config, context) {
+        const impl = await provider.create(config, context);
+        const k8s = impl.kubernetes!;
+        const kubernetes = new Proxy(k8s, {
+          get(target, property) {
+            if (property === 'versions')
+              return async (location: string, call: Parameters<typeof k8s.versions>[1]) => {
+                const versions = await target.versions(location, call);
+                const minor = /^(\d+\.\d+)/.exec(versions.defaultVersion)![1]!;
+                const valid = versions.validVersions.filter((version) => version.startsWith(minor));
+                return { ...versions, validVersions: valid };
+              };
+            const value = Reflect.get(target, property, target);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+        return { ...impl, kubernetes };
+      },
+    },
   };
 }
 
@@ -152,6 +186,35 @@ describe('kubernetesProviderConformanceCases', () => {
     const report = await runConformance(kubernetesProviderConformanceCases(), subject);
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
     expect(report.passed).toHaveLength(kubernetesProviderConformanceCases().length);
+  });
+
+  it('fails a provider whose credentials can do anything (the role cases), and nothing else', async () => {
+    const report = await runConformance(kubernetesProviderConformanceCases(), () => ({ ...gkeSubject(), can: () => true }));
+    expect(report.failed.map(({ name, error }) => [name, String(error)])).toEqual([
+      [
+        'a credential carries its role: view only reads, edit never reaches bc-access or kube-system',
+        'ConformanceFailure: a view credential cannot create pods',
+      ],
+      [
+        'forgetCredentials removes the access of a subject, and is idempotent',
+        'ConformanceFailure: the credential stops working once its subject is forgotten',
+      ],
+    ]);
+  });
+
+  it('fails the upgrade case of a location with one minor version unless the subject opts out', async () => {
+    const one = await runConformance(
+      kubernetesProviderConformanceCases().filter((test) => test.name.startsWith('raising the version')),
+      () => singleMinor(gkeSubject()),
+    );
+    expect(one.failed.map(({ error }) => String(error))).toEqual([
+      expect.stringMatching(/offers 1 minor version\(s\): an upgrade needs two/),
+    ]);
+    const skipped = await runConformance(
+      kubernetesProviderConformanceCases().filter((test) => test.name.startsWith('raising the version')),
+      () => ({ ...singleMinor(gkeSubject()), upgrade: false }),
+    );
+    expect(skipped.failed).toEqual([]);
   });
 
   it('fails a provider whose cluster refuses the credential it minted, and nothing else', async () => {

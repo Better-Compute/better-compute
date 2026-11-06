@@ -23,6 +23,15 @@ import { check, checkEqual, ConformanceFailure, type ConformanceCase } from '@be
 /** A node pool shape the provider accepts, without its name. */
 export type KubernetesConformanceShape = Omit<KubernetesNodePoolSpec, 'name'>;
 
+/** One thing a credential might do on its cluster: `verb` on `resource` of `group` ('' the core group) in `namespace`. */
+export interface KubernetesAccessCheck {
+  verb: string;
+  resource: string;
+  group?: string;
+  /** Absent for a cluster-scoped resource. */
+  namespace?: string;
+}
+
 /** What the cases run against: a provider, an account config, and what the provider calls things. */
 export interface KubernetesProviderConformanceSubject {
   provider: ProviderDefinition;
@@ -55,6 +64,16 @@ export interface KubernetesProviderConformanceSubject {
   adoptable?: string;
   /** Whether the cluster's own API accepts a minted credential (the emulator's check). Skipped without. */
   accepts?: (credentials: KubernetesCredentials) => boolean | Promise<boolean>;
+  /**
+   * Whether a minted credential may do `check` on its cluster now (the emulator's RBAC and admission policies, or a
+   * SubjectAccessReview against a live cluster). The role cases are skipped without.
+   */
+  can?: (credentials: KubernetesCredentials, check: KubernetesAccessCheck) => boolean | Promise<boolean>;
+  /**
+   * `false` when the location offers a single minor version on purpose: the upgrade case is then skipped. Otherwise a
+   * location with fewer than two minors fails that case (it would test nothing).
+   */
+  upgrade?: boolean;
 }
 
 /** The pool substrate's node pool label (`@better-compute/kubernetes` substratePoolLabel). */
@@ -280,7 +299,12 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
           const [x, y] = [a.split('.').map(Number), b.split('.').map(Number)];
           return y[0]! - x[0]! || y[1]! - x[1]!;
         });
-        if (minors.length < 2) return;
+        if (minors.length < 2) {
+          if (subject.upgrade === false) return;
+          throw new ConformanceFailure(
+            `${subject.location} offers ${minors.length} minor version(s): an upgrade needs two (set upgrade: false to skip this case)`,
+          );
+        }
         const [newer, older] = [minors[0]!, minors[1]!];
         const runs = (actual: string | undefined, version: string) =>
           actual !== undefined && (actual === version || actual.startsWith(`${version}.`) || actual.startsWith(`${version}-`));
@@ -339,6 +363,21 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
             isComputeError(shape, 'INVALID_STATE'),
             `a machine type change of a node pool is INVALID_STATE, not ${String(shape)}`,
           );
+          // More GPUs per node than the pool has: never a ready answer for the pool that is there.
+          const more = gpu.accelerators && { ...gpu.accelerators, count: gpu.accelerators.count * 2 };
+          if (more) {
+            const accelerators = await rejection(() =>
+              c.k8s.ensureNodePool(cluster, { ...gpu, accelerators: more }, c.call('gpu-accelerators')),
+            );
+            check(
+              isComputeError(accelerators, 'INVALID_STATE'),
+              `an accelerator change of a node pool is INVALID_STATE, not ${String(accelerators)}`,
+            );
+          }
+          if (subject.spot !== false) {
+            const flipped = await rejection(() => c.k8s.ensureNodePool(cluster, { ...gpu, spot: true }, c.call('gpu-spot-flip')));
+            check(isComputeError(flipped, 'INVALID_STATE'), `a Spot flip of a node pool is INVALID_STATE, not ${String(flipped)}`);
+          }
           // A flavor scaled to nothing keeps its pool (`nodes: 0` is a valid substrate flavor).
           if (subject.zeroNodes !== false)
             await settle(
@@ -407,9 +446,99 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
           check(!read.includes(minted.token), 'getCluster never carries the token');
           const view = await c.k8s.credentials(id, { subject: 'bc-substrate', role: 'view', ttlSeconds: 600 }, c.call('view'));
           check(view.token !== minted.token, 'every request mints its own token');
+          // A bad request is refused before anything is minted, and the refusal carries no token.
+          for (const [request, what] of [
+            [{ subject: 'Bad_Subject', role: 'view', ttlSeconds: 600 }, 'a subject that is no DNS-1123 label'],
+            [{ subject: 'bc-substrate', role: 'view', ttlSeconds: 60 }, 'ttlSeconds below 600'],
+            [{ subject: 'bc-substrate', role: 'view', ttlSeconds: 100_000 }, 'ttlSeconds above 86400'],
+          ] as const) {
+            const refused = await rejection(() => c.k8s.credentials(id!, request, c.call('bad-request')));
+            check(isComputeError(refused, 'INVALID_INPUT'), `${what} is INVALID_INPUT, not ${String(refused)}`);
+            const said = `${String(refused)} ${JSON.stringify((refused as { details?: unknown }).details ?? {})}`;
+            check(!said.includes(minted.token) && !said.includes(view.token), `refusing ${what} names no token`);
+          }
+          if (subject.missingCluster !== undefined) {
+            const missing = await rejection(() =>
+              c.k8s.credentials(subject.missingCluster!, { subject: 'bc-substrate', role: 'view', ttlSeconds: 600 }, c.call('creds-missing')),
+            );
+            check(isComputeError(missing, 'NOT_FOUND'), `credentials on an unknown cluster are NOT_FOUND, not ${String(missing)}`);
+          }
         } finally {
           await cleanUp(subject, c, id);
         }
+      },
+    },
+    {
+      name: 'a credential carries its role: view only reads, edit never reaches bc-access or kube-system',
+      async run(subject) {
+        if (!subject.can) return;
+        const c = await client(subject);
+        const { spec } = names(subject, 'roles');
+        let id: string | undefined;
+        try {
+          id = (await readyCluster(subject, c, spec())).id;
+          const mint = (name: string, role: 'view' | 'edit' | 'admin') =>
+            c.k8s.credentials(id!, { subject: name, role, ttlSeconds: 600 }, c.call(`roles-${name}`));
+          const admin = await mint('bc-conf-admin', 'admin');
+          const view = await mint('bc-conf-viewer', 'view');
+          const edit = await mint('bc-conf-editor', 'edit');
+          const can = (credentials: KubernetesCredentials, verb: string, resource: string, namespace?: string, group = '') =>
+            subject.can!(credentials, { verb, resource, group, ...(namespace !== undefined ? { namespace } : {}) });
+          check(await can(admin, 'create', 'pods', 'default'), 'an admin credential creates pods');
+          check(await can(view, 'get', 'pods', 'default'), 'a view credential reads pods');
+          check(!(await can(view, 'create', 'pods', 'default')), 'a view credential cannot create pods');
+          check(!(await can(view, 'get', 'secrets', 'default')), 'a view credential cannot read secrets');
+          check(await can(edit, 'create', 'deployments', 'default', 'apps'), 'an edit credential creates deployments');
+          // Every subject's service account lives in bc-access: an edit subject that could run a pod, mint a token or
+          // impersonate there would act as an admin subject's account.
+          for (const namespace of ['bc-access', 'kube-system']) {
+            check(!(await can(edit, 'create', 'pods', namespace)), `an edit credential cannot create pods in ${namespace}`);
+            check(!(await can(edit, 'create', 'pods/exec', namespace)), `an edit credential cannot exec in ${namespace}`);
+            check(
+              !(await can(edit, 'create', 'serviceaccounts/token', namespace)),
+              `an edit credential cannot mint service account tokens in ${namespace}`,
+            );
+            check(
+              !(await can(edit, 'impersonate', 'serviceaccounts', namespace)),
+              `an edit credential cannot impersonate service accounts in ${namespace}`,
+            );
+            check(await can(admin, 'create', 'pods', namespace), `an admin credential creates pods in ${namespace}`);
+          }
+        } finally {
+          await cleanUp(subject, c, id);
+        }
+      },
+    },
+    {
+      name: 'forgetCredentials removes the access of a subject, and is idempotent',
+      async run(subject) {
+        const c = await client(subject);
+        if (!c.k8s.forgetCredentials || !subject.can) return;
+        const { spec } = names(subject, 'forget');
+        let id: string | undefined;
+        try {
+          id = (await readyCluster(subject, c, spec())).id;
+          const minted = await c.k8s.credentials(id, { subject: 'bc-conf-forget', role: 'admin', ttlSeconds: 600 }, c.call('forget'));
+          const reads = () => subject.can!(minted, { verb: 'get', resource: 'pods', namespace: 'default' });
+          check(await reads(), 'the credential works before forgetCredentials');
+          await c.k8s.forgetCredentials(id, 'bc-conf-forget', c.call('forget-1'));
+          check(!(await reads()), 'the credential stops working once its subject is forgotten');
+          await c.k8s.forgetCredentials(id, 'bc-conf-forget', c.call('forget-2'));
+          if (subject.missingCluster !== undefined)
+            await c.k8s.forgetCredentials(subject.missingCluster, 'bc-conf-forget', c.call('forget-missing'));
+        } finally {
+          await cleanUp(subject, c, id);
+        }
+      },
+    },
+    {
+      name: 'node pool calls on an unknown cluster are NOT_FOUND',
+      async run(subject) {
+        if (subject.missingCluster === undefined) return;
+        const c = await client(subject);
+        const pool: KubernetesNodePoolSpec = { name: 'bc-conf-missing', ...subject.nodePool };
+        const error = await rejection(() => c.k8s.ensureNodePool(subject.missingCluster!, pool, c.call('missing-pool')));
+        check(isComputeError(error, 'NOT_FOUND'), `ensureNodePool on an unknown cluster is NOT_FOUND, not ${String(error)}`);
       },
     },
     {
