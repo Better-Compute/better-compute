@@ -12,3 +12,4 @@ export * from './stream-sinks.js';
 export * from './acm-pca.js';
 export * from './kms-ca.js';
 export * from './rds.js';
+export * from './emf.js';
