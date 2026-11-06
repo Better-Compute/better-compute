@@ -722,6 +722,8 @@ export interface ProviderNetworkSpec {
   name: string;
   description?: string;
   mtu?: number;
+  /** The network's primary IPv4 range, for providers whose networks have one (an AWS VPC). Absent: the provider's default. */
+  cidr?: string;
 }
 export interface ProviderSubnetSpec {
   network: string;
@@ -729,6 +731,8 @@ export interface ProviderSubnetSpec {
   region: string;
   cidr: string;
   privateGoogleAccess?: boolean;
+  /** The zone the subnet lives in, for providers whose subnets are zone-scoped (`subnetScope: 'zone'`). */
+  zone?: string;
 }
 export interface ProviderFirewallSpec {
   network: string;
@@ -754,6 +758,13 @@ export interface ProviderNetworkState {
  * again later.
  */
 export interface ProviderNetworks {
+  /** 'zone': subnets live in one zone and `ensureSubnet` gets `zone` (AWS). Default 'region'. */
+  readonly subnetScope?: 'region' | 'zone';
+  /**
+   * How `deny` rules are honored: natively, per target (GCP); network-wide only, whatever the targets (AWS
+   * network ACLs), so a targeted deny is refused; or not at all. Default 'native'.
+   */
+  readonly denyRules?: 'native' | 'network-wide' | 'none';
   ensureNetwork(spec: ProviderNetworkSpec, context: CallContext): Promise<ProviderNetworkState>;
   ensureSubnet(spec: ProviderSubnetSpec, context: CallContext): Promise<ProviderNetworkState>;
   ensureFirewall(spec: ProviderFirewallSpec, context: CallContext): Promise<ProviderNetworkState>;
@@ -1048,6 +1059,8 @@ export interface ProviderImpl {
     context: CallContext,
   ): Promise<ProviderListPrice[]>;
   networks?: ProviderNetworks;
+  /** The region a zone is in, when the zone's name does not end in `-<letter>` (AWS `us-east-1a`, `us-west-2-lax-1a`). */
+  zoneRegion?(zone: string): string;
   /** (kubernetes) Managed Kubernetes clusters and node pools on this account. */
   kubernetes?: ProviderKubernetes;
   /**
