@@ -29,6 +29,19 @@ const gpuNames: Readonly<Record<string, string>> = {
   T4G: 'T4',
 };
 
+/** (A10) AWS Neuron devices (`NeuronInfo`) by name, as accelerator model strings. */
+const neuronNames: Readonly<Record<string, string>> = {
+  TRAINIUM: 'TRN1',
+  TRAINIUM2: 'TRN2',
+  INFERENTIA: 'INF1',
+  INFERENTIA2: 'INF2',
+};
+
+/** A `NeuronInfo` device name as the pool `gpuModel` string; unknown → 'other'. */
+export function neuronModel(name: string): string {
+  return neuronNames[name.trim().toUpperCase()] ?? 'other';
+}
+
 /** A `GpuInfo` manufacturer and name as the pool `gpuModel` string; unknown → 'other'. */
 export function gpuModel(manufacturer: string, name: string): string {
   if (manufacturer.trim().toUpperCase() !== 'NVIDIA') return 'other';
@@ -58,6 +71,13 @@ export function parseInstanceTypes(items: readonly XmlElement[]): InstanceTypeIn
         gpuItems.map((gpu) => gpuModel(gpu.textOf('manufacturer') ?? '', gpu.textOf('name') ?? '')),
       );
       gpus = { model: models.size === 1 ? [...models][0]! : 'other', count };
+    }
+    // (A10) Trainium and Inferentia are accelerators the way GPUs are: TRN1, TRN2, INF1, INF2.
+    const neuronItems = item.child('neuronInfo')?.items('neuronDevices') ?? [];
+    if (!gpus && neuronItems.length) {
+      const count = neuronItems.reduce((sum, device) => sum + number(device.textOf('count')), 0);
+      const models = new Set(neuronItems.map((device) => neuronModel(device.textOf('name') ?? '')));
+      if (count > 0) gpus = { model: models.size === 1 ? [...models][0]! : 'other', count };
     }
     const storage = item.child('instanceStorageInfo')?.textOf('totalSizeInGB');
     const network = item.child('networkInfo');

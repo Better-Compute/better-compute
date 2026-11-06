@@ -19,6 +19,8 @@ export interface EmuType {
   efa?: number;
   /** (A10) NetworkInfo.MaximumNetworkCards (absent: 1). */
   networkCards?: number;
+  /** (A10) NeuronInfo: AWS Trainium or Inferentia devices. */
+  neuron?: { name: string; count: number };
 }
 
 export interface EmuInstance {
@@ -352,7 +354,7 @@ export class Ec2Emulator {
                 `${el('instanceType', t.type)}${el('bareMetal', t.bareMetal ?? false)}<processorInfo>${items(
                   'supportedArchitectures',
                   t.arch.map((a) => a),
-                )}</processorInfo><vCpuInfo>${el('defaultVCpus', t.vcpu)}</vCpuInfo><memoryInfo>${el('sizeInMiB', t.memoryMiB)}</memoryInfo>${t.instanceStorageGB ? `<instanceStorageInfo>${el('totalSizeInGB', t.instanceStorageGB)}</instanceStorageInfo>` : ''}${t.gpus ? `<gpuInfo>${items('gpus', [`${el('name', t.gpus.name)}${el('manufacturer', t.gpus.manufacturer)}${el('count', t.gpus.count)}`])}</gpuInfo>` : ''}<networkInfo>${el('efaSupported', t.efa !== undefined)}${el('maximumNetworkCards', t.networkCards)}${t.efa ? `<efaInfo>${el('maximumEfaInterfaces', t.efa)}</efaInfo>` : ''}</networkInfo>`,
+                )}</processorInfo><vCpuInfo>${el('defaultVCpus', t.vcpu)}</vCpuInfo><memoryInfo>${el('sizeInMiB', t.memoryMiB)}</memoryInfo>${t.instanceStorageGB ? `<instanceStorageInfo>${el('totalSizeInGB', t.instanceStorageGB)}</instanceStorageInfo>` : ''}${t.neuron ? `<neuronInfo>${items('neuronDevices', [`${el('count', t.neuron.count)}${el('name', t.neuron.name)}`])}</neuronInfo>` : ''}${t.gpus ? `<gpuInfo>${items('gpus', [`${el('name', t.gpus.name)}${el('manufacturer', t.gpus.manufacturer)}${el('count', t.gpus.count)}`])}</gpuInfo>` : ''}<networkInfo>${el('efaSupported', t.efa !== undefined)}${el('maximumNetworkCards', t.networkCards)}${t.efa ? `<efaInfo>${el('maximumEfaInterfaces', t.efa)}</efaInfo>` : ''}</networkInfo>`,
             ),
           ) + el('nextToken', next),
         );

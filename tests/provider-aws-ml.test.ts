@@ -400,3 +400,78 @@ describe('EFA', () => {
     ).toThrow();
   });
 });
+
+describe('Neuron accelerators', () => {
+  function neuronWorld() {
+    const w = world();
+    w.ec2emu.types.set('trn1.32xlarge', {
+      type: 'trn1.32xlarge',
+      vcpu: 128,
+      memoryMiB: 524_288,
+      arch: ['x86_64'],
+      neuron: { name: 'Trainium', count: 16 },
+      efa: 8,
+      networkCards: 8,
+    });
+    w.ec2emu.types.set('trn2.48xlarge', {
+      type: 'trn2.48xlarge',
+      vcpu: 192,
+      memoryMiB: 2_097_152,
+      arch: ['x86_64'],
+      neuron: { name: 'Trainium2', count: 16 },
+    });
+    w.ec2emu.types.set('inf2.48xlarge', {
+      type: 'inf2.48xlarge',
+      vcpu: 192,
+      memoryMiB: 786_432,
+      arch: ['x86_64'],
+      neuron: { name: 'Inferentia2', count: 12 },
+    });
+    w.ec2emu.types.set('inf1.xlarge', {
+      type: 'inf1.xlarge',
+      vcpu: 4,
+      memoryMiB: 8192,
+      arch: ['x86_64'],
+      neuron: { name: 'Inferentia', count: 1 },
+    });
+    w.ec2emu.types.set('xyz1.large', {
+      type: 'xyz1.large',
+      vcpu: 4,
+      memoryMiB: 8192,
+      arch: ['x86_64'],
+      neuron: { name: 'Something<New>', count: 2 },
+    });
+    for (const type of [
+      'trn1.32xlarge',
+      'trn2.48xlarge',
+      'inf2.48xlarge',
+      'inf1.xlarge',
+      'xyz1.large',
+    ])
+      w.ec2emu.offerings.get('us-east-1a')!.add(type);
+    return w;
+  }
+
+  it('Trainium and Inferentia devices are the TRN1, TRN2, INF2 and INF1 accelerator models', async () => {
+    const w = neuronWorld();
+    const offers = await w.compute.listOffers({});
+    const gpus = Object.fromEntries(
+      offers
+        .filter((offer) => offer.id.startsWith('us-east-1a/'))
+        .map((offer) => [offer.id.slice('us-east-1a/'.length), offer.gpus]),
+    );
+    expect(gpus['trn1.32xlarge']).toEqual({ model: 'TRN1', count: 16 });
+    expect(gpus['trn2.48xlarge']).toEqual({ model: 'TRN2', count: 16 });
+    expect(gpus['inf2.48xlarge']).toEqual({ model: 'INF2', count: 12 });
+    expect(gpus['inf1.xlarge']).toEqual({ model: 'INF1', count: 1 });
+    // A device name this provider does not know is 'other', never its raw text.
+    expect(gpus['xyz1.large']).toEqual({ model: 'other', count: 2 });
+    expect(gpus['m7i.large']).toBeUndefined();
+  });
+
+  it('a gpuModel query finds Trainium offers', async () => {
+    const w = neuronWorld();
+    const offers = await w.compute.listOffers({ gpuModel: 'TRN1' });
+    expect(offers.map((offer) => offer.id)).toEqual(['us-east-1a/trn1.32xlarge']);
+  });
+});
