@@ -3,3 +3,7 @@ export * from './query.js';
 export * from './credentials.js';
 export * from './sigv4.js';
 export * from './endpoints.js';
+export * from './redact.js';
+export * from './errors.js';
+export * from './paginate.js';
+export * from './client.js';
