@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { isComputeError } from '@better-compute/core';
 import {
+  adoptedRegion,
   kubernetesMigrations,
   parsePoolSubstrate,
   substrateIdentity,
@@ -104,6 +105,17 @@ describe('substratePolicyValidator', () => {
     await expect(substratePolicyValidator.validate(policy({ ...create, kind: 'x' }), { class: 'metal-host' })).rejects.toThrow(
       /kind/,
     );
+  });
+
+  it("derives an adopted cluster's region from GKE-, EKS- and DOKS-style locations", () => {
+    expect(adoptedRegion('us-central1-a', { regions: ['us-central1'] })).toBe('us-central1');
+    expect(adoptedRegion('us-central1', { regions: [] })).toBe('us-central1');
+    expect(adoptedRegion('europe-west4-b', { regions: [] })).toBe('europe-west4');
+    expect(adoptedRegion('us-east-1a', { regions: ['us-east-1'] })).toBe('us-east-1');
+    expect(adoptedRegion('eu-west-1b', { regions: [] })).toBe('eu-west-1');
+    expect(adoptedRegion('us-east-1', { regions: [] })).toBe('us-east-1');
+    expect(adoptedRegion('nyc1', { regions: ['nyc1', 'nyc3'] })).toBe('nyc1');
+    expect(adoptedRegion('nyc3', { regions: [] })).toBe('nyc3');
   });
 
   it('ships its migration', () => {

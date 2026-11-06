@@ -16,7 +16,7 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { endNodeReservations, rebuildPoolRollup } from '@better-compute/capacity';
-import { readAccount, zoneRegion } from '@better-compute/vps';
+import { readAccount } from '@better-compute/vps';
 import { clusterNetwork, markDeleted, reopen } from './clusters.js';
 import { canonical, sha256Hex } from './input.js';
 import {
@@ -468,6 +468,20 @@ function adoptedLocation(adoptId: string, provider: { zones: string[]; regions: 
 }
 
 /**
+ * The region of an adopted cluster's location, whatever the provider's zone naming: the location itself when it is
+ * one of the account's regions, else the longest account region it starts with (`us-central1-a`, `us-east-1a`),
+ * else the location without a trailing zone letter (`europe-west4-b` and `eu-west-1b` alike).
+ */
+export function adoptedRegion(location: string, provider: { regions: readonly string[] }): string {
+  if (provider.regions.includes(location)) return location;
+  const prefix = provider.regions
+    .filter((region) => location.startsWith(region))
+    .sort((a, b) => b.length - a.length)[0];
+  if (prefix !== undefined) return prefix;
+  return location.replace(/-[a-z]$/, '').replace(/([0-9])[a-z]$/, '$1');
+}
+
+/**
  * `cluster: { adopt }`: an `adopted` cluster row for the provider's cluster (the cluster reconciler reads it with
  * `getCluster`, never creates, changes or deletes it) and a node pool row per flavor (created in it under a name of
  * its own, `substrateNodePoolName`, and deleted with the substrate). One substrate per adopted cluster.
@@ -500,7 +514,7 @@ async function establishAdopted(
   if (named.rows.length > 0) throw new Refused(`A cluster named ${name} already exists in the pool owner's tenant`);
   const clusterId = newId('kcl');
   const location = adoptedLocation(adoptId, provider);
-  const region = /-[a-z]$/.test(location) ? zoneRegion(location) : location;
+  const region = adoptedRegion(location, provider);
   await tx.query(
     `INSERT INTO kubernetes_clusters (id, tenant_id, project_id, pool_id, provider_account_id, network_id, subnet_id,
                                       name, description, mode, location, region, release_channel, requested_version,

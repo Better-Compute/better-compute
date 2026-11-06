@@ -28,6 +28,7 @@ export {
   substratesReconciler,
   substrateClusterName,
   substrateNodePoolName,
+  adoptedRegion,
   flavorLabels,
   substratesWork,
   substratePoolLabel,
