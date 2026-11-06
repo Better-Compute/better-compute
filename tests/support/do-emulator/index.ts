@@ -8,6 +8,7 @@ import { registerFirewalls } from './firewalls.js';
 import { registerKeys } from './keys.js';
 import { registerMonitoring } from './monitoring.js';
 import { registerProjects } from './projects.js';
+import { registerSecurity } from './security.js';
 import { registerTags } from './tags.js';
 import { registerVpcs } from './vpcs.js';
 import { DoState, errorFixtures, type Json } from './state.js';
@@ -278,5 +279,6 @@ export class DoEmulator {
     registerBilling(this);
     registerProjects(this);
     registerMonitoring(this);
+    registerSecurity(this);
   }
 }
