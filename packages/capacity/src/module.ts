@@ -31,6 +31,7 @@ import {
 } from '@better-compute/core';
 import { readAllocation, releaseAllocation } from './bookings.js';
 import { capacityMigrations } from './migrations.js';
+import { isAwsRoleGlob, maxAwsRoleGlobStars, maxAwsRoleGlobs } from './workload-roles.js';
 import { nodeResourcesWork, syncNodeResources } from './host-resources.js';
 import { describeCreateReservation, describeExtendReservation } from './describe.js';
 import { planGangs } from './gang.js';
@@ -653,7 +654,7 @@ export interface SetQuotaInput {
 
 /**
  * (AWS A7) `policy.workloadRoles`: `{ aws?: string[] }`, IAM role ARN globs with a literal account
- * (vps `awsRoleGlobPattern`; vps matches them when an instance names a role), at most 64.
+ * (`isAwsRoleGlob`, at most 8 `*` each; vps matches them when an instance names a role), at most 64.
  */
 function checkWorkloadRoles(roles: unknown): void {
   if (roles === undefined) return;
@@ -663,14 +664,9 @@ function checkWorkloadRoles(roles: unknown): void {
     if (key !== 'aws') fail(`policy.workloadRoles.${key.slice(0, 32)} is not a known field`);
   const aws = (roles as { aws?: unknown }).aws;
   if (aws === undefined) return;
-  const glob = /^arn:(?:aws|aws-cn|aws-us-gov):iam::\d{12}:role\/[\w+=,.@/*?-]{1,512}$/;
-  if (
-    !Array.isArray(aws) ||
-    aws.length > 64 ||
-    !aws.every((entry) => typeof entry === 'string' && glob.test(entry))
-  )
+  if (!Array.isArray(aws) || aws.length > maxAwsRoleGlobs || !aws.every(isAwsRoleGlob))
     fail(
-      'policy.workloadRoles.aws lists at most 64 IAM role ARNs (arn:aws:iam::<12-digit account>:role/<name>; * and ? in the name)',
+      `policy.workloadRoles.aws lists at most ${maxAwsRoleGlobs} IAM role ARNs (arn:aws:iam::<12-digit account>:role/<name>; ? and at most ${maxAwsRoleGlobStars} * in the name)`,
     );
 }
 

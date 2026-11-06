@@ -28,3 +28,4 @@ export * from './tenancy.js';
 export * from './describe.js';
 export * from './host-resources.js';
 export * from './cpulist.js';
+export * from './workload-roles.js';

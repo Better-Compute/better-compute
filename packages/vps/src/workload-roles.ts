@@ -1,5 +1,24 @@
 import { ComputeError, type Migration } from '@better-compute/core';
+import {
+  allowedAwsRole,
+  awsRoleArnPattern,
+  type PoolWorkloadPolicy,
+} from '@better-compute/capacity';
 import { object } from './input.js';
+
+// The allow-list and its linear matcher live in capacity, shared with pools.create/update and the
+// workload broker.
+export {
+  allowedAwsRole,
+  awsRoleAllowed,
+  awsRoleArnPattern,
+  awsRoleGlobMatches,
+  awsRoleGlobPattern,
+  isAwsRoleGlob,
+  maxAwsRoleGlobs,
+  maxAwsRoleGlobStars,
+  type PoolWorkloadPolicy,
+} from '@better-compute/capacity';
 
 // AWS A7 workload identity, vps's half: an instance on a hosted pool may name the AWS IAM role its
 // workloads assume (`instances.create` `workloadIdentity.awsRoleArn`). The pool must have turned
@@ -9,19 +28,6 @@ import { object } from './input.js';
 // spec at once (fail closed). bcd exchanges the instance's workload token for the role's
 // credentials; the role's trust pins the tenant (`t:<tenantId>:instance:*`), so the allow-list
 // narrows which role bcd asks for and never widens who may assume one.
-
-/** A concrete IAM role ARN in a commercial, China or GovCloud partition. */
-export const awsRoleArnPattern =
-  /^arn:(?:aws|aws-cn|aws-us-gov):iam::\d{12}:role\/[\w+=,.@/-]{1,512}$/;
-/**
- * An allow-list entry: an IAM role ARN whose path and name may use `*` (any run) and `?` (one
- * character), as IAM's own ARN matching does. The account is always literal: a pool never allows
- * roles of any account.
- */
-export const awsRoleGlobPattern =
-  /^arn:(?:aws|aws-cn|aws-us-gov):iam::\d{12}:role\/[\w+=,.@/*?-]{1,512}$/;
-/** Entries a pool's `workloadRoles.aws` may list at most. */
-export const maxAwsRoleGlobs = 64;
 
 /** `instances.create`'s `workloadIdentity`. */
 export interface InstanceWorkloadIdentity {
@@ -47,47 +53,6 @@ export function parseWorkloadIdentity(value: unknown): InstanceWorkloadIdentity 
       'workloadIdentity.awsRoleArn must be an IAM role ARN (arn:aws:iam::<12-digit account>:role/<name>)',
     );
   return { awsRoleArn: input.awsRoleArn };
-}
-
-function globRegex(glob: string): RegExp {
-  let source = '';
-  for (const char of glob)
-    source += char === '*' ? '.*' : char === '?' ? '.' : char.replace(/[.+^${}()|[\]\\/-]/g, '\\$&');
-  return new RegExp(`^${source}$`);
-}
-
-/**
- * Whether `arn` matches one of the pool's `workloadRoles.aws` globs. A list that is not an array,
- * and entries that are not valid globs, allow nothing.
- */
-export function awsRoleAllowed(list: unknown, arn: string): boolean {
-  if (!Array.isArray(list) || !awsRoleArnPattern.test(arn)) return false;
-  return list
-    .slice(0, maxAwsRoleGlobs)
-    .some(
-      (entry) =>
-        typeof entry === 'string' && awsRoleGlobPattern.test(entry) && globRegex(entry).test(arn),
-    );
-}
-
-/** A pool policy's workload identity switch and AWS allow-list, as stored. */
-export interface PoolWorkloadPolicy {
-  workloadIdentity?: unknown;
-  workloadRoles?: unknown;
-}
-
-/** The role the pool allows the instance to assume, or undefined (fail closed). */
-export function allowedAwsRole(
-  policy: PoolWorkloadPolicy | null | undefined,
-  arn: string | null | undefined,
-): string | undefined {
-  if (!arn || policy?.workloadIdentity !== true) return undefined;
-  const roles = policy.workloadRoles;
-  const list =
-    typeof roles === 'object' && roles !== null && !Array.isArray(roles)
-      ? (roles as { aws?: unknown }).aws
-      : undefined;
-  return awsRoleAllowed(list, arn) ? arn : undefined;
 }
 
 /**

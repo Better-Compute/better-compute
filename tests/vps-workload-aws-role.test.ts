@@ -16,6 +16,7 @@ import { pglite } from '@better-compute/postgres/pglite';
 import { capacityMigrations, capacityModule, createCapacityPort } from '@better-compute/capacity';
 import {
   awsRoleAllowed,
+  awsRoleGlobMatches,
   instanceSpecs,
   instanceWork,
   parseCreateInstance,
@@ -266,6 +267,30 @@ describe('instance AWS workload roles (A7)', () => {
     expect(awsRoleAllowed(undefined, ALLOWED)).toBe(false);
     expect(awsRoleAllowed('nope', ALLOWED)).toBe(false);
     expect(awsRoleAllowed(['arn:aws:iam::222222222222:role/(.*)'], ALLOWED)).toBe(false);
+    expect(awsRoleGlobMatches('arn:aws:iam::1:role/a*b?c*', 'arn:aws:iam::1:role/aXXbYcZZ')).toBe(
+      true,
+    );
+    expect(awsRoleGlobMatches('arn:aws:iam::1:role/a*b?c*', 'arn:aws:iam::1:role/aXXbcZZ')).toBe(
+      false,
+    );
+    expect(awsRoleGlobMatches('arn:aws:iam::1:role/***', 'arn:aws:iam::1:role/')).toBe(true);
+    expect(awsRoleGlobMatches('arn:aws:iam::1:role/*x', 'arn:aws:iam::1:role/xax')).toBe(true);
+    expect(awsRoleGlobMatches('arn:aws:iam::1:role/*x', 'arn:aws:iam::1:role/xa')).toBe(false);
+  });
+
+  it('matches a many-star glob in linear time: it never backtracks (no ReDoS on the event loop)', () => {
+    const prefix = 'arn:aws:iam::123456789012:role/';
+    const arn = prefix + 'a'.repeat(480);
+    const twelve = prefix + '*a'.repeat(11) + '*b';
+    const start = performance.now();
+    expect(awsRoleGlobMatches(twelve, arn)).toBe(false);
+    expect(awsRoleGlobMatches(twelve, `${arn}b`)).toBe(true);
+    // The allow-list itself caps an entry at 8 stars, and still matches the worst case at once.
+    const eight = prefix + '*a'.repeat(7) + '*b';
+    expect(awsRoleAllowed([twelve], `${arn}b`)).toBe(false);
+    expect(awsRoleAllowed([eight], arn)).toBe(false);
+    expect(awsRoleAllowed([eight], `${arn}b`)).toBe(true);
+    expect(performance.now() - start).toBeLessThan(50);
   });
 
   it('refuses a role ARN outside the pool allow-list', async () => {
@@ -347,13 +372,19 @@ describe('instance AWS workload roles (A7)', () => {
       { aws: 'arn:aws:iam::222222222222:role/x' },
       { aws: ['arn:aws:iam::*:role/x'] },
       { aws: ['*'] },
+      { aws: [`arn:aws:iam::222222222222:role/${'*a'.repeat(9)}`] },
       { gcp: [] },
       { aws: Array.from({ length: 65 }, (_, i) => `arn:aws:iam::222222222222:role/r${i}`) },
     ])
       await expect(
         run(
           capacityApi.pools!.create!,
-          { tenantId: 'root', siteId: SITE, class: 'vps-host', policy: { workloadRoles } },
+          {
+            tenantId: 'root',
+            siteId: SITE,
+            class: 'vps-host',
+            policy: { workloadIdentity: true, workloadRoles },
+          },
           root,
         ),
         JSON.stringify(workloadRoles).slice(0, 80),
