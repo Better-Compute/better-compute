@@ -17,4 +17,5 @@ export * from './networks/index.js';
 export * from './probe.js';
 export * from './provider.js';
 export * from './storage/types.js';
+export * from './storage/nfs.js';
 export * from './storage/volumes.js';

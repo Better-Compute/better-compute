@@ -801,6 +801,12 @@ export interface ProviderVolumeSpec {
   snapshotId?: string;
   /** Plain labels, written as the provider's labels or tags. `better-compute-*` keys are the provider's own. */
   labels?: Readonly<Record<string, string>>;
+  /**
+   * (v1.x, `kind: 'shared'`) The tenant network the share is reachable from: a network file share is reached over
+   * a private network, so a provider that needs one (DigitalOcean) refuses a shared volume without it
+   * (`INVALID_INPUT`, reason `network`). Block volumes ignore it.
+   */
+  network?: NetworkRef;
 }
 
 /**
@@ -815,6 +821,11 @@ export interface ProviderVolumeSpec {
  * otherwise); a volume in another region than the machine is `INVALID_INPUT` before any write; a volume attached to
  * another machine is `CONFLICT`; an attached volume is not deleted (`INVALID_STATE`); `resizeVolume` only grows
  * (`INVALID_INPUT` for a smaller size).
+ *
+ * A `kind: 'shared'` volume (a network file share) attaches to many machines at once: `attachVolume` makes it
+ * reachable from the machine and returns its outputs with `attachedTo` naming that machine; `getVolume` reports no
+ * `attachedTo`. Its `device` is the NFS source the guest mounts (`<host>:<path>`), `filesystem` is `nfs`, and
+ * `kind` is `shared`. A shared volume that any machine still has attached is not deleted (`INVALID_STATE`).
  */
 export interface ProviderVolumes {
   ensureVolume(spec: ProviderVolumeSpec, context: CallContext): Promise<ProviderResourceState>;
@@ -830,6 +841,8 @@ export interface ProviderVolumes {
     name: string,
     region: string,
     context: CallContext,
+    /** (v1.x) The kind the volume was ensured as; absent: `block`. */
+    kind?: ProviderVolumeSpec['kind'],
   ): Promise<ProviderResourceState | undefined>;
   /** With `instanceId`, only a machine whose ownership label names that instance is attached to. */
   attachVolume(

@@ -1,0 +1,428 @@
+import { createHash } from 'node:crypto';
+import {
+  ComputeError,
+  isComputeError,
+  type CallContext,
+  type Logger,
+  type ProviderResourceState,
+  type ProviderVolumeSpec,
+} from '@better-compute/core';
+import type { DoClient } from '../client/http.js';
+import type { DoConfig } from '../config.js';
+import { vpcForNetwork } from '../networks/vpcs.js';
+import type { DoShare, DoShareAction } from './types.js';
+
+// Network File Storage shares as `kind: 'shared'` provider volumes (P6). The API's shapes are
+// unverified (the nfs fixture's provenance says why), so the provider reads only the fields it
+// needs and fails closed on the rest.
+//
+// Ownership. Shares carry no tags (as far as the reference shows), so a share of ours is one whose
+// name is the vps name plus `-` and the deployment's 12-hex hash (`shareName`): the same hash
+// the deployment tag carries, and the same trust (anyone on the account can forge either). Every
+// call but `ensureVolume` and `getVolume` refuses any other share (`INVALID_STATE`, `notManaged`),
+// so better-compute never resizes, attaches or deletes a share it did not make.
+//
+// Reachability. An NFS share is reached over a VPC, and VPC membership is its only access
+// control, so a share is created in its tenant network's VPC in the region (`spec.network`,
+// required) and never in a region's default VPC or a VPC that is not a better-compute network's.
+//
+// Ids. Every share call names the region (`?region=`), so a share's provider id is
+// `nfs:<region>:<uuid>`; nothing else in the provider has that shape, which is how `DoVolumes`
+// tells shares from block volumes.
+//
+// Actions (resize, snapshot, attach, detach) answer with an action that has no id and no list to
+// poll. No state outlives a call (ruling R4): a call reads the share and acts on what it sees; DO
+// refuses a second action while one runs (the `pending event` 422, CONFLICT `actionPending`),
+// which the call reports as still busy.
+
+/** DO's smallest share, in GiB (unverified). */
+export const minShareGiB = 50;
+/** DO's largest share, in GiB. */
+export const maxShareGiB = 16_384;
+const vpsNamePattern = /^[a-z][a-z0-9-]{0,63}$/;
+const maxShareName = 64;
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const regionPattern = /^[a-z][a-z0-9]{0,15}$/;
+const sharePrefix = 'nfs:';
+
+function fail(
+  code: 'INVALID_INPUT' | 'INVALID_STATE' | 'UNSUPPORTED' | 'CONFLICT' | 'NOT_FOUND',
+  message: string,
+  reason: string,
+): ComputeError {
+  return new ComputeError(code, message, undefined, { provider: 'digitalocean', reason });
+}
+
+function deploymentHash(deployment: string): string {
+  return createHash('sha256').update(deployment).digest('hex').slice(0, 12);
+}
+
+/** The provider name of the share vps names `name`, for this deployment. */
+export function shareName(name: string, deployment: string): string {
+  return `${name}-${deploymentHash(deployment)}`;
+}
+
+/** A share's provider id: `nfs:<region>:<uuid>`. */
+export function shareId(region: string, uuid: string): string {
+  return `${sharePrefix}${region}:${uuid.toLowerCase()}`;
+}
+
+/** Whether a provider volume id names a share (`nfs:`), well formed or not. */
+export function isShareId(id: string): boolean {
+  return id.startsWith(sharePrefix);
+}
+
+/** The region and uuid of a share id; undefined when it is not one. */
+export function parseShareId(id: string): { region: string; uuid: string } | undefined {
+  if (!isShareId(id)) return undefined;
+  const [region, uuid, ...rest] = id.slice(sharePrefix.length).split(':');
+  if (rest.length > 0 || !region || !uuid) return undefined;
+  if (!regionPattern.test(region) || !uuidPattern.test(uuid)) return undefined;
+  return { region, uuid: uuid.toLowerCase() };
+}
+
+const state = (
+  id: string,
+  value: ProviderResourceState['state'],
+  outputs?: Record<string, string>,
+  message?: string,
+): ProviderResourceState => ({
+  id,
+  state: value,
+  ...(outputs ? { outputs } : {}),
+  ...(message !== undefined ? { message } : {}),
+});
+
+/** A share's outputs (plain values only): the mount source appears once DO gives one. */
+export function shareOutputs(share: DoShare): Record<string, string> {
+  const host = typeof share.host === 'string' && share.host !== '' ? share.host : undefined;
+  const path =
+    typeof share.mount_path === 'string' && share.mount_path.startsWith('/')
+      ? share.mount_path
+      : undefined;
+  return {
+    kind: 'shared',
+    region: share.region,
+    sizeGiB: String(share.size_gib),
+    filesystem: 'nfs',
+    ...(host !== undefined ? { host } : {}),
+    ...(path !== undefined ? { mountPath: path } : {}),
+    ...(host !== undefined && path !== undefined ? { device: `${host}:${path}` } : {}),
+    ...((share.vpc_ids ?? []).length > 0 ? { vpcs: [...(share.vpc_ids ?? [])].join(',') } : {}),
+  };
+}
+
+/** The contract state of a share, by its status. */
+function shareState(share: DoShare, outputs = shareOutputs(share)): ProviderResourceState {
+  const id = shareId(share.region, share.id);
+  switch (share.status) {
+    case 'ACTIVE':
+      return state(id, 'ready', outputs);
+    case 'CREATING':
+      return state(id, 'pending', outputs);
+    case 'DELETED':
+      return state(id, 'deleted');
+    case 'FAILED':
+      return state(id, 'error', outputs, `DigitalOcean reports share ${share.id} failed`);
+    default:
+      // A status this provider does not know: busy, never ready.
+      return state(id, 'pending', outputs);
+  }
+}
+
+export class DoShares {
+  protected readonly client: DoClient;
+  protected readonly config: DoConfig;
+  protected readonly log: Logger;
+  protected readonly deployment: string;
+  protected readonly suffix: string;
+
+  constructor(client: DoClient, config: DoConfig, deployment: string, log: Logger) {
+    this.client = client;
+    this.config = config;
+    this.log = log;
+    this.deployment = deployment;
+    this.suffix = `-${deploymentHash(deployment)}`;
+  }
+
+  /** Whether better-compute may act on the share: its name carries this deployment's hash. */
+  protected owned(share: DoShare): boolean {
+    return (
+      typeof share.name === 'string' &&
+      share.name.endsWith(this.suffix) &&
+      vpsNamePattern.test(share.name.slice(0, -this.suffix.length))
+    );
+  }
+
+  protected refuseForeign(share: DoShare): void {
+    if (!this.owned(share))
+      throw fail(
+        'INVALID_STATE',
+        `share ${share.id} is not managed by this better-compute deployment and is never changed by it`,
+        'notManaged',
+      );
+  }
+
+  /** The share, or undefined when it does not exist. */
+  protected async share(
+    ref: { region: string; uuid: string },
+    signal: AbortSignal,
+  ): Promise<DoShare | undefined> {
+    try {
+      const reply = await this.client.request<{ share: DoShare }>(
+        'GET',
+        `/nfs/${encodeURIComponent(ref.uuid)}`,
+        { query: { region: ref.region }, signal, budget: 'observe' },
+      );
+      return reply.share?.status === 'DELETED' ? undefined : reply.share;
+    } catch (error) {
+      if (isComputeError(error, 'NOT_FOUND')) return undefined;
+      throw error;
+    }
+  }
+
+  /** A share id as the contract calls give it; anything else is `INVALID_INPUT`. */
+  protected parse(id: string): { region: string; uuid: string } {
+    const ref = parseShareId(id);
+    if (!ref)
+      throw fail(
+        'INVALID_INPUT',
+        `${JSON.stringify(id)} is not a DigitalOcean share id`,
+        'volumeId',
+      );
+    return ref;
+  }
+
+  /** The share to act on: it must exist and be ours. */
+  protected async ours(id: string, signal: AbortSignal): Promise<DoShare> {
+    const ref = this.parse(id);
+    const share = await this.share(ref, signal);
+    if (!share)
+      throw new ComputeError('NOT_FOUND', `share ${id} does not exist`, undefined, {
+        provider: 'digitalocean',
+        id,
+      });
+    this.refuseForeign(share);
+    return share;
+  }
+
+  /** The shares named `name` in `region` (at most one at DO; a list to be safe). */
+  protected async byName(name: string, region: string, signal: AbortSignal): Promise<DoShare[]> {
+    const out: DoShare[] = [];
+    for await (const share of this.client.pages<DoShare>('/nfs', 'shares', {
+      query: { region },
+      signal,
+      budget: 'observe',
+    }))
+      if (share.name === name && share.region === region && share.status !== 'DELETED')
+        out.push(share);
+    return out;
+  }
+
+  /**
+   * Starts a share action. DO's refusal while another action runs is reported as `undefined`
+   * (the caller says it is still busy); any other refusal propagates.
+   */
+  protected async act(
+    share: DoShare,
+    type: string,
+    params: Record<string, unknown>,
+    signal: AbortSignal,
+  ): Promise<DoShareAction | 'busy'> {
+    try {
+      const reply = await this.client.request<{ action?: DoShareAction }>(
+        'POST',
+        `/nfs/${encodeURIComponent(share.id)}/actions`,
+        { body: { type, region: share.region, params }, signal, budget: 'mutate' },
+      );
+      this.log.info('digitalocean.shareAction', { share: share.id, type });
+      return reply.action ?? { status: 'in-progress', type };
+    } catch (error) {
+      if (isComputeError(error, 'CONFLICT') && error.details?.reason === 'actionPending')
+        return 'busy';
+      throw error;
+    }
+  }
+
+  /**
+   * What a call that started `action` reports: the share read again once it completed, `error`
+   * when DO says it errored, else `busy`.
+   */
+  protected async after(
+    share: DoShare,
+    action: DoShareAction | 'busy',
+    busy: 'pending' | 'updating' | 'deleting',
+    signal: AbortSignal,
+  ): Promise<ProviderResourceState> {
+    const id = shareId(share.region, share.id);
+    if (action !== 'busy' && action.status === 'errored')
+      return state(
+        id,
+        'error',
+        shareOutputs(share),
+        `DigitalOcean's ${action.type} action on share ${share.id} errored; the next call tries again`,
+      );
+    if (action === 'busy' || action.status !== 'completed')
+      return state(id, busy, shareOutputs(share));
+    const fresh = await this.share({ region: share.region, uuid: share.id }, signal);
+    if (!fresh) return state(id, 'deleted');
+    return shareState(fresh);
+  }
+
+  // ------------------------------------------------------------------------------- ensure, get
+
+  /** Refuses what DO would refuse, and a share without a network, before any request. */
+  protected validate(spec: ProviderVolumeSpec): string {
+    if (!this.config.regions.includes(spec.region))
+      throw fail('INVALID_INPUT', `region ${spec.region} is not one this account uses`, 'region');
+    const name = vpsNamePattern.test(spec.name) ? shareName(spec.name, this.deployment) : '';
+    if (name === '' || name.length > maxShareName)
+      throw fail(
+        'INVALID_INPUT',
+        `${JSON.stringify(spec.name)} is not a share name: a lower-case letter, then [a-z0-9-], at most ${maxShareName - this.suffix.length} characters`,
+        'name',
+      );
+    if (!Number.isInteger(spec.sizeGiB) || spec.sizeGiB < minShareGiB || spec.sizeGiB > maxShareGiB)
+      throw fail(
+        'INVALID_INPUT',
+        `a DigitalOcean share is ${minShareGiB} to ${maxShareGiB} whole GiB, not ${spec.sizeGiB}`,
+        'size',
+      );
+    if (spec.filesystem !== undefined && spec.filesystem !== 'none')
+      throw fail(
+        'INVALID_INPUT',
+        `a share is a network filesystem; it is not formatted ${spec.filesystem}`,
+        'filesystem',
+      );
+    if (spec.snapshotId !== undefined)
+      throw fail(
+        'UNSUPPORTED',
+        'a DigitalOcean share is not created from a snapshot',
+        'sharedRestore',
+      );
+    if (
+      spec.network === undefined ||
+      typeof spec.network.network !== 'string' ||
+      !spec.network.network
+    )
+      throw fail(
+        'INVALID_INPUT',
+        'a DigitalOcean share is reached over a VPC: it names the tenant network it is reachable from',
+        'network',
+      );
+    return name;
+  }
+
+  async ensure(spec: ProviderVolumeSpec, ctx: CallContext): Promise<ProviderResourceState> {
+    const name = this.validate(spec);
+    const { signal } = ctx;
+    const [existing] = await this.byName(name, spec.region, signal);
+    if (existing) return shareState(existing);
+    // The network's VPC in the region: never a default VPC, never another network's.
+    const vpc = await vpcForNetwork(this.client, spec.network!, spec.region, signal);
+    let created: DoShare | undefined;
+    try {
+      const reply = await this.client.request<{ share?: DoShare }>('POST', '/nfs', {
+        body: { name, region: spec.region, size_gib: spec.sizeGiB, vpc_ids: [vpc.id] },
+        signal,
+        budget: 'mutate',
+      });
+      created = reply.share;
+    } catch (error) {
+      // A racing create of the same name won, or an answer that never arrived may have made it.
+      if (!isComputeError(error, 'CONFLICT') && !isComputeError(error, 'UNAVAILABLE')) throw error;
+      const [landed] = await this.byName(name, spec.region, signal);
+      if (!landed) throw error;
+      return shareState(landed);
+    }
+    if (!created || created.name !== name)
+      throw new ComputeError(
+        'PROVIDER_ERROR',
+        'DigitalOcean accepted a share create but returned no share',
+        undefined,
+        { provider: 'digitalocean', reason: 'badBody' },
+      );
+    this.log.info('digitalocean.shareCreated', { share: created.id, region: created.region });
+    return shareState(created);
+  }
+
+  async find(
+    name: string,
+    region: string,
+    ctx: CallContext,
+  ): Promise<ProviderResourceState | undefined> {
+    if (!vpsNamePattern.test(name) || !this.config.regions.includes(region)) return undefined;
+    const [found] = await this.byName(shareName(name, this.deployment), region, ctx.signal);
+    return found ? shareState(found) : undefined;
+  }
+
+  async get(id: string, ctx: CallContext): Promise<ProviderResourceState | undefined> {
+    const ref = parseShareId(id);
+    if (!ref) return undefined;
+    const share = await this.share(ref, ctx.signal);
+    return share ? shareState(share) : undefined;
+  }
+
+  // ----------------------------------------------------------------------- resize and delete
+
+  async resize(id: string, sizeGiB: number, ctx: CallContext): Promise<ProviderResourceState> {
+    this.parse(id);
+    if (!Number.isInteger(sizeGiB) || sizeGiB < minShareGiB || sizeGiB > maxShareGiB)
+      throw fail(
+        'INVALID_INPUT',
+        `a DigitalOcean share is ${minShareGiB} to ${maxShareGiB} whole GiB, not ${sizeGiB}`,
+        'size',
+      );
+    const { signal } = ctx;
+    const share = await this.ours(id, signal);
+    if (sizeGiB < share.size_gib)
+      throw fail(
+        'INVALID_INPUT',
+        `share ${share.id} is ${share.size_gib} GiB; a share only grows`,
+        'shrink',
+      );
+    if (share.status !== 'ACTIVE') {
+      const now = shareState(share);
+      return now.state === 'ready' || now.state === 'pending' ? { ...now, state: 'updating' } : now;
+    }
+    if (sizeGiB === share.size_gib) return shareState(share);
+    const action = await this.act(share, 'resize', { size_gib: sizeGiB }, signal);
+    return this.after(share, action, 'updating', signal);
+  }
+
+  /**
+   * Deletes a share of ours. `attached` says whether any machine still has it attached (the
+   * caller knows; DO does not keep it): such a share is not deleted.
+   */
+  async delete(
+    id: string,
+    ctx: CallContext,
+    attached?: (share: DoShare) => Promise<number | undefined>,
+  ): Promise<ProviderResourceState> {
+    const ref = this.parse(id);
+    const { signal } = ctx;
+    const share = await this.share(ref, signal);
+    if (!share) return state(shareId(ref.region, ref.uuid), 'deleted');
+    this.refuseForeign(share);
+    const holder = attached ? await attached(share) : undefined;
+    if (holder !== undefined)
+      throw fail(
+        'INVALID_STATE',
+        `share ${share.id} is attached to Droplet ${holder}; detach it first`,
+        'attached',
+      );
+    try {
+      await this.client.request('DELETE', `/nfs/${encodeURIComponent(share.id)}`, {
+        query: { region: share.region },
+        signal,
+        budget: 'mutate',
+      });
+    } catch (error) {
+      if (isComputeError(error, 'CONFLICT') && error.details?.reason === 'actionPending')
+        return state(shareId(share.region, share.id), 'deleting', shareOutputs(share));
+      if (!isComputeError(error, 'NOT_FOUND')) throw error;
+    }
+    this.log.info('digitalocean.shareDeleted', { share: share.id });
+    return state(shareId(share.region, share.id), 'deleted');
+  }
+}
