@@ -67,7 +67,14 @@ export type KubernetesObjectRef = Pick<KubernetesObject, 'apiVersion' | 'kind'> 
   metadata: { name: string; namespace?: string };
 };
 
+/** What `get` returns of an object: its metadata only (never a Secret's data). */
+export interface KubernetesObjectMeta {
+  metadata: { name: string; namespace?: string; labels: Record<string, string>; uid?: string };
+}
+
 export interface KubernetesApiClient {
+  /** The object's metadata, or undefined when it does not exist. */
+  get(object: KubernetesObjectRef): Promise<KubernetesObjectMeta | undefined>;
   /** Server-side apply: creates the object or takes ownership of the fields it names. */
   apply(object: KubernetesObject): Promise<void>;
   /** Deletes the object; one that does not exist is already gone. */
@@ -317,6 +324,27 @@ export function kubernetesApiClient(
   }
 
   const client: KubernetesApiClient = {
+    async get(object) {
+      const path = kubernetesObjectPath(object);
+      const what = `Reading ${describe(object)}`;
+      const response = await send(what, [], { url: `${origin}${path}`, method: 'GET' });
+      if (response.status === 404) return undefined;
+      if (response.status !== 200) throw failure(what, response, []);
+      const metadata = (response.body as { metadata?: { labels?: unknown; uid?: unknown } } | undefined)?.metadata;
+      const labels: Record<string, string> = {};
+      if (metadata?.labels && typeof metadata.labels === 'object')
+        for (const [key, value] of Object.entries(metadata.labels as Record<string, unknown>))
+          if (typeof value === 'string') labels[key] = value;
+      const uid = metadata?.uid;
+      return {
+        metadata: {
+          name: object.metadata.name,
+          ...(object.metadata.namespace !== undefined ? { namespace: object.metadata.namespace } : {}),
+          labels,
+          ...(typeof uid === 'string' && uid.length > 0 ? { uid } : {}),
+        },
+      };
+    },
     async apply(object) {
       const path = kubernetesObjectPath(object);
       const what = `Applying ${describe(object)}`;

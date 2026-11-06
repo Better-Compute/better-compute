@@ -111,6 +111,26 @@ describe('kubernetesApiClient', () => {
     ]);
   });
 
+  it("reads an object's metadata only (never a Secret's data), and a missing one is undefined", async () => {
+    const kube = recorder((request) =>
+      request.url.endsWith('/configmaps/gone')
+        ? { status: 404, body: { kind: 'Status', reason: 'NotFound' } }
+        : {
+            status: 200,
+            body: { metadata: { name: 'bcd-join', uid: 'u1', labels: { a: 'b', n: 1 } }, data: { token: 'c2VjcmV0' } },
+          },
+    );
+    const client = kubernetesApiClient(access, { transport: kube.transport });
+    const secret = await client.get({ apiVersion: 'v1', kind: 'Secret', metadata: { name: 'bcd-join', namespace: 'bcd-system' } });
+    expect(secret).toEqual({ metadata: { name: 'bcd-join', namespace: 'bcd-system', labels: { a: 'b' }, uid: 'u1' } });
+    expect(JSON.stringify(secret)).not.toContain('c2VjcmV0');
+    expect(await client.get({ apiVersion: 'v1', kind: 'ConfigMap', metadata: { name: 'gone', namespace: 'x' } })).toBeUndefined();
+    expect(kube.calls.map((call) => `${call.method} ${new URL(call.url).pathname}`)).toEqual([
+      'GET /api/v1/namespaces/bcd-system/secrets/bcd-join',
+      'GET /api/v1/namespaces/x/configmaps/gone',
+    ]);
+  });
+
   it('lists nodes with their labels, readiness and cordon', async () => {
     const kube = recorder(() => ({
       status: 200,

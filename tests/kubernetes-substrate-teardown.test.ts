@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { newId } from '@better-compute/core';
+import { ComputeError, newId } from '@better-compute/core';
 import { substrateWorld, type SubstrateWorld } from './support/substrate-world.js';
 
 // Pool substrates, teardown: archiving the pool (or removing policy.substrate) tears down what the substrate made,
@@ -112,6 +112,51 @@ describe('substrate: teardown', () => {
     expect([...world.cloud.clusters.get(adoptId)!.pools.keys()]).toEqual(['default']);
     expect(world.cloud.calls.some((call) => call.startsWith('deleteCluster'))).toBe(false);
     expect(world.kube.kinds('https://34.118.9.1')).toEqual([]);
+  });
+
+  it('keeps tearing down an adopted cluster until bcd is really gone (a refused delete is never "done")', async () => {
+    world = await substrateWorld();
+    existingCluster(world);
+    const server = 'https://34.118.9.1';
+    const pool = await world.createPool({ kind: 'kubernetes', cluster: { adopt: adoptId }, flavors: [{ ...gpu, nodes: 1 }] });
+    await world.converge(pool.id, 8);
+    expect(world.kube.kinds(server)).toContain('DaemonSet/bcd');
+    // RBAC on the tenant's cluster refuses the DaemonSet's delete.
+    world.kube.failDelete = { path: /\/daemonsets\/bcd$/, status: 403 };
+    await archive(pool.id);
+    await world.converge(pool.id, 10);
+    const stuck = await world.substrate(pool.id);
+    expect(stuck).toMatchObject({ state: 'deleting', desired_state: 'deleted' });
+    expect(stuck.message).toMatch(/bcd could not be removed from the adopted cluster/);
+    expect(world.kube.kinds(server)).toContain('DaemonSet/bcd');
+    const { rows } = await world.fixture.database.query<{ desired_state: string }>(
+      `SELECT desired_state FROM kubernetes_clusters WHERE id = $1`,
+      [stuck.cluster_id],
+    );
+    expect(rows[0]!.desired_state).toBe('present');
+    // Fixed: the next tries remove bcd, then the substrate is deleted.
+    delete world.kube.failDelete;
+    await world.converge(pool.id, 30);
+    expect(await world.substrate(pool.id)).toMatchObject({ state: 'deleted' });
+    expect(world.kube.kinds(server)).toEqual([]);
+  });
+
+  it('keeps tearing down an adopted cluster whose credential is refused, unless the cluster is gone', async () => {
+    world = await substrateWorld();
+    existingCluster(world);
+    const pool = await world.createPool({ kind: 'kubernetes', cluster: { adopt: adoptId }, flavors: [] });
+    await world.converge(pool.id, 6);
+    await archive(pool.id);
+    world.cloud.failNext = new ComputeError('ACCESS_DENIED', 'the account may not mint credentials');
+    await world.converge(pool.id, 1);
+    const stuck = await world.substrate(pool.id);
+    expect(stuck.state).toBe('deleting');
+    expect(stuck.message).toMatch(/credentials: .*may not mint/);
+    expect(world.kube.kinds('https://34.118.9.1')).toContain('DaemonSet/bcd');
+    // The tenant deleted the cluster meanwhile: nothing is left to remove.
+    world.cloud.clusters.delete(adoptId);
+    await world.converge(pool.id, 20);
+    expect(await world.substrate(pool.id)).toMatchObject({ state: 'deleted' });
   });
 
   it('removing policy.substrate tears down too, and a new substrate can follow', async () => {

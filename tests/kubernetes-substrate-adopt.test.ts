@@ -109,6 +109,48 @@ describe('substrate: adopt', () => {
     expect(world.cloud.calls).not.toContain('deleteNodePool default');
   });
 
+  it('labels what it applies, and never takes over or deletes a bcd-system the tenant made', async () => {
+    world = await substrateWorld();
+    existingCluster(world);
+    const server = 'https://34.118.9.1';
+    // The tenant runs bcd themselves (k8s-join style): their own Namespace and ConfigMap, no substrate label.
+    world.kube.put(server, '/api/v1/namespaces/bcd-system', {
+      apiVersion: 'v1',
+      kind: 'Namespace',
+      metadata: { name: 'bcd-system', labels: { owner: 'tenant' } },
+    });
+    world.kube.put(server, '/api/v1/namespaces/bcd-system/configmaps/theirs', {
+      apiVersion: 'v1',
+      kind: 'ConfigMap',
+      metadata: { name: 'theirs', namespace: 'bcd-system' },
+    });
+    const pool = await world.createPool(adopt([gpu]));
+    await world.converge(pool.id, 8);
+    const row = await world.substrate(pool.id);
+    expect(row.state).toBe('error');
+    expect(row.message).toMatch(/already has Namespace bcd-system, not made by this substrate/);
+    // Nothing was applied over theirs.
+    expect(world.kube.kinds(server).sort()).toEqual(['ConfigMap/theirs', 'Namespace/bcd-system']);
+    expect(world.kube.get(server, '/api/v1/namespaces/bcd-system').metadata.labels).toEqual({ owner: 'tenant' });
+    expect(world.kube.calls.filter((call) => call.method === 'PATCH')).toEqual([]);
+    // Teardown deletes none of it.
+    await world.api.pools.archive(world.root, { tenantId: world.rootTenant, poolId: pool.id });
+    await world.converge(pool.id, 10);
+    expect(await world.substrate(pool.id)).toMatchObject({ state: 'deleted' });
+    expect(world.kube.kinds(server).sort()).toEqual(['ConfigMap/theirs', 'Namespace/bcd-system']);
+    expect(world.kube.calls.filter((call) => call.method === 'DELETE')).toEqual([]);
+  });
+
+  it('applies every object labelled as the substrate pool', async () => {
+    world = await substrateWorld();
+    existingCluster(world);
+    const pool = await world.createPool(adopt());
+    await world.converge(pool.id, 6);
+    const objects = [...world.kube.objects.get('https://34.118.9.1')!.values()];
+    expect(objects.map((object) => object.kind).sort()).toEqual(['ConfigMap', 'DaemonSet', 'Namespace', 'Secret']);
+    for (const object of objects) expect(object.metadata.labels[substratePoolLabel]).toBe(pool.id);
+  });
+
   it('is an error when the cluster does not exist, and one cluster backs one pool only', async () => {
     world = await substrateWorld();
     const missing = await world.createPool(adopt());

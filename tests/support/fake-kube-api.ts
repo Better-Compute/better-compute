@@ -50,6 +50,14 @@ export class FakeKubeApi {
     return store;
   }
 
+  /** Puts an object at a path, as something other than the substrate would (a tenant's own install). */
+  put(server: string, path: string, object: any): void {
+    this.store(server).set(path, structuredClone(object));
+  }
+
+  /** Answers DELETEs of paths matching this with this status (a 403 from RBAC, …). */
+  failDelete?: { path: RegExp; status: number };
+
   /** The object at a path on a server, if applied. */
   get(server: string, path: string): any {
     return this.store(server).get(path);
@@ -109,6 +117,10 @@ export class FakeKubeApi {
         body: { kind: 'NodeList', metadata: more ? { continue: String(from + limit) } : {}, items },
       };
     }
+    if (request.method === 'GET') {
+      const object = store.get(url.pathname);
+      return object ? { status: 200, body: structuredClone(object) } : { status: 404, body: { kind: 'Status', reason: 'NotFound' } };
+    }
     if (request.method === 'PATCH') {
       if (request.contentType !== 'application/apply-patch+yaml')
         return { status: 415, body: { kind: 'Status', message: 'unsupported media type' } };
@@ -121,6 +133,8 @@ export class FakeKubeApi {
       return { status: existed ? 200 : 201, body: object };
     }
     if (request.method === 'DELETE') {
+      if (this.failDelete?.path.test(url.pathname))
+        return { status: this.failDelete.status, body: { kind: 'Status', reason: 'Forbidden', message: 'forbidden' } };
       if (!store.has(url.pathname)) return { status: 404, body: { kind: 'Status', reason: 'NotFound' } };
       store.delete(url.pathname);
       // A Namespace takes what is in it.

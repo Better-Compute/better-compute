@@ -94,9 +94,17 @@ export interface SubstrateNode {
   labels: Record<string, string>;
   ready: boolean;
   unschedulable: boolean;
+  /** `metadata.uid`: a later Node of the same name (EKS reuses IP-based names) is another Node. */
+  uid?: string;
+}
+/** An object's metadata as `get` reads it (never a Secret's data). */
+export interface SubstrateObjectMeta {
+  metadata: { name: string; namespace?: string; labels: Record<string, string> };
 }
 /** One cluster's API with one short-lived credential. */
 export interface SubstrateClusterApi {
+  /** The object's metadata, or undefined when it does not exist. */
+  get(object: SubstrateObjectRef): Promise<SubstrateObjectMeta | undefined>;
   apply(object: SubstrateObject): Promise<void>;
   remove(object: SubstrateObjectRef): Promise<void>;
   nodes(labelSelector?: string): Promise<SubstrateNode[]>;
@@ -1088,6 +1096,54 @@ async function removeGoneNodes(
   return true;
 }
 
+// --- what the substrate owns on a cluster ----------------------------------------------------------------------------
+
+/**
+ * Every object the substrate applies carries `better-compute.dev/substrate-pool: <pool id>`: what it owns. On an
+ * adopted cluster an object of the same name that exists without that label (a `bcd-system` Namespace or a `bcd`
+ * DaemonSet the tenant installed themselves) is never taken over (apply is a forced server-side apply), and teardown
+ * deletes only objects carrying the label, so a Namespace the substrate did not create is never deleted.
+ */
+function owned(poolId: string, objects: readonly SubstrateObject[]): SubstrateObject[] {
+  return objects.map((object) => ({
+    ...object,
+    metadata: { ...object.metadata, labels: { ...(object.metadata.labels ?? {}), [substratePoolLabel]: poolId } },
+  }));
+}
+
+const describeObject = (object: SubstrateObjectRef) =>
+  `${object.kind} ${object.metadata.namespace ? `${object.metadata.namespace}/` : ''}${object.metadata.name}`;
+const refOf = (object: SubstrateObjectRef): SubstrateObjectRef => ({
+  apiVersion: object.apiVersion,
+  kind: object.kind,
+  metadata: {
+    name: object.metadata.name,
+    ...(object.metadata.namespace !== undefined ? { namespace: object.metadata.namespace } : {}),
+  },
+});
+
+/** Objects in `objects` that exist on the cluster and are not this substrate's (by its label). */
+async function foreignObjects(
+  api: SubstrateClusterApi,
+  poolId: string,
+  objects: readonly SubstrateObjectRef[],
+): Promise<string[]> {
+  const foreign: string[] = [];
+  for (const object of objects) {
+    const found = await api.get(refOf(object));
+    if (found && found.metadata.labels[substratePoolLabel] !== poolId) foreign.push(describeObject(object));
+  }
+  return foreign;
+}
+
+/** Deletes an object only when it carries the substrate's label; one that is gone (or not ours) is left alone. */
+async function removeOwned(api: SubstrateClusterApi, poolId: string, object: SubstrateObjectRef): Promise<boolean> {
+  const found = await api.get(refOf(object));
+  if (!found || found.metadata.labels[substratePoolLabel] !== poolId) return false;
+  await api.remove(refOf(object));
+  return true;
+}
+
 /** Whether a token id is still usable for `uses` more joins and lives past the next few runs. */
 async function tokenLive(sql: SqlExecutor, tokenId: string, uses: number): Promise<boolean> {
   const { rows } = await sql.query<{ ok: boolean }>(
@@ -1250,7 +1306,10 @@ async function applyBcd(
     }
   } else if (tokenId !== null) revoke = true;
 
-  const manifests = agent.manifests({ siteId: pool.site_id, ...(selector ? { nodeSelector: selector } : {}) });
+  const manifests = owned(
+    row.pool_id,
+    agent.manifests({ siteId: pool.site_id, ...(selector ? { nodeSelector: selector } : {}) }),
+  );
   const hash = await sha256Hex(canonical(manifests));
   const appliedAt = row.applied_at === null ? 0 : new Date(row.applied_at).getTime();
   const due =
@@ -1259,8 +1318,32 @@ async function applyBcd(
     deps.clock.now() - appliedAt >= substrateReapplyMs;
   if (due) {
     const objects = joinToken !== undefined
-      ? agent.manifests({ siteId: pool.site_id, joinToken, ...(selector ? { nodeSelector: selector } : {}) })
+      ? owned(
+          row.pool_id,
+          agent.manifests({ siteId: pool.site_id, joinToken, ...(selector ? { nodeSelector: selector } : {}) }),
+        )
       : manifests;
+    if (cluster.adopted) {
+      // Never take over what the tenant runs on their own cluster.
+      const foreign = await attempt(deps, row.pool_id, signal, () =>
+        foreignObjects(api, row.pool_id, joinToken !== undefined ? objects : [...objects, agent.tokenSecret]),
+      );
+      if (!foreign) return retry();
+      if ('error' in foreign) {
+        await setState(deps, sql, row, { state: 'error', message: `apply: ${foreign.error}` });
+        return undefined;
+      }
+      if (foreign.value.length > 0) {
+        await setState(deps, sql, row, {
+          state: 'error',
+          message: `The adopted cluster already has ${foreign.value.join(', ')}, not made by this substrate: better-compute never takes over or deletes objects it did not create. Remove them (or install bcd under another namespace) and the substrate applies bcd`.slice(
+            0,
+            500,
+          ),
+        });
+        return undefined;
+      }
+    }
     for (const object of objects) {
       const applied = await attempt(deps, row.pool_id, signal, () => api.apply(object));
       if (!applied) return retry();
@@ -1271,7 +1354,7 @@ async function applyBcd(
     }
   }
   if (revoke) {
-    const removed = await attempt(deps, row.pool_id, signal, () => api.remove(agent.tokenSecret));
+    const removed = await attempt(deps, row.pool_id, signal, () => removeOwned(api, row.pool_id, agent.tokenSecret));
     if (!removed) return retry();
     if ('error' in removed) {
       await setState(deps, sql, row, { state: 'error', message: `token Secret: ${removed.error}` });
@@ -1310,6 +1393,8 @@ async function applyBcd(
 
 /** The NoSchedule reason on a pool's nodes once its substrate is being torn down. */
 export const substrateTeardownReason = 'substrate-teardown';
+/** How often a teardown that could not remove bcd from an adopted cluster tries again. */
+export const substrateTeardownRetryMs = 2 * 60_000;
 /** How often a teardown waiting for bookings to end looks again. */
 export const substrateDrainRecheckMs = 5 * 60_000;
 
@@ -1377,6 +1462,14 @@ async function teardown(
     if (cluster.provider_id !== null && deps.substrate && ['ready', 'updating', 'error'].includes(cluster.state)) {
       const removed = await removeBcd(deps, sql, row, cluster, signal);
       if (removed === 'retry') return deps.clock.now() + substrateRetryMs;
+      if (removed !== 'done') {
+        const message = `bcd could not be removed from the adopted cluster (it stays on its nodes until it is): ${removed.error}`.slice(
+          0,
+          500,
+        );
+        if (row.message !== message) await setState(deps, sql, row, { state: 'deleting', message });
+        return deps.clock.now() + substrateTeardownRetryMs;
+      }
     }
     await sql.transaction(async (tx) => {
       const { rows } = await tx.query<{ desired_state: string }>(
@@ -1410,22 +1503,38 @@ async function teardown(
   return undefined;
 }
 
-/** Deletes bcd's objects from the cluster; a cluster that is gone or refuses the credential has nothing to delete. */
+/**
+ * Deletes bcd's objects from the cluster, only those carrying the substrate's label (`owned`): the DaemonSet first,
+ * the Namespace last. On a created cluster (deleted next anyway) one that cannot be reached is left as it is. On an
+ * ADOPTED cluster, which stays, teardown fails closed: a credential, an account or a delete that fails is an error
+ * teardown retries, since bcd left running there keeps a privileged DaemonSet on the tenant's nodes; only a cluster
+ * the provider no longer has counts as nothing to delete.
+ */
 async function removeBcd(
   deps: SubstrateDeps,
   sql: SqlExecutor,
   row: SubstrateRow,
   cluster: ClusterRow,
   signal: AbortSignal,
-): Promise<'done' | 'retry'> {
+): Promise<'done' | 'retry' | { error: string }> {
   const agent = deps.substrate!.agent;
+  const failed = (error: string): 'done' | { error: string } => {
+    if (!cluster.adopted) {
+      deps.log.warn('kubernetes: substrate teardown could not remove bcd; the cluster is deleted next', {
+        poolId: row.pool_id,
+        error,
+      });
+      return 'done';
+    }
+    return { error };
+  };
   let kubernetes: ProviderKubernetes;
   try {
     const account = await sql.transaction((tx) => readAccount(tx, row.provider_account_id, row.tenant_id));
-    if (!account) return 'done';
+    if (!account) return failed(`Provider account ${row.provider_account_id} not found`);
     kubernetes = (await accountKubernetes(deps, account)).kubernetes;
-  } catch {
-    return 'done';
+  } catch (error) {
+    return failed(text(error));
   }
   const call: CallContext = {
     idempotencyKey: `substrate:${row.pool_id}:teardown`,
@@ -1443,27 +1552,25 @@ async function removeBcd(
   );
   if (!minted) return 'retry';
   if ('error' in minted) {
-    deps.log.warn('kubernetes: substrate teardown could not reach the cluster; leaving bcd objects', {
-      poolId: row.pool_id,
-      error: minted.error,
-    });
-    return 'done';
+    if (cluster.adopted) {
+      // Gone at the provider: nothing is left to delete. Anything else: keep trying.
+      const found = await attempt(deps, row.pool_id, signal, () => kubernetes.getCluster(cluster.provider_id!, call));
+      if (!found) return 'retry';
+      if (!('error' in found) && found.value === undefined) return 'done';
+    }
+    return failed(`credentials: ${minted.error}`);
   }
   const api = agent.connect(minted.value, { signal });
   const objects = [...agent.manifests({ siteId: 'site_teardown' }), agent.tokenSecret];
   // DaemonSet first, the Namespace last (it takes anything left in it).
   const order = (kind: string) => (kind === 'DaemonSet' ? 0 : kind === 'Namespace' ? 2 : 1);
   for (const object of objects.sort((a, b) => order(a.kind) - order(b.kind))) {
-    const removed = await attempt(deps, row.pool_id, signal, () =>
-      api.remove({ apiVersion: object.apiVersion, kind: object.kind, metadata: { ...object.metadata } }),
-    );
+    const removed = await attempt(deps, row.pool_id, signal, () => removeOwned(api, row.pool_id, object));
     if (!removed) return 'retry';
-    if ('error' in removed)
-      deps.log.warn('kubernetes: substrate teardown could not delete a bcd object', {
-        poolId: row.pool_id,
-        kind: object.kind,
-        error: removed.error,
-      });
+    if ('error' in removed) {
+      const outcome = failed(`${describeObject(object)}: ${removed.error}`);
+      if (outcome !== 'done') return outcome;
+    }
   }
   return 'done';
 }
