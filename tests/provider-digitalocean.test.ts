@@ -1626,7 +1626,16 @@ describe('compute', () => {
       id: 'digitalocean',
       version: '0.1.0',
       provides: ['vps'],
-      capabilities: ['power', 'reinstall', 'list', 'discover', 'claim', 'networks'],
+      capabilities: [
+        'power',
+        'reinstall',
+        'list',
+        'discover',
+        'claim',
+        'networks',
+        'volumes',
+        'addresses',
+      ],
     });
     const emu = emulator();
     let resolved = 0;
@@ -2233,6 +2242,8 @@ describe('definition', () => {
       'discover',
       'claim',
       'networks',
+      'volumes',
+      'addresses',
     ]);
     const parsed = await digitalocean.config['~standard'].validate(doAccount);
     expect(parsed).toMatchObject({
@@ -2290,7 +2301,14 @@ describe('definition', () => {
     const report = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
     expect(report).toEqual({
       account: { uuid: emu.account.uuid, status: 'active', dropletLimit: 40 },
-      families: { compute: 'ok', networks: 'ok', keys: 'ok', tags: 'ok' },
+      families: {
+        compute: 'ok',
+        networks: 'ok',
+        keys: 'ok',
+        tags: 'ok',
+        storage: 'ok',
+        addresses: 'ok',
+      },
       missing: [],
     });
     // Single, read-only requests: one page of each, nothing that changes anything.
@@ -2301,8 +2319,10 @@ describe('definition', () => {
         'GET /v2/droplets',
         'GET /v2/firewalls',
         'GET /v2/regions',
+        'GET /v2/reserved_ips',
         'GET /v2/sizes',
         'GET /v2/tags',
+        'GET /v2/volumes',
         'GET /v2/vpcs',
       ].sort(),
     );
@@ -2315,14 +2335,17 @@ describe('definition', () => {
     forbidden(emu, /^\/firewalls$/);
     forbidden(emu, /^\/sizes$/);
     forbidden(emu, /^\/tags$/);
+    forbidden(emu, /^\/reserved_ips$/);
     const report = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
     expect(report.families).toEqual({
       compute: 'denied',
       networks: 'denied',
       keys: 'ok',
       tags: 'denied',
+      storage: 'ok',
+      addresses: 'denied',
     });
-    expect(report.missing).toEqual(['sizes:read', 'firewall:read', 'tag:read']);
+    expect(report.missing).toEqual(['sizes:read', 'firewall:read', 'tag:read', 'reserved_ip:read']);
     expect(report.account.status).toBe('active');
   });
 
@@ -2374,6 +2397,8 @@ describe('definition: scoped account bodies and timeouts', () => {
       networks: 'ok',
       keys: 'ok',
       tags: 'ok',
+      storage: 'ok',
+      addresses: 'ok',
     });
     expect(report.missing).toEqual(['droplet:read']);
     expect(report.account.dropletLimit).toBeUndefined();

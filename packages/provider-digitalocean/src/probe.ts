@@ -14,7 +14,10 @@ export type DoFamilyState = 'ok' | 'denied';
 export interface DoAccountReport {
   /** `dropletLimit` is absent when the token lacks `droplet:read`: DigitalOcean then leaves it out. */
   account: { uuid: string; status: string; dropletLimit?: number };
-  families: Record<'compute' | 'networks' | 'keys' | 'tags', DoFamilyState>;
+  families: Record<
+    'compute' | 'networks' | 'keys' | 'tags' | 'storage' | 'addresses',
+    DoFamilyState
+  >;
   /** The read scopes the token lacks, in probe order. */
   missing: string[];
 }
@@ -30,6 +33,8 @@ const probes: readonly { family: Family; path: string; scope: string }[] = [
   { family: 'networks', path: '/firewalls', scope: 'firewall:read' },
   { family: 'keys', path: '/account/keys', scope: 'ssh_key:read' },
   { family: 'tags', path: '/tags', scope: 'tag:read' },
+  { family: 'storage', path: '/volumes', scope: 'block_storage:read' },
+  { family: 'addresses', path: '/reserved_ips', scope: 'reserved_ip:read' },
 ];
 
 /** How long the whole probe may take. */
@@ -46,7 +51,8 @@ function badBody(): ComputeError {
 
 /**
  * Read-only probe (GET account, regions, sizes, droplets?per_page=1, vpcs?per_page=1,
- * firewalls?per_page=1, account/keys?per_page=1, tags?per_page=1). Built the way the provider
+ * firewalls?per_page=1, account/keys?per_page=1, tags?per_page=1, volumes?per_page=1,
+ * reserved_ips?per_page=1). Built the way the provider
  * builds its client, so the token resolves, and is budgeted, exactly as it does for a create.
  * Throws when the token is refused or cannot read the account; any other failure of a list
  * propagates too, since it says nothing about a scope.
@@ -108,6 +114,8 @@ async function probe(client: DoClient, signal: AbortSignal): Promise<DoAccountRe
     networks: 'ok',
     keys: 'ok',
     tags: 'ok',
+    storage: 'ok',
+    addresses: 'ok',
   };
   const missing: string[] = [];
   probes.forEach(({ family, scope }, i) => {
