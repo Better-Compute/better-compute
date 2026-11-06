@@ -39,10 +39,15 @@ export function packUserData(
   if (sshKeys && sshKeys.length > 0) {
     for (const key of sshKeys)
       if (typeof key !== 'string' || key.trim() === '' || /[\u0000-\u001f\u007f]/.test(key))
-        throw new ComputeError('INVALID_INPUT', 'an SSH public key is one line of printable text', undefined, {
-          provider: 'aws',
-          reason: 'ssh-key',
-        });
+        throw new ComputeError(
+          'INVALID_INPUT',
+          'an SSH public key is one line of printable text',
+          undefined,
+          {
+            provider: 'aws',
+            reason: 'ssh-key',
+          },
+        );
     const keysPart = `#cloud-config\nssh_authorized_keys:\n${sshKeys.map((key) => `  - ${JSON.stringify(key.trim())}\n`).join('')}`;
     const boundary = `bc-${createHash('sha256').update(keysPart).update('\0').update(userData).digest('hex').slice(0, 32)}`;
     const part = (type: string, body: string) =>
@@ -54,7 +59,8 @@ export function packUserData(
       `--${boundary}--\n`;
   }
   const raw = Buffer.from(text, 'utf8');
-  if (raw.length <= userDataLimit) return { base64: raw.toString('base64'), gzipped: false, bytes: raw.length };
+  if (raw.length <= userDataLimit)
+    return { base64: raw.toString('base64'), gzipped: false, bytes: raw.length };
   const gzipped = deterministicGzip(raw);
   if (gzipped.length > userDataLimit)
     throw new ComputeError(

@@ -53,7 +53,12 @@ function directWorld(overrides: Partial<AwsConfig> = {}) {
   };
   const options = { fetch: emu.fetch, credentials: emu.ambient };
   const account = accountCredentials(config, context, options);
-  const ec2 = ec2Client({ region: config.region, credentials: account.source, fetch: emu.fetch, clock: emu.clock });
+  const ec2 = ec2Client({
+    region: config.region,
+    credentials: account.source,
+    fetch: emu.fetch,
+    clock: emu.clock,
+  });
   const compute = new AwsCompute(config, context, options, {
     ec2,
     account,
@@ -82,9 +87,9 @@ describe('config & ids', () => {
     expect(() => awsConfig.parse({ region: 'us-east-1', zones: [] })).toThrow(
       expect.objectContaining({ code: 'INVALID_INPUT' }),
     );
-    expect(() => awsConfig.parse({ region: 'us-east-1', zones: ['us-east-1a'], rootVolumeGiB: 4 })).toThrow(
-      expect.objectContaining({ code: 'INVALID_INPUT' }),
-    );
+    expect(() =>
+      awsConfig.parse({ region: 'us-east-1', zones: ['us-east-1a'], rootVolumeGiB: 4 }),
+    ).toThrow(expect.objectContaining({ code: 'INVALID_INPUT' }));
   });
 
   it('semantic validation refuses foreign zones and bad regions', () => {
@@ -102,7 +107,9 @@ describe('config & ids', () => {
     expect(() => validateAwsConfig(base({ zones: ['us-east-1a', 'us-east-10a'] }))).toThrow(
       expect.objectContaining({ code: 'INVALID_CONFIG' }),
     );
-    expect(() => validateAwsConfig(base({ region: 'us-west-2', zones: ['us-west-2-lax-1a', 'us-west-2b'] }))).not.toThrow();
+    expect(() =>
+      validateAwsConfig(base({ region: 'us-west-2', zones: ['us-west-2-lax-1a', 'us-west-2b'] })),
+    ).not.toThrow();
     expect(() => validateAwsConfig(base({ discoverTag: 'novalue' }))).toThrow(
       expect.objectContaining({ code: 'INVALID_CONFIG' }),
     );
@@ -120,11 +127,17 @@ describe('config & ids', () => {
         expect.objectContaining({ code: 'INVALID_CONFIG' }),
       );
     expect(() =>
-      validateAwsConfig(base({ assumeRoleArn: 'arn:aws:iam::222222222222:role/path/better-compute' })),
+      validateAwsConfig(
+        base({ assumeRoleArn: 'arn:aws:iam::222222222222:role/path/better-compute' }),
+      ),
     ).not.toThrow();
     expect(() =>
       validateAwsConfig(
-        base({ region: 'cn-north-1', zones: ['cn-north-1a'], assumeRoleArn: 'arn:aws-cn:iam::222222222222:role/x' }),
+        base({
+          region: 'cn-north-1',
+          zones: ['cn-north-1a'],
+          assumeRoleArn: 'arn:aws-cn:iam::222222222222:role/x',
+        }),
       ),
     ).not.toThrow();
   });
@@ -156,7 +169,13 @@ describe('config & ids', () => {
       instanceType: 'g6.xlarge',
       market: 'spot',
     });
-    for (const bad of ['us-east-1a/', 'a/b@x', 'us-east-1a/p5.48xlarge@cr-xyz', 'us-east-1a/../x', ''])
+    for (const bad of [
+      'us-east-1a/',
+      'a/b@x',
+      'us-east-1a/p5.48xlarge@cr-xyz',
+      'us-east-1a/../x',
+      '',
+    ])
       expect(() => parseOfferId(bad)).toThrow(expect.objectContaining({ code: 'INVALID_INPUT' }));
   });
 
@@ -169,7 +188,9 @@ describe('config & ids', () => {
   it('instance ids are validated', () => {
     expect(parseInstanceId('i-0abc12345678def01')).toBe('i-0abc12345678def01');
     for (const bad of ['i-xyz', 'vol-0abc12345678def01', 'i-0abc12345678def01 ', ''])
-      expect(() => parseInstanceId(bad)).toThrow(expect.objectContaining({ code: 'INVALID_INPUT' }));
+      expect(() => parseInstanceId(bad)).toThrow(
+        expect.objectContaining({ code: 'INVALID_INPUT' }),
+      );
   });
 
   it('tag values keep only what EC2 accepts', () => {
@@ -181,7 +202,11 @@ describe('config & ids', () => {
 describe('offers', () => {
   it('parses vcpu, memory, gpus, arch, metal and EFA', async () => {
     const { ec2 } = directWorld();
-    const doc = await ec2.call('DescribeInstanceTypes', { InstanceType: ['p5.48xlarge'] }, { signal });
+    const doc = await ec2.call(
+      'DescribeInstanceTypes',
+      { InstanceType: ['p5.48xlarge'] },
+      { signal },
+    );
     const [p5] = parseInstanceTypes(doc.items('instanceTypeSet'));
     expect(p5).toEqual({
       type: 'p5.48xlarge',
@@ -194,7 +219,11 @@ describe('offers', () => {
       efa: true,
       maxEfaInterfaces: 32,
     });
-    const doc2 = await ec2.call('DescribeInstanceTypes', { InstanceType: ['m7g.large', 'c7i.metal-24xl'] }, { signal });
+    const doc2 = await ec2.call(
+      'DescribeInstanceTypes',
+      { InstanceType: ['m7g.large', 'c7i.metal-24xl'] },
+      { signal },
+    );
     const parsed = parseInstanceTypes(doc2.items('instanceTypeSet'));
     expect(parsed.map((t) => [t.type, t.arch, t.bareMetal])).toEqual([
       ['m7g.large', ['arm64'], false],
@@ -204,7 +233,13 @@ describe('offers', () => {
     expect(gpuModel('NVIDIA', 'A10G')).toBe('A10G');
     expect(gpuModel('AMD', 'Radeon Pro V520')).toBe('other');
     expect(gpuModel('NVIDIA', 'Mystery')).toBe('other');
-    expect(parseInstanceTypes(parseXml('<x><instanceTypeSet><item><vCpuInfo/></item></instanceTypeSet></x>').items('instanceTypeSet'))).toEqual([]);
+    expect(
+      parseInstanceTypes(
+        parseXml('<x><instanceTypeSet><item><vCpuInfo/></item></instanceTypeSet></x>').items(
+          'instanceTypeSet',
+        ),
+      ),
+    ).toEqual([]);
   });
 
   it('lists offers in configured zones only', async () => {
@@ -227,10 +262,19 @@ describe('offers', () => {
 
   it('filters by gpu model and count', async () => {
     const { compute } = directWorld();
-    expect((await compute.listOffers({ gpuModel: 'H100', minGpus: 8 })).map((o) => o.id)).toEqual(['us-east-1a/p5.48xlarge']);
-    expect((await compute.listOffers({ gpuModel: 'L4' })).map((o) => o.id)).toEqual(['us-east-1a/g6.xlarge', 'us-east-1b/g6.xlarge']);
-    expect((await compute.listOffers({ minVcpu: 100 })).map((o) => o.id)).toEqual(['us-east-1a/p5.48xlarge']);
-    expect((await compute.listOffers({ minMemoryGiB: 16 })).every((o) => o.memoryGiB >= 16)).toBe(true);
+    expect((await compute.listOffers({ gpuModel: 'H100', minGpus: 8 })).map((o) => o.id)).toEqual([
+      'us-east-1a/p5.48xlarge',
+    ]);
+    expect((await compute.listOffers({ gpuModel: 'L4' })).map((o) => o.id)).toEqual([
+      'us-east-1a/g6.xlarge',
+      'us-east-1b/g6.xlarge',
+    ]);
+    expect((await compute.listOffers({ minVcpu: 100 })).map((o) => o.id)).toEqual([
+      'us-east-1a/p5.48xlarge',
+    ]);
+    expect((await compute.listOffers({ minMemoryGiB: 16 })).every((o) => o.memoryGiB >= 16)).toBe(
+      true,
+    );
   });
 
   it('skips bare metal', async () => {
@@ -272,7 +316,10 @@ describe('offers', () => {
 });
 
 /** An emulated platform account through the provider definition. */
-async function providerWorld(overrides: Record<string, unknown> = {}, options: Record<string, unknown> = {}) {
+async function providerWorld(
+  overrides: Record<string, unknown> = {},
+  options: Record<string, unknown> = {},
+) {
   const emu = new AwsEmulator();
   const ec2emu = new Ec2Emulator(emu);
   const records: string[] = [];
@@ -283,7 +330,11 @@ async function providerWorld(overrides: Record<string, unknown> = {}, options: R
     error: (m, f) => records.push(`${m} ${JSON.stringify(f ?? {})}`),
   };
   const provider = awsProvider({ fetch: emu.fetch, credentials: emu.ambient, ...options });
-  const config = awsConfig.parse({ region: 'us-east-1', zones: ['us-east-1a', 'us-east-1b'], ...overrides }) as AwsConfig;
+  const config = awsConfig.parse({
+    region: 'us-east-1',
+    zones: ['us-east-1a', 'us-east-1b'],
+    ...overrides,
+  }) as AwsConfig;
   const impl = (await provider.create(config, {
     clock: emu.clock,
     log,
@@ -299,7 +350,13 @@ async function providerWorld(overrides: Record<string, unknown> = {}, options: R
   });
   const create = (key = 'ins_test1', request: Partial<Parameters<AwsCompute['create']>[0]> = {}) =>
     impl.create(
-      { offerId: 'us-east-1a/t3.micro', image: 'ubuntu-24.04', userData: '#cloud-config\n', name: `vm-${key}`, ...request },
+      {
+        offerId: 'us-east-1a/t3.micro',
+        image: 'ubuntu-24.04',
+        userData: '#cloud-config\n',
+        name: `vm-${key}`,
+        ...request,
+      },
       call(key),
     );
   return { emu, ec2emu, provider, impl, call, create, records, config };
@@ -340,7 +397,9 @@ describe('compute', () => {
     const specs = [1, 2].map((n) => {
       const out: Record<string, string> = {};
       for (let m = 1; p.has(`TagSpecification.${n}.Tag.${m}.Key`); m++)
-        out[p.get(`TagSpecification.${n}.Tag.${m}.Key`)!] = p.get(`TagSpecification.${n}.Tag.${m}.Value`)!;
+        out[p.get(`TagSpecification.${n}.Tag.${m}.Key`)!] = p.get(
+          `TagSpecification.${n}.Tag.${m}.Value`,
+        )!;
       return [p.get(`TagSpecification.${n}.ResourceType`), out] as const;
     });
     expect(specs.map(([type]) => type)).toEqual(['instance', 'volume']);
@@ -357,19 +416,27 @@ describe('compute', () => {
     const { emu, create } = await providerWorld();
     await create('ins_arm', { offerId: 'us-east-1a/m7g.large', image: 'al2023' });
     const [run] = emu.calls('RunInstances');
-    expect(run!.params.get('ImageId')).toBe('resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64');
+    expect(run!.params.get('ImageId')).toBe(
+      'resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64',
+    );
     expect(run!.params.get('BlockDeviceMapping.1.DeviceName')).toBe('/dev/xvda');
   });
 
   it('raw images: an AMI reads its root device, an SSM parameter omits the mapping', async () => {
     const { emu, create, records } = await providerWorld();
     await create('ins_ami', { image: 'ami-0123456789abcdef0' });
-    expect(emu.calls('RunInstances')[0]!.params.get('BlockDeviceMapping.1.DeviceName')).toBe('/dev/xvda');
+    expect(emu.calls('RunInstances')[0]!.params.get('BlockDeviceMapping.1.DeviceName')).toBe(
+      '/dev/xvda',
+    );
     await create('ins_ssm', { image: 'resolve:ssm:/my/team/ami' });
     expect(emu.calls('RunInstances')[1]!.params.has('BlockDeviceMapping.1.DeviceName')).toBe(false);
     expect(records.some((line) => line.includes('unknown root device'))).toBe(true);
-    expect((await rejection(() => create('ins_bad', { image: 'windows-11' }))).code).toBe('INVALID_INPUT');
-    expect((await rejection(() => create('ins_gone', { image: 'ami-00000000000000001' }))).code).toBe('INVALID_INPUT');
+    expect((await rejection(() => create('ins_bad', { image: 'windows-11' }))).code).toBe(
+      'INVALID_INPUT',
+    );
+    expect(
+      (await rejection(() => create('ins_gone', { image: 'ami-00000000000000001' }))).code,
+    ).toBe('INVALID_INPUT');
   });
 
   it('create is idempotent by client token', async () => {
@@ -395,7 +462,10 @@ describe('compute', () => {
 
   it('reservation and spot offers are UNSUPPORTED until A3', async () => {
     const { create, emu } = await providerWorld();
-    for (const offerId of ['us-east-1a/p5.48xlarge@cr-0123456789abcdef0', 'us-east-1a/t3.micro:spot']) {
+    for (const offerId of [
+      'us-east-1a/p5.48xlarge@cr-0123456789abcdef0',
+      'us-east-1a/t3.micro:spot',
+    ]) {
       const error = await rejection(() => create('ins_a3', { offerId }));
       expect(error.code).toBe('UNSUPPORTED');
       expect(error.details?.reason).toBe('phase-a3');
@@ -415,10 +485,14 @@ describe('compute', () => {
     expect([...gz.subarray(0, 2)]).toEqual([0x1f, 0x8b]);
     expect(gz.readUInt32LE(4)).toBe(0);
     expect(gz[9]).toBe(0xff);
-    const text = Buffer.from(packUserData('#cloud-config\n', keys).base64, 'base64').toString('utf8');
+    const text = Buffer.from(packUserData('#cloud-config\n', keys).base64, 'base64').toString(
+      'utf8',
+    );
     const boundary = /boundary="([^"]+)"/.exec(text)![1]!;
     expect(boundary).toMatch(/^bc-[0-9a-f]{32}$/);
-    expect(Buffer.from(packUserData('#cloud-config\nx: 1\n', keys).base64, 'base64').toString()).not.toContain(boundary);
+    expect(
+      Buffer.from(packUserData('#cloud-config\nx: 1\n', keys).base64, 'base64').toString(),
+    ).not.toContain(boundary);
   });
 
   it('gzips user data over 16 KiB and refuses user data that stays too large', () => {
@@ -434,7 +508,10 @@ describe('compute', () => {
     } catch (caught) {
       error = caught;
     }
-    expect(error).toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'user-data-too-large' } });
+    expect(error).toMatchObject({
+      code: 'INVALID_INPUT',
+      details: { reason: 'user-data-too-large' },
+    });
   });
 
   it('ssh keys are delivered as a cloud-config part', () => {
@@ -443,13 +520,17 @@ describe('compute', () => {
       'base64',
     ).toString('utf8');
     expect(text).toContain('Content-Type: multipart/mixed');
-    expect(text).toContain('ssh_authorized_keys:\n  - "ssh-ed25519 AAAA key1"\n  - "ssh-rsa BBBB key2"');
+    expect(text).toContain(
+      'ssh_authorized_keys:\n  - "ssh-ed25519 AAAA key1"\n  - "ssh-rsa BBBB key2"',
+    );
     expect(text).toContain('Content-Type: text/x-shellscript');
     expect(text).toContain('#!/bin/sh\necho hi\n');
     expect(() => packUserData('', ['ssh-ed25519 AAAA\nruncmd: [evil]'])).toThrow(
       expect.objectContaining({ code: 'INVALID_INPUT' }),
     );
-    expect(Buffer.from(packUserData('#cloud-config\n').base64, 'base64').toString()).toBe('#cloud-config\n');
+    expect(Buffer.from(packUserData('#cloud-config\n').base64, 'base64').toString()).toBe(
+      '#cloud-config\n',
+    );
   });
 
   it('get finds a just-created instance through its client token', async () => {
@@ -459,7 +540,9 @@ describe('compute', () => {
     const got = await impl.get(machine.id, call('ins_ec'));
     expect(got?.state).toBe('pending');
     expect(got?.offerId).toBe('us-east-1a/t3.micro');
-    expect(emu.calls('DescribeInstances').some((r) => r.params.get('Filter.1.Name') === 'client-token')).toBe(true);
+    expect(
+      emu.calls('DescribeInstances').some((r) => r.params.get('Filter.1.Name') === 'client-token'),
+    ).toBe(true);
   });
 
   it('get reports pending inside the consistency window', async () => {
@@ -467,7 +550,11 @@ describe('compute', () => {
     ec2emu.newInstanceNotFound = { byId: 3, byToken: 3 };
     const machine = await create('ins_window');
     emu.clock.advance(60_000);
-    expect(await impl.get(machine.id, call('ins_window'))).toEqual({ id: machine.id, state: 'pending', addresses: [] });
+    expect(await impl.get(machine.id, call('ins_window'))).toEqual({
+      id: machine.id,
+      state: 'pending',
+      addresses: [],
+    });
     emu.clock.advance(61_000);
     expect(await impl.get(machine.id, call('ins_window'))).toBeUndefined();
     expect(await impl.get('i-0000000000000dead', call('other'))).toBeUndefined();
@@ -481,7 +568,9 @@ describe('compute', () => {
     const error = await rejection(() => impl.get(machine.id, call('ins_stockout')));
     expect(error.code).toBe('CAPACITY_UNAVAILABLE');
     ec2emu.asyncFailure(machine.id, 'Client.VolumeLimitExceeded');
-    expect((await rejection(() => impl.get(machine.id, call('ins_stockout')))).code).toBe('QUOTA_EXCEEDED');
+    expect((await rejection(() => impl.get(machine.id, call('ins_stockout')))).code).toBe(
+      'QUOTA_EXCEEDED',
+    );
     ec2emu.asyncFailure(machine.id, 'Server.InternalError');
     expect((await impl.get(machine.id, call('ins_stockout')))?.state).toBe('error');
     ec2emu.asyncFailure(machine.id, 'Client.UserInitiatedShutdown');
@@ -503,7 +592,9 @@ describe('compute', () => {
 
   it('get maps addresses, networks, tags and claimedBy', async () => {
     const { ec2emu, impl, call } = await providerWorld();
-    const foreign = ec2emu.addInstance({ tags: { Name: 'db', 'better-compute:instance': 'ins_x' } });
+    const foreign = ec2emu.addInstance({
+      tags: { Name: 'db', 'better-compute:instance': 'ins_x' },
+    });
     foreign.groups.push({ id: 'sg-0000000000000000b', name: 'bc-0123456789abcdef' });
     const machine = await impl.get(foreign.id, call());
     expect(machine).toMatchObject({
@@ -552,7 +643,10 @@ describe('compute', () => {
     const machine = await create('ins_protected');
     ec2emu.disableApiTermination(machine.id);
     const error = await rejection(() => impl.delete(machine.id, call('ins_protected')));
-    expect(error).toMatchObject({ code: 'INVALID_STATE', details: { reason: 'termination-protected' } });
+    expect(error).toMatchObject({
+      code: 'INVALID_STATE',
+      details: { reason: 'termination-protected' },
+    });
   });
 
   it('a tenant account is refused when the provider builds its client (F1)', async () => {
@@ -562,7 +656,10 @@ describe('compute', () => {
     const tenant = { clock: emu.clock, log: quiet, secrets: { resolve: async () => '' } };
     await expect(
       Promise.resolve().then(() =>
-        provider.create(config, { ...tenant, account: { id: 'pa_t', tenantId: 't_1', platform: false } }),
+        provider.create(config, {
+          ...tenant,
+          account: { id: 'pa_t', tenantId: 't_1', platform: false },
+        }),
       ),
     ).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
     await expect(
@@ -594,11 +691,15 @@ describe('power & reinstall', () => {
     const error = await rejection(() => impl.power(foreign.id, 'off', call()));
     expect(error).toMatchObject({ code: 'INVALID_STATE', details: { reason: 'not-claimed' } });
     expect(emu.calls('StopInstances')).toHaveLength(0);
-    expect((await rejection(() => impl.power('i-0000000000000dead', 'on', call()))).code).toBe('NOT_FOUND');
+    expect((await rejection(() => impl.power('i-0000000000000dead', 'on', call()))).code).toBe(
+      'NOT_FOUND',
+    );
+    expect((await rejection(() => impl.power(foreign.id, 'hibernate' as never, call()))).code).toBe(
+      'UNSUPPORTED',
+    );
     expect(
-      (await rejection(() => impl.power(foreign.id, 'hibernate' as never, call()))).code,
-    ).toBe('UNSUPPORTED');
-    expect((await rejection(() => impl.reinstall(foreign.id, 'al2023', call()))).details?.reason).toBe('not-claimed');
+      (await rejection(() => impl.reinstall(foreign.id, 'al2023', call()))).details?.reason,
+    ).toBe('not-claimed');
   });
 
   it('nmi sends a diagnostic interrupt', async () => {
@@ -674,7 +775,10 @@ describe('never logs', () => {
       try {
         await run();
       } catch (error) {
-        errors.push(String((error as Error).message), JSON.stringify((error as ComputeError).details ?? {}));
+        errors.push(
+          String((error as Error).message),
+          JSON.stringify((error as ComputeError).details ?? {}),
+        );
       }
     };
     const machine = await create('ins_logs', { sshKeys: ['ssh-ed25519 AAAA key'] });
@@ -686,7 +790,13 @@ describe('never logs', () => {
     await attempt(() => impl.listOffers({}));
     const joined = [...records, ...errors].join('\n');
     expect(records.length).toBeGreaterThan(3);
-    for (const secret of ['AKIATESTKEY', 'ASIA', 'testsecret', 'Signature=', 'minted-session-token'])
+    for (const secret of [
+      'AKIATESTKEY',
+      'ASIA',
+      'testsecret',
+      'Signature=',
+      'minted-session-token',
+    ])
       expect(joined).not.toContain(secret);
   });
 });

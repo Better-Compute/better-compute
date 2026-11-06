@@ -30,7 +30,12 @@ export class StsEmulator {
   /** Web identity token → the role ARN it may assume. */
   readonly webTokens = new Map<string, string>();
   /** Every AssumeRole request's parameters. */
-  readonly assumed: { roleArn: string; externalId?: string; sessionName: string; caller: string }[] = [];
+  readonly assumed: {
+    roleArn: string;
+    externalId?: string;
+    sessionName: string;
+    caller: string;
+  }[] = [];
   #minted = 0;
 
   constructor(private readonly emu: AwsEmulator) {
@@ -42,8 +47,17 @@ export class StsEmulator {
         const p = request.params;
         switch (request.operation) {
           case 'GetCallerIdentity': {
-            const identity = this.#identity(request.accessKeyId, request.headers.get('x-amz-security-token'));
-            if (!identity) return queryError('InvalidClientTokenId', 'The security token included in the request is invalid.', 'Sender', 403);
+            const identity = this.#identity(
+              request.accessKeyId,
+              request.headers.get('x-amz-security-token'),
+            );
+            if (!identity)
+              return queryError(
+                'InvalidClientTokenId',
+                'The security token included in the request is invalid.',
+                'Sender',
+                403,
+              );
             return queryResponse(
               'GetCallerIdentity',
               ns,
@@ -51,27 +65,61 @@ export class StsEmulator {
             );
           }
           case 'AssumeRole': {
-            const caller = this.#identity(request.accessKeyId, request.headers.get('x-amz-security-token'));
-            if (!caller) return queryError('InvalidClientTokenId', 'The security token included in the request is invalid.', 'Sender', 403);
+            const caller = this.#identity(
+              request.accessKeyId,
+              request.headers.get('x-amz-security-token'),
+            );
+            if (!caller)
+              return queryError(
+                'InvalidClientTokenId',
+                'The security token included in the request is invalid.',
+                'Sender',
+                403,
+              );
             const roleArn = p.get('RoleArn') ?? '';
             const externalId = p.get('ExternalId') ?? undefined;
-            this.assumed.push({ roleArn, externalId, sessionName: p.get('RoleSessionName') ?? '', caller: caller.account });
+            this.assumed.push({
+              roleArn,
+              externalId,
+              sessionName: p.get('RoleSessionName') ?? '',
+              caller: caller.account,
+            });
             const role = this.roles.get(roleArn);
-            const denied = queryError('AccessDenied', `User: ${caller.arn} is not authorized to perform: sts:AssumeRole on resource: ${roleArn}`, 'Sender', 403);
+            const denied = queryError(
+              'AccessDenied',
+              `User: ${caller.arn} is not authorized to perform: sts:AssumeRole on resource: ${roleArn}`,
+              'Sender',
+              403,
+            );
             if (!role) return denied;
             if (role.externalId !== undefined && role.externalId !== externalId) return denied;
-            if (role.trustedAccounts && !role.trustedAccounts.includes(caller.account)) return denied;
+            if (role.trustedAccounts && !role.trustedAccounts.includes(caller.account))
+              return denied;
             const account = role.identityAccount ?? roleArn.split(':')[4]!;
-            return this.#mint('AssumeRole', roleArn, account, Number(p.get('DurationSeconds') ?? 3600));
+            return this.#mint(
+              'AssumeRole',
+              roleArn,
+              account,
+              Number(p.get('DurationSeconds') ?? 3600),
+            );
           }
           case 'AssumeRoleWithWebIdentity': {
             const roleArn = p.get('RoleArn') ?? '';
             const token = p.get('WebIdentityToken') ?? '';
             if (request.headers.get('authorization'))
-              return queryError('InvalidParameterValue', 'AssumeRoleWithWebIdentity is unsigned', 'Sender');
+              return queryError(
+                'InvalidParameterValue',
+                'AssumeRoleWithWebIdentity is unsigned',
+                'Sender',
+              );
             if (this.webTokens.get(token) !== roleArn)
               return queryError('InvalidIdentityToken', 'Token is not valid', 'Sender', 400);
-            return this.#mint('AssumeRoleWithWebIdentity', roleArn, roleArn.split(':')[4]!, Number(p.get('DurationSeconds') ?? 3600));
+            return this.#mint(
+              'AssumeRoleWithWebIdentity',
+              roleArn,
+              roleArn.split(':')[4]!,
+              Number(p.get('DurationSeconds') ?? 3600),
+            );
           }
           default:
             return queryError('InvalidAction', `unknown action ${request.operation}`);

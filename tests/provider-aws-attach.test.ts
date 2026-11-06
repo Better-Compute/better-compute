@@ -6,7 +6,12 @@ import {
   type ExternalMachine,
   type Logger,
 } from '@better-compute/core';
-import { awsConfig, awsProvider, type AwsCompute, type AwsConfig } from '@better-compute/provider-aws';
+import {
+  awsConfig,
+  awsProvider,
+  type AwsCompute,
+  type AwsConfig,
+} from '@better-compute/provider-aws';
 import { AwsEmulator } from './support/aws-emulator/index.js';
 import { Ec2Emulator } from './support/aws-emulator/ec2.js';
 
@@ -76,7 +81,9 @@ describe('provider-aws attach', () => {
     expect(foreign.tags.has('better-compute:managed')).toBe(false);
     // Claiming again for the same instance is a no-op success.
     expect((await impl.claim(foreign.id, 'ins_attach1', call())).claimedBy).toBe('ins_attach1');
-    expect((await rejection(() => impl.claim('i-0000000000000dead', 'ins_attach1', call()))).code).toBe('NOT_FOUND');
+    expect(
+      (await rejection(() => impl.claim('i-0000000000000dead', 'ins_attach1', call()))).code,
+    ).toBe('NOT_FOUND');
   });
 
   it('claim with managed hands deletion to better-compute', async () => {

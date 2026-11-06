@@ -44,7 +44,13 @@ export const awsErrorCodes: Readonly<Partial<Record<ErrorCode, readonly string[]
     'LimitExceededException',
     'ServiceQuotaExceededException',
   ],
-  NOT_FOUND: ['ResourceNotFoundException', 'NotFoundException', 'NoSuchKey', 'NoSuchBucket', 'NoSuchEntity'],
+  NOT_FOUND: [
+    'ResourceNotFoundException',
+    'NotFoundException',
+    'NoSuchKey',
+    'NoSuchBucket',
+    'NoSuchEntity',
+  ],
   CONFLICT: [
     'IdempotentParameterMismatch',
     'ResourceExistsException',
@@ -197,7 +203,8 @@ export function parseAwsError(
       const message = error.textOf('Message');
       if (message) out.message = message;
     }
-    const requestId = doc.textOf('RequestID') ?? doc.textOf('RequestId') ?? error?.textOf('RequestId');
+    const requestId =
+      doc.textOf('RequestID') ?? doc.textOf('RequestId') ?? error?.textOf('RequestId');
     if (requestId) out.requestId = requestId;
   } catch {
     // Not XML: the status decides.

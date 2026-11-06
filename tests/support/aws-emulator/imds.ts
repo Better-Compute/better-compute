@@ -66,7 +66,10 @@ export class ContainerCredentialsEmulator {
       unsigned: () => true,
       handle: (request) => {
         this.requests += 1;
-        if (request.headers.get('authorization') !== this.token && request.url.hostname !== '169.254.170.2')
+        if (
+          request.headers.get('authorization') !== this.token &&
+          request.url.hostname !== '169.254.170.2'
+        )
           return new Response('{"message":"denied"}', { status: 401 });
         return Response.json({
           AccessKeyId: 'ASIACONTAINER0000001',

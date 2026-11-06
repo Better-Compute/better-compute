@@ -54,14 +54,16 @@ describe('aws-core credentials', () => {
       JSON.stringify({ accessKeyId: 'AKIATESTKEY0000000009', secretAccessKey: 'testsecret' }),
     );
     expect((await ok.credentials(context)).accessKeyId).toBe('AKIATESTKEY0000000009');
-    const missing = staticCredentials(async () => JSON.stringify({ accessKeyId: 'AKIATESTKEY0000000009' }));
+    const missing = staticCredentials(async () =>
+      JSON.stringify({ accessKeyId: 'AKIATESTKEY0000000009' }),
+    );
     const error = await failure(() => missing.credentials(context));
     expect(error.code).toBe('INVALID_CONFIG');
     expect(error.message).toContain('secretAccessKey');
     expect(error.message).not.toContain('AKIATESTKEY');
-    expect((await failure(() => staticCredentials(async () => 'nope').credentials(context))).code).toBe(
-      'INVALID_CONFIG',
-    );
+    expect(
+      (await failure(() => staticCredentials(async () => 'nope').credentials(context))).code,
+    ).toBe('INVALID_CONFIG');
   });
 
   it('env credentials read the three variables', async () => {
@@ -76,7 +78,9 @@ describe('aws-core credentials', () => {
       secretAccessKey: 'testsecret',
       sessionToken: 'env-session-token',
     });
-    expect((await failure(() => envCredentials({}).credentials(context))).code).toBe('UNAUTHENTICATED');
+    expect((await failure(() => envCredentials({}).credentials(context))).code).toBe(
+      'UNAUTHENTICATED',
+    );
   });
 
   it('IMDS requires a token and never falls back to v1', async () => {
@@ -90,7 +94,9 @@ describe('aws-core credentials', () => {
 
     const v1 = world();
     new ImdsEmulator(v1.emu, { v1Only: true });
-    const error = await failure(() => imdsCredentials({ fetch: v1.emu.fetch }).credentials(v1.context));
+    const error = await failure(() =>
+      imdsCredentials({ fetch: v1.emu.fetch }).credentials(v1.context),
+    );
     expect(error.code).toBe('UNAUTHENTICATED');
     expect(error.details?.reason).toBe('imds-unavailable');
     // No v1 request after the refused token.
@@ -100,11 +106,19 @@ describe('aws-core credentials', () => {
   it('container credentials refuse a non-allowed full URI', async () => {
     const { emu, context } = world();
     const container = new ContainerCredentialsEmulator(emu);
-    for (const uri of ['http://10.0.0.5/creds', 'http://169.254.169.254/x', 'http://127.0.0.1.evil.com/', 'http://u:p@127.0.0.1/'])
+    for (const uri of [
+      'http://10.0.0.5/creds',
+      'http://169.254.169.254/x',
+      'http://127.0.0.1.evil.com/',
+      'http://u:p@127.0.0.1/',
+    ])
       expect(
         (
           await failure(() =>
-            containerCredentials({ fetch: emu.fetch, env: { AWS_CONTAINER_CREDENTIALS_FULL_URI: uri } }).credentials(context),
+            containerCredentials({
+              fetch: emu.fetch,
+              env: { AWS_CONTAINER_CREDENTIALS_FULL_URI: uri },
+            }).credentials(context),
           )
         ).code,
       ).toBe('INVALID_CONFIG');
@@ -113,7 +127,8 @@ describe('aws-core credentials', () => {
       fetch: emu.fetch,
       env: {
         AWS_CONTAINER_CREDENTIALS_FULL_URI: 'http://169.254.170.23/v1/credentials',
-        AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE: '/var/run/secrets/pods.eks.amazonaws.com/serviceaccount/eks-pod-identity-token',
+        AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE:
+          '/var/run/secrets/pods.eks.amazonaws.com/serviceaccount/eks-pod-identity-token',
       },
       readFile: async () => 'pod-identity-token\n',
     });
@@ -156,7 +171,12 @@ describe('aws-core credentials', () => {
     });
     expect((await failure(() => bad.credentials(context))).code).toBe('PROVIDER_ERROR');
     expect(() =>
-      webIdentityCredentials({ roleArn: tenantRole, sessionName: 'x', token: async () => 't', region: 'us-east-1' }),
+      webIdentityCredentials({
+        roleArn: tenantRole,
+        sessionName: 'x',
+        token: async () => 't',
+        region: 'us-east-1',
+      }),
     ).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG' }));
   });
 
@@ -173,7 +193,12 @@ describe('aws-core credentials', () => {
     const creds = await source.credentials(context);
     expect(creds.sessionToken).toBeTruthy();
     expect(emu.sts.assumed).toEqual([
-      { roleArn: tenantRole, externalId: 'better-compute:pa_tenantA', sessionName: 'bc-pa_tenantA', caller: platformAccount },
+      {
+        roleArn: tenantRole,
+        externalId: 'better-compute:pa_tenantA',
+        sessionName: 'bc-pa_tenantA',
+        caller: platformAccount,
+      },
     ]);
     const wrong = assumeRoleCredentials(emu.ambient, {
       roleArn: tenantRole,
@@ -183,7 +208,12 @@ describe('aws-core credentials', () => {
       fetch: emu.fetch,
     });
     expect((await failure(() => wrong.credentials(context))).code).toBe('ACCESS_DENIED');
-    const identity = await getCallerIdentity(source, { region: 'us-east-1', fetch: emu.fetch, signal, clock: emu.clock });
+    const identity = await getCallerIdentity(source, {
+      region: 'us-east-1',
+      fetch: emu.fetch,
+      signal,
+      clock: emu.clock,
+    });
     expect(identity.account).toBe('222222222222');
   });
 
@@ -208,8 +238,14 @@ describe('aws-core credentials', () => {
     const second = world();
     new ImdsEmulator(second.emu);
     const container2 = new ContainerCredentialsEmulator(second.emu);
-    const fallthrough = ambientCredentials({ env, fetch: second.emu.fetch, readFile: async () => 'unknown' });
-    expect((await fallthrough.credentials(second.context)).accessKeyId).toBe('ASIACONTAINER0000001');
+    const fallthrough = ambientCredentials({
+      env,
+      fetch: second.emu.fetch,
+      readFile: async () => 'unknown',
+    });
+    expect((await fallthrough.credentials(second.context)).accessKeyId).toBe(
+      'ASIACONTAINER0000001',
+    );
     expect(fallthrough.kind).toBe('ambient:container');
     await fallthrough.credentials(second.context);
     expect(second.emu.calls('AssumeRoleWithWebIdentity')).toHaveLength(1);
@@ -222,7 +258,11 @@ describe('aws-core credentials', () => {
     expect(imdsOnly.kind).toBe('ambient:imds');
 
     const envFirst = ambientCredentials({
-      env: { ...env, AWS_ACCESS_KEY_ID: 'AKIATESTKEY0000000003', AWS_SECRET_ACCESS_KEY: 'testsecret' },
+      env: {
+        ...env,
+        AWS_ACCESS_KEY_ID: 'AKIATESTKEY0000000003',
+        AWS_SECRET_ACCESS_KEY: 'testsecret',
+      },
       fetch: third.emu.fetch,
     });
     await envFirst.credentials(third.context);
@@ -233,7 +273,12 @@ describe('aws-core credentials', () => {
     const { emu, context } = world();
     emu.sts.roles.set(tenantRole, {});
     const cached = cachedCredentials(
-      assumeRoleCredentials(emu.ambient, { roleArn: tenantRole, sessionName: 'bc-cache', region: 'us-east-1', fetch: emu.fetch }),
+      assumeRoleCredentials(emu.ambient, {
+        roleArn: tenantRole,
+        sessionName: 'bc-cache',
+        region: 'us-east-1',
+        fetch: emu.fetch,
+      }),
     );
     const all = await Promise.all(Array.from({ length: 10 }, () => cached.credentials(context)));
     expect(new Set(all.map((c) => c.accessKeyId)).size).toBe(1);
@@ -253,7 +298,10 @@ describe('aws-core credentials', () => {
     const forever = cachedCredentials(
       staticCredentials(async () => {
         loads += 1;
-        return JSON.stringify({ accessKeyId: 'AKIATESTKEY0000000004', secretAccessKey: 'testsecret' });
+        return JSON.stringify({
+          accessKeyId: 'AKIATESTKEY0000000004',
+          secretAccessKey: 'testsecret',
+        });
       }),
     );
     await forever.credentials(context);
@@ -264,23 +312,52 @@ describe('aws-core credentials', () => {
 
   it('getCallerIdentity returns the account', async () => {
     const { emu } = world();
-    const identity = await getCallerIdentity(emu.ambient, { region: 'us-east-1', fetch: emu.fetch, signal, clock: emu.clock });
-    expect(identity).toMatchObject({ account: platformAccount, arn: expect.stringContaining(platformAccount) });
+    const identity = await getCallerIdentity(emu.ambient, {
+      region: 'us-east-1',
+      fetch: emu.fetch,
+      signal,
+      clock: emu.clock,
+    });
+    expect(identity).toMatchObject({
+      account: platformAccount,
+      arn: expect.stringContaining(platformAccount),
+    });
     const unknown: CredentialSource = {
       kind: 'test',
-      credentials: async () => ({ accessKeyId: 'AKIATESTKEY0000000005', secretAccessKey: 'testsecret' }),
+      credentials: async () => ({
+        accessKeyId: 'AKIATESTKEY0000000005',
+        secretAccessKey: 'testsecret',
+      }),
     };
     expect(
-      (await failure(() => getCallerIdentity(unknown, { region: 'us-east-1', fetch: emu.fetch, signal, clock: emu.clock })))
-        .code,
+      (
+        await failure(() =>
+          getCallerIdentity(unknown, {
+            region: 'us-east-1',
+            fetch: emu.fetch,
+            signal,
+            clock: emu.clock,
+          }),
+        )
+      ).code,
     ).toBe('UNAUTHENTICATED');
   });
 
   it('never logs credentials', async () => {
     // A client with a recording logger, through a failing and a succeeding call.
     const { emu } = world();
-    emu.register(/^ec2\./, { service: 'ec2', protocol: 'ec2', handle: (r) => ec2Response(r.operation, '') });
-    const ec2 = ec2Client({ region: 'us-east-1', credentials: emu.ambient, fetch: emu.fetch, clock: emu.clock, log });
+    emu.register(/^ec2\./, {
+      service: 'ec2',
+      protocol: 'ec2',
+      handle: (r) => ec2Response(r.operation, ''),
+    });
+    const ec2 = ec2Client({
+      region: 'us-east-1',
+      credentials: emu.ambient,
+      fetch: emu.fetch,
+      clock: emu.clock,
+      log,
+    });
     await ec2.call('DescribeInstances', {}, { signal });
     emu.failNext('DescribeInstances', 'AuthFailure', 401);
     await failure(() => ec2.call('DescribeInstances', {}, { signal }));

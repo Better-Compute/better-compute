@@ -111,7 +111,9 @@ const createInput = (w: World, extra: Record<string, unknown> = {}) => ({
 
 /** The emulated instance an instance created (its better-compute:instance tag). */
 const vmOf = (w: World, instanceId: string): EmuInstance | undefined =>
-  [...w.ec2.instances.values()].find((instance) => instance.tags.get('better-compute:instance') === instanceId);
+  [...w.ec2.instances.values()].find(
+    (instance) => instance.tags.get('better-compute:instance') === instanceId,
+  );
 
 /** Runs `vps.instances` (letting EC2 state move in between) until the instance settles. */
 async function settle(w: World, instanceId: string, state: string, rounds = 8): Promise<any> {
@@ -149,7 +151,10 @@ describe('provider-aws through vps, end to end', () => {
   it('the instance survives EC2 eventual consistency', async () => {
     const w = await world();
     w.ec2.newInstanceNotFound = { byId: 2, byToken: 2 };
-    const created = await w.api.instances.create(w.acme, createInput(w, { idempotencyKey: 'vm-ec' }));
+    const created = await w.api.instances.create(
+      w.acme,
+      createInput(w, { idempotencyKey: 'vm-ec' }),
+    );
     const states: string[] = [];
     let current = await w.view(created.id);
     for (let round = 0; round < 8 && current.state !== 'running'; round++) {
@@ -171,7 +176,9 @@ describe('provider-aws through vps, end to end', () => {
       tenantId: w.rootTenant,
       accountId: w.accountId,
     });
-    expect(machines.items).toEqual([expect.objectContaining({ externalId: legacy.id, state: 'running' })]);
+    expect(machines.items).toEqual([
+      expect.objectContaining({ externalId: legacy.id, state: 'running' }),
+    ]);
     const instance = await w.api.instances.attach(w.root, {
       tenantId: w.acmeTenant,
       poolId: w.poolId,
@@ -215,7 +222,10 @@ describe('provider-aws through vps, end to end', () => {
 
   it('delete of a created instance terminates it', async () => {
     const w = await world();
-    const created = await w.api.instances.create(w.acme, createInput(w, { idempotencyKey: 'vm-del' }));
+    const created = await w.api.instances.create(
+      w.acme,
+      createInput(w, { idempotencyKey: 'vm-del' }),
+    );
     expect(await settle(w, created.id, 'running')).toMatchObject({ state: 'running' });
     await w.api.instances.delete(w.acme, { tenantId: w.acmeTenant, instanceId: created.id });
     expect(await settle(w, created.id, 'deleted')).toMatchObject({ state: 'deleted' });
@@ -238,7 +248,11 @@ describe('provider-aws through vps, end to end', () => {
         tenantId: w.acmeTenant,
         provider: 'aws',
         name: 'bad-zone',
-        config: { region: 'us-east-1', zones: ['eu-west-1a'], assumeRoleArn: 'arn:aws:iam::222222222222:role/bc' },
+        config: {
+          region: 'us-east-1',
+          zones: ['eu-west-1a'],
+          assumeRoleArn: 'arn:aws:iam::222222222222:role/bc',
+        },
       }),
     ).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
     // With a role in its own AWS account, the tenant's account is stored.
@@ -246,23 +260,37 @@ describe('provider-aws through vps, end to end', () => {
       tenantId: w.acmeTenant,
       provider: 'aws',
       name: 'with-role',
-      config: { region: 'us-east-1', zones: [ZONE], assumeRoleArn: 'arn:aws:iam::222222222222:role/bc' },
+      config: {
+        region: 'us-east-1',
+        zones: [ZONE],
+        assumeRoleArn: 'arn:aws:iam::222222222222:role/bc',
+      },
     });
     expect(ok.provider).toBe('aws');
   });
 
   it('async stockout fails the instance permanently with CAPACITY_UNAVAILABLE', async () => {
     const w = await world();
-    const created = await w.api.instances.create(w.acme, createInput(w, { idempotencyKey: 'stockout' }));
+    const created = await w.api.instances.create(
+      w.acme,
+      createInput(w, { idempotencyKey: 'stockout' }),
+    );
     // The reconciler's first pass launches it; EC2 then fails it for capacity.
-    for (let round = 0; round < 4 && !vmOf(w, created.id); round++) await w.tick('vps.instances', 5_000);
+    for (let round = 0; round < 4 && !vmOf(w, created.id); round++)
+      await w.tick('vps.instances', 5_000);
     const vm = vmOf(w, created.id)!;
     expect(vm).toBeDefined();
     w.ec2.asyncFailure(vm.id, 'Server.InsufficientInstanceCapacity');
     const failed = await settle(w, created.id, 'error');
     expect(failed).toMatchObject({
       state: 'error',
-      conditions: [expect.objectContaining({ type: 'ProvisionFailed', status: 'true', reason: 'CAPACITY_UNAVAILABLE' })],
+      conditions: [
+        expect.objectContaining({
+          type: 'ProvisionFailed',
+          status: 'true',
+          reason: 'CAPACITY_UNAVAILABLE',
+        }),
+      ],
     });
     const requests = w.emu.requests.length;
     await w.tick('vps.instances', 60_000);

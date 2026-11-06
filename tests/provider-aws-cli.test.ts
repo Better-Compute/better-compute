@@ -37,9 +37,13 @@ function harness(flags: AwsCommandContext['flags']) {
 describe('provider-aws CLI policies', () => {
   it('iam policy scopes destructive actions to managed tags', () => {
     const policy = iamPolicy();
-    const terminating = policy.Statement.filter((s) => actionsOf(s).includes('ec2:TerminateInstances'));
+    const terminating = policy.Statement.filter((s) =>
+      actionsOf(s).includes('ec2:TerminateInstances'),
+    );
     expect(terminating).toHaveLength(1);
-    expect(terminating[0]!.Condition?.StringEquals?.['ec2:ResourceTag/better-compute:managed']).toBe('true');
+    expect(
+      terminating[0]!.Condition?.StringEquals?.['ec2:ResourceTag/better-compute:managed'],
+    ).toBe('true');
     const run = policy.Statement.find((s) => s.Sid === 'RunTagged')!;
     expect(run.Condition?.StringEquals?.['aws:RequestTag/better-compute:managed']).toBe('true');
     const power = policy.Statement.find((s) => actionsOf(s).includes('ec2:StopInstances'))!;
@@ -47,9 +51,11 @@ describe('provider-aws CLI policies', () => {
     expect(actionsOf(power)).not.toContain('ec2:TerminateInstances');
     for (const statement of policy.Statement)
       if (statement.Resource === '*')
-        expect(actionsOf(statement).every((a) => a.startsWith('ec2:Describe') || a === 'sts:GetCallerIdentity')).toBe(
-          true,
-        );
+        expect(
+          actionsOf(statement).every(
+            (a) => a.startsWith('ec2:Describe') || a === 'sts:GetCallerIdentity',
+          ),
+        ).toBe(true);
   });
 
   it('tag edits are limited to better-compute keys', () => {
@@ -61,7 +67,11 @@ describe('provider-aws CLI policies', () => {
     for (const statement of tagging) {
       const onCreate = statement.Condition?.StringEquals?.['ec2:CreateAction'];
       const keys = statement.Condition?.['ForAllValues:StringEquals']?.['aws:TagKeys'];
-      expect(onCreate === 'RunInstances' || JSON.stringify(keys) === JSON.stringify(['better-compute:instance', 'better-compute:managed'])).toBe(true);
+      expect(
+        onCreate === 'RunInstances' ||
+          JSON.stringify(keys) ===
+            JSON.stringify(['better-compute:instance', 'better-compute:managed']),
+      ).toBe(true);
     }
   });
 
@@ -73,14 +83,20 @@ describe('provider-aws CLI policies', () => {
       instanceProfileArn: 'arn:aws-us-gov:iam::222222222222:instance-profile/bc-nodes',
     });
     const resources = policy.Statement.flatMap((s) =>
-      s.Resource === undefined ? [] : typeof s.Resource === 'string' ? [s.Resource] : [...s.Resource],
+      s.Resource === undefined
+        ? []
+        : typeof s.Resource === 'string'
+          ? [s.Resource]
+          : [...s.Resource],
     ).filter((r) => r !== '*');
     expect(resources.length).toBeGreaterThan(5);
     for (const resource of resources) expect(resource.startsWith('arn:aws-us-gov:')).toBe(true);
     expect(resources).toContain('arn:aws-us-gov:ec2:us-gov-west-1:222222222222:instance/*');
     expect(resources).toContain('arn:aws-us-gov:iam::222222222222:role/bc-nodes');
     expect(() => iamPolicy({ region: 'us-east-1.evil.com' })).toThrow();
-    expect(() => iamPolicy({ account: '12' })).toThrow(expect.objectContaining({ code: 'INVALID_INPUT' }));
+    expect(() => iamPolicy({ account: '12' })).toThrow(
+      expect.objectContaining({ code: 'INVALID_INPUT' }),
+    );
     expect(() =>
       iamPolicy({ instanceProfileArn: 'arn:aws-cn:iam::222222222222:instance-profile/x' }),
     ).toThrow(expect.objectContaining({ code: 'INVALID_INPUT' }));
@@ -92,8 +108,12 @@ describe('provider-aws CLI policies', () => {
       externalId: 'better-compute:pa_tenantA',
     });
     const [statement] = policy.Statement;
-    expect(statement!.Condition?.StringEquals?.['sts:ExternalId']).toBe('better-compute:pa_tenantA');
-    expect(statement!.Principal).toEqual({ AWS: 'arn:aws:iam::111111111111:role/bc-control-plane' });
+    expect(statement!.Condition?.StringEquals?.['sts:ExternalId']).toBe(
+      'better-compute:pa_tenantA',
+    );
+    expect(statement!.Principal).toEqual({
+      AWS: 'arn:aws:iam::111111111111:role/bc-control-plane',
+    });
     expect(statement!.Action).toBe('sts:AssumeRole');
     expect(statement!.Resource).toBeUndefined();
     for (const bad of [
@@ -118,12 +138,19 @@ describe('provider-aws CLI policies', () => {
     await awsTrustPolicyCommand().run(written.context);
     expect(written.out).toEqual([]);
     expect(JSON.parse(readFileSync(join(written.dir, 'trust.json'), 'utf8'))).toEqual(
-      trustPolicy({ platformPrincipalArn: 'arn:aws:iam::111111111111:role/bc', externalId: 'better-compute:pa_1' }),
+      trustPolicy({
+        platformPrincipalArn: 'arn:aws:iam::111111111111:role/bc',
+        externalId: 'better-compute:pa_1',
+      }),
     );
     expect(written.notes[0]).toContain('trust.json');
     // Never overwrites.
-    await expect(awsTrustPolicyCommand().run(written.context)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
-    await expect(awsTrustPolicyCommand().run(harness({}).context)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(awsTrustPolicyCommand().run(written.context)).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+    await expect(awsTrustPolicyCommand().run(harness({}).context)).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
   });
 
   it('commands have the CLI shape', () => {
@@ -139,7 +166,11 @@ describe('provider-aws CLI policies', () => {
         expect(typeof flag.description).toBe('string');
       }
     }
-    expect(Object.keys(awsTrustPolicyCommand().flags).sort()).toEqual(['external-id', 'out', 'platform-principal']);
+    expect(Object.keys(awsTrustPolicyCommand().flags).sort()).toEqual([
+      'external-id',
+      'out',
+      'platform-principal',
+    ]);
     expect(awsTrustPolicyCommand().flags['external-id'].required).toBe(true);
   });
 });

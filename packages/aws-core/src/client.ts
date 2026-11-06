@@ -1,4 +1,10 @@
-import { ComputeError, isComputeError, systemClock, type Clock, type Logger } from '@better-compute/core';
+import {
+  ComputeError,
+  isComputeError,
+  systemClock,
+  type Clock,
+  type Logger,
+} from '@better-compute/core';
 import type { CredentialSource } from './credentials.js';
 import { endpointFor, signingRegionFor, type AwsService } from './endpoints.js';
 import { mapAwsError, parseAwsError } from './errors.js';
@@ -110,14 +116,20 @@ class Limiter {
     private readonly sleep: (ms: number, signal: AbortSignal) => Promise<void>,
   ) {
     if (!(perSecond > 0) || !(burst >= 1))
-      throw new ComputeError('INVALID_CONFIG', 'an AWS rate limit needs perSecond > 0 and burst >= 1');
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'an AWS rate limit needs perSecond > 0 and burst >= 1',
+      );
     this.#tokens = burst;
     this.#last = clock.now();
   }
 
   async take(signal: AbortSignal): Promise<void> {
     const now = this.clock.now();
-    this.#tokens = Math.min(this.burst, this.#tokens + ((now - this.#last) / 1000) * this.perSecond);
+    this.#tokens = Math.min(
+      this.burst,
+      this.#tokens + ((now - this.#last) / 1000) * this.perSecond,
+    );
     this.#last = now;
     this.#tokens -= 1;
     if (this.#tokens >= 0) return;
@@ -164,7 +176,12 @@ class Transport {
     this.signingRegion = signingRegionFor(options.service, options.region);
     this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
     const rate = options.rateLimit ?? { perSecond: 20, burst: 40 };
-    this.#limiter = new Limiter(rate.perSecond, rate.burst, this.clock, options.sleep ?? defaultSleep);
+    this.#limiter = new Limiter(
+      rate.perSecond,
+      rate.burst,
+      this.clock,
+      options.sleep ?? defaultSleep,
+    );
     this.#timeoutMs = options.timeoutMs ?? 20_000;
   }
 
@@ -246,7 +263,9 @@ class Transport {
         operation: request.operation,
         status: response.status,
         requestId:
-          response.headers.get('x-amzn-requestid') ?? response.headers.get('x-amz-request-id') ?? undefined,
+          response.headers.get('x-amzn-requestid') ??
+          response.headers.get('x-amz-request-id') ??
+          undefined,
         ms: Date.now() - started,
       });
       return { status: response.status, headers: response.headers, body };
@@ -272,7 +291,10 @@ function parseBody(body: Uint8Array, service: string, operation: string): XmlEle
     return parseXml(new TextDecoder().decode(body));
   } catch (error) {
     if (isComputeError(error)) throw error;
-    throw new ComputeError('PROVIDER_ERROR', redactAws(`AWS ${service} ${operation}: unreadable response`));
+    throw new ComputeError(
+      'PROVIDER_ERROR',
+      redactAws(`AWS ${service} ${operation}: unreadable response`),
+    );
   }
 }
 
@@ -331,7 +353,11 @@ export function jsonClient(
   if (!/^[A-Za-z0-9_.]{1,128}$/.test(options.targetPrefix))
     throw new ComputeError('INVALID_CONFIG', 'malformed AWS JSON target prefix');
   return {
-    async call<T>(operation: string, body: Readonly<Record<string, unknown>>, { signal }: RequestOptions) {
+    async call<T>(
+      operation: string,
+      body: Readonly<Record<string, unknown>>,
+      { signal }: RequestOptions,
+    ) {
       checkAction(operation);
       const response = await transport.send(
         {
@@ -352,7 +378,10 @@ export function jsonClient(
       try {
         return JSON.parse(text) as T;
       } catch {
-        throw new ComputeError('PROVIDER_ERROR', `AWS ${options.service} ${operation}: unreadable response`);
+        throw new ComputeError(
+          'PROVIDER_ERROR',
+          `AWS ${options.service} ${operation}: unreadable response`,
+        );
       }
     },
   };
@@ -364,10 +393,14 @@ export function restClient(options: ServiceClientOptions & { s3?: boolean }): Re
   return {
     async request(method, path, request) {
       if (!path.startsWith('/') || /[\r\n#?]/.test(path))
-        throw new ComputeError('INVALID_INPUT', 'a REST path starts with / and has no query or fragment');
+        throw new ComputeError(
+          'INVALID_INPUT',
+          'a REST path starts with / and has no query or fragment',
+        );
       const url = new URL(transport.endpoint.toString());
       url.pathname = `${url.pathname.replace(/\/$/, '')}${path}`;
-      for (const [key, value] of Object.entries(request.query ?? {})) url.searchParams.append(key, value);
+      for (const [key, value] of Object.entries(request.query ?? {}))
+        url.searchParams.append(key, value);
       const response = await transport.send(
         {
           operation: `${method} ${path.split('/')[1] ?? ''}`,

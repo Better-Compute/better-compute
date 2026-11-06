@@ -31,27 +31,27 @@ Both return a form-encoded body with `Action` and `Version` and the keys sorted.
 
 ## Clients
 
-| Function | Protocol |
-| --- | --- |
-| `ec2Client(options)` | EC2 (version 2016-11-15); returns the parsed `<ActionResponse>`. |
-| `queryClient({ …, version })` | awsQuery (STS, IAM, SNS, …); returns the `<ActionResult>` element. |
-| `jsonClient({ …, jsonVersion, targetPrefix })` | JSON 1.0/1.1 with `X-Amz-Target`. |
-| `restClient({ …, s3? })` | rest-json and rest-xml; `s3` signs S3-style. |
+| Function                                       | Protocol                                                           |
+| ---------------------------------------------- | ------------------------------------------------------------------ |
+| `ec2Client(options)`                           | EC2 (version 2016-11-15); returns the parsed `<ActionResponse>`.   |
+| `queryClient({ …, version })`                  | awsQuery (STS, IAM, SNS, …); returns the `<ActionResult>` element. |
+| `jsonClient({ …, jsonVersion, targetPrefix })` | JSON 1.0/1.1 with `X-Amz-Target`.                                  |
+| `restClient({ …, s3? })`                       | rest-json and rest-xml; `s3` signs S3-style.                       |
 
 Every client takes the injected `fetch`, a `clock` (business time; signing uses it), a `log`, a token-bucket `rateLimit` (default 20/s, burst 40) and a `timeoutMs` (default 20 s). There are exactly two retries: one after `RequestTimeTooSkewed`/`RequestExpired` with the offset from the server's `Date`, and one after `ExpiredToken` with the credentials invalidated. Everything else is the caller's (the reconciler owns backoff). Failures are `ComputeError`s mapped by `mapAwsError` (throttling → `RATE_LIMITED` with `retryAfterMs`, capacity → `CAPACITY_UNAVAILABLE`, limits → `QUOTA_EXCEEDED`, `*.NotFound` → `NOT_FOUND`, …), with `details: { provider: 'aws', service, status, code, requestId }`. `paginate` follows tokens and refuses a repeated one.
 
 ## Credentials
 
-| Source | Kind |
-| --- | --- |
-| `staticCredentials(load)` | A secret's JSON `{ accessKeyId, secretAccessKey, sessionToken? }`. |
-| `envCredentials(env)` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`. |
-| `imdsCredentials()` | IMDSv2 only; no IMDSv1 fallback. |
-| `containerCredentials()` | ECS and EKS Pod Identity. The full URI may only name loopback, `169.254.170.2` or `169.254.170.23`. |
-| `webIdentityCredentials()` | `AssumeRoleWithWebIdentity`, sent unsigned. |
-| `assumeRoleCredentials(base, …)` | `AssumeRole` with an ExternalId and a checked session name. |
-| `ambientCredentials()` | env → web identity → container → IMDS; keeps the first that works. |
-| `cachedCredentials(source)` | Single-flight; refreshes 5 minutes before expiry. |
+| Source                           | Kind                                                                                                |
+| -------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `staticCredentials(load)`        | A secret's JSON `{ accessKeyId, secretAccessKey, sessionToken? }`.                                  |
+| `envCredentials(env)`            | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`.                                  |
+| `imdsCredentials()`              | IMDSv2 only; no IMDSv1 fallback.                                                                    |
+| `containerCredentials()`         | ECS and EKS Pod Identity. The full URI may only name loopback, `169.254.170.2` or `169.254.170.23`. |
+| `webIdentityCredentials()`       | `AssumeRoleWithWebIdentity`, sent unsigned.                                                         |
+| `assumeRoleCredentials(base, …)` | `AssumeRole` with an ExternalId and a checked session name.                                         |
+| `ambientCredentials()`           | env → web identity → container → IMDS; keeps the first that works.                                  |
+| `cachedCredentials(source)`      | Single-flight; refreshes 5 minutes before expiry.                                                   |
 
 Ambient credentials are the control plane's own identity: providers allow them for platform (root-tenant) accounts only (ruling F1).
 

@@ -1,5 +1,10 @@
 import { ComputeError, field, manifest, type SecretRef } from '@better-compute/core';
-import { assertRegion, parseArn, partitionOf, type CredentialSource } from '@better-compute/aws-core';
+import {
+  assertRegion,
+  parseArn,
+  partitionOf,
+  type CredentialSource,
+} from '@better-compute/aws-core';
 
 /**
  * One AWS account in one region (AD3). Credentials are a SecretRef, never a value. There is no
@@ -38,8 +43,14 @@ export const awsConfig = manifest({
     .string({ maxLength: 2048 })
     .optional()
     .describe('Instance profile ARN passed to RunInstances'),
-  rootVolumeGiB: field.int({ min: 8, max: 16384 }).default(100).describe('Root EBS volume size in GiB'),
-  rootVolumeType: field.option(['gp3', 'gp2', 'io2']).default('gp3').describe('Root EBS volume type'),
+  rootVolumeGiB: field
+    .int({ min: 8, max: 16384 })
+    .default(100)
+    .describe('Root EBS volume size in GiB'),
+  rootVolumeType: field
+    .option(['gp3', 'gp2', 'io2'])
+    .default('gp3')
+    .describe('Root EBS volume type'),
   kmsKeyId: field
     .string({ maxLength: 2048 })
     .optional()
@@ -106,7 +117,12 @@ export function roleArnOf(config: Pick<AwsConfig, 'region' | 'assumeRoleArn'>) {
   } catch {
     throw invalid('assumeRoleArn is not an IAM role ARN', 'assumeRoleArn');
   }
-  if (arn.service !== 'iam' || arn.region !== '' || !/^\d{12}$/.test(arn.account) || !/^role\/[\w+=,.@/-]{1,512}$/.test(arn.resource))
+  if (
+    arn.service !== 'iam' ||
+    arn.region !== '' ||
+    !/^\d{12}$/.test(arn.account) ||
+    !/^role\/[\w+=,.@/-]{1,512}$/.test(arn.resource)
+  )
     throw invalid('assumeRoleArn is not an IAM role ARN', 'assumeRoleArn');
   if (arn.partition !== partitionOf(config.region).partition)
     throw invalid(
@@ -121,14 +137,20 @@ export function validateAwsConfig(config: AwsConfig): void {
   try {
     assertRegion(config.region);
   } catch {
-    throw invalid(`region ${JSON.stringify(config.region.slice(0, 32))} is not an AWS region`, 'region');
+    throw invalid(
+      `region ${JSON.stringify(config.region.slice(0, 32))} is not an AWS region`,
+      'region',
+    );
   }
   if (config.zones.length === 0) throw invalid('an AWS account lists at least one zone', 'zones');
   const escaped = config.region.replace(/-/g, '\\-');
   const zonePattern = new RegExp(`^${escaped}(?:[a-z]|-[a-z]{2,10}-\\d{1,2}[a-z])$`);
   for (const zone of config.zones)
     if (!zonePattern.test(zone))
-      throw invalid(`zone ${JSON.stringify(zone.slice(0, 64))} is not a zone of ${config.region}`, 'zones');
+      throw invalid(
+        `zone ${JSON.stringify(zone.slice(0, 64))} is not a zone of ${config.region}`,
+        'zones',
+      );
   roleArnOf(config);
   if (config.discoverTag !== undefined) parseDiscoverTag(config.discoverTag);
   if (config.instanceProfile !== undefined) {
@@ -148,7 +170,10 @@ export function parseDiscoverTag(text: string): [string, string] {
   const eq = text.indexOf('=');
   const key = eq === -1 ? '' : text.slice(0, eq);
   const value = eq === -1 ? '' : text.slice(eq + 1);
-  if (!/^[\p{L}\p{N} _.:/=+\-@]{1,128}$/u.test(key) || !/^[\p{L}\p{N} _.:/=+\-@]{0,256}$/u.test(value))
+  if (
+    !/^[\p{L}\p{N} _.:/=+\-@]{1,128}$/u.test(key) ||
+    !/^[\p{L}\p{N} _.:/=+\-@]{0,256}$/u.test(value)
+  )
     throw invalid('discoverTag must be "key=value"', 'discoverTag');
   return [key, value];
 }

@@ -47,8 +47,23 @@ export interface EmuInstance {
 const defaultTypes: EmuType[] = [
   { type: 't3.micro', vcpu: 2, memoryMiB: 1024, arch: ['x86_64'] },
   { type: 'm7i.large', vcpu: 2, memoryMiB: 8192, arch: ['x86_64'] },
-  { type: 'g6.xlarge', vcpu: 4, memoryMiB: 16384, arch: ['x86_64'], gpus: { name: 'L4', manufacturer: 'NVIDIA', count: 1 }, instanceStorageGB: 250 },
-  { type: 'p5.48xlarge', vcpu: 192, memoryMiB: 2_097_152, arch: ['x86_64'], gpus: { name: 'H100', manufacturer: 'NVIDIA', count: 8 }, instanceStorageGB: 30_400, efa: 32 },
+  {
+    type: 'g6.xlarge',
+    vcpu: 4,
+    memoryMiB: 16384,
+    arch: ['x86_64'],
+    gpus: { name: 'L4', manufacturer: 'NVIDIA', count: 1 },
+    instanceStorageGB: 250,
+  },
+  {
+    type: 'p5.48xlarge',
+    vcpu: 192,
+    memoryMiB: 2_097_152,
+    arch: ['x86_64'],
+    gpus: { name: 'H100', manufacturer: 'NVIDIA', count: 8 },
+    instanceStorageGB: 30_400,
+    efa: 32,
+  },
   { type: 'm7g.large', vcpu: 2, memoryMiB: 8192, arch: ['arm64'] },
   { type: 'c7i.metal-24xl', vcpu: 96, memoryMiB: 196_608, arch: ['x86_64'], bareMetal: true },
 ];
@@ -67,7 +82,8 @@ function filtersOf(params: URLSearchParams): Map<string, string[]> {
   const filters = new Map<string, string[]>();
   for (let n = 1; params.has(`Filter.${n}.Name`); n++) {
     const values: string[] = [];
-    for (let m = 1; params.has(`Filter.${n}.Value.${m}`); m++) values.push(params.get(`Filter.${n}.Value.${m}`)!);
+    for (let m = 1; params.has(`Filter.${n}.Value.${m}`); m++)
+      values.push(params.get(`Filter.${n}.Value.${m}`)!);
     filters.set(params.get(`Filter.${n}.Name`)!, values);
   }
   return filters;
@@ -92,7 +108,12 @@ export class Ec2Emulator {
   readonly images = new Map<string, { rootDevice: string; arch: string }>([
     ['ami-0123456789abcdef0', { rootDevice: '/dev/xvda', arch: 'x86_64' }],
   ]);
-  readonly replaceRootTasks: { id: string; instanceId: string; imageId: string; clientToken?: string }[] = [];
+  readonly replaceRootTasks: {
+    id: string;
+    instanceId: string;
+    imageId: string;
+    clientToken?: string;
+  }[] = [];
   readonly diagnosticInterrupts: string[] = [];
   /** Page size cap for paged reads (small, so tests page). */
   pageSize = 2;
@@ -104,7 +125,9 @@ export class Ec2Emulator {
     for (const zone of this.zones.keys())
       this.offerings.set(
         zone,
-        new Set([...this.types.keys()].filter((type) => type !== 'p5.48xlarge' || zone === 'us-east-1a')),
+        new Set(
+          [...this.types.keys()].filter((type) => type !== 'p5.48xlarge' || zone === 'us-east-1a'),
+        ),
       );
     emu.register(/^ec2\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$/, {
       service: 'ec2',
@@ -118,7 +141,15 @@ export class Ec2Emulator {
   }
 
   /** A foreign (not better-compute created) running instance. */
-  addInstance(options: { id?: string; type?: string; zone?: string; tags?: Record<string, string>; state?: EmuInstance['state'] } = {}): EmuInstance {
+  addInstance(
+    options: {
+      id?: string;
+      type?: string;
+      zone?: string;
+      tags?: Record<string, string>;
+      state?: EmuInstance['state'];
+    } = {},
+  ): EmuInstance {
     const id = options.id ?? this.#id('i');
     const instance: EmuInstance = {
       id,
@@ -174,9 +205,14 @@ export class Ec2Emulator {
   #instanceXml(instance: EmuInstance): string {
     const tagSet = items(
       'tagSet',
-      [...instance.tags].sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => `${el('key', k)}${el('value', v)}`),
+      [...instance.tags]
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([k, v]) => `${el('key', k)}${el('value', v)}`),
     );
-    const eni = `${el('networkInterfaceId', `eni-${instance.id.slice(2)}`)}${el('subnetId', instance.subnetId)}${el('vpcId', instance.vpcId)}${el('privateIpAddress', instance.privateIp)}${instance.publicIp ? `<association>${el('publicIp', instance.publicIp)}</association>` : ''}${items('groupSet', instance.groups.map((g) => `${el('groupId', g.id)}${el('groupName', g.name)}`))}`;
+    const eni = `${el('networkInterfaceId', `eni-${instance.id.slice(2)}`)}${el('subnetId', instance.subnetId)}${el('vpcId', instance.vpcId)}${el('privateIpAddress', instance.privateIp)}${instance.publicIp ? `<association>${el('publicIp', instance.publicIp)}</association>` : ''}${items(
+      'groupSet',
+      instance.groups.map((g) => `${el('groupId', g.id)}${el('groupName', g.name)}`),
+    )}`;
     return [
       el('instanceId', instance.id),
       el('imageId', instance.imageId),
@@ -187,7 +223,9 @@ export class Ec2Emulator {
       el('launchTime', new Date(instance.launchTime).toISOString()),
       `<placement>${el('availabilityZone', instance.zone)}</placement>`,
       el('clientToken', instance.clientToken),
-      instance.stateReason ? `<stateReason>${el('code', instance.stateReason)}${el('message', instance.stateReason)}</stateReason>` : '',
+      instance.stateReason
+        ? `<stateReason>${el('code', instance.stateReason)}${el('message', instance.stateReason)}</stateReason>`
+        : '',
       el('capacityReservationId', instance.capacityReservationId),
       el('instanceLifecycle', instance.lifecycle),
       el('architecture', this.types.get(instance.type)?.arch[0] ?? 'x86_64'),
@@ -219,28 +257,46 @@ export class Ec2Emulator {
     switch (action) {
       case 'DescribeAvailabilityZones': {
         const names = listOf(p, 'ZoneName');
-        const zones = [...this.zones].filter(([zone]) => names.length === 0 || names.includes(zone));
+        const zones = [...this.zones].filter(
+          ([zone]) => names.length === 0 || names.includes(zone),
+        );
         return ec2Response(
           action,
-          items('availabilityZoneInfo', zones.map(([zone, id]) => `${el('zoneName', zone)}${el('zoneId', id)}${el('zoneState', 'available')}${el('regionName', 'us-east-1')}`)),
+          items(
+            'availabilityZoneInfo',
+            zones.map(
+              ([zone, id]) =>
+                `${el('zoneName', zone)}${el('zoneId', id)}${el('zoneState', 'available')}${el('regionName', 'us-east-1')}`,
+            ),
+          ),
         );
       }
       case 'DescribeInstanceTypeOfferings': {
         const locations = filtersOf(p).get('location') ?? [...this.offerings.keys()];
         const all: [string, string][] = [];
-        for (const zone of locations) for (const type of this.offerings.get(zone) ?? []) all.push([zone, type]);
+        for (const zone of locations)
+          for (const type of this.offerings.get(zone) ?? []) all.push([zone, type]);
         const { page, next } = this.#page(all, p);
         return ec2Response(
           action,
-          items('instanceTypeOfferingSet', page.map(([zone, type]) => `${el('instanceType', type)}${el('locationType', 'availability-zone')}${el('location', zone)}`)) + el('nextToken', next),
+          items(
+            'instanceTypeOfferingSet',
+            page.map(
+              ([zone, type]) =>
+                `${el('instanceType', type)}${el('locationType', 'availability-zone')}${el('location', zone)}`,
+            ),
+          ) + el('nextToken', next),
         );
       }
       case 'DescribeInstanceTypes': {
         const names = listOf(p, 'InstanceType');
-        if (names.length > 100) return ec2Error('InvalidParameterValue', 'at most 100 instance types');
+        if (names.length > 100)
+          return ec2Error('InvalidParameterValue', 'at most 100 instance types');
         const unknown = names.find((name) => !this.types.has(name));
         if (unknown) return ec2Error('InvalidInstanceType', `unknown ${unknown}`);
-        const all = names.length ? names.map((name) => this.types.get(name)!) : [...this.types.values()];
+        const all = names.length
+          ? names.map((name) => this.types.get(name)!)
+          : [...this.types.values()];
         const { page, next } = this.#page(all, p);
         return ec2Response(
           action,
@@ -248,7 +304,10 @@ export class Ec2Emulator {
             'instanceTypeSet',
             page.map(
               (t) =>
-                `${el('instanceType', t.type)}${el('bareMetal', t.bareMetal ?? false)}<processorInfo>${items('supportedArchitectures', t.arch.map((a) => a))}</processorInfo><vCpuInfo>${el('defaultVCpus', t.vcpu)}</vCpuInfo><memoryInfo>${el('sizeInMiB', t.memoryMiB)}</memoryInfo>${t.instanceStorageGB ? `<instanceStorageInfo>${el('totalSizeInGB', t.instanceStorageGB)}</instanceStorageInfo>` : ''}${t.gpus ? `<gpuInfo>${items('gpus', [`${el('name', t.gpus.name)}${el('manufacturer', t.gpus.manufacturer)}${el('count', t.gpus.count)}`])}</gpuInfo>` : ''}<networkInfo>${el('efaSupported', t.efa !== undefined)}${t.efa ? `<efaInfo>${el('maximumEfaInterfaces', t.efa)}</efaInfo>` : ''}</networkInfo>`,
+                `${el('instanceType', t.type)}${el('bareMetal', t.bareMetal ?? false)}<processorInfo>${items(
+                  'supportedArchitectures',
+                  t.arch.map((a) => a),
+                )}</processorInfo><vCpuInfo>${el('defaultVCpus', t.vcpu)}</vCpuInfo><memoryInfo>${el('sizeInMiB', t.memoryMiB)}</memoryInfo>${t.instanceStorageGB ? `<instanceStorageInfo>${el('totalSizeInGB', t.instanceStorageGB)}</instanceStorageInfo>` : ''}${t.gpus ? `<gpuInfo>${items('gpus', [`${el('name', t.gpus.name)}${el('manufacturer', t.gpus.manufacturer)}${el('count', t.gpus.count)}`])}</gpuInfo>` : ''}<networkInfo>${el('efaSupported', t.efa !== undefined)}${t.efa ? `<efaInfo>${el('maximumEfaInterfaces', t.efa)}</efaInfo>` : ''}</networkInfo>`,
             ),
           ) + el('nextToken', next),
         );
@@ -256,10 +315,17 @@ export class Ec2Emulator {
       case 'DescribeImages': {
         const ids = listOf(p, 'ImageId');
         const found = ids.filter((id) => this.images.has(id));
-        if (found.length < ids.length) return ec2Error('InvalidAMIID.NotFound', 'The image id does not exist');
+        if (found.length < ids.length)
+          return ec2Error('InvalidAMIID.NotFound', 'The image id does not exist');
         return ec2Response(
           action,
-          items('imagesSet', found.map((id) => `${el('imageId', id)}${el('rootDeviceName', this.images.get(id)!.rootDevice)}${el('architecture', this.images.get(id)!.arch)}`)),
+          items(
+            'imagesSet',
+            found.map(
+              (id) =>
+                `${el('imageId', id)}${el('rootDeviceName', this.images.get(id)!.rootDevice)}${el('architecture', this.images.get(id)!.arch)}`,
+            ),
+          ),
         );
       }
       case 'RunInstances':
@@ -274,9 +340,16 @@ export class Ec2Emulator {
             const instance = this.instances.get(id);
             if (instance && instance.notFoundById > 0) {
               instance.notFoundById -= 1;
-              return ec2Error('InvalidInstanceID.NotFound', `The instance ID '${id}' does not exist`);
+              return ec2Error(
+                'InvalidInstanceID.NotFound',
+                `The instance ID '${id}' does not exist`,
+              );
             }
-            if (!instance) return ec2Error('InvalidInstanceID.NotFound', `The instance ID '${id}' does not exist`);
+            if (!instance)
+              return ec2Error(
+                'InvalidInstanceID.NotFound',
+                `The instance ID '${id}' does not exist`,
+              );
             found.push(instance);
           }
         } else {
@@ -292,7 +365,13 @@ export class Ec2Emulator {
         const { page, next } = ids.length ? { page: found, next: undefined } : this.#page(found, p);
         return ec2Response(
           action,
-          items('reservationSet', page.map((instance) => `${el('reservationId', `r-${instance.id.slice(2)}`)}${el('ownerId', '222222222222')}${items('instancesSet', [this.#instanceXml(instance)])}`)) + el('nextToken', next),
+          items(
+            'reservationSet',
+            page.map(
+              (instance) =>
+                `${el('reservationId', `r-${instance.id.slice(2)}`)}${el('ownerId', '222222222222')}${items('instancesSet', [this.#instanceXml(instance)])}`,
+            ),
+          ) + el('nextToken', next),
         );
       }
       case 'TerminateInstances':
@@ -302,54 +381,73 @@ export class Ec2Emulator {
         const changes: string[] = [];
         for (const id of ids) {
           const instance = this.instances.get(id);
-          if (!instance) return ec2Error('InvalidInstanceID.NotFound', `The instance ID '${id}' does not exist`);
+          if (!instance)
+            return ec2Error('InvalidInstanceID.NotFound', `The instance ID '${id}' does not exist`);
           const previous = instance.state;
           if (action === 'TerminateInstances') {
             if (instance.terminationProtected)
-              return ec2Error('OperationNotPermitted', `The instance '${id}' may not be terminated. Modify its 'disableApiTermination' instance attribute and try again.`);
+              return ec2Error(
+                'OperationNotPermitted',
+                `The instance '${id}' may not be terminated. Modify its 'disableApiTermination' instance attribute and try again.`,
+              );
             if (instance.state !== 'terminated') instance.state = 'shutting-down';
           } else if (action === 'StartInstances') {
             if (instance.state === 'terminated' || instance.state === 'shutting-down')
               return ec2Error('IncorrectInstanceState', 'terminated');
-            if (instance.state === 'stopped' || instance.state === 'stopping') instance.state = 'pending';
+            if (instance.state === 'stopped' || instance.state === 'stopping')
+              instance.state = 'pending';
           } else {
             if (instance.state === 'terminated' || instance.state === 'shutting-down')
               return ec2Error('IncorrectInstanceState', 'terminated');
             if (instance.state === 'running' || instance.state === 'pending')
               instance.state = p.get('Force') === 'true' ? 'stopped' : 'stopping';
           }
-          changes.push(`${el('instanceId', id)}<currentState>${el('code', stateCodes[instance.state])}${el('name', instance.state)}</currentState><previousState>${el('code', stateCodes[previous])}${el('name', previous)}</previousState>`);
+          changes.push(
+            `${el('instanceId', id)}<currentState>${el('code', stateCodes[instance.state])}${el('name', instance.state)}</currentState><previousState>${el('code', stateCodes[previous])}${el('name', previous)}</previousState>`,
+          );
         }
         return ec2Response(action, items('instancesSet', changes));
       }
       case 'RebootInstances': {
         for (const id of listOf(p, 'InstanceId'))
-          if (!this.instances.has(id)) return ec2Error('InvalidInstanceID.NotFound', `The instance ID '${id}' does not exist`);
+          if (!this.instances.has(id))
+            return ec2Error('InvalidInstanceID.NotFound', `The instance ID '${id}' does not exist`);
         return ec2Response(action, el('return', true));
       }
       case 'SendDiagnosticInterrupt': {
         const id = p.get('InstanceId') ?? '';
-        if (!this.instances.has(id)) return ec2Error('InvalidInstanceID.NotFound', `The instance ID '${id}' does not exist`);
+        if (!this.instances.has(id))
+          return ec2Error('InvalidInstanceID.NotFound', `The instance ID '${id}' does not exist`);
         this.diagnosticInterrupts.push(id);
         return ec2Response(action, '');
       }
       case 'CreateReplaceRootVolumeTask': {
         const instanceId = p.get('InstanceId') ?? '';
-        if (!this.instances.has(instanceId)) return ec2Error('InvalidInstanceID.NotFound', 'no such instance');
+        if (!this.instances.has(instanceId))
+          return ec2Error('InvalidInstanceID.NotFound', 'no such instance');
         const clientToken = p.get('ClientToken') ?? undefined;
         let task = this.replaceRootTasks.find((t) => clientToken && t.clientToken === clientToken);
         if (!task) {
-          task = { id: this.#id('replacevol'), instanceId, imageId: p.get('ImageId') ?? '', ...(clientToken ? { clientToken } : {}) };
+          task = {
+            id: this.#id('replacevol'),
+            instanceId,
+            imageId: p.get('ImageId') ?? '',
+            ...(clientToken ? { clientToken } : {}),
+          };
           this.replaceRootTasks.push(task);
         }
-        return ec2Response(action, `<replaceRootVolumeTask>${el('replaceRootVolumeTaskId', task.id)}${el('instanceId', instanceId)}${el('taskState', 'pending')}</replaceRootVolumeTask>`);
+        return ec2Response(
+          action,
+          `<replaceRootVolumeTask>${el('replaceRootVolumeTaskId', task.id)}${el('instanceId', instanceId)}${el('taskState', 'pending')}</replaceRootVolumeTask>`,
+        );
       }
       case 'CreateTags':
       case 'DeleteTags': {
         const resources = listOf(p, 'ResourceId');
         for (const id of resources) {
           const instance = this.instances.get(id);
-          if (!instance) return ec2Error('InvalidInstanceID.NotFound', `The instance ID '${id}' does not exist`);
+          if (!instance)
+            return ec2Error('InvalidInstanceID.NotFound', `The instance ID '${id}' does not exist`);
           for (let n = 1; p.has(`Tag.${n}.Key`); n++) {
             const key = p.get(`Tag.${n}.Key`)!;
             if (action === 'CreateTags') instance.tags.set(key, p.get(`Tag.${n}.Value`) ?? '');
@@ -369,20 +467,36 @@ export class Ec2Emulator {
   #run(request: EmulatorRequest): Response {
     const p = request.params;
     const token = p.get('ClientToken') ?? undefined;
-    const signature = [...p].filter(([key]) => key !== 'ClientToken').map(([k, v]) => `${k}=${v}`).sort().join('&');
+    const signature = [...p]
+      .filter(([key]) => key !== 'ClientToken')
+      .map(([k, v]) => `${k}=${v}`)
+      .sort()
+      .join('&');
     if (token) {
-      const existing = [...this.instances.values()].find((instance) => instance.clientToken === token);
+      const existing = [...this.instances.values()].find(
+        (instance) => instance.clientToken === token,
+      );
       if (existing) {
         if (existing.signature !== signature)
-          return ec2Error('IdempotentParameterMismatch', 'Arguments on this idempotent request are inconsistent with arguments used in previous request(s).');
-        return ec2Response('RunInstances', `${el('reservationId', `r-${existing.id.slice(2)}`)}${el('ownerId', '222222222222')}${items('instancesSet', [this.#instanceXml(existing)])}`);
+          return ec2Error(
+            'IdempotentParameterMismatch',
+            'Arguments on this idempotent request are inconsistent with arguments used in previous request(s).',
+          );
+        return ec2Response(
+          'RunInstances',
+          `${el('reservationId', `r-${existing.id.slice(2)}`)}${el('ownerId', '222222222222')}${items('instancesSet', [this.#instanceXml(existing)])}`,
+        );
       }
     }
     const type = p.get('InstanceType') ?? '';
     const zone = p.get('Placement.AvailabilityZone') ?? 'us-east-1a';
-    if (!this.types.has(type)) return ec2Error('InvalidParameterValue', `Invalid value '${type}' for InstanceType.`);
+    if (!this.types.has(type))
+      return ec2Error('InvalidParameterValue', `Invalid value '${type}' for InstanceType.`);
     if (!this.offerings.get(zone)?.has(type))
-      return ec2Error('Unsupported', `Your requested instance type (${type}) is not supported in your requested Availability Zone (${zone}).`);
+      return ec2Error(
+        'Unsupported',
+        `Your requested instance type (${type}) is not supported in your requested Availability Zone (${zone}).`,
+      );
     const imageId = p.get('ImageId') ?? '';
     if (!/^ami-[0-9a-f]{8,17}$/.test(imageId) && !imageId.startsWith('resolve:ssm:'))
       return ec2Error('InvalidAMIID.Malformed', 'Invalid id');
@@ -391,7 +505,10 @@ export class Ec2Emulator {
       return ec2Error('InvalidParameterValue', 'User data is limited to 16384 bytes');
     const instance = this.addInstance({ type, zone, state: 'pending' });
     instance.imageId = imageId.startsWith('resolve:ssm:') ? 'ami-0fedcba9876543210' : imageId;
-    instance.publicIp = p.get('NetworkInterface.1.AssociatePublicIpAddress') === 'false' ? undefined : instance.publicIp;
+    instance.publicIp =
+      p.get('NetworkInterface.1.AssociatePublicIpAddress') === 'false'
+        ? undefined
+        : instance.publicIp;
     if (token) instance.clientToken = token;
     instance.signature = signature;
     instance.notFoundById = this.newInstanceNotFound.byId;
@@ -401,10 +518,19 @@ export class Ec2Emulator {
     const subnet = p.get('NetworkInterface.1.SubnetId');
     if (subnet) instance.subnetId = subnet;
     for (let n = 1; p.has(`TagSpecification.${n}.ResourceType`); n++) {
-      const target = p.get(`TagSpecification.${n}.ResourceType`) === 'instance' ? instance.tags : instance.volumeTags;
+      const target =
+        p.get(`TagSpecification.${n}.ResourceType`) === 'instance'
+          ? instance.tags
+          : instance.volumeTags;
       for (let m = 1; p.has(`TagSpecification.${n}.Tag.${m}.Key`); m++)
-        target.set(p.get(`TagSpecification.${n}.Tag.${m}.Key`)!, p.get(`TagSpecification.${n}.Tag.${m}.Value`) ?? '');
+        target.set(
+          p.get(`TagSpecification.${n}.Tag.${m}.Key`)!,
+          p.get(`TagSpecification.${n}.Tag.${m}.Value`) ?? '',
+        );
     }
-    return ec2Response('RunInstances', `${el('reservationId', `r-${instance.id.slice(2)}`)}${el('ownerId', '222222222222')}${items('instancesSet', [this.#instanceXml(instance)])}`);
+    return ec2Response(
+      'RunInstances',
+      `${el('reservationId', `r-${instance.id.slice(2)}`)}${el('ownerId', '222222222222')}${items('instancesSet', [this.#instanceXml(instance)])}`,
+    );
   }
 }

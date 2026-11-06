@@ -51,7 +51,9 @@ export function parseInstanceTypes(items: readonly XmlElement[]): InstanceTypeIn
     const gpuItems = item.child('gpuInfo')?.items('gpus') ?? [];
     if (gpuItems.length) {
       const count = gpuItems.reduce((sum, gpu) => sum + number(gpu.textOf('count')), 0);
-      const models = new Set(gpuItems.map((gpu) => gpuModel(gpu.textOf('manufacturer') ?? '', gpu.textOf('name') ?? '')));
+      const models = new Set(
+        gpuItems.map((gpu) => gpuModel(gpu.textOf('manufacturer') ?? '', gpu.textOf('name') ?? '')),
+      );
       gpus = { model: models.size === 1 ? [...models][0]! : 'other', count };
     }
     const storage = item.child('instanceStorageInfo')?.textOf('totalSizeInGB');
@@ -74,7 +76,10 @@ export function parseInstanceTypes(items: readonly XmlElement[]): InstanceTypeIn
 }
 
 export interface InstanceTypeCache {
-  get(types: readonly string[], signal: AbortSignal): Promise<ReadonlyMap<string, InstanceTypeInfo>>;
+  get(
+    types: readonly string[],
+    signal: AbortSignal,
+  ): Promise<ReadonlyMap<string, InstanceTypeInfo>>;
 }
 
 /** Instance types cached for `ttlMs` (default a day), read in batches of 100. */
@@ -96,14 +101,24 @@ export function instanceTypeCache(
         let token: string | undefined;
         const seen = new Set<string>();
         do {
-          const doc = await ec2.call('DescribeInstanceTypes', { InstanceType: batch, NextToken: token }, { signal });
-          for (const info of parseInstanceTypes(doc.items('instanceTypeSet'))) cache.set(info.type, { info, at: now });
+          const doc = await ec2.call(
+            'DescribeInstanceTypes',
+            { InstanceType: batch, NextToken: token },
+            { signal },
+          );
+          for (const info of parseInstanceTypes(doc.items('instanceTypeSet')))
+            cache.set(info.type, { info, at: now });
           token = doc.textOf('nextToken') || undefined;
           if (token && seen.has(token))
-            throw new ComputeError('PROVIDER_ERROR', 'AWS returned a pagination token twice', undefined, {
-              provider: 'aws',
-              reason: 'pagination-loop',
-            });
+            throw new ComputeError(
+              'PROVIDER_ERROR',
+              'AWS returned a pagination token twice',
+              undefined,
+              {
+                provider: 'aws',
+                reason: 'pagination-loop',
+              },
+            );
           if (token) seen.add(token);
         } while (token);
       }
@@ -183,7 +198,8 @@ export function toMachine(
   const tags: Record<string, string> = {};
   for (const item of instance.items('tagSet')) {
     const key = item.textOf('key');
-    if (key !== undefined && !Object.hasOwn(tags, key) && key !== '__proto__') tags[key] = item.textOf('value') ?? '';
+    if (key !== undefined && !Object.hasOwn(tags, key) && key !== '__proto__')
+      tags[key] = item.textOf('value') ?? '';
   }
   const labels: Record<string, string> = { ...tags };
   const zoneId = zone ? info.zoneIds.get(zone) : undefined;

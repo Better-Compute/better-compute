@@ -62,7 +62,11 @@ export function aliasRootDeviceOf(image: ImageRef): string | undefined {
 /** The login user of an image: Ubuntu and DLAMI → ubuntu; Amazon Linux, EKS and anything else → ec2-user. */
 export function sshUserOf(image: ImageRef): string {
   if (image.startsWith('ubuntu-') || image.startsWith('dlami-')) return 'ubuntu';
-  if (image.includes('/canonical/ubuntu/') || image.includes('ubuntu-22.04') || image.includes('ubuntu-24.04'))
+  if (
+    image.includes('/canonical/ubuntu/') ||
+    image.includes('ubuntu-22.04') ||
+    image.includes('ubuntu-24.04')
+  )
     return 'ubuntu';
   return 'ec2-user';
 }

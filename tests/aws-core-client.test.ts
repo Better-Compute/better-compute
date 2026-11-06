@@ -16,7 +16,10 @@ import { ec2Error, ec2Response, jsonError, queryResponse } from './support/aws-e
 
 const stub: CredentialSource = {
   kind: 'test',
-  credentials: async () => ({ accessKeyId: 'AKIATESTKEY0000000001', secretAccessKey: 'testsecret' }),
+  credentials: async () => ({
+    accessKeyId: 'AKIATESTKEY0000000001',
+    secretAccessKey: 'testsecret',
+  }),
 };
 const signal = new AbortController().signal;
 
@@ -28,12 +31,14 @@ function world() {
     protocol: 'ec2',
     handle: (request) =>
       answers.shift() ??
-      ec2Response(
-        request.operation,
-        `<echo>${request.params.get('Filter.1.Name') ?? ''}</echo>`,
-      ),
+      ec2Response(request.operation, `<echo>${request.params.get('Filter.1.Name') ?? ''}</echo>`),
   });
-  const ec2 = ec2Client({ region: 'us-east-1', credentials: stub, fetch: emu.fetch, clock: emu.clock });
+  const ec2 = ec2Client({
+    region: 'us-east-1',
+    credentials: stub,
+    fetch: emu.fetch,
+    clock: emu.clock,
+  });
   return { emu, ec2, answers };
 }
 
@@ -153,7 +158,9 @@ describe('aws-core clients', () => {
     const error = await failure(() => ec2.call('DescribeInstances', {}, { signal }));
     expect(error.code).toBe('RATE_LIMITED');
     expect(error.retryAfterMs).toBe(7000);
-    expect(mapAwsError({ status: 400, code: 'Throttling', service: 'ec2' }).retryAfterMs).toBe(2000);
+    expect(mapAwsError({ status: 400, code: 'Throttling', service: 'ec2' }).retryAfterMs).toBe(
+      2000,
+    );
   });
 
   it('retries once on clock skew with the server offset', async () => {
@@ -178,7 +185,12 @@ describe('aws-core clients', () => {
       emu.skewMs += 20 * 60_000;
       return response;
     };
-    const client = ec2Client({ region: 'us-east-1', credentials: stub, fetch: lying, clock: emu.clock });
+    const client = ec2Client({
+      region: 'us-east-1',
+      credentials: stub,
+      fetch: lying,
+      clock: emu.clock,
+    });
     const error = await failure(() => client.call('DescribeInstances', {}, { signal }));
     expect(error.code).toBe('UNAUTHENTICATED');
     expect(count).toBe(2);
@@ -188,7 +200,12 @@ describe('aws-core clients', () => {
     const { emu } = world();
     const invalidate = vi.fn();
     const source: CredentialSource = { ...stub, invalidate };
-    const client = ec2Client({ region: 'us-east-1', credentials: source, fetch: emu.fetch, clock: emu.clock });
+    const client = ec2Client({
+      region: 'us-east-1',
+      credentials: source,
+      fetch: emu.fetch,
+      clock: emu.clock,
+    });
     emu.failNext('DescribeInstances', 'ExpiredToken', 400);
     await client.call('DescribeInstances', {}, { signal });
     expect(invalidate).toHaveBeenCalledTimes(1);
@@ -203,7 +220,9 @@ describe('aws-core clients', () => {
     vi.useFakeTimers();
     const never: typeof fetch = (_input, init) =>
       new Promise((_resolve, reject) => {
-        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        init?.signal?.addEventListener('abort', () =>
+          reject(new DOMException('aborted', 'AbortError')),
+        );
       });
     const client = ec2Client({
       region: 'us-east-1',
@@ -257,14 +276,20 @@ describe('aws-core clients', () => {
       service: 'sts',
       protocol: 'query',
       handle: (request) =>
-        queryResponse(request.operation, 'https://sts.amazonaws.com/doc/2011-06-15/', '<Account>111111111111</Account>'),
+        queryResponse(
+          request.operation,
+          'https://sts.amazonaws.com/doc/2011-06-15/',
+          '<Account>111111111111</Account>',
+        ),
     });
     emu.register(/^ssm\./, {
       service: 'ssm',
       protocol: 'json',
       handle: (request) =>
         request.operation === 'GetParameter'
-          ? new Response(JSON.stringify({ Parameter: { Value: request.headers.get('x-amz-target') } }))
+          ? new Response(
+              JSON.stringify({ Parameter: { Value: request.headers.get('x-amz-target') } }),
+            )
           : jsonError('ValidationException', 'bad'),
     });
     const sts = queryClient({
@@ -287,7 +312,11 @@ describe('aws-core clients', () => {
       jsonVersion: '1.1',
       targetPrefix: 'AmazonSSM',
     });
-    const value = await ssm.call<{ Parameter: { Value: string } }>('GetParameter', { Name: 'x' }, { signal });
+    const value = await ssm.call<{ Parameter: { Value: string } }>(
+      'GetParameter',
+      { Name: 'x' },
+      { signal },
+    );
     expect(value.Parameter.Value).toBe('AmazonSSM.GetParameter');
     expect(emu.requests[1]!.headers.get('content-type')).toBe('application/x-amz-json-1.1');
     const error = await failure(() => ssm.call('PutParameter', {}, { signal }));

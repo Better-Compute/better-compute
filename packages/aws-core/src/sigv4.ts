@@ -33,7 +33,8 @@ const algorithm = 'AWS4-HMAC-SHA256';
 const unsigned = 'UNSIGNED-PAYLOAD';
 
 const sha256Hex = (data: Uint8Array | string) => createHash('sha256').update(data).digest('hex');
-const hmac = (key: Uint8Array | string, data: string) => createHmac('sha256', key).update(data).digest();
+const hmac = (key: Uint8Array | string, data: string) =>
+  createHmac('sha256', key).update(data).digest();
 
 /** RFC 3986: only `A-Za-z0-9-._~` stay literal. */
 function uriEncode(text: string): string {
@@ -45,8 +46,12 @@ function uriEncode(text: string): string {
 
 /** `20150830T123600Z`. */
 function amzDate(now: number): string {
-  if (!Number.isFinite(now)) throw new ComputeError('INVALID_INPUT', 'signing time is not a number');
-  return new Date(now).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  if (!Number.isFinite(now))
+    throw new ComputeError('INVALID_INPUT', 'signing time is not a number');
+  return new Date(now)
+    .toISOString()
+    .replace(/[-:]/g, '')
+    .replace(/\.\d{3}/, '');
 }
 
 /** Decodes a percent-encoded segment, keeping malformed escapes as they are. */
@@ -181,9 +186,12 @@ function prepare(
 }
 
 function signature(input: SigningInput, prepared: Prepared): string {
-  const stringToSign = [algorithm, prepared.amz, prepared.scope, sha256Hex(prepared.canonical)].join(
-    '\n',
-  );
+  const stringToSign = [
+    algorithm,
+    prepared.amz,
+    prepared.scope,
+    sha256Hex(prepared.canonical),
+  ].join('\n');
   const key = signingKey(
     input.credentials.secretAccessKey,
     prepared.amz.slice(0, 8),
@@ -196,7 +204,8 @@ function signature(input: SigningInput, prepared: Prepared): string {
 /** The headers the signed request carries besides the caller's own. */
 function signedExtras(input: SigningInput, payloadHash: string): Record<string, string> {
   const extras: Record<string, string> = { 'x-amz-date': amzDate(input.now) };
-  if (input.credentials.sessionToken) extras['x-amz-security-token'] = input.credentials.sessionToken;
+  if (input.credentials.sessionToken)
+    extras['x-amz-security-token'] = input.credentials.sessionToken;
   if (input.contentSha256Header) extras['x-amz-content-sha256'] = payloadHash;
   return extras;
 }

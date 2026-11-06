@@ -35,10 +35,16 @@ const usage = (message: string) => new ComputeError('INVALID_INPUT', message);
  * instance better-compute does not own even if the control plane had a bug.
  */
 export function iamPolicy(
-  options: { partition?: AwsPartition; region?: string; account?: string; instanceProfileArn?: string } = {},
+  options: {
+    partition?: AwsPartition;
+    region?: string;
+    account?: string;
+    instanceProfileArn?: string;
+  } = {},
 ): IamPolicyDocument {
   const partition = options.partition ?? 'aws';
-  if (!partitions.includes(partition)) throw usage(`--partition is one of ${partitions.join(', ')}`);
+  if (!partitions.includes(partition))
+    throw usage(`--partition is one of ${partitions.join(', ')}`);
   const region = options.region === undefined ? '*' : assertRegion(options.region);
   if (options.account !== undefined && !/^\d{12}$/.test(options.account))
     throw usage('--account is a 12-digit AWS account id');
@@ -124,7 +130,9 @@ export function iamPolicy(
   if (options.instanceProfileArn !== undefined) {
     const profile = parseArn(options.instanceProfileArn);
     if (profile.service !== 'iam' || !profile.resource.startsWith('instance-profile/'))
-      throw usage('--instance-profile is an instance profile ARN (arn:…:iam::<account>:instance-profile/<name>)');
+      throw usage(
+        '--instance-profile is an instance profile ARN (arn:…:iam::<account>:instance-profile/<name>)',
+      );
     if (profile.partition !== partition)
       throw usage(`--instance-profile is in partition ${profile.partition}, not ${partition}`);
     // The role of the same path and name as the profile (the console's convention); edit it if yours differs.
@@ -143,7 +151,10 @@ export function iamPolicy(
  * The trust policy a tenant attaches to the role better-compute assumes: only the platform's
  * principal, and only with the platform-assigned ExternalId (AD4).
  */
-export function trustPolicy(options: { platformPrincipalArn: string; externalId: string }): IamPolicyDocument {
+export function trustPolicy(options: {
+  platformPrincipalArn: string;
+  externalId: string;
+}): IamPolicyDocument {
   let principal;
   try {
     principal = parseArn(options.platformPrincipalArn);
@@ -193,7 +204,8 @@ async function emit(context: AwsCommandContext, document: IamPolicyDocument): Pr
   try {
     await writeFile(file, json, { flag: 'wx', mode: 0o644 });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw usage(`--out ${out} exists; give a new file`);
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST')
+      throw usage(`--out ${out} exists; give a new file`);
     throw error;
   }
   context.note(`wrote ${file}`);
@@ -222,8 +234,16 @@ export function awsIamPolicyCommand() {
         choices: partitions,
         description: 'aws (default), aws-cn or aws-us-gov',
       },
-      region: { type: 'string' as const, value: 'REGION', description: 'Limit resource ARNs to this region' },
-      account: { type: 'string' as const, value: 'ID', description: 'Limit resource ARNs to this AWS account' },
+      region: {
+        type: 'string' as const,
+        value: 'REGION',
+        description: 'Limit resource ARNs to this region',
+      },
+      account: {
+        type: 'string' as const,
+        value: 'ID',
+        description: 'Limit resource ARNs to this AWS account',
+      },
       'instance-profile': {
         type: 'string' as const,
         value: 'ARN',

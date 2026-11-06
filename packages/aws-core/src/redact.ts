@@ -3,7 +3,10 @@
 
 const patterns: readonly [RegExp, string][] = [
   // Access key ids: long-term (AKIA) and temporary (ASIA), plus the other documented prefixes.
-  [/\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|APKA|ABIA|ACCA)[A-Z0-9]{12,}\b/g, '[REDACTED-KEY-ID]'],
+  [
+    /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|APKA|ABIA|ACCA)[A-Z0-9]{12,}\b/g,
+    '[REDACTED-KEY-ID]',
+  ],
   // Signatures and tokens in headers and query strings.
   [/(Signature=)[0-9a-fA-F]+/g, '$1[REDACTED]'],
   [/(X-Amz-Signature=)[^&\s"']+/gi, '$1[REDACTED]'],

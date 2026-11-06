@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { ComputeError, isComputeError, type Logger, type ProviderContext } from '@better-compute/core';
+import {
+  ComputeError,
+  isComputeError,
+  type Logger,
+  type ProviderContext,
+} from '@better-compute/core';
 import { accountCredentials, awsConfig, type AwsConfig } from '@better-compute/provider-aws';
 import { AwsEmulator, platformAccount } from './support/aws-emulator/index.js';
 
@@ -15,7 +20,8 @@ function world() {
     clock: emu.clock,
     log: quiet,
     secrets: {
-      resolve: async () => JSON.stringify({ accessKeyId: 'AKIATESTKEY0000000077', secretAccessKey: 'testsecret' }),
+      resolve: async () =>
+        JSON.stringify({ accessKeyId: 'AKIATESTKEY0000000077', secretAccessKey: 'testsecret' }),
     },
     account: { id, tenantId: platform ? 'root' : `t_${id}`, platform },
   });
@@ -52,7 +58,10 @@ describe('provider-aws account credentials', () => {
   it('tenant account without credentials or role is refused (F1)', () => {
     const { context, options } = world();
     expect(() => accountCredentials(config(), context('pa_tenantA', false), options)).toThrow(
-      expect.objectContaining({ code: 'INVALID_CONFIG', details: expect.objectContaining({ reason: 'ambientCredentials' }) }),
+      expect.objectContaining({
+        code: 'INVALID_CONFIG',
+        details: expect.objectContaining({ reason: 'ambientCredentials' }),
+      }),
     );
   });
 
@@ -69,11 +78,20 @@ describe('provider-aws account credentials', () => {
   it('external id is platform-assigned', async () => {
     const { emu, context, options, call } = world();
     expect('externalId' in awsConfig.fields).toBe(false);
-    const account = accountCredentials(config({ assumeRoleArn: roleA }), context('pa_tenantA', false), options);
+    const account = accountCredentials(
+      config({ assumeRoleArn: roleA }),
+      context('pa_tenantA', false),
+      options,
+    );
     expect(account.externalId).toBe('better-compute:pa_tenantA');
     expect(await account.verify(call)).toEqual({ account: '222222222222' });
     expect(emu.sts.assumed).toEqual([
-      expect.objectContaining({ roleArn: roleA, externalId: 'better-compute:pa_tenantA', sessionName: 'bc-pa_tenantA', caller: platformAccount }),
+      expect.objectContaining({
+        roleArn: roleA,
+        externalId: 'better-compute:pa_tenantA',
+        sessionName: 'bc-pa_tenantA',
+        caller: platformAccount,
+      }),
     ]);
     const prefixed = accountCredentials(
       config({ assumeRoleArn: roleA }),
@@ -91,8 +109,17 @@ describe('provider-aws account credentials', () => {
         ...options,
         platformAccounts: [platformAccount],
       }),
-    ).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG', details: expect.objectContaining({ reason: 'platform-account-role' }) }));
-    const account = accountCredentials(config({ assumeRoleArn: platformRole }), context('pa_tenantA', false), options);
+    ).toThrow(
+      expect.objectContaining({
+        code: 'INVALID_CONFIG',
+        details: expect.objectContaining({ reason: 'platform-account-role' }),
+      }),
+    );
+    const account = accountCredentials(
+      config({ assumeRoleArn: platformRole }),
+      context('pa_tenantA', false),
+      options,
+    );
     const error = await failure(() => account.verify(call));
     expect(error.code).toBe('ACCESS_DENIED');
     expect(error.details?.reason).toBe('platform-account-role');
@@ -100,8 +127,15 @@ describe('provider-aws account credentials', () => {
 
   it('refuses when the assumed identity is another account', async () => {
     const { emu, context, options, call } = world();
-    emu.sts.roles.set(roleB, { externalId: 'better-compute:pa_tenantB', identityAccount: '444444444444' });
-    const account = accountCredentials(config({ assumeRoleArn: roleB }), context('pa_tenantB', false), options);
+    emu.sts.roles.set(roleB, {
+      externalId: 'better-compute:pa_tenantB',
+      identityAccount: '444444444444',
+    });
+    const account = accountCredentials(
+      config({ assumeRoleArn: roleB }),
+      context('pa_tenantB', false),
+      options,
+    );
     const error = await failure(() => account.verify(call));
     expect(error.code).toBe('ACCESS_DENIED');
     expect(error.details?.reason).toBe('assumed-identity-mismatch');
@@ -109,7 +143,11 @@ describe('provider-aws account credentials', () => {
 
   it("tenant A cannot use tenant B's role", async () => {
     const { context, options, call } = world();
-    const account = accountCredentials(config({ assumeRoleArn: roleB }), context('pa_tenantA', false), options);
+    const account = accountCredentials(
+      config({ assumeRoleArn: roleB }),
+      context('pa_tenantA', false),
+      options,
+    );
     const error = await failure(() => account.verify(call));
     expect(error.code).toBe('ACCESS_DENIED');
     expect(error.details).toMatchObject({ provider: 'aws', service: 'sts', code: 'AccessDenied' });
@@ -118,13 +156,26 @@ describe('provider-aws account credentials', () => {
   it('a role without an account context is refused', () => {
     const { emu, options } = world();
     expect(() =>
-      accountCredentials(config({ assumeRoleArn: roleA }), { clock: emu.clock, log: quiet, secrets: { resolve: async () => '' } }, options),
-    ).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG', details: expect.objectContaining({ reason: 'account-context-required' }) }));
+      accountCredentials(
+        config({ assumeRoleArn: roleA }),
+        { clock: emu.clock, log: quiet, secrets: { resolve: async () => '' } },
+        options,
+      ),
+    ).toThrow(
+      expect.objectContaining({
+        code: 'INVALID_CONFIG',
+        details: expect.objectContaining({ reason: 'account-context-required' }),
+      }),
+    );
   });
 
   it('verify runs once', async () => {
     const { emu, context, options, call } = world();
-    const account = accountCredentials(config({ assumeRoleArn: roleA }), context('pa_tenantA', false), options);
+    const account = accountCredentials(
+      config({ assumeRoleArn: roleA }),
+      context('pa_tenantA', false),
+      options,
+    );
     await Promise.all([account.verify(call), account.verify(call)]);
     await account.verify(call);
     expect(emu.calls('GetCallerIdentity')).toHaveLength(2);

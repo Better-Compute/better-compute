@@ -169,7 +169,11 @@ export class AwsEmulator {
       emulated.accessKeyId = keyId;
       if (Math.abs(signedAt - this.now()) > 15 * 60_000) {
         this.requests.push(emulated);
-        const response = error('RequestTimeTooSkewed', 'The difference between the request time and the current time is too large.', 400);
+        const response = error(
+          'RequestTimeTooSkewed',
+          'The difference between the request time and the current time is too large.',
+          400,
+        );
         response.headers.set('date', new Date(this.now()).toUTCString());
         return response;
       }

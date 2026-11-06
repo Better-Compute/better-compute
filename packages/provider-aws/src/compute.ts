@@ -16,7 +16,12 @@ import type { AccountCredentials } from './account.js';
 import { parseDiscoverTag, type AwsConfig, type AwsProviderOptions } from './config.js';
 import { clientToken, offerId, parseInstanceId, parseOfferId, tags, tagValue } from './ids.js';
 import { aliasRootDeviceOf, resolveImage } from './images.js';
-import { toMachine, type InstanceTypeCache, type InstanceTypeInfo, type ZoneCache } from './shapes.js';
+import {
+  toMachine,
+  type InstanceTypeCache,
+  type InstanceTypeInfo,
+  type ZoneCache,
+} from './shapes.js';
 import { packUserData } from './userdata.js';
 
 export interface AwsComputeDeps {
@@ -44,22 +49,34 @@ const maxLabels = 40;
 /** `stateReason.code` of a terminated instance → what `get` reports. */
 function terminatedFailure(code: string | undefined): ComputeError | 'error' | undefined {
   if (code === 'Server.InsufficientInstanceCapacity')
-    return new ComputeError('CAPACITY_UNAVAILABLE', 'EC2 had no capacity for the instance', undefined, {
-      provider: 'aws',
-      reason: code,
-    });
+    return new ComputeError(
+      'CAPACITY_UNAVAILABLE',
+      'EC2 had no capacity for the instance',
+      undefined,
+      {
+        provider: 'aws',
+        reason: code,
+      },
+    );
   if (code === 'Client.VolumeLimitExceeded')
-    return new ComputeError('QUOTA_EXCEEDED', 'the EBS volume limit was reached launching the instance', undefined, {
-      provider: 'aws',
-      reason: code,
-    });
+    return new ComputeError(
+      'QUOTA_EXCEEDED',
+      'the EBS volume limit was reached launching the instance',
+      undefined,
+      {
+        provider: 'aws',
+        reason: code,
+      },
+    );
   if (code === 'Server.InternalError') return 'error';
   return undefined;
 }
 
 /** A tag key for a tenant label: `better-compute:<key>`, only characters EC2 takes. */
 function labelKey(key: string): string | undefined {
-  const clean = Array.from(String(key).replace(/[^\p{L}\p{N} _.:/=+\-@]/gu, '')).slice(0, 100).join('');
+  const clean = Array.from(String(key).replace(/[^\p{L}\p{N} _.:/=+\-@]/gu, ''))
+    .slice(0, 100)
+    .join('');
   return clean === '' ? undefined : `better-compute:${clean}`;
 }
 
@@ -82,7 +99,11 @@ export class AwsCompute implements ProviderImpl {
     await this.deps.account.verify({ signal, clock: this.context.clock });
   }
 
-  protected async call(action: string, params: QueryParams, signal: AbortSignal): Promise<XmlElement> {
+  protected async call(
+    action: string,
+    params: QueryParams,
+    signal: AbortSignal,
+  ): Promise<XmlElement> {
     await this.ready(signal);
     return this.deps.ec2.call(action, params, { signal });
   }
@@ -113,13 +134,20 @@ export class AwsCompute implements ProviderImpl {
       }
       token = doc.textOf('nextToken') || undefined;
       if (token && seen.has(token))
-        throw new ComputeError('PROVIDER_ERROR', 'AWS returned a pagination token twice', undefined, {
-          provider: 'aws',
-          reason: 'pagination-loop',
-        });
+        throw new ComputeError(
+          'PROVIDER_ERROR',
+          'AWS returned a pagination token twice',
+          undefined,
+          {
+            provider: 'aws',
+            reason: 'pagination-loop',
+          },
+        );
       if (token) seen.add(token);
     } while (token);
-    pairs.sort(([az, at], [bz, bt]) => (az === bz ? (at < bt ? -1 : at > bt ? 1 : 0) : az < bz ? -1 : 1));
+    pairs.sort(([az, at], [bz, bt]) =>
+      az === bz ? (at < bt ? -1 : at > bt ? 1 : 0) : az < bz ? -1 : 1,
+    );
     this.#offerings = { pairs, at: now };
     return pairs;
   }
@@ -152,7 +180,10 @@ export class AwsCompute implements ProviderImpl {
     return offers;
   }
 
-  async #types(types: readonly string[], signal: AbortSignal): Promise<ReadonlyMap<string, InstanceTypeInfo>> {
+  async #types(
+    types: readonly string[],
+    signal: AbortSignal,
+  ): Promise<ReadonlyMap<string, InstanceTypeInfo>> {
     await this.ready(signal);
     return this.deps.types.get(types, signal);
   }
@@ -165,7 +196,8 @@ export class AwsCompute implements ProviderImpl {
       if (type) types = await this.#types([type], signal);
     } catch (error) {
       // An unknown type (a retired family) still maps, without its shape.
-      if (!isComputeError(error, 'INVALID_INPUT') && !isComputeError(error, 'PROVIDER_ERROR')) throw error;
+      if (!isComputeError(error, 'INVALID_INPUT') && !isComputeError(error, 'PROVIDER_ERROR'))
+        throw error;
     }
     const zoneIds = await this.deps.zones.all(signal);
     return toMachine(instance, { region: this.config.region, types, zoneIds });
@@ -174,16 +206,23 @@ export class AwsCompute implements ProviderImpl {
   // --- create, get, delete ------------------------------------------------------------------------
 
   /** The root device of an image: the alias's fixed name, DescribeImages for an AMI, none for SSM. */
-  async #rootDevice(image: ImageRef, imageId: string, signal: AbortSignal): Promise<string | undefined> {
+  async #rootDevice(
+    image: ImageRef,
+    imageId: string,
+    signal: AbortSignal,
+  ): Promise<string | undefined> {
     const alias = aliasRootDeviceOf(image);
     if (alias) return alias;
     if (imageId.startsWith('resolve:ssm:')) {
       if (!this.#loggedSsm.has(imageId)) {
         this.#loggedSsm.add(imageId);
-        this.context.log.info('aws: an SSM image parameter has an unknown root device; the root volume keeps the AMI defaults', {
-          provider: 'aws',
-          image: imageId.slice(0, 256),
-        });
+        this.context.log.info(
+          'aws: an SSM image parameter has an unknown root device; the root volume keeps the AMI defaults',
+          {
+            provider: 'aws',
+            image: imageId.slice(0, 256),
+          },
+        );
       }
       return undefined;
     }
@@ -195,10 +234,15 @@ export class AwsCompute implements ProviderImpl {
       doc = await this.call('DescribeImages', { ImageId: [imageId] }, signal);
     } catch (error) {
       if (isComputeError(error, 'NOT_FOUND'))
-        throw new ComputeError('INVALID_INPUT', `image ${imageId} does not exist in ${this.config.region}`, undefined, {
-          provider: 'aws',
-          reason: 'image',
-        });
+        throw new ComputeError(
+          'INVALID_INPUT',
+          `image ${imageId} does not exist in ${this.config.region}`,
+          undefined,
+          {
+            provider: 'aws',
+            reason: 'image',
+          },
+        );
       throw error;
     }
     const device = doc.items('imagesSet')[0]?.textOf('rootDeviceName');
@@ -230,22 +274,37 @@ export class AwsCompute implements ProviderImpl {
   async create(request: AwsCreateRequest, context: CallContext): Promise<ExternalMachine> {
     const offer = parseOfferId(request.offerId);
     if (offer.reservation !== undefined || offer.market === 'spot')
-      throw new ComputeError('UNSUPPORTED', 'capacity reservation and spot offers arrive with AWS phase A3', undefined, {
-        provider: 'aws',
-        reason: 'phase-a3',
-      });
+      throw new ComputeError(
+        'UNSUPPORTED',
+        'capacity reservation and spot offers arrive with AWS phase A3',
+        undefined,
+        {
+          provider: 'aws',
+          reason: 'phase-a3',
+        },
+      );
     if (!this.config.zones.includes(offer.zone))
-      throw new ComputeError('INVALID_INPUT', `zone ${offer.zone} is not one of this account's zones`, undefined, {
-        provider: 'aws',
-        reason: 'zone',
-      });
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `zone ${offer.zone} is not one of this account's zones`,
+        undefined,
+        {
+          provider: 'aws',
+          reason: 'zone',
+        },
+      );
     const { signal } = context;
     const info = (await this.#types([offer.instanceType], signal)).get(offer.instanceType);
     if (!info)
-      throw new ComputeError('INVALID_INPUT', `instance type ${offer.instanceType} does not exist in ${this.config.region}`, undefined, {
-        provider: 'aws',
-        reason: 'instance-type',
-      });
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `instance type ${offer.instanceType} does not exist in ${this.config.region}`,
+        undefined,
+        {
+          provider: 'aws',
+          reason: 'instance-type',
+        },
+      );
     const imageId = resolveImage(request.image, info.arch[0] ?? 'x86_64');
     const rootDevice = await this.#rootDevice(request.image, imageId, signal);
     const userData = packUserData(request.userData, request.sshKeys);
@@ -291,7 +350,9 @@ export class AwsCompute implements ProviderImpl {
           ]
         : undefined,
       SecurityGroupId: !subnet && groups.length ? groups : undefined,
-      IamInstanceProfile: this.config.instanceProfile ? { Arn: this.config.instanceProfile } : undefined,
+      IamInstanceProfile: this.config.instanceProfile
+        ? { Arn: this.config.instanceProfile }
+        : undefined,
       InstanceInitiatedShutdownBehavior: 'stop',
       TagSpecification: this.#tagSpecifications(request, context),
     };
@@ -299,7 +360,9 @@ export class AwsCompute implements ProviderImpl {
     const instance = doc.items('instancesSet')[0];
     const id = instance?.textOf('instanceId');
     if (!instance || !id)
-      throw new ComputeError('PROVIDER_ERROR', 'RunInstances returned no instance', undefined, { provider: 'aws' });
+      throw new ComputeError('PROVIDER_ERROR', 'RunInstances returned no instance', undefined, {
+        provider: 'aws',
+      });
     if (!this.#created.has(id)) this.#created.set(id, this.context.clock.now());
     return this.machine(instance, signal);
   }
@@ -308,7 +371,9 @@ export class AwsCompute implements ProviderImpl {
   protected async describe(id: string, signal: AbortSignal): Promise<XmlElement | undefined> {
     try {
       const doc = await this.call('DescribeInstances', { InstanceId: [id] }, signal);
-      return doc.items('reservationSet').flatMap((reservation) => reservation.items('instancesSet'))
+      return doc
+        .items('reservationSet')
+        .flatMap((reservation) => reservation.items('instancesSet'))
         .find((item) => item.textOf('instanceId') === id);
     } catch (error) {
       if (isComputeError(error, 'NOT_FOUND')) return undefined;
@@ -322,7 +387,9 @@ export class AwsCompute implements ProviderImpl {
       { Filter: [{ Name: 'client-token', Value: [clientToken(context.idempotencyKey)] }] },
       context.signal,
     );
-    return doc.items('reservationSet').flatMap((reservation) => reservation.items('instancesSet'))
+    return doc
+      .items('reservationSet')
+      .flatMap((reservation) => reservation.items('instancesSet'))
       .find((item) => item.textOf('instanceId') === id);
   }
 
@@ -357,21 +424,33 @@ export class AwsCompute implements ProviderImpl {
     if (!instance) return;
     const state = instance.child('instanceState')?.textOf('name');
     if (state === 'terminated' || state === 'shutting-down') return;
-    const tagged = new Map(instance.items('tagSet').map((item) => [item.textOf('key'), item.textOf('value')]));
+    const tagged = new Map(
+      instance.items('tagSet').map((item) => [item.textOf('key'), item.textOf('value')]),
+    );
     if (tagged.get(tags.managed) !== 'true')
-      throw new ComputeError('INVALID_STATE', `instance ${id} is not managed by better-compute`, undefined, {
-        provider: 'aws',
-        reason: 'not-managed',
-      });
+      throw new ComputeError(
+        'INVALID_STATE',
+        `instance ${id} is not managed by better-compute`,
+        undefined,
+        {
+          provider: 'aws',
+          reason: 'not-managed',
+        },
+      );
     try {
       await this.call('TerminateInstances', { InstanceId: [id] }, context.signal);
     } catch (error) {
       if (isComputeError(error, 'NOT_FOUND')) return;
       if (isComputeError(error, 'INVALID_STATE') && error.details?.code === 'OperationNotPermitted')
-        throw new ComputeError('INVALID_STATE', `instance ${id} has termination protection on`, undefined, {
-          provider: 'aws',
-          reason: 'termination-protected',
-        });
+        throw new ComputeError(
+          'INVALID_STATE',
+          `instance ${id} has termination protection on`,
+          undefined,
+          {
+            provider: 'aws',
+            reason: 'termination-protected',
+          },
+        );
       throw error;
     }
   }
@@ -379,11 +458,16 @@ export class AwsCompute implements ProviderImpl {
   // --- power, reinstall, list ---------------------------------------------------------------------
 
   /** The instance's tags, or NOT_FOUND. */
-  async #tagged(id: string, signal: AbortSignal): Promise<{ instance: XmlElement; tags: Map<string, string> }> {
+  async #tagged(
+    id: string,
+    signal: AbortSignal,
+  ): Promise<{ instance: XmlElement; tags: Map<string, string> }> {
     parseInstanceId(id);
     const instance = await this.describe(id, signal);
     if (!instance)
-      throw new ComputeError('NOT_FOUND', `instance ${id} does not exist`, undefined, { provider: 'aws' });
+      throw new ComputeError('NOT_FOUND', `instance ${id} does not exist`, undefined, {
+        provider: 'aws',
+      });
     const found = new Map<string, string>();
     for (const item of instance.items('tagSet')) {
       const key = item.textOf('key');
@@ -396,10 +480,15 @@ export class AwsCompute implements ProviderImpl {
   async #claimed(id: string, signal: AbortSignal): Promise<XmlElement> {
     const { instance, tags: found } = await this.#tagged(id, signal);
     if (!found.get(tags.instance))
-      throw new ComputeError('INVALID_STATE', `${id} is not an instance of better-compute and is never changed by it`, undefined, {
-        provider: 'aws',
-        reason: 'not-claimed',
-      });
+      throw new ComputeError(
+        'INVALID_STATE',
+        `${id} is not an instance of better-compute and is never changed by it`,
+        undefined,
+        {
+          provider: 'aws',
+          reason: 'not-claimed',
+        },
+      );
     return instance;
   }
 
@@ -415,7 +504,12 @@ export class AwsCompute implements ProviderImpl {
     };
     const call = Object.hasOwn(actions, action) ? actions[action] : undefined;
     if (!call)
-      throw new ComputeError('UNSUPPORTED', `EC2 has no power action ${String(action)}`, undefined, { provider: 'aws' });
+      throw new ComputeError(
+        'UNSUPPORTED',
+        `EC2 has no power action ${String(action)}`,
+        undefined,
+        { provider: 'aws' },
+      );
     await this.#claimed(id, context.signal);
     await this.call(call[0], call[1], context.signal);
   }
@@ -441,19 +535,32 @@ export class AwsCompute implements ProviderImpl {
   }
 
   /** Pages DescribeInstances with filters, mapping every instance. */
-  protected async *instances(filters: { Name: string; Value: string[] }[], context: CallContext): AsyncIterable<ExternalMachine> {
+  protected async *instances(
+    filters: { Name: string; Value: string[] }[],
+    context: CallContext,
+  ): AsyncIterable<ExternalMachine> {
     const seen = new Set<string>();
     let token: string | undefined;
     do {
-      const doc = await this.call('DescribeInstances', { Filter: filters, MaxResults: 1000, NextToken: token }, context.signal);
+      const doc = await this.call(
+        'DescribeInstances',
+        { Filter: filters, MaxResults: 1000, NextToken: token },
+        context.signal,
+      );
       for (const reservation of doc.items('reservationSet'))
-        for (const instance of reservation.items('instancesSet')) yield await this.machine(instance, context.signal);
+        for (const instance of reservation.items('instancesSet'))
+          yield await this.machine(instance, context.signal);
       token = doc.textOf('nextToken') || undefined;
       if (token && seen.has(token))
-        throw new ComputeError('PROVIDER_ERROR', 'AWS returned a pagination token twice', undefined, {
-          provider: 'aws',
-          reason: 'pagination-loop',
-        });
+        throw new ComputeError(
+          'PROVIDER_ERROR',
+          'AWS returned a pagination token twice',
+          undefined,
+          {
+            provider: 'aws',
+            reason: 'pagination-loop',
+          },
+        );
       if (token) seen.add(token);
     } while (token);
   }
@@ -496,27 +603,45 @@ export class AwsCompute implements ProviderImpl {
   ): Promise<ExternalMachine> {
     const owner = tagValue(instanceId);
     if (owner === '' || owner !== instanceId)
-      throw new ComputeError('INVALID_INPUT', 'an instance id to claim with is plain text', undefined, { provider: 'aws' });
+      throw new ComputeError(
+        'INVALID_INPUT',
+        'an instance id to claim with is plain text',
+        undefined,
+        { provider: 'aws' },
+      );
     const before = await this.#tagged(id, context.signal);
     const holder = before.tags.get(tags.instance);
     if (holder && holder !== instanceId)
-      throw new ComputeError('CONFLICT', `instance ${id} is held by another better-compute instance`, undefined, {
-        provider: 'aws',
-        reason: 'claimed',
-      });
+      throw new ComputeError(
+        'CONFLICT',
+        `instance ${id} is held by another better-compute instance`,
+        undefined,
+        {
+          provider: 'aws',
+          reason: 'claimed',
+        },
+      );
     const state = before.instance.child('instanceState')?.textOf('name');
     if (state === 'terminated' || state === 'shutting-down')
-      throw new ComputeError('INVALID_STATE', `instance ${id} is ${state}`, undefined, { provider: 'aws', reason: state });
+      throw new ComputeError('INVALID_STATE', `instance ${id} is ${state}`, undefined, {
+        provider: 'aws',
+        reason: state,
+      });
     const wanted: { Key: string; Value: string }[] = [{ Key: tags.instance, Value: instanceId }];
     if (options.managed) wanted.push({ Key: tags.managed, Value: 'true' });
     if (holder !== instanceId || (options.managed && before.tags.get(tags.managed) !== 'true'))
       await this.call('CreateTags', { ResourceId: [id], Tag: wanted }, context.signal);
     const after = await this.#tagged(id, context.signal);
     if (after.tags.get(tags.instance) !== instanceId)
-      throw new ComputeError('CONFLICT', `instance ${id} was claimed by another control plane at the same time`, undefined, {
-        provider: 'aws',
-        reason: 'lost-race',
-      });
+      throw new ComputeError(
+        'CONFLICT',
+        `instance ${id} was claimed by another control plane at the same time`,
+        undefined,
+        {
+          provider: 'aws',
+          reason: 'lost-race',
+        },
+      );
     return this.machine(after.instance, context.signal);
   }
 

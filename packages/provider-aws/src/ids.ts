@@ -13,7 +13,9 @@ export const tags = {
 /** The EC2 instance id; `INVALID_INPUT` otherwise. */
 export function parseInstanceId(id: string): string {
   if (typeof id !== 'string' || !/^i-[0-9a-f]{8,17}$/.test(id))
-    throw new ComputeError('INVALID_INPUT', 'not an EC2 instance id', undefined, { provider: 'aws' });
+    throw new ComputeError('INVALID_INPUT', 'not an EC2 instance id', undefined, {
+      provider: 'aws',
+    });
   return id;
 }
 
@@ -36,9 +38,14 @@ export function offerId(offer: ParsedOffer): string {
 export function parseOfferId(id: string): ParsedOffer {
   const match = typeof id === 'string' ? offerPattern.exec(id) : null;
   if (!match)
-    throw new ComputeError('INVALID_INPUT', 'not an AWS offer id (<zone>/<instanceType>[@<cr-id>][:spot])', undefined, {
-      provider: 'aws',
-    });
+    throw new ComputeError(
+      'INVALID_INPUT',
+      'not an AWS offer id (<zone>/<instanceType>[@<cr-id>][:spot])',
+      undefined,
+      {
+        provider: 'aws',
+      },
+    );
   const [, zone, instanceType, reservation, spot] = match;
   return {
     zone: zone!,
@@ -55,5 +62,7 @@ export function clientToken(key: string): string {
 
 /** A tag value EC2 accepts: letters, digits, spaces and `_.:/=+-@`, at most 256 characters. */
 export function tagValue(value: string): string {
-  return Array.from(String(value).replace(/[^\p{L}\p{N} _.:/=+\-@]/gu, '')).slice(0, 256).join('');
+  return Array.from(String(value).replace(/[^\p{L}\p{N} _.:/=+\-@]/gu, ''))
+    .slice(0, 256)
+    .join('');
 }

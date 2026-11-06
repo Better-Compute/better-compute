@@ -70,9 +70,7 @@ describe('aws-core endpoints', () => {
     expect(endpointFor('ec2', 'us-east-1', { fips: true }).host).toBe(
       'ec2-fips.us-east-1.amazonaws.com',
     );
-    expect(endpointFor('ec2', 'us-east-1', { dualStack: true }).host).toBe(
-      'ec2.us-east-1.api.aws',
-    );
+    expect(endpointFor('ec2', 'us-east-1', { dualStack: true }).host).toBe('ec2.us-east-1.api.aws');
     expect(endpointFor('sqs', 'us-east-1', { dualStack: true }).host).toBe(
       'sqs.dualstack.us-east-1.amazonaws.com',
     );

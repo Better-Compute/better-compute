@@ -76,10 +76,15 @@ export function staticCredentials(load: () => Promise<string>): CredentialSource
       try {
         parsed = JSON.parse(text);
       } catch {
-        throw new ComputeError('INVALID_CONFIG', 'the AWS credentials secret is not JSON', undefined, {
-          provider: 'aws',
-          reason: 'credentials',
-        });
+        throw new ComputeError(
+          'INVALID_CONFIG',
+          'the AWS credentials secret is not JSON',
+          undefined,
+          {
+            provider: 'aws',
+            reason: 'credentials',
+          },
+        );
       }
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
         throw new ComputeError('INVALID_CONFIG', 'the AWS credentials secret is not a JSON object');
@@ -87,11 +92,16 @@ export function staticCredentials(load: () => Promise<string>): CredentialSource
         parsed as Record<string, unknown>,
         { id: 'accessKeyId', secret: 'secretAccessKey', token: 'sessionToken' },
         (field) =>
-          new ComputeError('INVALID_CONFIG', `the AWS credentials secret has no valid ${field}`, undefined, {
-            provider: 'aws',
-            reason: 'credentials',
-            field,
-          }),
+          new ComputeError(
+            'INVALID_CONFIG',
+            `the AWS credentials secret has no valid ${field}`,
+            undefined,
+            {
+              provider: 'aws',
+              reason: 'credentials',
+              field,
+            },
+          ),
       );
     },
   };
@@ -105,7 +115,8 @@ export function envCredentials(env: Env = process.env): CredentialSource {
       return fromRecord(
         env as Record<string, unknown>,
         { id: 'AWS_ACCESS_KEY_ID', secret: 'AWS_SECRET_ACCESS_KEY', token: 'AWS_SESSION_TOKEN' },
-        (field) => unauthenticated(`environment variable ${field} is not set`, 'env-missing', 'env'),
+        (field) =>
+          unauthenticated(`environment variable ${field} is not set`, 'env-missing', 'env'),
       );
     },
   };
@@ -125,14 +136,22 @@ async function boundedFetch(
   try {
     return await fetchImpl(url, { ...init, signal: controller.signal, redirect: 'manual' });
   } catch {
-    throw unauthenticated(`AWS ${options.kind} credentials are unreachable`, options.reason, options.kind);
+    throw unauthenticated(
+      `AWS ${options.kind} credentials are unreachable`,
+      options.reason,
+      options.kind,
+    );
   } finally {
     clearTimeout(timer);
     options.signal.removeEventListener('abort', onAbort);
   }
 }
 
-async function credentialJson(response: Response, kind: string, reason: string): Promise<AwsCredentials> {
+async function credentialJson(
+  response: Response,
+  kind: string,
+  reason: string,
+): Promise<AwsCredentials> {
   // Errors never carry the body: it may hold credentials.
   if (response.status !== 200)
     throw unauthenticated(`AWS ${kind} credentials answered HTTP ${response.status}`, reason, kind);
@@ -173,7 +192,11 @@ export function imdsCredentials(
         bounded,
       );
       if (tokenResponse.status !== 200)
-        throw unauthenticated(`the instance metadata service refused a token (HTTP ${tokenResponse.status})`, reason, 'imds');
+        throw unauthenticated(
+          `the instance metadata service refused a token (HTTP ${tokenResponse.status})`,
+          reason,
+          'imds',
+        );
       const token = (await tokenResponse.text()).trim();
       if (token === '' || /[\r\n]/.test(token))
         throw unauthenticated('the instance metadata service gave no token', reason, 'imds');
@@ -185,7 +208,11 @@ export function imdsCredentials(
         bounded,
       );
       if (listed.status !== 200)
-        throw unauthenticated(`the instance has no IAM role (HTTP ${listed.status})`, reason, 'imds');
+        throw unauthenticated(
+          `the instance has no IAM role (HTTP ${listed.status})`,
+          reason,
+          'imds',
+        );
       const role = (await listed.text()).split('\n')[0]?.trim() ?? '';
       if (!/^[\w+=,.@-]{1,128}$/.test(role))
         throw unauthenticated('the instance has no IAM role', reason, 'imds');
@@ -228,15 +255,24 @@ export function containerCredentials(
       let url: URL;
       if (relative) {
         if (!relative.startsWith('/'))
-          throw new ComputeError('INVALID_CONFIG', 'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI must start with /');
+          throw new ComputeError(
+            'INVALID_CONFIG',
+            'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI must start with /',
+          );
         url = new URL(`http://169.254.170.2${relative}`);
         if (url.host !== '169.254.170.2')
-          throw new ComputeError('INVALID_CONFIG', 'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI changes the host');
+          throw new ComputeError(
+            'INVALID_CONFIG',
+            'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI changes the host',
+          );
       } else if (full) {
         try {
           url = new URL(full);
         } catch {
-          throw new ComputeError('INVALID_CONFIG', 'AWS_CONTAINER_CREDENTIALS_FULL_URI is not a URL');
+          throw new ComputeError(
+            'INVALID_CONFIG',
+            'AWS_CONTAINER_CREDENTIALS_FULL_URI is not a URL',
+          );
         }
         if (
           (url.protocol !== 'http:' && url.protocol !== 'https:') ||
@@ -250,18 +286,30 @@ export function containerCredentials(
             undefined,
             { provider: 'aws', reason: 'container-uri' },
           );
-      } else throw unauthenticated('no container credentials endpoint is configured', 'container-missing', 'container');
+      } else
+        throw unauthenticated(
+          'no container credentials endpoint is configured',
+          'container-missing',
+          'container',
+        );
       let authorization = env.AWS_CONTAINER_AUTHORIZATION_TOKEN;
       const tokenFile = env.AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE;
       if (tokenFile) {
         try {
           authorization = (await readFile(tokenFile)).trim();
         } catch {
-          throw unauthenticated('the container authorization token file is unreadable', reason, 'container');
+          throw unauthenticated(
+            'the container authorization token file is unreadable',
+            reason,
+            'container',
+          );
         }
       }
       if (authorization !== undefined && /[\r\n]/.test(authorization))
-        throw new ComputeError('INVALID_CONFIG', 'the container authorization token has a line break');
+        throw new ComputeError(
+          'INVALID_CONFIG',
+          'the container authorization token has a line break',
+        );
       const response = await boundedFetch(
         fetchImpl,
         url.toString(),
@@ -280,7 +328,10 @@ async function defaultReadFile(path: string): Promise<string> {
 
 function checkSessionName(name: string): void {
   if (!sessionNamePattern.test(name))
-    throw new ComputeError('INVALID_CONFIG', 'an AWS role session name must match [\\w+=,.@-]{2,64}');
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'an AWS role session name must match [\\w+=,.@-]{2,64}',
+    );
 }
 
 function checkRoleArn(roleArn: string): void {
@@ -303,7 +354,12 @@ function stsCredentials(result: XmlElement | undefined, kind: string): AwsCreden
       SessionToken: credentials.textOf('SessionToken'),
       Expiration: expiration,
     },
-    { id: 'AccessKeyId', secret: 'SecretAccessKey', token: 'SessionToken', expiration: 'Expiration' },
+    {
+      id: 'AccessKeyId',
+      secret: 'SecretAccessKey',
+      token: 'SessionToken',
+      expiration: 'Expiration',
+    },
     (field) => unauthenticated(`STS returned credentials without ${field}`, 'sts', kind),
   );
 }
@@ -362,7 +418,10 @@ async function stsCall(
   }
   const text = await response.text();
   if (response.status !== 200)
-    throw mapAwsError({ ...parseAwsError('query', response.status, response.headers, text), service: 'sts' });
+    throw mapAwsError({
+      ...parseAwsError('query', response.status, response.headers, text),
+      service: 'sts',
+    });
   const doc = parseXml(text);
   return doc.child(`${action}Result`) ?? doc;
 }
@@ -383,7 +442,8 @@ export function webIdentityCredentials(options: {
     kind: 'web-identity',
     async credentials({ signal, clock }) {
       const token = (await options.token()).trim();
-      if (token === '') throw unauthenticated('the web identity token is empty', 'web-identity', 'web-identity');
+      if (token === '')
+        throw unauthenticated('the web identity token is empty', 'web-identity', 'web-identity');
       const result = await stsCall(
         'AssumeRoleWithWebIdentity',
         {
@@ -522,7 +582,8 @@ export function cachedCredentials(
     async credentials(context) {
       if (
         current &&
-        (current.expiresAt === undefined || context.clock.now() < current.expiresAt - refreshBeforeMs)
+        (current.expiresAt === undefined ||
+          context.clock.now() < current.expiresAt - refreshBeforeMs)
       )
         return current;
       if (!inflight) {
@@ -550,16 +611,27 @@ export function cachedCredentials(
 /** `sts:GetCallerIdentity` for the identity behind `credentials`. */
 export async function getCallerIdentity(
   credentials: CredentialSource,
-  options: { region: string; fetch?: typeof fetch; endpoint?: string; signal: AbortSignal; clock: Clock },
+  options: {
+    region: string;
+    fetch?: typeof fetch;
+    endpoint?: string;
+    signal: AbortSignal;
+    clock: Clock;
+  },
 ): Promise<{ account: string; arn: string; userId: string }> {
   const result = await stsCall('GetCallerIdentity', {}, { ...options, signer: credentials });
   const account = result.textOf('Account') ?? '';
   const arn = result.textOf('Arn') ?? '';
   const userId = result.textOf('UserId') ?? '';
   if (!/^\d{12}$/.test(account))
-    throw new ComputeError('PROVIDER_ERROR', 'STS GetCallerIdentity returned no account', undefined, {
-      provider: 'aws',
-      service: 'sts',
-    });
+    throw new ComputeError(
+      'PROVIDER_ERROR',
+      'STS GetCallerIdentity returned no account',
+      undefined,
+      {
+        provider: 'aws',
+        service: 'sts',
+      },
+    );
   return { account, arn, userId };
 }
