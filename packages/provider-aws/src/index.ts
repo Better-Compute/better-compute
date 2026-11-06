@@ -8,3 +8,4 @@ export * from './userdata.js';
 export * from './provider.js';
 export * from './cli.js';
 export * from './events.js';
+export * from './event-rules.js';

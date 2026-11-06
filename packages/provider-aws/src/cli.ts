@@ -47,6 +47,8 @@ export function iamPolicy(
     discoverTag?: string;
     /** The customer-managed KMS key ARN of the accounts' `kmsKeyId`: adds EBS's grants on it. */
     kmsKeyArn?: string;
+    /** (A4) The name of the accounts' intake queue (`eventQueueUrl`): adds receive and delete on it. */
+    eventQueue?: string;
   } = {},
 ): IamPolicyDocument {
   const partition = options.partition ?? 'aws';
@@ -198,6 +200,23 @@ export function iamPolicy(
       },
     );
   }
+  // A4: scheduled events without a queue (DescribeInstanceStatus), and the intake queue's reads.
+  statements.push({
+    Sid: 'ScheduledEvents',
+    Effect: 'Allow',
+    Action: 'ec2:DescribeInstanceStatus',
+    Resource: '*',
+  });
+  if (options.eventQueue !== undefined) {
+    if (!/^[A-Za-z0-9_-]{1,75}(.fifo)?$/.test(options.eventQueue))
+      throw usage('--event-queue is the intake queue name (1 to 80 characters of [A-Za-z0-9_-])');
+    statements.push({
+      Sid: 'EventIntake',
+      Effect: 'Allow',
+      Action: ['sqs:ReceiveMessage', 'sqs:DeleteMessage'],
+      Resource: `arn:${partition}:sqs:${region}:${account}:${options.eventQueue}`,
+    });
+  }
   if (options.instanceProfileArn !== undefined) {
     const profile = parseArn(options.instanceProfileArn);
     if (profile.service !== 'iam' || !profile.resource.startsWith('instance-profile/'))
@@ -295,7 +314,7 @@ export function awsIamPolicyCommand() {
     group: 'Providers' as const,
     summary: 'Print the IAM permissions policy an AWS provider account needs',
     description:
-      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId.',
+      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; ec2:DescribeInstanceStatus reads scheduled events, and --event-queue adds sqs:ReceiveMessage and sqs:DeleteMessage on the event intake queue (aws event-rules).',
     target: 'none' as const,
     output: 'text' as const,
     flags: {
@@ -330,6 +349,11 @@ export function awsIamPolicyCommand() {
         value: 'KEY=VALUE',
         description: 'Attach may tag only instances carrying this tag (the account discoverTag)',
       },
+      'event-queue': {
+        type: 'string' as const,
+        value: 'NAME',
+        description: 'The intake queue of the accounts (aws event-rules): adds sqs:ReceiveMessage and sqs:DeleteMessage on it',
+      },
       out: outFlag,
     },
     async run(context: AwsCommandContext): Promise<void> {
@@ -346,6 +370,9 @@ export function awsIamPolicyCommand() {
           ...(text(context.flags['kms-key']) ? { kmsKeyArn: text(context.flags['kms-key'])! } : {}),
           ...(text(context.flags['discover-tag'])
             ? { discoverTag: text(context.flags['discover-tag'])! }
+            : {}),
+          ...(text(context.flags['event-queue'])
+            ? { eventQueue: text(context.flags['event-queue'])! }
             : {}),
         }),
       );
