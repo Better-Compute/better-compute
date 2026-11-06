@@ -884,7 +884,12 @@ interface LeakRow {
   sku_description: string | null;
   start_ms: number;
   end_ms: number;
+  quantity: number | null;
+  unit: string | null;
 }
+
+/** Units that are hours: a row longer than an hour in one of them bills its quantity, not its whole span. */
+const hourUnits = /^(?:h|hr|hrs|hour|hours)$/i;
 
 /** The UTC day (`YYYY-MM-DD`) of a time. */
 const dayOf = (ms: number) => new Date(ms).toISOString().slice(0, 10);
@@ -892,7 +897,9 @@ const dayOf = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 /**
  * The leak check (D12), in the pass's last transaction: per instance and UTC day of the window, the hours the
  * provider billed compute for (hour slots covered by regular rows of its `computeSku`, attributed to the
- * instance) against the hours of those slots a `running` usage interval of the instance overlaps. When the
+ * instance) against the hours of those slots a `running` usage interval of the instance overlaps. A row longer than
+ * an hour whose unit is hours (Cost Explorer's daily rows) bills its quantity, rounded up, not every hour it spans,
+ * and its whole span is compared with the running intervals. When the
  * provider's exceed the metered by more than `toleranceHours`, `billing.leak` is published, at most once per
  * instance-day (`provider_cost_leaks`). Providers without `computeSku` are not checked.
  */
@@ -913,7 +920,8 @@ export async function detectLeaks(
     `SELECT c.instance_id, c.tenant_id, c.record->>'service' AS service, c.record->>'sku' AS sku,
             c.record->>'skuDescription' AS sku_description,
             (extract(epoch FROM c.usage_start) * 1000)::float8 AS start_ms,
-            (extract(epoch FROM c.usage_end) * 1000)::float8 AS end_ms
+            (extract(epoch FROM c.usage_end) * 1000)::float8 AS end_ms,
+            (c.record->>'quantity')::float8 AS quantity, c.record->>'unit' AS unit
        FROM provider_costs c JOIN instances i ON i.id = c.instance_id
       WHERE c.account_id = $1 AND c.instance_id IS NOT NULL
         AND c.usage_start >= to_timestamp($2::float8 / 1000) AND c.usage_start < to_timestamp($3::float8 / 1000)
@@ -922,8 +930,14 @@ export async function detectLeaks(
         AND i.billing IS DISTINCT FROM 'none'`,
     [account.id, window.from, window.to],
   );
-  // instance → day → billed hour slots (slot start ms)
-  const billed = new Map<string, { tenantId: string | null; days: Map<string, Set<number>> }>();
+  // instance → day → the hour slots its rows cover (slot start ms), the slots billed in full, and the hours wide
+  // (longer than an hour, in hours) rows bill
+  interface BilledDay {
+    slots: Set<number>;
+    whole: Set<number>;
+    wideHours: number;
+  }
+  const billed = new Map<string, { tenantId: string | null; days: Map<string, BilledDay> }>();
   for (const row of rows) {
     const sku = {
       service: row.service ?? '',
@@ -936,11 +950,31 @@ export async function detectLeaks(
     const usageStart = Number(row.start_ms);
     const usageEnd = Number(row.end_ms);
     const first = Math.floor(usageStart / HOUR) * HOUR;
+    const quantity = Number(row.quantity);
+    const wide =
+      usageEnd - usageStart > HOUR &&
+      hourUnits.test(row.unit ?? '') &&
+      Number.isFinite(quantity) &&
+      quantity > 0;
     for (let slot = first; slot < usageEnd; slot += HOUR) {
       const day = dayOf(slot);
-      const slots = entry.days.get(day) ?? new Set<number>();
-      entry.days.set(day, slots);
-      slots.add(slot);
+      const billedDay = entry.days.get(day) ?? { slots: new Set(), whole: new Set(), wideHours: 0 };
+      entry.days.set(day, billedDay);
+      billedDay.slots.add(slot);
+      if (!wide) billedDay.whole.add(slot);
+    }
+    if (wide) {
+      // The quantity is spread over the days the row spans, by how much of the span each holds.
+      for (
+        let dayStart = Math.floor(usageStart / dayMs) * dayMs;
+        dayStart < usageEnd;
+        dayStart += dayMs
+      ) {
+        const overlap = Math.min(usageEnd, dayStart + dayMs) - Math.max(usageStart, dayStart);
+        const billedDay = entry.days.get(dayOf(dayStart));
+        if (billedDay && overlap > 0)
+          billedDay.wideHours += (quantity * overlap) / (usageEnd - usageStart);
+      }
     }
   }
   if (billed.size === 0) return { leaks: 0 };
@@ -966,8 +1000,14 @@ export async function detectLeaks(
         start: Number(interval.started_ms),
         end: interval.ended_ms === null ? now : Number(interval.ended_ms),
       }));
-    for (const [day, slots] of [...days].sort(([a], [b]) => a.localeCompare(b))) {
-      const providerHours = slots.size;
+    for (const [day, { slots, whole, wideHours }] of [...days].sort(([a], [b]) =>
+      a.localeCompare(b),
+    )) {
+      // Rounded to a microhour first, so per-second billing's 5.0000000001 hours stay 5.
+      const providerHours = Math.min(
+        slots.size,
+        whole.size + Math.ceil(Math.round(wideHours * 1e6) / 1e6),
+      );
       let meteredHours = 0;
       for (const slot of slots)
         if (running.some((span) => span.start < slot + HOUR && span.end > slot)) meteredHours++;
