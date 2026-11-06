@@ -511,16 +511,26 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
         check(region !== undefined, 'the subject names no region and its offer id none');
         const network = key(subject, 'share-net');
         const subnet = key(subject, 'share-subnet');
-        const networkSettle = (step: () => Promise<{ id: string; state: string; message?: string }>, what: string) =>
-          settle(subject, step as () => Promise<ProviderResourceState>, ['ready'], what);
+        const networkSettle = (
+          step: () => Promise<{ id: string; state: string; message?: string }>,
+          what: string,
+        ) => settle(subject, step as () => Promise<ProviderResourceState>, ['ready'], what);
         const machines: ExternalMachine[] = [];
         let volumeId: string | undefined;
         try {
-          await networkSettle(() => networks.ensureNetwork({ name: network }, call('share-net')), 'ensureNetwork');
+          await networkSettle(
+            () => networks.ensureNetwork({ name: network }, call('share-net')),
+            'ensureNetwork',
+          );
           await networkSettle(
             () =>
               networks.ensureSubnet(
-                { network, name: subnet, region, cidr: subject.sharedVolumeCidr ?? '10.200.0.0/24' },
+                {
+                  network,
+                  name: subnet,
+                  region,
+                  cidr: subject.sharedVolumeCidr ?? '10.200.0.0/24',
+                },
                 call('share-subnet'),
               ),
             'ensureSubnet',
@@ -574,11 +584,18 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
               ['ready'],
               'attachVolume (shared)',
             );
-            checkEqual(attached.outputs?.attachedTo, machine.id, 'a shared attach names the machine it made it reachable from');
+            checkEqual(
+              attached.outputs?.attachedTo,
+              machine.id,
+              'a shared attach names the machine it made it reachable from',
+            );
           }
           const both = await volumes.getVolume(id, call('share-get'));
           checkResource(both, 'getVolume (shared)');
-          check(both?.outputs?.attachedTo === undefined, 'a shared volume on many machines names none of them');
+          check(
+            both?.outputs?.attachedTo === undefined,
+            'a shared volume on many machines names none of them',
+          );
           check(
             typeof both?.outputs?.device === 'string' && both.outputs.device.includes(':/'),
             'a shared volume reports its NFS source as device (<host>:<path>)',
@@ -595,12 +612,19 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
               ['deleted'],
               'detachVolume (shared)',
             );
-          await settle(subject, () => volumes.deleteVolume(id, call('share-delete')), ['deleted'], 'deleteVolume (shared)');
+          await settle(
+            subject,
+            () => volumes.deleteVolume(id, call('share-delete')),
+            ['deleted'],
+            'deleteVolume (shared)',
+          );
           volumeId = undefined;
         } finally {
           if (volumeId !== undefined) {
             for (const machine of machines)
-              await volumes.detachVolume(volumeId, machine.id, call(`share-cleanup-detach-${machine.id}`)).catch(() => {});
+              await volumes
+                .detachVolume(volumeId, machine.id, call(`share-cleanup-detach-${machine.id}`))
+                .catch(() => {});
             await volumes.deleteVolume(volumeId, call('share-cleanup')).catch(() => {});
           }
           for (const machine of machines) await cleanUp(impl, call, machine.id);
