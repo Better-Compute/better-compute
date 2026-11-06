@@ -1186,6 +1186,41 @@ describe('leak detection', () => {
     expect(await world.events('billing.leak')).toHaveLength(1);
   });
 
+  it('billing.leaks lists the raised leaks, newest day first; only root reads them', async () => {
+    const world = await costWorld();
+    const vm = await freshVm(world);
+    const day1 = Math.floor((world.now() - 2 * DAY) / DAY) * DAY;
+    computeHours(world, vm.id, day1 + 2 * HOUR, 5);
+    computeHours(world, vm.id, day1 + DAY + 2 * HOUR, 3);
+    await world.scan();
+    const range = { from: day1 - DAY, to: world.now() + DAY };
+    const { items } = await world.api.billing.leaks(world.root, range);
+    expect(items).toEqual([
+      {
+        accountId: world.accountId,
+        accountName: 'gce-main',
+        provider: 'fake-gce',
+        instanceId: vm.id,
+        tenantId: world.acmeTenant,
+        day: new Date(day1 + DAY).toISOString().slice(0, 10),
+        providerHours: 3,
+        meteredHours: 0,
+        raisedAt: expect.any(Number),
+      },
+      expect.objectContaining({ day: new Date(day1).toISOString().slice(0, 10), providerHours: 5 }),
+    ]);
+    // the range is of the leak's day
+    expect(
+      (await world.api.billing.leaks(world.root, { from: day1 + DAY, to: day1 + 2 * DAY })).items,
+    ).toHaveLength(1);
+    await expect(world.api.billing.leaks(world.acme, range)).rejects.toMatchObject({
+      code: 'ACCESS_DENIED',
+    });
+    await expect(
+      world.api.billing.leaks(world.root, { from: range.to, to: range.from }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
   it('within tolerance raises nothing', async () => {
     const world = await costWorld();
     const vm = await freshVm(world);

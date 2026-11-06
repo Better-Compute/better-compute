@@ -8,6 +8,7 @@ import {
   type Json,
   type Logger,
   type ProviderAccountProbe,
+  type ProviderFinding,
   type ProviderContext,
   type ProviderDefinition,
   type ProviderImpl,
@@ -979,10 +980,7 @@ export async function probeStoredAccount(
       undefined,
       { provider: account.provider },
     );
-  const config = await validateConfig(provider, account.config);
-  assertNoInlineSecrets(config);
-  assertAccountSecretRefs(config, account, deps);
-  const context = { ...providerContext(provider, account, deps, deps), signal };
+  const { config, context } = await storedAccountContext(provider, account, deps, signal);
   let probe: ProviderAccountProbe;
   if (provider.probeAccount) probe = await provider.probeAccount(config, context);
   else {
@@ -998,6 +996,93 @@ export async function probeStoredAccount(
     ...(probe.optional !== undefined ? { optional: [...probe.optional] } : {}),
     ...(probe.details !== undefined ? { details: probe.details } : {}),
   };
+}
+
+/**
+ * A stored account's validated config and the context a provider reads it with: the refs checked again, its
+ * secrets scoped to the account exactly as a client's.
+ */
+async function storedAccountContext(
+  provider: ProviderDefinition,
+  account: ProviderAccount,
+  deps: ClientDeps,
+  signal: AbortSignal,
+) {
+  const config = await validateConfig(provider, account.config);
+  assertNoInlineSecrets(config);
+  assertAccountSecretRefs(config, account, deps);
+  return { config, context: { ...providerContext(provider, account, deps, deps), signal } };
+}
+
+/** What `providerAccounts.findings` answers: the provider's findings on a stored account (never a secret). */
+export interface ProviderAccountFindings {
+  accountId: string;
+  provider: string;
+  /** Epoch ms. */
+  readAt: number;
+  items: ProviderFinding[];
+}
+
+/** The most findings one answer keeps, and the longest title, detail, id and group kept (characters). */
+export const findingsLimit = 200;
+const findingLimits = { id: 200, kind: 64, title: 200, detail: 2000, group: 200 } as const;
+const findingSeverities: readonly ProviderFinding['severity'][] = ['critical', 'warning', 'info'];
+
+/** A provider's finding as vps answers it: required fields present, text bounded; undefined when malformed. */
+function findingOf(raw: unknown): ProviderFinding | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  const text = (key: keyof typeof findingLimits) =>
+    typeof value[key] === 'string' && value[key].trim() !== ''
+      ? value[key].trim().slice(0, findingLimits[key])
+      : undefined;
+  const id = text('id');
+  const kind = text('kind');
+  const title = text('title');
+  const severity = value.severity as ProviderFinding['severity'];
+  if (!id || !kind || !title || !findingSeverities.includes(severity)) return undefined;
+  const finding: ProviderFinding = { id, kind, severity, title };
+  const detail = text('detail');
+  if (detail) finding.detail = detail;
+  if (typeof value.at === 'number' && Number.isSafeInteger(value.at) && value.at >= 0)
+    finding.at = value.at;
+  const group = text('group');
+  if (group) finding.group = group;
+  return finding;
+}
+
+/**
+ * `providerAccounts.findings` (P9): what the provider says an operator should look at on a stored account
+ * (`ProviderInput.findings`), read-only at the provider, with the account's own credential. Malformed findings
+ * and repeated ids are left out, text is bounded, at most `findingsLimit` are kept. A provider without the hook is
+ * `UNSUPPORTED`. Errors propagate.
+ */
+export async function readStoredFindings(
+  providers: ReadonlyMap<string, ProviderDefinition>,
+  account: ProviderAccount,
+  deps: ClientDeps,
+  signal: AbortSignal,
+): Promise<ProviderAccountFindings> {
+  const provider = providerOf(providers, account.provider);
+  if (!provider.findings)
+    throw new ComputeError(
+      'UNSUPPORTED',
+      `Provider ${account.provider} reports no findings`,
+      undefined,
+      { provider: account.provider },
+    );
+  const { config, context } = await storedAccountContext(provider, account, deps, signal);
+  const raw = await provider.findings(config, context);
+  const items: ProviderFinding[] = [];
+  const seen = new Set<string>();
+  for (const entry of Array.isArray(raw) ? raw : []) {
+    const finding = findingOf(entry);
+    if (!finding || seen.has(finding.id)) continue;
+    seen.add(finding.id);
+    items.push(finding);
+    if (items.length === findingsLimit) break;
+  }
+  return { accountId: account.id, provider: account.provider, readAt: deps.clock.now(), items };
 }
 
 /** Builds provider clients from accounts, cached per (account id, version). */

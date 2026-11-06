@@ -3,7 +3,9 @@ import { manualClock } from '@better-compute/core';
 import {
   probeAccount,
   readSecurityFindings,
+  readFindings,
   securityAttention,
+  securityFindings,
   type DoConfig,
 } from '@better-compute/provider-digitalocean';
 import { DoEmulator } from './support/do-emulator/index.js';
@@ -135,6 +137,31 @@ describe('readSecurityFindings', () => {
         { accountId: 'a', accountName: 'n', href: '/x', now: 7 },
       )[0],
     ).toMatchObject({ severity: 'critical', at: 7 });
+  });
+
+  it('becomes provider findings, and one saying so without security:read', async () => {
+    const emu = world();
+    const report = await readSecurityFindings(doAccount as DoConfig, context, { fetch: emu.fetch });
+    expect(securityFindings(report)[0]).toEqual({
+      id: 'security:rule-ssh',
+      kind: 'security',
+      severity: 'warning',
+      title: 'SSH open to the internet',
+      detail: '3 resources affected. Port 22 accepts connections from 0.0.0.0/0',
+      at: Date.parse('2026-10-05T10:01:00Z'),
+      group: 'SSH open to the internet',
+    });
+    expect(securityFindings({ findings: [{ rule: 'r', title: 't', severity: 'low' }] })).toEqual([
+      { id: 'security:r', kind: 'security', severity: 'info', title: 't', detail: 'Found by the latest DigitalOcean security scan.', group: 't' },
+    ]);
+    emu.failNext({ path: /^\/security\// }, 403, emu.error('forbidden').body);
+    expect(await readFindings(doAccount as DoConfig, context, { fetch: emu.fetch })).toEqual([
+      expect.objectContaining({ id: 'security:unreadable', severity: 'info' }),
+    ]);
+    emu.failNext({ path: /^\/security\// }, 401, emu.error('unauthorized').body);
+    await expect(
+      readFindings(doAccount as DoConfig, context, { fetch: emu.fetch }),
+    ).rejects.toBeDefined();
   });
 
   it('adds security:read to the operations probe', async () => {

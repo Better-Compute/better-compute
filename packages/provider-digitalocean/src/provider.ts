@@ -7,6 +7,7 @@ import { deploymentTag } from './ids.js';
 import { doBilling, readInvoiceCosts } from './ops/costs.js';
 import { doConnect } from './ops/oauth.js';
 import { withTenantProjects } from './ops/projects.js';
+import { readFindings } from './ops/security.js';
 import { checkReport, probeAccount } from './probe.js';
 
 const maxInCallWaitMs = 20_000;
@@ -45,6 +46,8 @@ export function digitaloceanProvider(
     // providerAccounts.check (P9): the read scopes, the operations ones as optional.
     probeAccount: async (config: DoConfig, context) =>
       checkReport(await probeAccount(config, context, options, { operations: true })),
+    // providerAccounts.findings (P9): the latest security scan.
+    findings: (config: DoConfig, context) => readFindings(config, context, options),
     create: (config: DoConfig, context: ProviderContext) => {
       if (config.regions.length === 0)
         throw invalidConfig('A DigitalOcean account lists at least one region', 'regions');

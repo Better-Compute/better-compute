@@ -1,4 +1,4 @@
-import { isComputeError, type ProviderContext } from '@better-compute/core';
+import { isComputeError, type ProviderContext, type ProviderFinding } from '@better-compute/core';
 import { clientFor } from '../client/build.js';
 import type { DoConfig, DoProviderOptions } from '../config.js';
 
@@ -131,13 +131,7 @@ export function securityAttention(
 ): DoAttentionItem[] {
   const fallback = report.scan?.createdAt ?? account.now ?? 0;
   return report.findings.map((finding) => {
-    const count =
-      finding.affectedResources === undefined
-        ? undefined
-        : `${finding.affectedResources} ${finding.affectedResources === 1 ? 'resource' : 'resources'} affected.`;
-    const detail =
-      [count, finding.detail].filter(Boolean).join(' ') ||
-      'Found by the latest DigitalOcean security scan.';
+    const detail = detailOf(finding);
     return {
       id: `do-security:${account.accountId}:${finding.rule}`,
       severity: attentionSeverity[finding.severity],
@@ -151,4 +145,57 @@ export function securityAttention(
       action: { label: 'Open the account', href: account.href },
     };
   });
+}
+
+/** The words of a finding's detail: the resources affected, then DO's own detail. */
+function detailOf(finding: DoSecurityFinding): string {
+  const count =
+    finding.affectedResources === undefined
+      ? undefined
+      : `${finding.affectedResources} ${finding.affectedResources === 1 ? 'resource' : 'resources'} affected.`;
+  return [count, finding.detail].filter(Boolean).join(' ') || 'Found by the latest DigitalOcean security scan.';
+}
+
+/** The report as provider findings (`providerAccounts.findings`): one per rule, a finding's time else the scan's. */
+export function securityFindings(report: DoSecurityReport): ProviderFinding[] {
+  const scanned = report.scan?.createdAt;
+  return report.findings.map((finding) => {
+    const at = finding.foundAt ?? scanned;
+    return {
+      id: `security:${finding.rule}`,
+      kind: 'security',
+      severity: attentionSeverity[finding.severity],
+      title: finding.title,
+      detail: detailOf(finding),
+      ...(at !== undefined ? { at } : {}),
+      group: finding.title,
+    };
+  });
+}
+
+/**
+ * `ProviderInput.findings` (P9): the latest security scan's findings. A token without `security:read` answers one
+ * finding saying so, never an empty list that reads as a clean account; other errors propagate.
+ */
+export async function readFindings(
+  config: DoConfig,
+  context: ProviderContext,
+  options: DoProviderOptions = {},
+): Promise<ProviderFinding[]> {
+  let report: DoSecurityReport;
+  try {
+    report = await readSecurityFindings(config, context, options);
+  } catch (error) {
+    if (!isComputeError(error, 'ACCESS_DENIED')) throw error;
+    return [
+      {
+        id: 'security:unreadable',
+        kind: 'security',
+        severity: 'info',
+        title: 'Security findings are not readable',
+        detail: "The token lacks security:read, so the account's DigitalOcean security scan cannot be read.",
+      },
+    ];
+  }
+  return securityFindings(report);
 }

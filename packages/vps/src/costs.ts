@@ -1124,7 +1124,70 @@ async function detectPeriodLeaks(
   return { leaks };
 }
 
-// --- Margins (D12)-------------------------------------------------------------------------------------------
+/** One raised leak (`billing.leaks`): what `billing.leak` said, with the account it was found on. */
+export interface LeakView {
+  accountId: string;
+  accountName: string;
+  provider: string;
+  instanceId: string;
+  /** The instance's tenant; null when the instance is gone. */
+  tenantId: string | null;
+  /** UTC day (`YYYY-MM-DD`): the day of hour-slot rows, the period's first day of period rows. */
+  day: string;
+  providerHours: number;
+  meteredHours: number;
+  /** Epoch ms. */
+  raisedAt: number;
+}
+
+/** The most leaks one `billing.leaks` answers. */
+export const leaksLimit = 500;
+
+/**
+ * The leaks raised on the platform's (root's) accounts whose day is in `[from, to)`, newest day first, at most
+ * `leaksLimit`. Nothing without a root tenant: a tenant's own account is never checked.
+ */
+export async function listLeaks(
+  sql: { query: SqlTx['query'] },
+  input: { from: number; to: number; rootTenantId: string | undefined },
+): Promise<LeakView[]> {
+  if (input.rootTenantId === undefined) return [];
+  const { rows } = await sql.query<{
+    account_id: string;
+    name: string;
+    provider: string;
+    instance_id: string;
+    tenant_id: string | null;
+    day: string;
+    provider_hours: string | number;
+    metered_hours: string | number;
+    raised_ms: number;
+  }>(
+    `SELECT l.account_id, a.name, a.provider, l.instance_id, i.tenant_id, to_char(l.day, 'YYYY-MM-DD') AS day,
+            l.provider_hours, l.metered_hours, (extract(epoch FROM l.raised_at) * 1000)::float8 AS raised_ms
+       FROM provider_cost_leaks l
+       JOIN provider_accounts a ON a.id = l.account_id AND a.tenant_id = $3
+       LEFT JOIN instances i ON i.id = l.instance_id
+      WHERE l.day >= (to_timestamp($1::float8 / 1000) AT TIME ZONE 'UTC')::date
+        AND l.day < (to_timestamp($2::float8 / 1000) AT TIME ZONE 'UTC')::date
+      ORDER BY l.day DESC, l.raised_at DESC, l.instance_id
+      LIMIT ${leaksLimit}`,
+    [input.from, input.to, input.rootTenantId],
+  );
+  return rows.map((row) => ({
+    accountId: row.account_id,
+    accountName: row.name,
+    provider: row.provider,
+    instanceId: row.instance_id,
+    tenantId: row.tenant_id,
+    day: row.day,
+    providerHours: Number(row.provider_hours),
+    meteredHours: Number(row.metered_hours),
+    raisedAt: Number(row.raised_ms),
+  }));
+}
+
+// --- Margins (D12) -------------------------------------------------------------------------------------------
 
 /** What `billing.margins` groups by. */
 export type MarginGroup = 'tenant' | 'pool' | 'account' | 'meter';

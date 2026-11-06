@@ -581,6 +581,7 @@ group('billing', 'vps', [
   ['setPrices', 'mutation', 'billing:manage', 'fleet', 'v1.0'],
   ['proposePrices', 'read', 'billing:read', 'fleet', 'v1.0'],
   ['margins', 'read', 'billing:read', 'fleet', 'v1.0'],
+  ['leaks', 'read', 'billing:read', 'fleet', 'v1.0'],
 ]);
 group('providerAccounts', 'vps', [
   [
@@ -605,6 +606,7 @@ group('providerAccounts', 'vps', [
   ['get', 'read', 'providers:read', 'provider-account', 'v0.3'],
   ['offers', 'read', 'providers:read', 'provider-account', 'v0.3'],
   ['check', 'read', 'providers:read', 'provider-account', 'v1.0'],
+  ['findings', 'read', 'providers:read', 'provider-account', 'v1.0'],
   ['update', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
   ['delete', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
   ['bootstrap', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],

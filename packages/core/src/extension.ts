@@ -1112,6 +1112,21 @@ export interface ProviderAccountProbe {
   details?: { [key: string]: Json };
 }
 
+/** (P9) One thing on a provider account an operator should look at (`ProviderInput.findings`). Never a secret. */
+export interface ProviderFinding {
+  /** Stable across reads of the same finding (the provider's rule id), unique in one answer. */
+  id: string;
+  /** What it is about: `security`, `billing`, … */
+  kind: string;
+  severity: 'critical' | 'warning' | 'info';
+  title: string;
+  detail?: string;
+  /** Epoch ms the provider found it. */
+  at?: number;
+  /** Findings of one kind that read as one (the rule's name). */
+  group?: string;
+}
+
 /**
  * (P9) A provider's OAuth connect flow (`providerAccounts.connectSetup` and `connect`): the person's browser goes
  * to `authorizeUrl`, comes back to the redirect URI with a code, and `exchange` trades the code (single use) for the
@@ -1165,6 +1180,15 @@ export interface ProviderInput<C> {
     config: C,
     context: ProviderContext & { signal: AbortSignal },
   ): Promise<ProviderAccountProbe>;
+  /**
+   * (P9) What an operator should look at on a stored account, as the provider reports it (DigitalOcean: its
+   * security scan), for `providerAccounts.findings`. Read-only at the provider; a part it may not read is itself a
+   * finding, never an empty answer that looks clean.
+   */
+  findings?(
+    config: C,
+    context: ProviderContext & { signal: AbortSignal },
+  ): Promise<ProviderFinding[]>;
   /** (P9) An OAuth connect flow, when the provider has one configured (`providerAccounts.connect`). */
   connect?: ProviderConnect;
   /** A key no two accounts of this provider may share (e.g. a federation audience). Pure; no I/O. */

@@ -32,6 +32,7 @@ import {
   passThroughMeterCheck,
   parseFederationSetup,
   probeStoredAccount,
+  readStoredFindings,
   parseTenantVaultPaths,
   providerOf,
   ProviderClients,
@@ -45,6 +46,7 @@ import {
   type FederationSetupInput,
   type ProviderAccount,
   type ProviderAccountCheck,
+  type ProviderAccountFindings,
   type TenantVaultPaths,
 } from './accounts.js';
 import {
@@ -456,6 +458,8 @@ export type VpsApi = {
     offers: MethodDefinition<AccountRef & { query: OfferQuery }, { items: Offer[] }>;
     /** (P9) What the account's credential may do, as its provider probes it (read-only). */
     check: MethodDefinition<AccountRef, ProviderAccountCheck>;
+    /** (P9) What the provider says an operator should look at on the account (read-only). */
+    findings: MethodDefinition<AccountRef, ProviderAccountFindings>;
     update: MethodDefinition<
       AccountRef & { config: unknown; billing?: AccountBilling },
       ProviderAccountView
@@ -1554,6 +1558,24 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           if (!account)
             throw new ComputeError('NOT_FOUND', `Provider account ${input.accountId} not found`);
           return probeStoredAccount(
+            providers,
+            account,
+            accountCheck(context),
+            context.signal ?? AbortSignal.timeout(55_000),
+          );
+        },
+      }),
+      // What the provider says needs an operator on the account (P9: DigitalOcean's security scan), read-only.
+      findings: defineMethod({
+        action: 'compute:providers:read',
+        kind: 'read',
+        resource: accountResource,
+        validate: describedBy(schemas.account, (raw) => parseAccountRef(raw) as AccountRef),
+        handler: async (context, input) => {
+          const account = await readAccount(context.sql, input.accountId, input.tenantId);
+          if (!account)
+            throw new ComputeError('NOT_FOUND', `Provider account ${input.accountId} not found`);
+          return readStoredFindings(
             providers,
             account,
             accountCheck(context),

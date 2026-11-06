@@ -10,6 +10,7 @@ import { digitaloceanProvider, resetBudgets } from '@better-compute/provider-dig
 import { closeFixtures, computeFixture } from '@better-compute/testing';
 import { defineProvider, vps } from '@better-compute/vps';
 import { DoEmulator } from './support/do-emulator/index.js';
+import { securityOf } from './support/do-emulator/security.js';
 
 // providerAccounts.check (P9): a read-only look at what a stored account's credential may do. vps validates the
 // stored config, scopes its secrets to the account exactly as a client's, and asks the provider's `probeAccount`;
@@ -21,7 +22,9 @@ beforeEach(() => resetBudgets());
 
 type Probe = (config: { key: string }, context: ProviderContext & { signal: AbortSignal }) => Promise<ProviderAccountProbe>;
 
-async function fakeWorld(hooks: { probe?: Probe; check?: boolean } = {}) {
+type Findings = (config: { key: string }, context: ProviderContext & { signal: AbortSignal }) => Promise<unknown[]>;
+
+async function fakeWorld(hooks: { probe?: Probe; check?: boolean; findings?: Findings } = {}) {
   const contexts: (ProviderContext & { signal: AbortSignal })[] = [];
   const checkAccount = vi.fn(async (_config: { key: string }, context: ProviderContext & { signal: AbortSignal }) => {
     contexts.push(context);
@@ -37,6 +40,14 @@ async function fakeWorld(hooks: { probe?: Probe; check?: boolean } = {}) {
           probeAccount: async (config: { key: string }, context: ProviderContext & { signal: AbortSignal }) => {
             contexts.push(context);
             return hooks.probe!(config, context);
+          },
+        }
+      : {}),
+    ...(hooks.findings
+      ? {
+          findings: async (config: { key: string }, context: ProviderContext & { signal: AbortSignal }) => {
+            contexts.push(context);
+            return hooks.findings!(config, context) as never;
           },
         }
       : {}),
@@ -74,7 +85,9 @@ async function fakeWorld(hooks: { probe?: Probe; check?: boolean } = {}) {
   checkAccount.mockClear();
   const check = () =>
     api.providerAccounts.check(acme, { tenantId: tenants.acme.id, accountId: account.id });
-  return { fixture, api, tenants, account, ref, contexts, check, checkAccount };
+  const findings = () =>
+    api.providerAccounts.findings(acme, { tenantId: tenants.acme.id, accountId: account.id });
+  return { fixture, api, tenants, account, ref, contexts, check, findings, checkAccount };
 }
 
 describe('providerAccounts.check', () => {
@@ -182,5 +195,95 @@ describe('providerAccounts.check on DigitalOcean', () => {
     // A Droplet-locked account is not ok, whatever the scopes.
     emu.account.status = 'locked';
     expect(await check()).toMatchObject({ ok: false, missing: [] });
+  });
+});
+
+// providerAccounts.findings (P9): what the provider says an operator should look at on the account (DigitalOcean:
+// its security scan), read-only, with the account's own credential. vps keeps only well-formed findings.
+describe('providerAccounts.findings', () => {
+  it("answers the provider's findings, well-formed ones only, bounded", async () => {
+    const { findings, account, contexts, ref } = await fakeWorld({
+      findings: async (config, context) => {
+        expect(await context.secrets.resolve(config.key as never)).toBe('the-key-value');
+        return [
+          { id: 'f-1', kind: 'security', severity: 'critical', title: 'Root login', detail: 'd', at: 5, group: 'g' },
+          { id: 'f-2', kind: 'security', severity: 'info', title: 'x'.repeat(500) },
+          { id: 'f-3', kind: 'security', severity: 'extreme', title: 'Unknown severity' },
+          { kind: 'security', severity: 'info', title: 'No id' },
+          { id: 'f-4', kind: 'security', severity: 'warning', title: '' },
+          'not an object',
+        ];
+      },
+    });
+    const result = await findings();
+    expect(result).toEqual({
+      accountId: account.id,
+      provider: 'test',
+      readAt: expect.any(Number),
+      items: [
+        { id: 'f-1', kind: 'security', severity: 'critical', title: 'Root login', detail: 'd', at: 5, group: 'g' },
+        { id: 'f-2', kind: 'security', severity: 'info', title: 'x'.repeat(200) },
+      ],
+    });
+    expect(contexts[0]!.account).toMatchObject({ id: account.id });
+    expect(JSON.stringify(result)).not.toContain('the-key-value');
+    expect(ref).toBeDefined();
+  });
+
+  it('is UNSUPPORTED for a provider without findings', async () => {
+    const bare = await fakeWorld({ check: true });
+    await expect(bare.findings()).rejects.toMatchObject({ code: 'UNSUPPORTED' });
+  });
+
+  it('DigitalOcean: the security scan, and a finding saying so when security:read is missing', async () => {
+    const emu = new DoEmulator();
+    emu.validTokens = new Set(['acme-token']);
+    securityOf(emu).scans = [
+      {
+        id: 'scan-1',
+        status: 'COMPLETED',
+        created_at: '2026-10-05T10:00:00Z',
+        findings: [{ rule_uuid: 'rule-ssh', name: 'SSH open to the internet', severity: 'HIGH' }],
+      },
+    ];
+    const fixture = await computeFixture({
+      modules: [vps({ providers: [digitaloceanProvider({ fetch: emu.fetch })] })],
+    });
+    const { compute, tenants, iam } = fixture;
+    iam.allow({ token: tenants.acme.token });
+    const api = compute.api as any;
+    const acme = { token: tenants.acme.token };
+    const { ref } = await api.secrets.put(acme, {
+      tenantId: tenants.acme.id,
+      name: 'do',
+      value: 'acme-token',
+      idempotencyKey: 'do',
+    });
+    const account = await api.providerAccounts.create(acme, {
+      tenantId: tenants.acme.id,
+      provider: 'digitalocean',
+      name: 'do',
+      config: { token: ref, regions: ['nyc3'] },
+    });
+    const read = () =>
+      api.providerAccounts.findings(acme, { tenantId: tenants.acme.id, accountId: account.id });
+    expect((await read()).items).toEqual([
+      {
+        id: 'security:rule-ssh',
+        kind: 'security',
+        severity: 'warning',
+        title: 'SSH open to the internet',
+        detail: 'Found by the latest DigitalOcean security scan.',
+        at: Date.parse('2026-10-05T10:00:00Z'),
+        group: 'SSH open to the internet',
+      },
+    ]);
+    emu.failNext({ path: /^\/security\// }, 403, emu.error('forbidden').body);
+    const denied = await read();
+    expect(denied.items).toEqual([
+      expect.objectContaining({ id: 'security:unreadable', kind: 'security', severity: 'info' }),
+    ]);
+    expect(denied.items[0].detail).toMatch(/security:read/);
+    expect(JSON.stringify(denied)).not.toContain('acme-token');
   });
 });
