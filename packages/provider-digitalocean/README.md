@@ -139,9 +139,27 @@ DigitalOcean has no network object, so a tenant network is built from a VPC per 
 - **Discover, adopt, release** by engine: adopt tags a cluster no deployment manages (`managedByAnother` otherwise);
   release takes every `better-compute-*` tag off and leaves it running.
 
+- **App Platform:** `do.app` takes the App spec without its `name` (the provider name) as the manifest. A SECRET
+  env's value, registry credentials and log-destination keys must be SecretRefs; they are resolved just before the
+  call, and DO's ciphertext is never copied into a spec better-compute reports. Apps have no tags: ownership is a set
+  of build-time `BETTER_COMPUTE_*` envs (tenants cannot set those) plus `BETTER_COMPUTE_SPEC`, the fingerprint of
+  the spec last applied, so a converged app is never redeployed. Deployments are read-only status: the latest one
+  decides `pending`, `updating`, `ready` or `error`. On a shared (hosted) account a spec may not reach
+  account-wide objects: linked GitHub/GitLab/Bitbucket repositories, DOCR, a database cluster by name, a VPC or a DNS
+  zone; on the tenant's own account it may. Discover, adopt (rewrites the envs once, keeping DO's ciphertext) and
+  release.
+- **Functions:** `do.functions-namespace` (owned through its label `<name>-bc<deployment hash>`; its key is a secret
+  output; not adoptable) and `do.functions-trigger` (a scheduled trigger in a namespace; cron, body and enabled
+  change in place, the function and name do not).
+- **Add-Ons:** `do.addon`, a Marketplace SaaS add-on on a plan, owned through the name suffix
+  `-bc<deployment hash>` (adopt renames it, release renames it back); only the plan changes in place. The vendor SSO
+  link is never an output.
+
 Token scopes: `database:read`, `database:create`, `database:update` and `database:delete`, plus `tag:create` for
-adopt and release. Not modelled yet: Standard and Advanced editions, private networking (a tenant network's VPC),
-Vector Databases, App Platform, Functions, Add-Ons, 1-Click apps and Partner Network Connect.
+adopt and release; the App Platform, Functions and Add-Ons scopes for those kinds. The App, Functions and Add-Ons
+bodies follow the API reference and are not yet checked against recorded responses. Not modelled yet: Standard and
+Advanced editions, private networking (a tenant network's VPC), Vector Databases, the 1-Click catalog and Partner
+Network Connect.
 
 ## Rate budget
 

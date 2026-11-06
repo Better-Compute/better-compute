@@ -46,6 +46,10 @@ betterCompute({ modules: [vps({ providers }), cloudResources({ providers, maxPer
   allows databases without allowing apps.
 - **Desired state.** `update` changes a kind's `updatable` fields in place and refuses any other change
   (`replaceRequired`). `delete` removes the resources living in one (database users, pools) first.
+- **Whose account.** Every `ensure` says `accountScope: 'tenant'` on the tenant's own (BYO) account and
+  `'shared'` on a hosted pool; a kind refuses a spec reaching account-wide objects (a VPC, a registry, linked
+  repositories, another resource by name) on a shared account.
+- **Secrets in a spec** are SecretRefs, resolved only within the resource's tenant, just before the provider call.
 - **Quota** per tenant and kind: `maxPerKind` (default 20) and `quotas: { 'do.database.pg': 5 }`.
 - **Events** `cloud.resource.*` (`created`, `ready`, `updating`, `updated`, `failed`, `deleting`, `deleted`,
   `adopted`, `releasing`, `released`), never carrying a secret value.
