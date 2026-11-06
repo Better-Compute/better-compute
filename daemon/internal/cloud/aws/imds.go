@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -78,6 +79,9 @@ type Client struct {
 	HTTP *http.Client
 	// Now defaults to time.Now.
 	Now func() time.Time
+	// Log takes what the client reports on its own (a spot notice that does not parse); default
+	// slog.Default().
+	Log *slog.Logger
 
 	mu        sync.Mutex
 	detected  int // 0 unknown, 1 EC2, -1 not

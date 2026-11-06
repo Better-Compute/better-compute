@@ -24,7 +24,8 @@ type Cloud interface {
 
 // Interruption is a cloud's notice that it takes the instance back (an EC2 spot instance-action).
 type Interruption struct {
-	// Action is what the cloud does: "terminate", "stop" or "hibernate".
+	// Action is what the cloud does: "terminate", "stop" or "hibernate", or "unknown" for a notice
+	// that does not say (still an interruption).
 	Action string
 	// Deadline is when.
 	Deadline time.Time
