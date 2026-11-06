@@ -39,6 +39,12 @@ export const doConfig = manifest({
     .boolean()
     .default(false)
     .describe('Offer products that DigitalOcean still marks as previews'),
+  networkModel: field
+    .option(['vpc-per-subnet', 'vpc-subnets'])
+    .default('vpc-per-subnet')
+    .describe(
+      "How subnets map to DigitalOcean: one VPC per subnet, or (reserved for DO's VPC Subnets preview) subnets inside one VPC per network and region. Changing it does not migrate existing networks",
+    ),
 });
 
 /** The validated account configuration. */
@@ -52,6 +58,8 @@ export interface DoConfig {
   allowSpot?: boolean;
   discoverTag?: string;
   previews?: boolean;
+  /** Default `vpc-per-subnet` (DO-D9). `vpc-subnets` is reserved: refused until DO's VPC Subnets shape is recorded. */
+  networkModel?: 'vpc-per-subnet' | 'vpc-subnets';
 }
 
 export interface DoProviderOptions {

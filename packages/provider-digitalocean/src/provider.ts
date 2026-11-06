@@ -51,6 +51,16 @@ export function digitaloceanProvider(
           `discoverTag ${JSON.stringify(config.discoverTag)} is not a DigitalOcean tag: lower-case [a-z0-9:_-], at most 255 characters`,
           'discoverTag',
         );
+      // VPC Subnets (P4) are a DO preview whose shape no recorded response confirms yet: the model is
+      // named so accounts can be planned for it, and refused until it is implemented. Moving an
+      // account between models is an operator step (docs), never automatic.
+      if (config.networkModel === 'vpc-subnets')
+        throw invalidConfig(
+          config.previews === true
+            ? "networkModel 'vpc-subnets' is not available yet: DigitalOcean's VPC Subnets preview is not supported by this provider version; use 'vpc-per-subnet'"
+            : "networkModel 'vpc-subnets' needs previews: true, and is not available yet; use 'vpc-per-subnet'",
+          'networkModel',
+        );
       const inCallWaitMs = options.inCallWaitMs ?? 0;
       if (!Number.isInteger(inCallWaitMs) || inCallWaitMs < 0 || inCallWaitMs > maxInCallWaitMs)
         throw invalidConfig(

@@ -1685,6 +1685,19 @@ describe('compute', () => {
     }
     for (const discoverTag of ['fleet', 'env:prod', 'k8s_pool-1', 'x'.repeat(255)])
       await digitaloceanProvider({ fetch: emu.fetch }).create({ ...config, discoverTag }, context);
+    // networkModel 'vpc-subnets' (P4, DO's VPC Subnets preview) is reserved: refused with or
+    // without previews until its shape is recorded; 'vpc-per-subnet' is the model in use.
+    for (const previews of [false, true]) {
+      const error = await refused({}, { ...config, previews, networkModel: 'vpc-subnets' });
+      expect([error.code, error.details?.reason], String(previews)).toEqual([
+        'INVALID_CONFIG',
+        'networkModel',
+      ]);
+    }
+    await digitaloceanProvider({ fetch: emu.fetch }).create(
+      { ...config, networkModel: 'vpc-per-subnet' },
+      context,
+    );
     expect(emu.requests).toHaveLength(requests);
   });
 
@@ -2217,7 +2230,13 @@ describe('definition', () => {
       const hand = seedDroplet(emu.state, { name: 'legacy', tags: [] });
       return {
         provider: digitaloceanProvider({ fetch: emu.fetch }),
-        config: { ...doAccount, regions: ['nyc3', 'sfo3'], sshKeyFingerprint: key.fingerprint },
+        // previews: true offers the preview members too (VPC routes, P4), so their case runs.
+        config: {
+          ...doAccount,
+          regions: ['nyc3', 'sfo3'],
+          sshKeyFingerprint: key.fingerprint,
+          previews: true,
+        },
         attachable: String(hand.id),
         offerId: 'nyc3/s-1vcpu-1gb',
         // The volume and address cases attach and assign across regions too (INVALID_INPUT).

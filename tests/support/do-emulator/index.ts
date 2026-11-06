@@ -13,6 +13,7 @@ import { registerNatGateways } from './nat-gateways.js';
 import { registerTags } from './tags.js';
 import { registerVolumes } from './volumes.js';
 import { registerVpcPeerings } from './vpc-peerings.js';
+import { registerVpcRoutes } from './vpc-routes.js';
 import { registerVpcs } from './vpcs.js';
 import { DoState, errorFixtures, type Json } from './state.js';
 
@@ -116,6 +117,8 @@ export class DoEmulator {
   natGatewayReads = 1;
   /** How many reads a peering takes to turn `ACTIVE`, and to be gone once deleted; at 0, at once. */
   peeringReads = 1;
+  /** How many route list reads a new VPC route answers `PENDING` to before it is `ACTIVE`. */
+  routeReads = 1;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -307,5 +310,6 @@ export class DoEmulator {
     registerCertificates(this);
     registerNatGateways(this);
     registerVpcPeerings(this);
+    registerVpcRoutes(this);
   }
 }

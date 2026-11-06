@@ -29,7 +29,9 @@ const certCase = 'certificates (when offered): a custom certificate by name, del
 const natCase =
   'nat gateways (when offered): one per subnet by name; the subnet goes only after its gateway';
 const peeringCase = 'peerings (when offered): two subnets peered by name, deleted idempotently';
-const edgeCases = [lbCase, lbRegionCase, dnsCase, certCase, natCase, peeringCase];
+const routeCase =
+  'routes (when offered): a subnet route by name, refused when changed, deleted before its subnet';
+const edgeCases = [lbCase, lbRegionCase, dnsCase, certCase, natCase, peeringCase, routeCase];
 
 const fail = (code: ConstructorParameters<typeof ComputeError>[0], message: string) =>
   new ComputeError(code, message);
@@ -57,6 +59,8 @@ interface Breaks {
   leaksKey?: boolean;
   /** Deletes a subnet a NAT gateway still serves. */
   subnetUnderNat?: boolean;
+  /** Changes a route's destination in place instead of refusing it. */
+  routeInPlace?: boolean;
 }
 
 function fakeProvider(breaks: Breaks = {}, members: { edge?: boolean } = {}) {
@@ -205,6 +209,7 @@ function fakeProvider(breaks: Breaks = {}, members: { edge?: boolean } = {}) {
   const subnets = new Set<string>();
   const gateways = new Map<string, string>();
   const peerings = new Map<string, 'ready' | 'deleting'>();
+  const routes = new Map<string, { subnet: string; destination: string }>();
   const networks: ProviderNetworks = {
     ensureNetwork: async (spec) => ({ id: spec.name, state: 'ready' }),
     ensureSubnet: async (spec) => {
@@ -217,6 +222,7 @@ function fakeProvider(breaks: Breaks = {}, members: { edge?: boolean } = {}) {
       const id = `${region}/${name}`;
       if (!breaks.subnetUnderNat && [...gateways.values()].includes(id))
         return { id, state: 'pending' };
+      if ([...routes.values()].some((route) => route.subnet === id)) return { id, state: 'pending' };
       subnets.delete(id);
       return { id, state: 'deleted' };
     },
@@ -242,6 +248,24 @@ function fakeProvider(breaks: Breaks = {}, members: { edge?: boolean } = {}) {
       const known = peerings.get(spec.name);
       peerings.set(spec.name, 'ready');
       return state(spec.name, known ? 'ready' : 'pending');
+    },
+    ensureRoute: async (spec) => {
+      const subnet = `${spec.region}/${spec.subnet}`;
+      if (!subnets.has(subnet)) throw fail('INVALID_STATE', 'no such subnet');
+      const id = `${subnet}/${spec.name}`;
+      const known = routes.get(id);
+      if (known && known.destination !== spec.destination && !breaks.routeInPlace)
+        throw fail('INVALID_STATE', 'another destination');
+      routes.set(id, { subnet, destination: spec.destination });
+      return state(id, known ? 'ready' : 'pending', {
+        destination: spec.destination,
+        nextHop: spec.nextHop.id,
+      });
+    },
+    deleteRoute: async (ref) => {
+      const id = `${ref.region}/${ref.subnet}/${ref.name}`;
+      routes.delete(id);
+      return state(id, 'deleted');
     },
     deletePeering: async (name) => {
       const known = peerings.get(name);
@@ -346,5 +370,9 @@ describe('provider edge contracts', () => {
 
   it('a subnet deleted while its NAT gateway exists fails the NAT case', async () => {
     expect(await failedCases({ subnetUnderNat: true })).toEqual([natCase]);
+  });
+
+  it('a route changed in place fails the route case', async () => {
+    expect(await failedCases({ routeInPlace: true })).toEqual([routeCase]);
   });
 });

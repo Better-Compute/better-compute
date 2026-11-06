@@ -72,6 +72,11 @@ export interface ProviderConformanceSubject {
   natCidr?: string;
   /** (edge) The CIDRs of the two subnets the peering case makes (default `10.251.0.0/24`, `10.252.0.0/24`). */
   peeringCidrs?: readonly [string, string];
+  /**
+   * (edge) The subnet the route case makes and the private address in it the route points at (default
+   * `10.253.0.0/24` and `10.253.0.10`).
+   */
+  route?: { cidr: string; nextHop: string };
 }
 
 const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -1150,6 +1155,94 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
           for (const subnet of [left, right])
             await networks.deleteSubnet(region, subnet, call(`peer-cleanup-${subnet}`)).catch(() => {});
           await networks.deleteNetwork(network, call('peer-cleanup-network')).catch(() => {});
+        }
+      },
+    },
+    {
+      name: 'routes (when offered): a subnet route by name, refused when changed, deleted before its subnet',
+      async run(subject) {
+        const probe = await client(subject);
+        const networks = probe.impl.networks;
+        if (!networks?.ensureRoute || !networks.deleteRoute) return;
+        const { impl, call } = probe;
+        const region =
+          subject.region ??
+          (await impl.listOffers({})).find((offer) => offer.id === subject.offerId)?.region;
+        check(region !== undefined, 'the subject names no region and its offer reports none');
+        const network = key(subject, 'route-net');
+        const subnet = key(subject, 'route-sub');
+        const name = key(subject, 'route');
+        const cidr = subject.route?.cidr ?? '10.253.0.0/24';
+        const hop = subject.route?.nextHop ?? '10.253.0.10';
+        const asResource = (step: () => Promise<{ id: string; state: string; message?: string }>) =>
+          step as () => Promise<ProviderResourceState>;
+        const ref = { name, network, subnet, region };
+        let made = false;
+        try {
+          await settle(
+            subject,
+            asResource(() => networks.ensureNetwork({ name: network }, call('route-network'))),
+            ['ready'],
+            'ensureNetwork',
+          );
+          await settle(
+            subject,
+            asResource(() =>
+              networks.ensureSubnet({ network, name: subnet, region, cidr }, call('route-subnet')),
+            ),
+            ['ready'],
+            'ensureSubnet',
+          );
+          const spec = {
+            ...ref,
+            destination: '192.0.2.0/24',
+            nextHop: { kind: 'address' as const, id: hop },
+          };
+          const route = await settle(
+            subject,
+            () => networks.ensureRoute!(spec, call('route-ensure')),
+            ['ready'],
+            'ensureRoute',
+          );
+          made = true;
+          checkEqual(
+            (await networks.ensureRoute!(spec, call('route-ensure-again'))).id,
+            route.id,
+            'ensuring the route again returns the same route',
+          );
+          await checkRejects(
+            () =>
+              networks.ensureRoute!(
+                { ...spec, destination: '198.51.100.0/24' },
+                call('route-change'),
+              ),
+            'INVALID_STATE',
+            'changing a route in place',
+          );
+          const early = await networks.deleteSubnet(region, subnet, call('route-subnet-early'));
+          check(early.state !== 'deleted', 'a subnet is not deleted while a route of ours is in it');
+          await settle(
+            subject,
+            () => networks.deleteRoute!(ref, call('route-delete')),
+            ['deleted'],
+            'deleteRoute',
+          );
+          made = false;
+          checkEqual(
+            (await networks.deleteRoute!(ref, call('route-delete-again'))).state,
+            'deleted',
+            'deleting a deleted route counts as deleted',
+          );
+          await settle(
+            subject,
+            asResource(() => networks.deleteSubnet(region, subnet, call('route-subnet-delete'))),
+            ['deleted'],
+            'deleteSubnet',
+          );
+        } finally {
+          if (made) await networks.deleteRoute!(ref, call('route-cleanup')).catch(() => {});
+          await networks.deleteSubnet(region, subnet, call('route-cleanup-subnet')).catch(() => {});
+          await networks.deleteNetwork(network, call('route-cleanup-network')).catch(() => {});
         }
       },
     },

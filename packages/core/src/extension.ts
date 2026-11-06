@@ -792,6 +792,37 @@ export interface ProviderNetworks {
   ensurePeering?(spec: ProviderPeeringSpec, context: CallContext): Promise<ProviderResourceState>;
   /** (edge) Deletes the peering `name` this deployment made: `deleting`, then `deleted`. */
   deletePeering?(name: string, context: CallContext): Promise<ProviderResourceState>;
+  /**
+   * (edge, preview) A static route of a subnet: traffic from the subnet to `spec.destination` goes to `spec.nextHop`.
+   * Idempotent by `spec.name` within the subnet; `pending` while the provider applies it. Outputs: `destination` and
+   * `nextHop`. A route of that name with another destination or next hop is `INVALID_STATE` (reason `replace`); a
+   * next hop that is not this deployment's (a gateway or machine it did not make, an address outside the subnet) is
+   * `INVALID_STATE` or `INVALID_INPUT` before any write. A subnet that holds a route of ours is deleted only after
+   * the route (as with NAT gateways).
+   */
+  ensureRoute?(spec: ProviderRouteSpec, context: CallContext): Promise<ProviderResourceState>;
+  /** (edge, preview) Deletes the route `ref.name` this deployment made in the subnet; a gone one counts as deleted. */
+  deleteRoute?(ref: ProviderRouteRef, context: CallContext): Promise<ProviderResourceState>;
+}
+
+/** (edge) Where a route lives: its provider-side name (vps derives it) in a subnet of a network. */
+export interface ProviderRouteRef {
+  name: string;
+  network: string;
+  /** The subnet whose routes it joins (as `ensureSubnet` named it). */
+  subnet: string;
+  region: string;
+}
+
+/** (edge) A static route as vps asks for it. */
+export interface ProviderRouteSpec extends ProviderRouteRef {
+  /** The destination CIDR. */
+  destination: string;
+  /**
+   * Where the traffic goes: a NAT gateway (`ensureNatGateway`'s id), a machine (its provider id) or a private
+   * address inside the subnet.
+   */
+  nextHop: { kind: 'natGateway' | 'machine' | 'address'; id: string };
 }
 
 /** (edge) One side of a peering: a network, and the subnet and region where the provider peers subnets. */

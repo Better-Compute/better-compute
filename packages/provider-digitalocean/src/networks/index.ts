@@ -10,6 +10,8 @@ import {
   type ProviderNetworkState,
   type ProviderPeeringSpec,
   type ProviderResourceState,
+  type ProviderRouteRef,
+  type ProviderRouteSpec,
   type ProviderSubnetSpec,
 } from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
@@ -32,11 +34,13 @@ import {
 } from './firewalls.js';
 import { DoNatGateways } from './nat.js';
 import { DoPeerings } from './peering.js';
+import { DoRoutes } from './routes.js';
 import { accountVpcs, checkSubnet, networkDescription, networkOfVpc, vpcLookup } from './vpcs.js';
 
 export * from './firewalls.js';
 export * from './nat.js';
 export * from './peering.js';
+export * from './routes.js';
 export * from './vpcs.js';
 
 // Tenant networking on DigitalOcean (DO-D9, DO-D10). A network is no DO object of its own: it is
@@ -126,6 +130,12 @@ export class DoNetworks implements ProviderNetworks {
   readonly #nat: DoNatGateways;
   /** VPC peerings (P4): between subnets of ours, deleted before their subnets. */
   readonly #peerings: DoPeerings;
+  /** VPC routes (P4, preview): only on an account with `previews: true`. */
+  readonly #routes: DoRoutes | undefined;
+  /** (preview) Present only on an account with `previews: true` (VPC Routes are a DO preview). */
+  readonly ensureRoute?: (spec: ProviderRouteSpec, context: CallContext) => Promise<ProviderResourceState>;
+  /** (preview) Present only on an account with `previews: true`. */
+  readonly deleteRoute?: (ref: ProviderRouteRef, context: CallContext) => Promise<ProviderResourceState>;
   /** The firewall list, per client (one DoNetworks per client); undefined until read. */
   #firewallCache: { loadedAt: number; firewalls: Promise<readonly DoFirewall[]> } | undefined;
 
@@ -135,6 +145,12 @@ export class DoNetworks implements ProviderNetworks {
     this.#deploymentTag = deploymentTag(deployment);
     this.#nat = new DoNatGateways(client, config, deployment, log);
     this.#peerings = new DoPeerings(client, config, deployment, log);
+    if (config.previews === true) {
+      const routes = new DoRoutes(client, config, deployment, log);
+      this.#routes = routes;
+      this.ensureRoute = (spec, context) => routes.ensure(spec, context);
+      this.deleteRoute = (ref, context) => routes.delete(ref, context);
+    }
   }
 
   // ---------------------------------------------------------------------------- NAT gateways
@@ -389,10 +405,12 @@ export class DoNetworks implements ProviderNetworks {
     // serves the VPC, DO would refuse its delete, so the subnet stays pending.
     const serving = await this.#nat.release(vpc, signal);
     const joining = await this.#peerings.release(vpc, signal);
-    if (serving.length > 0 || joining.length > 0) {
+    const routing = this.#routes ? await this.#routes.release(vpc, signal) : [];
+    if (serving.length > 0 || joining.length > 0 || routing.length > 0) {
       const foreign = [
         ...serving.filter((g) => !this.#nat.isOurs(g)).map((g) => `NAT gateway ${g.id}`),
         ...joining.filter((p) => !this.#peerings.isOurs(p)).map((p) => `peering ${p.id}`),
+        ...routing.filter((r) => !this.#routes!.isOurs(r)).map((r) => `route ${r.id}`),
       ];
       return state(
         id,
