@@ -465,6 +465,7 @@ describe('vps() API surface', () => {
       'vps/0088_provider_purchases_unknown',
       'vps/0090_provider_events',
       'vps/0091_provider_interruptions',
+      'vps/0111_instance_placement',
     ]);
     expect(module.requires).toEqual(['capacity']);
     expect(() => vps({ runtimes: [] })).toThrow(ComputeError);

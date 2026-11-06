@@ -497,6 +497,18 @@ export interface Flavor {
   placement?: { numaAffine?: boolean; pinned?: boolean; hugepages?: '2Mi' | '1Gi' };
 }
 
+/**
+ * (AWS A10) Where an instance's machine lands relative to its siblings: every instance of one
+ * tenant's `group` in a pool shares one provider placement group with one `strategy`.
+ */
+export interface InstancePlacementGroup {
+  /** A lower-case name, unique per tenant and pool. */
+  group: string;
+  strategy: 'cluster' | 'spread' | 'partition';
+  /** `partition` only: the partition (1–7) to launch into. */
+  partition?: number;
+}
+
 export interface Instance {
   id: string;
   tenantId: string;
@@ -521,6 +533,8 @@ export interface Instance {
   subnetId?: string;
   /** Provider labels the tenant asked for at create (provider pools; better-compute's own are not shown). */
   labels?: Record<string, string>;
+  /** (AWS A10) The tenant's placement group for the machine (provider pools), as asked at create. */
+  placement?: InstancePlacementGroup;
   addresses: string[];
   ownerIdentityId: string;
   idempotencyKey: string;

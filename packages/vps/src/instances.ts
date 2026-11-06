@@ -13,6 +13,7 @@ import {
   type EventPublisher,
   type ImageFormat,
   type Instance,
+  type InstancePlacementGroup,
   type InstanceDesiredState,
   type InstanceState,
   type InstanceVerb,
@@ -151,6 +152,8 @@ export interface CreateInstanceInput {
    * provider's own ownership labels are written over them.
    */
   labels?: Record<string, string>;
+  /** (AWS A10) The placement group to launch into (provider pools). */
+  placement?: InstancePlacementGroup;
   /**
    * (v1.0) Who owns the instance in the tenant (default: the caller), so it shows in their
    * `scope: 'mine'` list and owner policies apply to them. Only the platform (a root caller
@@ -274,6 +277,41 @@ export function instanceLabels(value: unknown): Record<string, string> {
 export const isSecretRef = (userData: string | undefined): userData is `secret://${string}` =>
   userData !== undefined && secretRefPattern.test(userData);
 
+const placementStrategies: ReadonlySet<string> = new Set(['cluster', 'spread', 'partition']);
+
+/** `instances.create` placement (AWS A10): a group name, a strategy, and a partition for partition groups. */
+export function instancePlacement(raw: unknown): InstancePlacementGroup {
+  const input = object(raw, ['group', 'strategy', 'partition']);
+  if (typeof input.group !== 'string' || !/^[a-z][a-z0-9-]{0,62}$/.test(input.group))
+    fail(
+      'placement.group is a lower-case letter, then lower-case letters, digits or - (at most 63)',
+    );
+  if (typeof input.strategy !== 'string' || !placementStrategies.has(input.strategy))
+    fail('placement.strategy is cluster, spread or partition');
+  const placement: InstancePlacementGroup = {
+    group: input.group,
+    strategy: input.strategy as InstancePlacementGroup['strategy'],
+  };
+  if (input.partition !== undefined) {
+    if (placement.strategy !== 'partition')
+      fail('placement.partition is for a partition strategy only');
+    placement.partition = int(input.partition, 'placement.partition', 1, 7);
+  }
+  return placement;
+}
+
+/**
+ * The provider's name for an instance's placement group: one per tenant, pool and group, so two
+ * tenants (or pools) with the same group name never share a provider placement group.
+ */
+export async function providerPlacementGroup(
+  row: Pick<InstanceRow, 'tenantId' | 'poolId'>,
+  placement: InstancePlacementGroup,
+): Promise<string> {
+  const digest = await sha256Hex(`${row.tenantId}/${row.poolId}/${placement.group}`);
+  return `bc-pg-${digest.slice(0, 32)}`;
+}
+
 export function parseCreateInstance(raw: unknown): CreateInstanceInput {
   const input = object(raw, [
     'tenantId',
@@ -287,6 +325,7 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
     'networkId',
     'subnetId',
     'labels',
+    'placement',
     'ownerIdentityId',
     'idempotencyKey',
     'wait',
@@ -337,6 +376,7 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
     const labels = instanceLabels(input.labels);
     if (Object.keys(labels).length > 0) result.labels = labels;
   }
+  if (input.placement !== undefined) result.placement = instancePlacement(input.placement);
   if (input.ownerIdentityId !== undefined) {
     if (
       typeof input.ownerIdentityId !== 'string' ||
@@ -486,6 +526,7 @@ interface RawInstance {
   network_id: string | null;
   subnet_id: string | null;
   labels: Record<string, string> | string | null;
+  placement: InstancePlacementGroup | string | null;
   network_external_name: string | null;
 }
 
@@ -616,6 +657,8 @@ export interface InstanceRow {
   networkExternalName?: string;
   /** The tenant's provider labels (`instances.create`, vps/0043). */
   labels?: Record<string, string>;
+  /** (AWS A10) The tenant's placement group (`instances.create`, vps/0111). */
+  placement?: InstancePlacementGroup;
 }
 
 const json = <T>(value: T | string): T =>
@@ -675,6 +718,7 @@ function toRow(raw: RawInstance): InstanceRow {
   if (raw.network_external_name !== null && raw.network_external_name !== undefined)
     row.networkExternalName = raw.network_external_name;
   if (raw.labels !== null && raw.labels !== undefined) row.labels = json(raw.labels);
+  if (raw.placement !== null && raw.placement !== undefined) row.placement = json(raw.placement);
   return row;
 }
 
@@ -687,7 +731,7 @@ const columns = `i.id, i.tenant_id, i.pool_id, i.project_id, i.flavor_id, i.flav
   (extract(epoch FROM i.host_cert_valid_before) * 1000)::float8 AS host_cert_valid_ms, i.network_policy,
   i.identity_rebind_ref, i.origin, i.on_delete, i.provider_claimed_at IS NOT NULL AS claimed,
   coalesce(i.reboot_requested_at > coalesce(i.rebooted_at, '-infinity'), false) AS reboot_pending,
-  i.reboot_hard, i.network_id, i.subnet_id, i.labels,
+  i.reboot_hard, i.network_id, i.subnet_id, i.labels, i.placement,
   (SELECT n.external_name FROM networks n WHERE n.id = i.network_id) AS network_external_name`;
 
 export async function readInstance(
@@ -729,6 +773,7 @@ export function instanceView(row: InstanceRow): Instance {
   if (row.networkId !== undefined) view.networkId = row.networkId;
   if (row.subnetId !== undefined) view.subnetId = row.subnetId;
   if (row.labels !== undefined) view.labels = { ...row.labels };
+  if (row.placement !== undefined) view.placement = { ...row.placement };
   return view;
 }
 
@@ -1281,6 +1326,28 @@ export async function prepareCreateInstance(
       'INVALID_INPUT',
       `Pool ${pool.id} is not a provider pool; labels are written on provider machines only`,
     );
+  if (input.placement !== undefined) {
+    if (pool.class !== 'provider')
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `Pool ${pool.id} is not a provider pool; placement groups are the provider's`,
+      );
+    // One strategy per group: a provider placement group has one, so another is refused here
+    // rather than failing the machine later.
+    const { rows: clash } = await tx.query<{ strategy: string }>(
+      `SELECT placement->>'strategy' AS strategy FROM instances
+        WHERE tenant_id = $1 AND pool_id = $2 AND placement IS NOT NULL
+          AND placement->>'group' = $3 AND placement->>'strategy' <> $4
+          AND state <> 'deleted' AND id <> $5
+        LIMIT 1`,
+      [input.tenantId, input.poolId, input.placement.group, input.placement.strategy, instanceId],
+    );
+    if (clash[0])
+      throw new ComputeError(
+        'CONFLICT',
+        `Placement group ${input.placement.group} is a ${clash[0].strategy} group in pool ${input.poolId}`,
+      );
+  }
   const flavor = await readFlavorByName(tx, input.poolId, input.flavor);
   if (!flavor || flavor.archived)
     throw new ComputeError('NOT_FOUND', `Flavor ${input.flavor} not found in pool ${input.poolId}`);
@@ -1332,9 +1399,10 @@ export async function prepareCreateInstance(
       `INSERT INTO instances (id, tenant_id, pool_id, project_id, flavor_id, flavor, image_id, image,
                               ssh_keys, user_data, runtime, draft, state, desired_state,
                               provider_account_id, owner_identity_id, agent_id, delegation_id,
-                              idempotency_key, request_hash, version, network_id, subnet_id, labels)
+                              idempotency_key, request_hash, version, network_id, subnet_id, labels,
+                              placement)
        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::text[], $10, $11, true, 'pending', $12,
-               $13, $14, $15, $16, $17, decode($18, 'hex'), 1, $19, $20, $21::jsonb)`,
+               $13, $14, $15, $16, $17, decode($18, 'hex'), 1, $19, $20, $21::jsonb, $22::jsonb)`,
       [
         instanceId,
         input.tenantId,
@@ -1357,6 +1425,7 @@ export async function prepareCreateInstance(
         placement?.networkId ?? null,
         placement?.subnetId ?? null,
         input.labels ? JSON.stringify(input.labels) : null,
+        input.placement ? JSON.stringify(input.placement) : null,
       ],
     );
   await context.authz.upsert(tx, {

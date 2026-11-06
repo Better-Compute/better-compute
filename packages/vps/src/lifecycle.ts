@@ -44,6 +44,7 @@ import {
   withoutCondition,
   type InstanceDeps,
   type InstanceRow,
+  providerPlacementGroup,
 } from './instances.js';
 import { closeOpenInterval, openInterval } from './instance-usage.js';
 import { releaseAddress } from './ipam.js';
@@ -544,6 +545,18 @@ async function reconcileProvider(
           ...(row.sshKeys.length ? { sshKeys: row.sshKeys } : {}),
           // The tenant's labels; the provider's own ownership labels win over them.
           ...(row.labels !== undefined ? { labels: row.labels } : {}),
+          // (AWS A10) The tenant's placement group, under a name scoped to its tenant and pool.
+          ...(row.placement !== undefined
+            ? {
+                placement: {
+                  group: await providerPlacementGroup(row, row.placement),
+                  strategy: row.placement.strategy,
+                  ...(row.placement.partition !== undefined
+                    ? { partition: row.placement.partition }
+                    : {}),
+                },
+              }
+            : {}),
           // (v1.0) On a tenant network: its subnet, and the tag the firewall rules target.
           ...(row.networkId !== undefined && row.subnetId !== undefined
             ? {
