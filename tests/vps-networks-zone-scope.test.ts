@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import type { ExternalMachine, ProviderNetworkState } from '@better-compute/core';
+import type {
+  ExternalMachine,
+  ProviderNetworkState,
+  ProviderSubnetSpec,
+} from '@better-compute/core';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
 import { defineProvider, vps } from '@better-compute/vps';
 
@@ -22,12 +26,15 @@ const machine = (name: string): ExternalMachine => ({
   state: 'running',
   addresses: [],
 });
+/** Every subnet spec a provider was asked to ensure. */
+const subnetSpecs: ProviderSubnetSpec[] = [];
 const networks = (extra: object) => ({
   ...extra,
   async ensureNetwork(spec: { name: string }) {
     return ready(spec.name);
   },
-  async ensureSubnet(spec: { name: string }) {
+  async ensureSubnet(spec: ProviderSubnetSpec) {
+    subnetSpecs.push(spec);
     return ready(spec.name);
   },
   async ensureFirewall(spec: { name: string }) {
@@ -246,6 +253,34 @@ describe('vps networks on a zone-scoped provider', () => {
       details: { zone: 'us-west-2-lax-1a' },
     });
     expect((failure as { details: object }).details).not.toHaveProperty('region');
+  });
+});
+
+describe('private service access on a subnet', () => {
+  it('privateAccess reaches the provider as privateGoogleAccess, off unless asked', async () => {
+    const w = await world();
+    const net = await w.network(w.zonalPool, { cidr: '10.30.0.0/16' });
+    const view = await w.addSubnet(net.id, {
+      region: 'us-west-2',
+      zone: 'us-west-2a',
+      cidr: '10.30.1.0/24',
+      privateAccess: true,
+    });
+    expect(view.subnets[0]).toMatchObject({ privateAccess: true });
+    await w.addSubnet(net.id, { region: 'us-west-2', zone: 'us-west-2a', cidr: '10.30.2.0/24' });
+    subnetSpecs.length = 0;
+    expect(await w.converge(net.id)).toMatchObject({ state: 'ready' });
+    const byCidr = new Map(subnetSpecs.map((spec) => [spec.cidr, spec]));
+    expect(byCidr.get('10.30.1.0/24')).toMatchObject({ privateGoogleAccess: true });
+    expect(byCidr.get('10.30.2.0/24')).not.toHaveProperty('privateGoogleAccess');
+    await expect(
+      w.addSubnet(net.id, {
+        region: 'us-west-2',
+        zone: 'us-west-2a',
+        cidr: '10.30.3.0/24',
+        privateAccess: 'yes',
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
 });
 

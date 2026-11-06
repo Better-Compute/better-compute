@@ -281,8 +281,8 @@ nothing depends on remembered ids. The tenant-facing behaviour above holds; thes
   deny applies whatever the priority of a targeted allow, and ACLs are stateless: a deny on ingress ports can block the
   replies to outbound connections that use them. An ACL holds 20 entries per direction by default; a deny that does not
   fit is `error`. Deny rules on an adopted VPC are `error`: its ACL is never edited.
-- **Private service access.** A subnet with private Google access on GCE maps to S3 and DynamoDB gateway endpoints on
-  the VPC's main route table; they are removed with the network.
+- **Private service access.** `networks.addSubnet` with `privateAccess: true` (Private Google Access on GCE) adds S3
+  and DynamoDB gateway endpoints on the VPC's main route table; they are removed with the network.
 - **Deletion** removes endpoints, subnets, security groups and the gateway, then the VPC; anything still in use
   (`DependencyViolation`) keeps the delete `pending`, and machines still on a subnet keep their groups and gateway
   until they are gone. Only VPCs carrying the network tag are ever deleted. An

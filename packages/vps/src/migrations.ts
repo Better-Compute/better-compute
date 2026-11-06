@@ -13,6 +13,7 @@ import {
   vpsNetworkAdoptMigration,
   vpsNetworksMigration,
   vpsNetworkZonesMigration,
+  vpsSubnetPrivateAccessMigration,
 } from './networks.js';
 import {
   vpsIdentityRebindMigration,
@@ -211,4 +212,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsInstanceLabelsMigration,
   vpsNetworkAdoptMigration,
   vpsNetworkZonesMigration,
+  vpsSubnetPrivateAccessMigration,
 ]);

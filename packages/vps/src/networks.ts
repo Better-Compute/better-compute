@@ -157,6 +157,15 @@ ALTER TABLE networks ADD COLUMN cidr cidr;
 `,
 };
 
+/**
+ * (AWS A2) A subnet asks for private access to the cloud's own services (`privateAccess`): GCE's
+ * Private Google Access, AWS's S3 and DynamoDB gateway endpoints. Off for every existing subnet.
+ */
+export const vpsSubnetPrivateAccessMigration: Migration = {
+  name: 'vps/0085_subnet_private_access',
+  sql: `ALTER TABLE network_subnets ADD COLUMN private_access boolean NOT NULL DEFAULT false;`,
+};
+
 // --- Provider names ----------------------------------------------------------------------------
 
 /**
@@ -204,6 +213,8 @@ export interface NetworkView {
     region: string;
     zone?: string;
     cidr: string;
+    /** Private access to the cloud's own services was asked for (`networks.addSubnet`). */
+    privateAccess?: true;
     state: NetworkState;
   }[];
   /** Adopted (`networks.adopt`): the provider VPC's own name, which better-compute never deletes. */
@@ -275,6 +286,8 @@ export interface AddSubnetInput extends NetworkRef {
   /** Required on a zone-scoped provider (AWS): one of the account's zones, in `region`. */
   zone?: string;
   cidr: string;
+  /** Private access to the cloud's own services (GCE Private Google Access, AWS S3/DynamoDB endpoints). */
+  privateAccess?: boolean;
 }
 export interface RemoveSubnetInput extends NetworkRef {
   subnetId: string;
@@ -504,7 +517,17 @@ export function parseUpdateNetwork(raw: unknown): UpdateNetworkInput {
 }
 
 export function parseAddSubnet(raw: unknown): AddSubnetInput {
-  const input = object(raw, ['tenantId', 'networkId', 'name', 'region', 'zone', 'cidr']);
+  const input = object(raw, [
+    'tenantId',
+    'networkId',
+    'name',
+    'region',
+    'zone',
+    'cidr',
+    'privateAccess',
+  ]);
+  if (input.privateAccess !== undefined && typeof input.privateAccess !== 'boolean')
+    fail('privateAccess must be true or false');
   if (typeof input.region !== 'string' || !regionName.test(input.region)) fail('region is invalid');
   if (input.zone !== undefined && (typeof input.zone !== 'string' || !zoneName.test(input.zone)))
     fail('zone is invalid');
@@ -515,6 +538,7 @@ export function parseAddSubnet(raw: unknown): AddSubnetInput {
     region: input.region as string,
     ...(input.zone !== undefined ? { zone: input.zone as string } : {}),
     cidr: subnetCidr(input.cidr),
+    ...(input.privateAccess === true ? { privateAccess: true } : {}),
   };
 }
 
@@ -798,7 +822,12 @@ export const networkSchemas = {
       cidr: {
         type: 'string',
         description:
-          'A private (RFC 1918) IPv4 range from /8 to /29 that overlaps no other subnet of the network',
+          'A private (RFC 1918) IPv4 range from /8 to /29 (narrower where the provider takes less, AWS /16 to /28) that overlaps no other subnet of the network',
+      },
+      privateAccess: {
+        type: 'boolean',
+        description:
+          'Reach the cloud’s own services privately: Private Google Access on GCE, S3 and DynamoDB gateway endpoints on AWS. Default false',
       },
     },
     ['tenantId', 'networkId', 'name', 'region', 'cidr'],
@@ -863,6 +892,7 @@ interface SubnetRow {
   region: string;
   zone: string | null;
   cidr: string;
+  private_access: boolean;
   state: NetworkState;
   desired_state: 'present' | 'deleted';
   message: string | null;
@@ -884,7 +914,7 @@ type RuleSpec = Omit<RuleFields, 'enabled'>;
 const networkColumns = `id, tenant_id, project_id, pool_id, provider_account_id, name, description, state,
   desired_state, message, encode(request_hash, 'hex') AS request_hash, version, created_at,
   provisioned_at, external_name, shared_tag_scoped, cidr::text AS cidr`;
-const subnetColumns = `id, network_id, name, region, zone, cidr::text AS cidr, state, desired_state, message`;
+const subnetColumns = `id, network_id, name, region, zone, cidr::text AS cidr, private_access, state, desired_state, message`;
 const ruleColumns = `id, network_id, name, spec, enabled, state, desired_state, message, version`;
 
 export function networkView(row: NetworkRow, subnets: readonly SubnetRow[]): NetworkView {
@@ -907,6 +937,7 @@ export function networkView(row: NetworkRow, subnets: readonly SubnetRow[]): Net
         region: subnet.region,
         ...(subnet.zone !== null && subnet.zone !== undefined ? { zone: subnet.zone } : {}),
         cidr: subnet.cidr,
+        ...(subnet.private_access === true ? { privateAccess: true as const } : {}),
         state: subnet.state,
       })),
     ...(row.external_name !== null ? { externalNetwork: row.external_name } : {}),
@@ -1527,15 +1558,23 @@ export async function addSubnet(
     if (previous)
       // A deleted subnet's name is free again: the row is revived (its provider resource is gone).
       await tx.query(
-        `UPDATE network_subnets SET region = $2, cidr = $3::cidr, zone = $4, state = 'pending', desired_state = 'present', message = NULL
+        `UPDATE network_subnets SET region = $2, cidr = $3::cidr, zone = $4, private_access = $5, state = 'pending', desired_state = 'present', message = NULL
           WHERE id = $1`,
-        [previous.id, input.region, input.cidr, input.zone ?? null],
+        [previous.id, input.region, input.cidr, input.zone ?? null, input.privateAccess === true],
       );
     else
       await tx.query(
-        `INSERT INTO network_subnets (id, network_id, name, region, zone, cidr, state, desired_state)
-         VALUES ($1, $2, $3, $4, $5, $6::cidr, 'pending', 'present')`,
-        [newId('snet'), network.id, input.name, input.region, input.zone ?? null, input.cidr],
+        `INSERT INTO network_subnets (id, network_id, name, region, zone, cidr, private_access, state, desired_state)
+         VALUES ($1, $2, $3, $4, $5, $6::cidr, $7, 'pending', 'present')`,
+        [
+          newId('snet'),
+          network.id,
+          input.name,
+          input.region,
+          input.zone ?? null,
+          input.cidr,
+          input.privateAccess === true,
+        ],
       );
   } catch (error) {
     if (exclusionViolation(error))
@@ -2481,6 +2520,7 @@ class NetworkWorker {
             region: subnet.region,
             cidr: subnet.cidr,
             ...(subnet.zone !== null && subnet.zone !== undefined ? { zone: subnet.zone } : {}),
+            ...(subnet.private_access === true ? { privateGoogleAccess: true } : {}),
           },
           this.#call(subnet.id),
         ),
