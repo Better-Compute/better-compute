@@ -50,7 +50,11 @@ export function digitaloceanProvider(
       return new DoCompute(
         config,
         context,
-        { deployment: options.deployment ?? 'default', inCallWaitMs },
+        {
+          deployment: options.deployment ?? 'default',
+          inCallWaitMs,
+          ...(options.catalogImages ? { catalogImages: options.catalogImages } : {}),
+        },
         clientFor(config, context, options),
       );
     },

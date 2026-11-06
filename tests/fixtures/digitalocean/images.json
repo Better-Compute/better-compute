@@ -1,0 +1,53 @@
+{
+  "_provenance": "Shape: OpenAPI images/models/image.yml (spec): id, name, type (base/snapshot/backup/custom/admin), distribution, slug, public, regions, created_at, min_disk_size, size_gigabytes, description, tags, status (NEW/available/pending/deleted/retired), error_message. Custom-image create body {name, url, region, distribution, description, tags} (images_create_custom.yml, spec). Values are illustrative; the gpu-*-base slugs follow the AI/ML image naming in the research doc (S2, docs).",
+  "images": [
+    {
+      "id": 129211873,
+      "name": "24.04 (LTS) x64",
+      "type": "base",
+      "distribution": "Ubuntu",
+      "slug": "ubuntu-24-04-x64",
+      "public": true,
+      "regions": ["nyc3", "sfo3", "tor1", "atl1"],
+      "created_at": "2024-04-25T15:33:28Z",
+      "min_disk_size": 7,
+      "size_gigabytes": 2.36,
+      "description": "Ubuntu 24.04 x64",
+      "tags": [],
+      "status": "available",
+      "error_message": ""
+    },
+    {
+      "id": 129211874,
+      "name": "AI/ML Ready H100x1",
+      "type": "base",
+      "distribution": "Ubuntu",
+      "slug": "gpu-h100x1-base",
+      "public": true,
+      "regions": ["nyc3", "tor1", "atl1"],
+      "created_at": "2025-01-10T12:00:00Z",
+      "min_disk_size": 30,
+      "size_gigabytes": 12.4,
+      "description": "Ubuntu with NVIDIA drivers and CUDA",
+      "tags": [],
+      "status": "available",
+      "error_message": ""
+    }
+  ],
+  "custom": {
+    "id": 38413969,
+    "name": "ubuntu-18.04-minimal",
+    "type": "custom",
+    "distribution": "Ubuntu",
+    "slug": null,
+    "public": false,
+    "regions": [],
+    "created_at": "2018-09-20T19:28:00Z",
+    "min_disk_size": null,
+    "size_gigabytes": null,
+    "description": "Cloud-optimized image w/ small footprint",
+    "tags": ["base-image", "prod"],
+    "status": "NEW",
+    "error_message": ""
+  }
+}

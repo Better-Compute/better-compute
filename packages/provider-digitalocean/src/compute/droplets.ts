@@ -29,6 +29,7 @@ import { DoNetworks } from '../networks/index.js';
 import { networkNamer, vpcForNetwork } from '../networks/vpcs.js';
 import { poolMembers } from './autoscale.js';
 import { ensureSshKeys } from './keys.js';
+import { DoCatalogImages } from './catalog.js';
 import { classifyImage, imageParam, type ImageChoice } from './images.js';
 import { cachedSize, gpuModelOf, listOffers } from './offers.js';
 import { assignTag, ensureTag, hasTag, spelled, unassignTag } from './tags.js';
@@ -153,20 +154,26 @@ const powerTypes: Readonly<Record<Exclude<PowerAction, 'nmi'>, string>> = {
 };
 
 
+/** What a DoCompute takes from the provider options. */
+export type DoComputeOptions = Required<Pick<DoProviderOptions, 'deployment' | 'inCallWaitMs'>> &
+  Pick<DoProviderOptions, 'catalogImages'>;
+
 export class DoCompute implements ProviderImpl {
   protected readonly config: DoConfig;
   protected readonly context: ProviderContext;
-  protected readonly options: Required<Pick<DoProviderOptions, 'deployment' | 'inCallWaitMs'>>;
+  protected readonly options: DoComputeOptions;
   protected readonly client: DoClient;
   /** This deployment's tag: what `delete` and the reaper require, with the managed tag. */
   protected readonly deploymentTag: string;
   /** Tenant networks: VPCs, Cloud Firewalls and Droplet tags. */
   readonly networks: DoNetworks;
+  /** Catalog images imported as custom images; absent without `catalogImages`. */
+  protected readonly catalog: DoCatalogImages | undefined;
 
   constructor(
     config: DoConfig,
     context: ProviderContext,
-    options: Required<Pick<DoProviderOptions, 'deployment' | 'inCallWaitMs'>>,
+    options: DoComputeOptions,
     client: DoClient,
   ) {
     this.config = config;
@@ -175,6 +182,14 @@ export class DoCompute implements ProviderImpl {
     this.client = client;
     this.deploymentTag = deploymentTag(options.deployment);
     this.networks = new DoNetworks(client, config, options.deployment);
+    this.catalog = options.catalogImages
+      ? new DoCatalogImages(
+          client,
+          options.catalogImages,
+          { managed: managedTag, deployment: this.deploymentTag },
+          context.log,
+        )
+      : undefined;
   }
 
   /** Whether better-compute may delete the Droplet: managed, and in this deployment (R3). */
@@ -536,18 +551,19 @@ export class DoCompute implements ProviderImpl {
 
   /** Refuses, before any request, an image this provider can't boot: a catalog image needs a source. */
   protected checkImage(choice: ImageChoice): ImageChoice {
-    if (choice.kind === 'catalog') throw noCatalog(choice.ref);
+    if (choice.kind === 'catalog' && !this.catalog) throw noCatalog(choice.ref);
     return choice;
   }
 
   /** The `image` member of a create or rebuild in `region`. */
   protected async imageFor(
     choice: ImageChoice,
-    _region: string,
-    _signal: AbortSignal,
+    region: string,
+    signal: AbortSignal,
   ): Promise<string | number> {
-    if (choice.kind === 'catalog') throw noCatalog(choice.ref);
-    return imageParam(choice);
+    if (choice.kind !== 'catalog') return imageParam(choice);
+    if (!this.catalog) throw noCatalog(choice.ref);
+    return this.catalog.imageIn(choice.ref, region, signal);
   }
 
   /**

@@ -4,6 +4,7 @@ import { registerAutoscale } from './autoscale.js';
 import { registerCatalog } from './catalog.js';
 import { registerDroplets } from './droplets.js';
 import { registerFirewalls } from './firewalls.js';
+import { registerImages } from './images.js';
 import { registerKeys } from './keys.js';
 import { registerTags } from './tags.js';
 import { registerVpcs } from './vpcs.js';
@@ -88,6 +89,10 @@ export class DoEmulator {
    * turns `succeeded` (list entries count). The create or replace itself always answers `waiting`.
    */
   firewallReads = 0;
+  /** How many reads of an imported custom image it takes to turn `available` (P3). */
+  importReads = 1;
+  /** How many reads of an image it takes for a `transfer` action to complete (P3). */
+  transferReads = 1;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -272,5 +277,6 @@ export class DoEmulator {
     registerActions(this);
     registerVpcs(this);
     registerFirewalls(this);
+    registerImages(this);
   }
 }

@@ -5,6 +5,7 @@
 export * from './client/errors.js';
 export * from './client/http.js';
 export { RateBudget, budgetFor, budgetShares, resetBudgets, tokenHash } from './client/budget.js';
+export * from './compute/catalog.js';
 export * from './compute/droplets.js';
 export * from './compute/images.js';
 export * from './compute/keys.js';

@@ -14,6 +14,8 @@ export const labels = {
   owner: 'better-compute-owner',
   deployment: 'better-compute-deployment',
   key: 'better-compute-key',
+  /** On a custom image better-compute imported: a prefix of the catalog digest (P3). */
+  image: 'better-compute-image',
   /** Not a tag: discovery sets it on a Droplet that belongs to a DO autoscale pool. */
   autoscalePool: 'better-compute-autoscale-pool',
 } as const;

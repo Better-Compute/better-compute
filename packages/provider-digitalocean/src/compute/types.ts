@@ -90,3 +90,23 @@ export interface DoAutoscaleMember {
   status?: string;
   health_status?: string;
 }
+
+/**
+ * An image (`GET /images/{id}`): a public distribution or AI/ML image, a snapshot or a custom
+ * image. `status` is `NEW`, `available`, `pending`, `deleted` or `retired`; `regions` are where
+ * it can boot (empty while a custom image is still importing).
+ */
+export interface DoImage {
+  id: number;
+  name: string;
+  type?: string;
+  distribution?: string;
+  slug?: string | null;
+  public?: boolean;
+  regions: string[];
+  created_at: string;
+  status?: string;
+  error_message?: string;
+  description?: string;
+  tags?: string[];
+}
