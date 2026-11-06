@@ -66,6 +66,42 @@ describe('provider account onboarding (A7)', () => {
     });
   });
 
+  it('a malformed platformPrincipalArn is refused when the provider is built, never shown', () => {
+    for (const platformPrincipalArn of [
+      'bc-control-plane',
+      'arn:aws:s3:::bucket',
+      'arn:aws:iam::1111:role/x',
+      'arn:aws:iam::111111111111:group/ops',
+    ])
+      expect(() => awsProvider({ platformPrincipalArn }), platformPrincipalArn).toThrow(
+        expect.objectContaining({
+          code: 'INVALID_CONFIG',
+          details: expect.objectContaining({ provider: 'aws', reason: 'platformPrincipalArn' }),
+        }),
+      );
+    expect(() => awsProvider({ platformPrincipalArn: PLATFORM })).not.toThrow();
+    // Unset, a role account shows the ExternalId only: the principal is the host's to name.
+    const describe = awsProvider().describeAccount!;
+    expect(
+      describe(
+        {
+          region: 'us-east-1',
+          zones: ['us-east-1a'],
+          assumeRoleArn: 'arn:aws:iam::222222222222:role/better-compute',
+          rootVolumeGiB: 100,
+          rootVolumeType: 'gp3',
+          metadataHopLimit: 1,
+          associatePublicIp: true,
+        },
+        { id: 'pa_3', tenantId: 't_acme', name: 'role', platform: false },
+      ),
+    ).toEqual({
+      mode: 'assume-role',
+      roleArn: 'arn:aws:iam::222222222222:role/better-compute',
+      externalId: 'better-compute:pa_3',
+    });
+  });
+
   it('a keyless account shows the subject and audience its role trusts', () => {
     // The keyless account's check is covered by aws-account-federation.test.ts; the hook is pure.
     const describe = awsProvider().describeAccount!;
@@ -137,6 +173,26 @@ describe('provider account onboarding (A7)', () => {
         throw new Error('boom');
       },
     });
+    const bigint = defineProvider({
+      id: 'bigint',
+      version: '1.0.0',
+      provides: ['vps'],
+      config: manifest({ zone: field.string().optional() }),
+      create: () => ({}) as any,
+      describeAccount: () => ({ n: 1n }) as any,
+    });
+    const circular = defineProvider({
+      id: 'circular',
+      version: '1.0.0',
+      provides: ['vps'],
+      config: manifest({ zone: field.string().optional() }),
+      create: () => ({}) as any,
+      describeAccount: () => {
+        const loop: Record<string, unknown> = {};
+        loop.self = loop;
+        return loop as any;
+      },
+    });
     expect(() =>
       defineProvider({
         id: 'bad',
@@ -149,13 +205,13 @@ describe('provider account onboarding (A7)', () => {
     ).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG' }));
     const fixture = await computeFixture({
       clock: 'sim',
-      modules: [vps({ providers: [plain, broken] })],
+      modules: [vps({ providers: [plain, broken, bigint, circular] })],
     });
     const { compute, tenants, iam } = fixture;
     iam.allow({ token: tenants.root.token });
     const api = compute.api as any;
     const root = { token: tenants.root.token };
-    for (const provider of ['plain', 'broken']) {
+    for (const provider of ['plain', 'broken', 'bigint', 'circular']) {
       const created = await api.providerAccounts.create(root, {
         tenantId: tenants.root.id,
         provider,

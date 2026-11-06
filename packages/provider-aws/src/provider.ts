@@ -1,6 +1,8 @@
+import { ComputeError } from '@better-compute/core';
 import { ec2Client } from '@better-compute/aws-core';
 import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 import { accountCredentials } from './account.js';
+import { trustPolicy } from './cli.js';
 import { AwsCompute } from './compute.js';
 import { awsConfig, validateAwsConfig, type AwsConfig, type AwsProviderOptions } from './config.js';
 import { checkAwsAccount } from './federation.js';
@@ -13,6 +15,19 @@ import { instanceTypeCache, zoneCache } from './shapes.js';
  * (root-tenant) accounts may use (F1).
  */
 export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinition<AwsConfig> {
+  // The principal tenants are told to trust (onboarding.platformPrincipalArn): an IAM role or user
+  // ARN, as `aws trust-policy --platform-principal` takes, or the host fails at start.
+  if (options.platformPrincipalArn !== undefined)
+    try {
+      trustPolicy({ platformPrincipalArn: options.platformPrincipalArn, externalId: 'better-compute:x' });
+    } catch {
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'awsProvider platformPrincipalArn must be the IAM role or user ARN of the control plane identity',
+        undefined,
+        { provider: 'aws', reason: 'platformPrincipalArn' },
+      );
+    }
   return defineProvider<AwsConfig>({
     id: 'aws',
     version: '0.1.0',

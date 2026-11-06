@@ -967,18 +967,18 @@ export function describedAccount(
 ): ProviderAccount {
   const describe = providers.get(account.provider)?.describeAccount;
   if (!describe) return account;
-  let onboarding: unknown;
   try {
-    onboarding = describe(account.config, {
+    const onboarding: unknown = describe(account.config, {
       ...accountContext(account, rootTenantId),
       name: account.name,
     });
+    if (typeof onboarding !== 'object' || onboarding === null || Array.isArray(onboarding))
+      return account;
+    // Inside the try: a BigInt or a cycle throws here, and shows nothing rather than failing.
+    return { ...account, onboarding: JSON.parse(JSON.stringify(onboarding)) as Record<string, Json> };
   } catch {
     return account;
   }
-  if (typeof onboarding !== 'object' || onboarding === null || Array.isArray(onboarding))
-    return account;
-  return { ...account, onboarding: JSON.parse(JSON.stringify(onboarding)) as Record<string, Json> };
 }
 
 /** Builds provider clients from accounts, cached per (account id, version). */

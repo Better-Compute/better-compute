@@ -66,7 +66,10 @@ To onboard a tenant's AWS account:
 
 `providerAccounts.get` shows what the tenant still has to set up as the account's `onboarding`: `mode`
 (`assume-role`, `web-identity`, `access-key` or `ambient`), and for a role the `externalId` and, when the host
-passes `awsProvider({ platformPrincipalArn })`, the principal to trust. `better-compute aws onboarding-template
+passes `awsProvider({ platformPrincipalArn })`, the principal to trust. That option is display only and never
+derived (reading the host's identity would be a network call on every read); a value that is not an IAM role or
+user ARN fails `awsProvider` (`INVALID_CONFIG`, `platformPrincipalArn`), and without it tenants see the ExternalId
+only and must get the principal from the operator. `better-compute aws onboarding-template
 --account <pa_…> --platform-principal <arn>` renders steps 2 and 3 as one CloudFormation template (the role, its
 trust and the ABAC policy; the same `--region`, `--instance-profile`, `--kms-key` and `--discover-tag` flags).
 
