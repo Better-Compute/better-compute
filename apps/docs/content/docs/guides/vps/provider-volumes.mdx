@@ -1,0 +1,175 @@
+---
+title: Volumes and addresses
+description: Block volumes, their snapshots and reserved public addresses on a provider account, as typed resources next to instances, and what happens to them when an instance is deleted.
+metaTitle: Provider volumes, snapshots and reserved IPs
+icon: HardDrive
+status: new
+packages: ['@better-compute/vps', '@better-compute/core', '@better-compute/provider-digitalocean']
+sources: ['packages/vps/src/provider-resources.ts', 'packages/vps/src/lifecycle.ts', 'packages/core/src/extension.ts', 'packages/core/src/catalog.ts', 'packages/events/src/catalog.ts', 'packages/provider-digitalocean/src/storage/volumes.ts', 'packages/provider-digitalocean/src/edge/addresses.ts', 'packages/provider-digitalocean/src/compute/droplets.ts', 'tests/vps-provider-resources.test.ts', 'tests/do-end-to-end.test.ts', 'tests/provider-digitalocean-volumes.test.ts', 'tests/provider-digitalocean-addresses.test.ts']
+---
+
+A tenant on a provider pool can keep data and an address that outlive any one instance: a **provider volume** is a
+block volume on the pool's provider account, a **provider snapshot** is a point-in-time copy of one, and a **provider
+address** is a reserved public IP. All three are typed resources of the `vps` module, listed and authorized like
+instances, and converged on the provider by one reconciler, `vps.provider-resources`.
+
+They are different from the [sandbox and host volumes](/docs/guides/vps/sandboxes) that `bcd` keeps on a hosted
+machine's own disks: those live on a node, these live in the cloud account.
+
+| Provider     | Volumes                       | Snapshots                 | Addresses                     |
+| ------------ | ----------------------------- | ------------------------- | ----------------------------- |
+| DigitalOcean | Block Storage (`kind: block`) | Volume snapshots          | Reserved IPv4 and IPv6        |
+| Others       | When the provider implements `ProviderImpl.volumes` | With volumes | When it implements `ProviderImpl.addresses` |
+
+A pool whose provider implements neither answers `UNSUPPORTED` to every create.
+
+## How a request converges
+
+Every mutation records what the tenant wants (`desiredState`, the wanted attachment or assignment) in its own
+transaction and returns at once, usually with `state: 'pending'`. The reconciler then calls the provider outside any
+transaction and writes back what it saw:
+
+- States are `pending`, `ready`, `updating` (a resize running), `deleting`, `deleted` and `error`. An `error` carries
+  the provider's `message` and is retried by the next change or the periodic pass (every 5 minutes).
+- Provider actions (attach, detach, resize, snapshot) never block a run. A running action is looked at again 5 seconds
+  later; a rate-limited or unavailable provider 30 seconds later.
+- A create sends the provider a name derived from the resource id, so a create whose answer was lost finds what it
+  made instead of making a second one. A reserved IP has no name on DigitalOcean: a reserve whose answer was lost puts
+  the address in `error` and is never sent again (see [lost reserves](#lost-reserves)).
+
+Each create takes an `idempotencyKey`. The same key with the same body returns the same resource; with a different
+body it is `CONFLICT`.
+
+## Volumes
+
+```ts title="volume.ts"
+const volume = await compute.api.providerVolumes.create(token, {
+  tenantId: 'ten_01jz…',
+  poolId: 'pool_01jz…',
+  name: 'pg-data',
+  region: 'nyc3',
+  sizeGiB: 100,
+  filesystem: 'ext4',
+  instanceId: 'inst_01jz…', // attach once both are ready
+  idempotencyKey: 'pg-data-1',
+});
+// → { id: 'pvol_…', state: 'pending', attachment: { instanceId, state: 'pending', desiredState: 'present' }, … }
+```
+
+<TypeTable
+  type={{
+    name: { type: 'string', description: '1-42 lower-case letters, digits or -, starting with a letter. Unique per tenant among volumes that are not deleted.', required: true },
+    region: { type: 'string', description: "One of the provider account's regions, such as nyc3.", required: true },
+    sizeGiB: { type: 'number', description: 'From 1 to 16384 GiB.', required: true },
+    filesystem: { type: "'ext4' | 'xfs' | 'none'", description: 'Formats the volume when it is created. Unset or none: a raw block device.' },
+    instanceId: { type: 'string', description: 'An instance to attach it to, of the same tenant, provider account and region.' },
+    deleteWithInstance: { type: 'boolean', description: 'Delete the volume when the instance it is attached to is deleted; otherwise deleting the instance only detaches it.', default: 'false' },
+    description: { type: 'string', description: 'Free text kept with the volume.' },
+    projectId: { type: 'string', description: 'The project the volume belongs to, for listing.' },
+  }}
+/>
+
+Once it is `ready`, `device` is the path the guest sees it at. On DigitalOcean that is
+`/dev/disk/by-id/scsi-0DO_Volume_<name>`, where `<name>` is the provider name derived from the volume id.
+
+The other methods of `providerVolumes`:
+
+| Method     | What it does                                                                                       |
+| ---------- | -------------------------------------------------------------------------------------------------- |
+| `get`, `list` | One volume, or the tenant's (filter by `poolId` or `projectId`; `includeDeleted` adds deleted ones). |
+| `attach`   | Attaches it to an instance. A volume is attached to one instance at a time: a second instance is `CONFLICT`, never a silent move. |
+| `detach`   | Detaches it. The volume stays.                                                                     |
+| `resize`   | Grows it to `sizeGiB`. A smaller size is `INVALID_INPUT`: volumes only grow.                        |
+| `snapshot` | Takes a snapshot (`name`, `idempotencyKey`). At most 25 snapshots that are not deleted per volume. |
+| `delete`   | Deletes it at the provider. `INVALID_STATE` while it is attached: detach it first.                 |
+
+Attach refuses before any provider call: an instance of another tenant is `ACCESS_DENIED`; one on another provider
+account or in another region is `INVALID_INPUT`; an instance being deleted is `INVALID_STATE`.
+
+## Snapshots
+
+A snapshot outlives its volume. `providerSnapshots` has `get`, `list` (filter by `volumeId`), `delete` and `restore`:
+
+```ts title="restore.ts"
+const copy = await compute.api.providerSnapshots.restore(token, {
+  tenantId: 'ten_01jz…',
+  snapshotId: 'psnap_01jz…',
+  name: 'pg-data-copy',
+  idempotencyKey: 'restore-1',
+  // optional: sizeGiB (not below the snapshot's), filesystem, description, deleteWithInstance
+});
+// → a new provider volume, created from the snapshot
+```
+
+A restore waits until the snapshot is `ready`, and fails if the snapshot is deleted first.
+
+## Addresses
+
+```ts title="address.ts"
+const ip = await compute.api.providerAddresses.create(token, {
+  tenantId: 'ten_01jz…',
+  poolId: 'pool_01jz…',
+  name: 'ingress',
+  region: 'nyc3',
+  family: 'ipv4', // or 'ipv6'
+  idempotencyKey: 'ingress-1',
+});
+await compute.api.providerAddresses.assign(token, { tenantId: ip.tenantId, addressId: ip.id, instanceId: 'inst_01jz…' });
+// get → { address: '203.0.113.7', assignmentState: 'ready', instanceId: 'inst_01jz…', … }
+```
+
+`assignmentState` is `none`, `pending`, `ready`, `deleting` (an unassign running) or `error` (with
+`assignmentMessage`). An address is on one instance at a time: assigning it to a second instance is `CONFLICT`, and to
+an instance of another tenant `ACCESS_DENIED`. `unassign` releases it and keeps it reserved. `delete` is `INVALID_STATE`
+while it is assigned.
+
+The reconciler never takes an address over from a machine it did not put it on: if the provider reports it on another
+machine, the assignment goes to `error` and nothing is moved.
+
+### Lost reserves
+
+DigitalOcean's reserved IPs carry no name or tag, so a reserve whose answer never arrived (a timeout or a dropped
+connection) cannot be found again. Rather than risk a second address, the address goes to `error` with a message
+saying so, and is never reserved again. Delete it, and check the account's reserved IPs for one that is not assigned. A
+reserve that was refused or rate-limited reserved nothing, and is retried.
+
+## Deleting an instance
+
+Deleting an instance takes care of its volumes and addresses:
+
+1. While the machine is being deleted, a volume with `deleteWithInstance` makes no provider call (an ensure by name
+   could otherwise make again a volume the delete already took).
+2. The machine delete names the instance's `deleteWithInstance` volumes. On DigitalOcean that is one
+   `DELETE /v2/droplets/{id}/destroy_with_associated_resources/selective` naming only volumes that carry this
+   deployment's managed tags and are attached to that Droplet. A tenant's own volume attached by hand is never named
+   and survives. With nothing to name it is a plain `DELETE /v2/droplets/{id}`. Tag-scoped bulk deletes are never used.
+3. When the delete finishes, the instance's attachments are no longer wanted, its `deleteWithInstance` volumes move to
+   `deleting`, and every volume and address it had is woken. The reconciler settles the detach, deletes what is to go
+   (already gone after a selective destroy; a provider without one deletes it after the machine) and unassigns its
+   addresses, which stay reserved.
+
+An instance that finishes as a **detach** (an attached machine with `onDelete: 'detach'`, or one whose ownership label
+is gone) leaves its machine running. Its volumes are only detached, `deleteWithInstance` or not.
+
+## Quota, billing and events
+
+- A volume books its `sizeGiB` as `diskGiB` quota on (tenant, pool), the resource a provider instance's disk books;
+  growing it books the difference. An address books one `addresses`. A tenant without a quota row for the resource
+  gets nothing (`QUOTA_EXCEEDED`, fail closed). The booking is refunded once the provider has deleted the resource.
+  Snapshots book no quota.
+- The meters are `vps.volume.gib.hours`, `vps.snapshot.gib.hours` and `vps.address.hours`. In this release the rows
+  record `ready_at`, `deleted_at` and `metered_until`, but usage windows are not written for them yet.
+- Events: `providerVolume.*` (created, updated, ready, attached, detached, resized, error, deleting, deleted),
+  `providerVolume.snapshot.*` and `providerAddress.*` (created, updated, ready, assigned, unassigned, error, deleting,
+  deleted). See the [event catalog](/docs/reference/events).
+
+## Permissions
+
+| Group               | Read             | Everything else     | Resource                     |
+| ------------------- | ---------------- | ------------------- | ---------------------------- |
+| `providerVolumes`   | `volumes:read`   | `volumes:manage`    | `provider-volume/{id}`       |
+| `providerSnapshots` | `volumes:read`   | `volumes:manage`    | `provider-snapshot/{id}`     |
+| `providerAddresses` | `addresses:read` | `addresses:manage`  | `provider-address/{id}`      |
+
+`list` is decided on the tenant. A create is decided on the new resource, a restore on the snapshot and a snapshot on
+its volume.
