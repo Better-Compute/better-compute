@@ -201,7 +201,7 @@ describe('probeAccount operations', () => {
       { fetch: emu.fetch },
       { operations: true },
     );
-    expect(report.operations).toEqual({ billing: 'denied', projects: 'ok' });
+    expect(report.operations).toEqual({ billing: 'denied', projects: 'ok', monitoring: 'ok' });
     expect(report.missing).toEqual(['billing:read']);
   });
 });

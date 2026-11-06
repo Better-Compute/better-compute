@@ -22,12 +22,13 @@ export interface DoAccountReport {
 }
 
 /** (P9) Read scopes the operations surfaces need: none of them is needed to run Droplets. */
-export type DoOperationsFamily = 'billing' | 'projects';
+export type DoOperationsFamily = 'billing' | 'projects' | 'monitoring';
 
 /** One read per operations scope. */
 const operationsProbes: readonly { family: DoOperationsFamily; path: string; scope: string }[] = [
   { family: 'billing', path: '/customers/my/balance', scope: 'billing:read' },
   { family: 'projects', path: '/projects', scope: 'project:read' },
+  { family: 'monitoring', path: '/monitoring/alerts', scope: 'monitoring:read' },
 ];
 
 type Family = keyof DoAccountReport['families'];
