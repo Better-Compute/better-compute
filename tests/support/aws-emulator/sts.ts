@@ -4,6 +4,44 @@ import { el, queryError, queryResponse } from './xml.js';
 
 const ns = 'https://sts.amazonaws.com/doc/2011-06-15/';
 
+/** IAM's StringLike: `*` any run, `?` one character, the rest literal. */
+function like(pattern: string, value: string): boolean {
+  const source = [...pattern]
+    .map((char) =>
+      char === '*' ? '.*' : char === '?' ? '.' : char.replace(/[.+^${}()|[\]\\/-]/g, '\\$&'),
+    )
+    .join('');
+  return new RegExp(`^${source}$`).test(value);
+}
+
+/** Whether a web role's trust (its `condition`, else its `trust` rule) accepts the claims. */
+function trusts(role: StsWebRole, claims: Record<string, unknown>): boolean {
+  const sub = typeof claims.sub === 'string' ? claims.sub : undefined;
+  if (role.condition === undefined) return sub !== undefined && role.trust?.(sub) === true;
+  const provider = role.issuer.replace(/^https:\/\//, '');
+  const operators = Object.entries(role.condition);
+  if (operators.length === 0) return false;
+  return operators.every(([operator, keys]) => {
+    const match =
+      operator === 'StringEquals'
+        ? (expected: string, value: string) => expected === value
+        : operator === 'StringLike'
+          ? like
+          : undefined;
+    if (!match) return false;
+    return Object.entries(keys).every(([key, expected]) => {
+      const at = key.lastIndexOf(':');
+      if (key.slice(0, at) !== provider) return false;
+      const claim = claims[key.slice(at + 1)];
+      const values = (Array.isArray(claim) ? claim : [claim]).filter(
+        (item): item is string => typeof item === 'string',
+      );
+      const patterns: readonly string[] = typeof expected === 'string' ? [expected] : expected;
+      return values.some((value) => patterns.some((pattern) => match(pattern, value)));
+    });
+  });
+}
+
 export interface StsIdentity {
   secret: string;
   account: string;
@@ -30,8 +68,15 @@ export interface StsWebRole {
   jwks: () => Promise<unknown>;
   /** The provider's client id the trust pins (default `sts.amazonaws.com`). */
   audience?: string;
-  /** The trust policy's condition over `sub`. */
-  trust: (sub: string) => boolean;
+  /** The trust policy's condition over `sub` (a hand-written rule). */
+  trust?: (sub: string) => boolean;
+  /**
+   * The trust statement's `Condition` as a rendered template has it (`<issuer host/path>:sub` and
+   * `:aud` keys under StringEquals or StringLike), evaluated against the token's claims as IAM does;
+   * it replaces `trust`. Every key must hold; a key for another provider, or another operator, never
+   * matches.
+   */
+  condition?: Record<string, Record<string, string | readonly string[]>>;
   /** Override: the account GetCallerIdentity reports for the minted credentials. */
   identityAccount?: string;
 }
@@ -191,7 +236,7 @@ export class StsEmulator {
       record(false, sub);
       return queryError('ExpiredTokenException', 'Token is expired', 'Sender', 400);
     }
-    if (sub === undefined || !role.trust(sub)) {
+    if (sub === undefined || !trusts(role, claims)) {
       record(false, sub);
       return queryError(
         'AccessDenied',

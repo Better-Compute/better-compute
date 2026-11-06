@@ -80,11 +80,13 @@ platform's own AWS identity: set `webIdentityRoleArn`. vps fixes the account's s
 `credentials` or `assumeRoleArn` too, `webIdentityExclusive`; a tenant role in a `platformAccounts` account,
 `platform-account-role`.
 
-Before such an account is stored, `checkAccount` proves the role trusts exactly that subject: a stranger's probe
-(another tenant, the same name) and a sibling's (this tenant, another name) must be refused by STS
-(`federationTrustsAnySubject` otherwise), the account's own subject must be accepted (`federationRefused`), the
-identity must be the role's account (`assumed-identity-mismatch`), and it must read EC2 (`ec2Access`). Throttling,
-5xx and timeouts (`checkTimeoutMs`, default 10 s) store nothing and a retry runs the check again.
+Before such an account is stored, `checkAccount` proves the role trusts exactly that subject: the account's own
+subject must be accepted (`federationRefused`) as the role's account (`assumed-identity-mismatch`); then a
+stranger's probe (another tenant, the same name) and a sibling's (this tenant, another name) must be refused by the
+trust condition, `AccessDenied` (`federationTrustsAnySubject` if accepted); and it must read EC2 (`ec2Access`). A
+probe answered with any other STS error, such as `InvalidIdentityToken` when STS cannot fetch the issuer's keys, is
+`UNAVAILABLE` (`federationProbeInconclusive`), never a pass. That, throttling, 5xx and timeouts (`checkTimeoutMs`,
+default 10 s) store nothing and a retry runs the check again.
 
 `better-compute aws onboarding-template --issuer <issuer URL> --tenant <tenantId> --name <account name>` renders
 the IAM OIDC provider for the issuer (client id `sts.amazonaws.com`; `--oidc-provider-arn` reuses one) and the role

@@ -1134,9 +1134,9 @@ in one region: a fleet in several regions is several accounts.
 - **Keyless accounts.** As with GCP's `federationAudience`, `webIdentityRoleArn` signs the account in with no key:
   its workload identity (subject `compute-account:<tenantId>/aws/<name>`, audience `sts.amazonaws.com`) is exchanged
   with `AssumeRoleWithWebIdentity`, so it needs a workload issuer but never the platform's AWS identity. Before it is
-  stored, the provider checks that the role refuses a stranger's and a sibling's subject
-  (`federationTrustsAnySubject`), accepts the account's own (`federationRefused`), is in the role's account and can
-  read EC2 (`ec2Access`). `aws onboarding-template --issuer <url> --tenant <id> --name <name>` renders the IAM OIDC
+  stored, the provider checks that the role accepts the account's own subject (`federationRefused`) in the role's
+  account, then refuses a stranger's and a sibling's with `AccessDenied` (`federationTrustsAnySubject`; any other
+  STS answer to a probe is `UNAVAILABLE`, `federationProbeInconclusive`), and can read EC2 (`ec2Access`). `aws onboarding-template --issuer <url> --tenant <id> --name <name>` renders the IAM OIDC
   provider and that role.
 - **Workload roles.** An instance of a hosted pool with `policy.workloadIdentity: true` may name an IAM role as
   `workloadIdentity.awsRoleArn`, if the pool lists it in `policy.workloadRoles.aws` (ARN globs; `INVALID_INPUT`,

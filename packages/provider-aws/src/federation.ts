@@ -75,16 +75,20 @@ async function bounded<T>(
  * key or role account keeps its lazy check on first use) and makes no call. A federated one, in
  * order, stopping at the first failure:
  *
- * 1. a stranger's probe (another tenant, the same name) must be refused by STS;
- * 2. a sibling's probe (this tenant, another name) must be refused;
- * 3. the account's own subject must be accepted (`federationRefused` otherwise);
- * 4. the federated identity must be the role's own account (`assumed-identity-mismatch`);
+ * 1. the account's own subject must be accepted (`federationRefused` otherwise), which shows the
+ *    issuer, the IAM OIDC provider and the audience work;
+ * 2. the federated identity must be the role's own account (`assumed-identity-mismatch`);
+ * 3. a stranger's probe (another tenant, the same name) must be refused by STS;
+ * 4. a sibling's probe (this tenant, another name) must be refused;
  * 5. it must be able to read EC2 in the region (`ec2Access` on AccessDenied/UnauthorizedOperation).
  *
- * An accepted probe is `federationTrustsAnySubject`. A probe counts as refused, and step 3 as
- * INVALID_CONFIG, only on an STS refusal (`isWebIdentityRefusal`); anything else (throttling, a 5xx,
- * a timeout, an expired token) propagates as it is, so the check fails closed and a retry with the
- * same idempotency key runs it again.
+ * Step 1 is INVALID_CONFIG only on an STS refusal (`isWebIdentityRefusal`). An accepted probe is
+ * `federationTrustsAnySubject`. A probe's token differs from the accepted one only in `sub`, so it
+ * counts as refused only on `AccessDenied`, the trust condition failing; any other STS answer
+ * (InvalidIdentityToken, as when STS cannot fetch the issuer's keys, or IDPRejectedClaim) is
+ * UNAVAILABLE `federationProbeInconclusive`, never a pass. Anything else (throttling, a 5xx, a
+ * timeout) propagates as it is. Either way the check fails closed and a retry with the same
+ * idempotency key runs it again.
  */
 export async function checkAwsAccount(
   config: AwsConfig,
@@ -114,25 +118,7 @@ export async function checkAwsAccount(
     );
   const subject = identity.subject;
 
-  // 1, 2: subjects this account is not must be refused.
-  for (const kind of ['stranger', 'sibling'] as const) {
-    const probe = await identity.mintProbe(kind, { audience: webIdentityAudience });
-    try {
-      await exchange(probe.token, 'bc-probe');
-    } catch (error) {
-      if (isWebIdentityRefusal(error)) continue;
-      throw error;
-    }
-    throw invalid(
-      'federationTrustsAnySubject',
-      `The role ${config.webIdentityRoleArn} trusts subjects other than this account's: it accepted ` +
-        `${kind === 'stranger' ? "another tenant's account" : 'another account of this tenant'}. ` +
-        `Make its trust policy an exact match on this account's subject: ${exactTrust(subject)}`,
-      { probe: kind },
-    );
-  }
-
-  // 3, 4: the account's own subject must be accepted, as the role's own account.
+  // 1, 2: the account's own subject must be accepted, as the role's own account.
   try {
     await bounded(context.signal, timeoutMs, 'AWS STS', (signal) => account.verify(call(signal)));
   } catch (error) {
@@ -148,6 +134,37 @@ export async function checkAwsAccount(
     if (isComputeError(error, 'ACCESS_DENIED') && error.details?.reason === 'assumed-identity-mismatch')
       throw invalid('assumed-identity-mismatch', error.message);
     throw error;
+  }
+
+  // 3, 4: subjects this account is not must be refused, by the trust condition (AccessDenied).
+  for (const kind of ['stranger', 'sibling'] as const) {
+    const probe = await identity.mintProbe(kind, { audience: webIdentityAudience });
+    try {
+      await exchange(probe.token, 'bc-probe');
+    } catch (error) {
+      if (isWebIdentityRefusal(error) && error.details?.code === 'AccessDenied') continue;
+      if (isWebIdentityRefusal(error))
+        throw new ComputeError(
+          'UNAVAILABLE',
+          `AWS STS answered the ${kind} probe with ${String(error.details?.code)} after accepting this ` +
+            "account's own identity, so the role's trust could not be checked; retry",
+          undefined,
+          {
+            provider: 'aws',
+            reason: 'federationProbeInconclusive',
+            probe: kind,
+            stsError: error.details?.code,
+          },
+        );
+      throw error;
+    }
+    throw invalid(
+      'federationTrustsAnySubject',
+      `The role ${config.webIdentityRoleArn} trusts subjects other than this account's: it accepted ` +
+        `${kind === 'stranger' ? "another tenant's account" : 'another account of this tenant'}. ` +
+        `Make its trust policy an exact match on this account's subject: ${exactTrust(subject)}`,
+      { probe: kind },
+    );
   }
 
   // 5: the federated identity must read EC2 in the account's region.
