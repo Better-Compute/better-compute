@@ -31,14 +31,7 @@ import { networkNamer, vpcForNetwork } from '../networks/vpcs.js';
 import { poolMembers } from './autoscale.js';
 import { ensureSshKeys } from './keys.js';
 import { cachedSize, gpuModelOf, listOffers } from './offers.js';
-import {
-  assignTag,
-  ensureTag,
-  hasTag,
-  isKubernetesNode,
-  spelled,
-  unassignTag,
-} from './tags.js';
+import { assignTag, ensureTag, hasTag, isKubernetesNode, spelled, unassignTag } from './tags.js';
 import type { DoAction, DoDroplet, DoVpc } from './types.js';
 
 // Droplets as machines. DO has no idempotency key, so a create carries its key as a tag

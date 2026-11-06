@@ -2031,7 +2031,13 @@ describe('attach', () => {
     const compute = await build(emu);
     const cluster = '0d0c5000-0000-4000-8000-000000000001';
     // A worker of one of this deployment's pools carries the pool's tags, ours among them.
-    const workerTags = ['k8s', `k8s:${cluster}`, 'k8s-worker', kubernetesTag, deploymentTag('default')];
+    const workerTags = [
+      'k8s',
+      `k8s:${cluster}`,
+      'k8s-worker',
+      kubernetesTag,
+      deploymentTag('default'),
+    ];
     const worker = seedDroplet(emu.state, { tags: workerTags });
     const member = seedDroplet(emu.state, { tags: [`k8s:${cluster}`] });
     const pooled = seedDroplet(emu.state, { tags: [kubernetesTag, deploymentTag('default')] });
@@ -2040,9 +2046,7 @@ describe('attach', () => {
     expect((await discovered(compute)).map((m) => m.id)).toEqual([String(plain.id)]);
     for (const node of [worker, member, pooled])
       for (const managed of [true, false]) {
-        const error = await failure(
-          compute.claim!(String(node.id), 'inst_1', ctx(), { managed }),
-        );
+        const error = await failure(compute.claim!(String(node.id), 'inst_1', ctx(), { managed }));
         expect([error.code, error.details?.reason]).toEqual(['INVALID_STATE', 'kubernetesNode']);
       }
     expect(tagWrites(emu)).toEqual([]);
@@ -2058,7 +2062,9 @@ describe('attach', () => {
     });
     const refused = await failure(compute.delete!(String(claimed.id), ctx()));
     expect(refused.code).toBe('INVALID_STATE');
-    expect(emu.requests.some((r) => r.method === 'DELETE' && r.url.pathname.startsWith('/v2/droplets'))).toBe(false);
+    expect(
+      emu.requests.some((r) => r.method === 'DELETE' && r.url.pathname.startsWith('/v2/droplets')),
+    ).toBe(false);
     await compute.release!(String(claimed.id), 'inst_2', ctx());
     expect(claimed.tags).toEqual(workerTags);
     // A droplet that only carries the plain `k8s` tag is claimable.
