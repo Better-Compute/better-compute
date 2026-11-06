@@ -270,6 +270,43 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
       },
     },
     {
+      name: 'raising the version upgrades the control plane in place (outputs.version runs it)',
+      async run(subject) {
+        const c = await client(subject);
+        const versions = await c.k8s.versions(subject.location, c.call('versions'));
+        const minors = [
+          ...new Set(versions.validVersions.map((version) => /^(\d+\.\d+)/.exec(version)?.[1]).filter((v) => v !== undefined)),
+        ].sort((a, b) => {
+          const [x, y] = [a.split('.').map(Number), b.split('.').map(Number)];
+          return y[0]! - x[0]! || y[1]! - x[1]!;
+        });
+        if (minors.length < 2) return;
+        const [newer, older] = [minors[0]!, minors[1]!];
+        const runs = (actual: string | undefined, version: string) =>
+          actual !== undefined && (actual === version || actual.startsWith(`${version}.`) || actual.startsWith(`${version}-`));
+        const { spec } = names(subject, 'upgrade');
+        let id: string | undefined;
+        try {
+          const created = await readyCluster(subject, c, spec({ version: older }));
+          id = created.id;
+          check(runs(created.outputs?.version, older), `created on ${older}, runs ${created.outputs?.version}`);
+          const upgraded = await settle(
+            subject,
+            'ensureCluster upgrade',
+            async () => {
+              const state = await c.k8s.ensureCluster(spec({ version: newer }), c.call('upgrade'));
+              return state.state === 'ready' && !runs(state.outputs?.version, newer) ? { ...state, state: 'updating' } : state;
+            },
+            ['ready'],
+          );
+          checkEqual(upgraded!.id, id, 'an upgrade keeps the cluster');
+          check(runs(upgraded!.outputs?.version, newer), `upgraded to ${newer}, runs ${upgraded!.outputs?.version}`);
+        } finally {
+          await cleanUp(subject, c, id);
+        }
+      },
+    },
+    {
       name: 'a labelled GPU node pool settles ready, resizes in place, and never changes shape',
       async run(subject) {
         const c = await client(subject);
