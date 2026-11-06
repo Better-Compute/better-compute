@@ -163,6 +163,56 @@ describe('fleet.export with Kubernetes clusters', () => {
     expect(planned.calls).toEqual([]);
   });
 
+  it('keeps a standard cluster whose only node pool is being deleted a valid document', async () => {
+    const cluster: KubernetesClusterView = await world.api.kubernetesClusters.create(
+      world.root,
+      clusterBody({ name: 'last-pool', idempotencyKey: 'export-last-pool' }),
+    );
+    await world.api.kubernetesNodePools.delete(world.root, {
+      tenantId: world.rootTenant,
+      clusterId: cluster.id,
+      nodePoolId: cluster.nodePools[0]!.id,
+    });
+    // The pool on its way out is not part of the fleet: the cluster has none left, and says so.
+    const config = await exported();
+    expect(config.kubernetesClusters?.[0]?.nodePools).toEqual([]);
+    const planned = await world.api.fleet.plan(world.root, {
+      tenantId: world.rootTenant,
+      config: JSON.parse(JSON.stringify(config)),
+      prune: true,
+    });
+    expect(planned.blocked).toBe(false);
+    expect(planned.calls).toEqual([]);
+    // Gone at the provider too: still a document that plans nothing.
+    await world.fixture.database.query(
+      `UPDATE kubernetes_node_pools SET state = 'deleted' WHERE cluster_id = $1`,
+      [cluster.id],
+    );
+    expect((await exported()).kubernetesClusters?.[0]?.nodePools).toEqual([]);
+    expect(
+      (await world.api.fleet.plan(world.root, { tenantId: world.rootTenant, config, prune: true }))
+        .calls,
+    ).toEqual([]);
+
+    // Creating a standard cluster with no node pool is what the module refuses: the plan blocks it.
+    const fresh = await world.api.fleet.plan(world.root, {
+      tenantId: world.rootTenant,
+      config: {
+        ...config,
+        kubernetesClusters: [
+          ...config.kubernetesClusters!,
+          { name: 'bare', pool: world.poolId, location: 'us-central1', nodePools: [] },
+        ],
+      },
+    });
+    expect(
+      fresh.changes.find((change) => change.kind === 'kubernetesCluster' && change.name === 'bare'),
+    ).toMatchObject({
+      action: 'create',
+      blocked: 'a standard cluster is created with at least one node pool: list one in nodePools',
+    });
+  });
+
   it('names a substrate pool account by its document name', async () => {
     const pool = await world.api.pools.create(world.root, {
       tenantId: world.rootTenant,
@@ -348,6 +398,80 @@ describe('fleet.plan for Kubernetes clusters', () => {
       'gpu',
       'system',
     ]);
+  });
+
+  it('clears a description the document drops; an empty one is left out of the export', async () => {
+    const cluster = await created('training', { description: 'GPU training' });
+    const document = await exported();
+    expect(document.kubernetesClusters![0]!.description).toBe('GPU training');
+    const next = structuredClone(document);
+    delete next.kubernetesClusters![0]!.description;
+    const planned = await plan(next);
+    expect(changeOf(planned, 'kubernetesCluster', 'training')).toEqual({
+      kind: 'kubernetesCluster',
+      name: 'training',
+      action: 'update',
+      fields: ['description'],
+    });
+    expect(planned.calls).toEqual([
+      {
+        path: 'kubernetesClusters/update',
+        input: { tenantId: world.rootTenant, clusterId: cluster.id, description: '' },
+      },
+    ]);
+    await apply(next, { planHash: planned.planHash });
+    const view = await world.api.kubernetesClusters.get(world.root, {
+      tenantId: world.rootTenant,
+      clusterId: cluster.id,
+    });
+    expect(view.description ?? '').toBe('');
+    const after = await exported();
+    expect(after.kubernetesClusters![0]).not.toHaveProperty('description');
+    expect((await plan(after)).calls).toEqual([]);
+    // An empty description in the document says the same.
+    const empty = { ...after.kubernetesClusters![0]!, description: '' };
+    expect((await plan({ ...after, kubernetesClusters: [empty] })).calls).toEqual([]);
+  });
+
+  it('blocks resizing a node pool outside the autoscaling bounds it ends with', async () => {
+    await created('training');
+    const document = await exported();
+    type Pools = NonNullable<FleetKubernetesCluster['nodePools']>;
+    const gpuOf = (pools: Pools) => pools.find((pool) => pool.name === 'gpu')!;
+    const variant = (change: (pools: Pools) => void) => {
+      const next = structuredClone(document);
+      change(next.kubernetesClusters![0]!.nodePools!);
+      return next;
+    };
+    const resize = (change: (pools: Pools) => void) => plan(variant(change));
+    const nine = variant((pools) => (gpuOf(pools).nodeCount = 9));
+    const tooMany = await plan(nine);
+    expect(tooMany.blocked).toBe(true);
+    expect(changeOf(tooMany, 'kubernetesNodePool', 'training/gpu')).toEqual({
+      kind: 'kubernetesNodePool',
+      name: 'training/gpu',
+      action: 'update',
+      fields: ['nodeCount'],
+      blocked: 'nodeCount 9 must lie within autoscaling 0..4',
+    });
+    expect(tooMany.calls).toEqual([]);
+    // Refused whole before anything runs (it used to fail in phase 2 with INVALID_INPUT).
+    await expect(apply(nine)).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    // New bounds that take the count, or no autoscaling at all, are fine.
+    const widened = await resize((pools) => {
+      gpuOf(pools).nodeCount = 9;
+      gpuOf(pools).autoscaling = { minNodes: 0, maxNodes: 10 };
+    });
+    expect(widened.blocked).toBe(false);
+    expect(changeOf(widened, 'kubernetesNodePool', 'training/gpu')?.fields).toEqual([
+      'nodeCount',
+      'autoscaling',
+    ]);
+    const fixed = await resize((pools) => {
+      gpuOf(pools).nodeCount = 9;
+      delete gpuOf(pools).autoscaling;
+    });
+    expect(fixed.blocked).toBe(false);
   });
 
   it('blocks what cannot change, a cluster being deleted, an unknown pool and a taken name', async () => {
@@ -653,15 +777,18 @@ describe('fleet.apply of new clusters (composable admission)', () => {
     ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
     expect(await projected(await draft(caller.identityId, 'refused'))).toBeUndefined();
 
-    // Phase 2 fails after the create was checked (a node pool resized outside its autoscaling
-    // bounds is refused by its handler): nothing is applied, and the staged projection row goes.
+    // Phase 2 fails after the create was checked (a node pool added in a zone outside the
+    // cluster's region is refused by its handler, which knows the region): nothing is applied, and
+    // the staged projection row goes.
     const existing = await created('existing');
     const next = await withClusters([
       ...(await exported()).kubernetesClusters!,
       { name: 'fresh', pool: world.poolId, location: 'us-central1', nodePools: [system] },
     ]);
     const wanted = next.kubernetesClusters!.find((cluster) => cluster.name === 'existing')!;
-    wanted.nodePools!.find((pool) => pool.name === 'gpu')!.nodeCount = 9;
+    wanted.nodePools!.find((pool) => pool.name === 'gpu')!.nodeCount = 3;
+    wanted.nodePools!.push({ ...system, name: 'abroad', zones: ['europe-west4-a'] });
+    expect((await plan(next)).blocked).toBe(false);
     await expect(apply(next)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     const rootIdentity = world.fixture.tenants.root.caller.identityId;
     expect(await projected(await draft(rootIdentity, 'fresh'))).toBeUndefined();
@@ -669,13 +796,14 @@ describe('fleet.apply of new clusters (composable admission)', () => {
       `SELECT 1 FROM kubernetes_clusters WHERE name = 'fresh'`,
     );
     expect(rows).toEqual([]);
-    expect(
-      (
-        await world.api.kubernetesClusters.get(world.root, {
-          tenantId: world.rootTenant,
-          clusterId: existing.id,
-        })
-      ).nodePools.find((pool: { name: string }) => pool.name === 'gpu').nodeCount,
-    ).toBe(0);
+    const after = await world.api.kubernetesClusters.get(world.root, {
+      tenantId: world.rootTenant,
+      clusterId: existing.id,
+    });
+    expect(after.nodePools.find((pool: { name: string }) => pool.name === 'gpu').nodeCount).toBe(0);
+    expect(after.nodePools.map((pool: { name: string }) => pool.name).sort()).toEqual([
+      'gpu',
+      'system',
+    ]);
   });
 });

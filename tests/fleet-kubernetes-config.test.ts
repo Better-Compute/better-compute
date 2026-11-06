@@ -122,10 +122,14 @@ describe('kubernetesClusters in the document', () => {
     expect(message(document([cluster({ description: 'a\nb' })]))).toMatch(/\.description/);
   });
 
-  it('checks node pools: standard needs one, autopilot takes none; fields and duplicates', () => {
-    expect(message(document([cluster({ nodePools: [] })]))).toMatch(
-      /kubernetesClusters\[0\]\.nodePools must list at least one node pool for a standard cluster/,
-    );
+  it('checks node pools: autopilot takes none; fields and duplicates', () => {
+    // A live standard cluster may have no node pool left; creating one with none is blocked by the plan.
+    expect(validateFleetConfig(document([cluster({ nodePools: [] })]))).toMatchObject({
+      kubernetesClusters: [{ name: 'training', nodePools: [] }],
+    });
+    expect(validateFleetConfig(document([cluster({ nodePools: undefined })]))).toMatchObject({
+      kubernetesClusters: [{ name: 'training', nodePools: [] }],
+    });
     expect(message(document([cluster({ mode: 'autopilot' })]))).toMatch(
       /nodePools must be empty for an autopilot cluster/,
     );
@@ -193,6 +197,29 @@ describe('kubernetesClusters in the document', () => {
     // Still a provider-style name: no upper case, spaces or a leading dot.
     expect(message(pool('.large'))).toMatch(/nodePools\[0\]\.machineType/);
     expect(message(pool('M5.Large'))).toMatch(/nodePools\[0\]\.machineType/);
+  });
+
+  it('leaves a node count outside its autoscaling bounds to the plan, as the module does', () => {
+    // kubernetesClusters.create and kubernetesNodePools.create take such a pool (the autoscaler
+    // moves it into its bounds), so an exported document may hold one: only a resize to such a
+    // count is refused, and the plan blocks that (tests/fleet-kubernetes.test.ts).
+    const pool = (nodeCount: number) =>
+      document([
+        cluster({
+          nodePools: [
+            {
+              name: 'gpu',
+              machineType: 'g2-standard-8',
+              nodeCount,
+              autoscaling: { minNodes: 1, maxNodes: 4 },
+            },
+          ],
+        }),
+      ]);
+    expect(message(pool(1))).toBe('valid');
+    expect(message(pool(4))).toBe('valid');
+    expect(message(pool(0))).toBe('valid');
+    expect(message(pool(9))).toBe('valid');
   });
 
   it('round-trips through JSON as a document a person can commit', () => {

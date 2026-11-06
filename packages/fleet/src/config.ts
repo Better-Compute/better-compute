@@ -72,7 +72,10 @@ export interface FleetKubernetesCluster {
   authorizedNetworks?: string[];
   privateNodes?: boolean;
   description?: string;
-  /** `standard`: 1 to 10 node pools. `autopilot`: none (the provider runs the nodes). */
+  /**
+   * `standard`: up to 10 node pools, at least one to create the cluster (a live one may have none
+   * left). `autopilot`: none (the provider runs the nodes).
+   */
   nodePools?: FleetKubernetesNodePool[];
 }
 
@@ -430,11 +433,10 @@ function kubernetesCluster(raw: unknown, path: string): FleetKubernetesCluster {
   const pools = list(input.nodePools, `${path}.nodePools`, nodePool, (pool) => pool.name);
   if (pools.length > maxNodePools)
     fail(`${path}.nodePools`, `lists at most ${maxNodePools} node pools`);
-  if ((result.mode ?? 'standard') === 'standard') {
-    if (!pools.length)
-      fail(`${path}.nodePools`, 'must list at least one node pool for a standard cluster');
-    result.nodePools = pools;
-  } else if (pools.length)
+  // A standard cluster may run with no node pools (its last one deleted), so the document may say
+  // so; only creating one takes at least one, which the plan checks (it knows what exists).
+  if ((result.mode ?? 'standard') === 'standard') result.nodePools = pools;
+  else if (pools.length)
     fail(
       `${path}.nodePools`,
       'must be empty for an autopilot cluster (the provider runs its nodes)',

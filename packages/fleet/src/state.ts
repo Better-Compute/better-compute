@@ -566,7 +566,10 @@ function exportCluster(cluster: FleetStateCluster): FleetKubernetesCluster {
   if (cluster.projectId !== undefined) out.projectId = cluster.projectId;
   if (cluster.authorizedNetworks.length) out.authorizedNetworks = cluster.authorizedNetworks;
   if (cluster.privateNodes) out.privateNodes = true;
-  if (cluster.description !== undefined) out.description = cluster.description;
+  // An empty description is none: the document leaves it out (and its plan clears one with '').
+  if (cluster.description) out.description = cluster.description;
+  // Node pools on their way out are not part of the fleet any more. A standard cluster may be left
+  // with none (`kubernetesNodePools.delete` takes the last one): it exports `nodePools: []`.
   if (cluster.mode === 'standard')
     out.nodePools = cluster.nodePools
       .filter((pool) => !pool.deleting)

@@ -132,7 +132,14 @@ function nodePoolDiff(current: FleetStateNodePool, wanted: FleetKubernetesNodePo
   if (current.nodeCount !== wanted.nodeCount) update.nodeCount = wanted.nodeCount;
   if (!same(current.autoscaling ?? null, wanted.autoscaling ?? null))
     update.autoscaling = wanted.autoscaling ?? null;
-  return { immutable, update };
+  // `kubernetesNodePools.update` refuses a resize outside the autoscaling bounds it ends with (a
+  // create takes any count: the autoscaler moves it), so the plan says so before anything runs.
+  const bounds = wanted.autoscaling;
+  const outOfBounds =
+    update.nodeCount !== undefined &&
+    bounds !== undefined &&
+    (wanted.nodeCount < bounds.minNodes || wanted.nodeCount > bounds.maxNodes);
+  return { immutable, update, outOfBounds };
 }
 
 /** The fields of a live cluster that differ from the document, split by whether they can change. */
@@ -154,8 +161,9 @@ function clusterDiff(current: FleetStateCluster, wanted: FleetKubernetesCluster,
     update.version = wanted.version;
   if (!sameSet(current.authorizedNetworks, wanted.authorizedNetworks ?? []))
     update.authorizedNetworks = wanted.authorizedNetworks ?? [];
-  if (wanted.description !== undefined && current.description !== wanted.description)
-    update.description = wanted.description;
+  // Ours alone, so absent means none: a description the document drops is cleared ('').
+  if ((current.description ?? '') !== (wanted.description ?? ''))
+    update.description = wanted.description ?? '';
   return { immutable, update };
 }
 
@@ -214,6 +222,10 @@ export function planKubernetes(
       continue;
     }
     if (!current) {
+      if ((cluster.mode ?? 'standard') === 'standard' && !cluster.nodePools?.length) {
+        block('a standard cluster is created with at least one node pool: list one in nodePools');
+        continue;
+      }
       if (options.createdPools.has(cluster.pool)) {
         add({
           kind: 'kubernetesCluster',
@@ -321,6 +333,14 @@ export function planKubernetes(
           action: 'update',
           fields: [...diff.immutable, ...fields],
           blocked: `${diff.immutable.join(', ')} cannot change; add a node pool under another name`,
+        });
+      else if (diff.outOfBounds)
+        add({
+          kind: 'kubernetesNodePool',
+          name,
+          action: 'update',
+          fields,
+          blocked: `nodeCount ${pool.nodeCount} must lie within autoscaling ${pool.autoscaling!.minNodes}..${pool.autoscaling!.maxNodes}`,
         });
       else if (fields.length) {
         add({ kind: 'kubernetesNodePool', name, action: 'update', fields });
