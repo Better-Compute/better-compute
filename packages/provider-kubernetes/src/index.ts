@@ -4,3 +4,4 @@
  */
 export * from './daemonset.js';
 export * from './cli.js';
+export * from './apply.js';
