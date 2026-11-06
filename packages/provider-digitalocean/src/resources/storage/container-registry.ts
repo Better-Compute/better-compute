@@ -5,6 +5,7 @@ import {
   checkManagedName,
   hasCode,
   managedResourceName,
+  notManaged,
   storageError,
   type DoResourceKind,
   type DoResourceState,
@@ -86,11 +87,7 @@ async function readRegistry(
 
 function refuseUnmanaged(name: string): void {
   if (!managedResourceName.test(name))
-    throw storageError(
-      'INVALID_STATE',
-      `Registry ${name} is not one better-compute manages; it was left alone`,
-      'unmanaged',
-    );
+    throw notManaged(`Registry ${name} is not one better-compute manages; it was left alone`);
 }
 
 export function containerRegistryKind(client: DoClient): ContainerRegistryKind {
@@ -104,12 +101,17 @@ export function containerRegistryKind(client: DoClient): ContainerRegistryKind {
   return {
     kind: 'do.container-registry',
     family: 'storage',
+    description:
+      'A DigitalOcean Container Registry (registry.digitalocean.com/<name>) in one region, owned by its bc- name',
     spec: containerRegistrySpec as unknown as DoResourceKind<ContainerRegistrySpec>['spec'],
     outputs: ['name', 'region', 'endpoint', 'storageUsageBytes'],
     regional: true,
     updatable: [],
 
-    async ensure(name, spec, ctx) {
+    async ensure(request, ctx) {
+      // A registry's id is its name.
+      const name = request.id ?? request.name;
+      const { spec } = request;
       checkManagedName(name, 'A registry');
       const existing = await readRegistry(client, name, ctx.signal);
       if (existing) {
@@ -132,7 +134,9 @@ export function containerRegistryKind(client: DoClient): ContainerRegistryKind {
 
     async get(id, ctx) {
       const registry = await readRegistry(client, id, ctx.signal);
-      return registry ? registryState(registry) : undefined;
+      return registry
+        ? { ...registryState(registry), ...(registry.region ? { spec: { region: registry.region } } : {}) }
+        : undefined;
     },
 
     async delete(id, ctx) {
@@ -165,7 +169,10 @@ export function containerRegistryKind(client: DoClient): ContainerRegistryKind {
         yield {
           id: registry.name,
           name: registry.name,
-          ...(managedResourceName.test(registry.name) ? { managedBy: 'better-compute' } : {}),
+          ...(registry.region ? { region: registry.region, spec: { region: registry.region } } : {}),
+          // Registries carry no tags: a managed name is all there is.
+          ...(managedResourceName.test(registry.name) ? { managedBy: 'this' as const } : {}),
+          outputs: registryState(registry).outputs!,
         };
     },
 
@@ -263,12 +270,21 @@ export function registryGcKind(client: DoClient): DoResourceKind<RegistryGcSpec>
   return {
     kind: 'do.registry-garbage-collection',
     family: 'storage',
+    description:
+      'Garbage collection of a registry: collected within the last intervalHours, started when it was not',
     spec: registryGcSpec as unknown as DoResourceKind<RegistryGcSpec>['spec'],
     outputs: ['registry', 'uuid', 'status', 'blobsDeleted', 'freedBytes'],
     regional: false,
     updatable: ['type', 'intervalHours'],
+    parent: 'do.container-registry',
 
-    async ensure(_name, spec, ctx) {
+    async ensure({ spec, parent }, ctx) {
+      if (parent !== undefined && parent !== spec.registry)
+        throw storageError(
+          'INVALID_INPUT',
+          `The collection names registry ${spec.registry} but lives in ${parent}`,
+          'parent',
+        );
       if (!(await readRegistry(client, spec.registry, ctx.signal)))
         throw storageError('NOT_FOUND', `Registry ${spec.registry} not found`, 'registry');
       const since = ctx.clock.now() - spec.intervalHours * 3_600_000;

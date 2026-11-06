@@ -26,7 +26,7 @@ const markerBody = (deployment = 'default') =>
 describe('do.spaces-bucket ensure', () => {
   it('creates a bucket with its marker, then converges acl and versioning in place', async () => {
     const w = await storageWorld();
-    const created = await w.resources.ensure(
+    const created = await w.ensure(
       'do.spaces-bucket',
       'tenant-a-assets',
       { region: 'nyc3' },
@@ -47,7 +47,7 @@ describe('do.spaces-bucket ensure', () => {
     const bucket = w.spaces.buckets.get('tenant-a-assets')!;
     expect(bucket.objects.has(bucketMarkerKey)).toBe(true);
 
-    const again = await w.resources.ensure(
+    const again = await w.ensure(
       'do.spaces-bucket',
       'tenant-a-assets',
       { region: 'nyc3' },
@@ -56,7 +56,7 @@ describe('do.spaces-bucket ensure', () => {
     expect(again).toEqual(created);
     expect(w.spaces.requests.filter((r) => r.method === 'PUT')).toHaveLength(2);
 
-    const changed = await w.resources.ensure(
+    const changed = await w.ensure(
       'do.spaces-bucket',
       'tenant-a-assets',
       { region: 'nyc3', acl: 'public-read', versioning: true },
@@ -66,7 +66,7 @@ describe('do.spaces-bucket ensure', () => {
     expect(bucket.acl).toBe('public-read');
     expect(bucket.versioning).toBe('Enabled');
 
-    const off = await w.resources.ensure(
+    const off = await w.ensure(
       'do.spaces-bucket',
       'tenant-a-assets',
       { region: 'nyc3' },
@@ -77,7 +77,7 @@ describe('do.spaces-bucket ensure', () => {
 
   it('creates a versioned bucket in one pass', async () => {
     const w = await storageWorld();
-    const state = await w.resources.ensure(
+    const state = await w.ensure(
       'do.spaces-bucket',
       'tenant-a-logs',
       { region: 'nyc3', versioning: true },
@@ -91,16 +91,16 @@ describe('do.spaces-bucket ensure', () => {
     const w = await storageWorld();
     w.spaces.seedBucket('taken-name', { owner: 'SOMEONEELSE' });
     const taken = await failure(
-      w.resources.ensure('do.spaces-bucket', 'taken-name', { region: 'nyc3' }, w.ctx()),
+      w.ensure('do.spaces-bucket', 'taken-name', { region: 'nyc3' }, w.ctx()),
     );
     expect(taken.code).toBe('CONFLICT');
     expect(taken.details?.reason).toBe('bucketNameTaken');
 
     const hand = w.spaces.seedBucket('hand-made');
     const unmanaged = await failure(
-      w.resources.ensure('do.spaces-bucket', 'hand-made', { region: 'nyc3' }, w.ctx()),
+      w.ensure('do.spaces-bucket', 'hand-made', { region: 'nyc3' }, w.ctx()),
     );
-    expect(unmanaged.details?.reason).toBe('unmanaged');
+    expect(unmanaged.details?.reason).toBe('notManaged');
     expect(hand.objects.size).toBe(0);
 
     const other = w.spaces.seedBucket('other-dep');
@@ -108,10 +108,10 @@ describe('do.spaces-bucket ensure', () => {
     expect(
       (
         await failure(
-          w.resources.ensure('do.spaces-bucket', 'other-dep', { region: 'nyc3' }, w.ctx()),
+          w.ensure('do.spaces-bucket', 'other-dep', { region: 'nyc3' }, w.ctx()),
         )
       ).details?.reason,
-    ).toBe('otherDeployment');
+    ).toBe('managedByAnother');
   });
 
   it('validates the name and spec before any request', async () => {
@@ -123,7 +123,7 @@ describe('do.spaces-bucket ensure', () => {
       ['ok-name', {}],
     ] as const)
       expect(
-        (await failure(w.resources.ensure('do.spaces-bucket', name, spec, w.ctx()))).code,
+        (await failure(w.ensure('do.spaces-bucket', name, spec, w.ctx()))).code,
       ).toBe('INVALID_INPUT');
     expect(w.spaces.requests).toHaveLength(0);
   });
@@ -132,7 +132,7 @@ describe('do.spaces-bucket ensure', () => {
     const { spacesAccessKey: _a, spacesSecretKey: _s, ...bare } = storageAccount;
     const w = await storageWorld(bare);
     const error = await failure(
-      w.resources.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx()),
+      w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx()),
     );
     expect(error.code).toBe('INVALID_CONFIG');
     expect(error.details?.reason).toBe('spacesKeys');
@@ -143,7 +143,7 @@ describe('do.spaces-bucket ensure', () => {
 
   it('never sends the secret key over the wire or into an error', async () => {
     const w = await storageWorld();
-    await w.resources.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
+    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
     expect(JSON.stringify(w.spaces.requests)).not.toContain('spaces-secret');
   });
 });
@@ -151,7 +151,7 @@ describe('do.spaces-bucket ensure', () => {
 describe('do.spaces-bucket get and delete', () => {
   it('reads a bucket, and nothing for a gone one', async () => {
     const w = await storageWorld();
-    await w.resources.ensure(
+    await w.ensure(
       'do.spaces-bucket',
       'tenant-a-assets',
       { region: 'nyc3', acl: 'public-read' },
@@ -168,7 +168,7 @@ describe('do.spaces-bucket get and delete', () => {
 
   it('deletes an empty managed bucket', async () => {
     const w = await storageWorld();
-    await w.resources.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
+    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
     expect(await w.resources.delete('do.spaces-bucket', 'nyc3/tenant-a-assets', w.ctx())).toEqual({
       id: 'nyc3/tenant-a-assets',
       state: 'deleted',
@@ -181,7 +181,7 @@ describe('do.spaces-bucket get and delete', () => {
 
   it('deletes a versioned bucket, clearing the marker versions', async () => {
     const w = await storageWorld();
-    await w.resources.ensure(
+    await w.ensure(
       'do.spaces-bucket',
       'tenant-a-logs',
       { region: 'nyc3', versioning: true },
@@ -198,7 +198,7 @@ describe('do.spaces-bucket get and delete', () => {
 
   it('refuses to delete a bucket that holds tenant data, and keeps it', async () => {
     const w = await storageWorld();
-    await w.resources.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
+    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
     const bucket = w.spaces.buckets.get('tenant-a-assets')!;
     bucket.objects.set('index.html', { body: new TextEncoder().encode('<h1>hi</h1>') });
     const refused = await failure(
@@ -212,7 +212,7 @@ describe('do.spaces-bucket get and delete', () => {
 
   it('puts the marker back when an object lands between the check and the delete', async () => {
     const w = await storageWorld();
-    await w.resources.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
+    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
     w.spaces.failNext('DELETE /tenant-a-assets$', 409, 'BucketNotEmpty');
     const refused = await failure(
       w.resources.delete('do.spaces-bucket', 'nyc3/tenant-a-assets', w.ctx()),
@@ -225,7 +225,7 @@ describe('do.spaces-bucket get and delete', () => {
     const w = await storageWorld();
     w.spaces.seedBucket('hand-made');
     const refused = await failure(w.resources.delete('do.spaces-bucket', 'nyc3/hand-made', w.ctx()));
-    expect(refused.details?.reason).toBe('unmanaged');
+    expect(refused.details?.reason).toBe('notManaged');
     expect(w.spaces.buckets.has('hand-made')).toBe(true);
   });
 });

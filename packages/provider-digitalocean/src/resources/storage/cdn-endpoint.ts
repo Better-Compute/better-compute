@@ -88,23 +88,40 @@ export function cdnEndpointKind(deps: {
 }): CdnEndpointKind {
   const { client } = deps;
 
-  async function requireManagedOrigin(origin: string, signal: AbortSignal): Promise<void> {
+  async function originOwner(
+    origin: string,
+    signal: AbortSignal,
+  ): Promise<'mine' | 'missing' | 'other'> {
     const match = originPattern.exec(origin);
     if (!match)
       throw storageError('INVALID_INPUT', `${origin} is not a Spaces origin`, 'origin');
-    const owner = await bucketOwnership(
-      deps.spaces(match[2]!),
-      match[1]!,
-      deps.deploymentTag,
-      signal,
-    );
-    if (owner !== 'mine')
+    return bucketOwnership(deps.spaces(match[2]!), match[1]!, deps.deploymentTag, signal);
+  }
+
+  /**
+   * Refuses an endpoint whose origin is not a bucket this deployment manages: on `ensure` the
+   * reason is `unmanagedOrigin` (manage the bucket first); anywhere else it is the contract's
+   * `notManaged`.
+   */
+  async function requireManagedOrigin(
+    origin: string,
+    signal: AbortSignal,
+    reason: 'unmanagedOrigin' | 'notManaged' = 'notManaged',
+  ): Promise<void> {
+    if ((await originOwner(origin, signal)) !== 'mine')
       throw storageError(
         'INVALID_STATE',
         `The CDN origin ${origin} is not a bucket better-compute manages`,
-        'unmanagedOrigin',
+        reason,
       );
   }
+
+  const specOf = (endpoint: DoCdnEndpoint) => ({
+    origin: endpoint.origin,
+    ttl: endpoint.ttl ?? 3600,
+    ...(endpoint.custom_domain ? { customDomain: endpoint.custom_domain } : {}),
+    ...(endpoint.certificate_id ? { certificateId: endpoint.certificate_id } : {}),
+  });
 
   async function read(id: string, signal: AbortSignal): Promise<DoCdnEndpoint | undefined> {
     checkId(id);
@@ -124,12 +141,14 @@ export function cdnEndpointKind(deps: {
   return {
     kind: 'do.cdn-endpoint',
     family: 'edge',
+    description:
+      "DigitalOcean's CDN in front of a Spaces bucket this deployment manages, with an optional custom domain",
     spec: cdnEndpointSpec as unknown as DoResourceKind<CdnEndpointSpec>['spec'],
     outputs: ['origin', 'endpoint', 'url', 'ttl', 'customDomain'],
     regional: false,
     updatable: ['ttl', 'customDomain', 'certificateId'],
 
-    async ensure(_name: string, spec: CdnEndpointSpec, ctx: CallContext) {
+    async ensure({ spec, id }, ctx: CallContext) {
       if (!(cdnTtls as readonly number[]).includes(spec.ttl))
         throw storageError(
           'INVALID_INPUT',
@@ -142,13 +161,21 @@ export function cdnEndpointKind(deps: {
           'customDomain and certificateId are set together or not at all',
           'customDomain',
         );
-      await requireManagedOrigin(spec.origin, ctx.signal);
-      let existing: DoCdnEndpoint | undefined;
-      for await (const endpoint of client.pages<DoCdnEndpoint>('/cdn/endpoints', 'endpoints', {
-        signal: ctx.signal,
-        budget: 'sweep',
-      }))
-        if (endpoint.origin === spec.origin) existing = endpoint;
+      await requireManagedOrigin(spec.origin, ctx.signal, 'unmanagedOrigin');
+      // The endpoint an earlier ensure answered wins; its origin cannot change in place.
+      let existing = id !== undefined ? await read(id, ctx.signal) : undefined;
+      if (existing && existing.origin !== spec.origin)
+        throw storageError(
+          'INVALID_STATE',
+          `CDN endpoint ${existing.id} serves ${existing.origin}; an origin cannot change in place`,
+          'replaceRequired',
+        );
+      if (!existing)
+        for await (const endpoint of client.pages<DoCdnEndpoint>('/cdn/endpoints', 'endpoints', {
+          signal: ctx.signal,
+          budget: 'sweep',
+        }))
+          if (endpoint.origin === spec.origin) existing = endpoint;
       const wanted = {
         ttl: spec.ttl,
         ...(spec.customDomain
@@ -184,7 +211,17 @@ export function cdnEndpointKind(deps: {
 
     async get(id, ctx) {
       const endpoint = await read(id, ctx.signal);
-      return endpoint ? state(endpoint) : undefined;
+      return endpoint ? { ...state(endpoint), spec: specOf(endpoint) } : undefined;
+    },
+
+    async adopt(id, _labels, ctx) {
+      // Endpoints carry no labels: one in front of a bucket this deployment manages is already
+      // its own, so adopting it only checks that.
+      const endpoint = await read(id, ctx.signal);
+      if (!endpoint)
+        throw storageError('NOT_FOUND', `CDN endpoint ${id} not found`, 'cdnEndpoint');
+      await requireManagedOrigin(endpoint.origin, ctx.signal);
+      return { ...state(endpoint), spec: specOf(endpoint) };
     },
 
     async delete(id, ctx) {
@@ -220,8 +257,19 @@ export function cdnEndpointKind(deps: {
       for await (const endpoint of client.pages<DoCdnEndpoint>('/cdn/endpoints', 'endpoints', {
         signal: ctx.signal,
         budget: 'sweep',
-      }))
-        yield { id: endpoint.id, name: endpoint.origin };
+      })) {
+        const owner = originPattern.test(endpoint.origin)
+          ? await originOwner(endpoint.origin, ctx.signal)
+          : 'missing';
+        yield {
+          id: endpoint.id,
+          name: endpoint.origin,
+          ...(owner === 'mine' ? { managedBy: 'this' as const } : {}),
+          ...(owner === 'other' ? { managedBy: 'other' as const } : {}),
+          outputs: state(endpoint).outputs!,
+          spec: specOf(endpoint),
+        };
+      }
     },
   };
 }

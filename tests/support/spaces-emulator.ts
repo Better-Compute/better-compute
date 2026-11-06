@@ -378,7 +378,7 @@ export class SpacesEmulator {
     const object = bucket.objects.get(key);
     if (method === 'GET' || method === 'HEAD') {
       if (!object) return this.#error(404, 'NoSuchKey');
-      return new Response(method === 'HEAD' ? null : object.body, {
+      return new Response(method === 'HEAD' ? null : (object.body as BodyInit), {
         status: 200,
         headers: {
           'content-length': String(object.body.length),

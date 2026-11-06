@@ -4,6 +4,7 @@ import {
   checkManagedName,
   hasCode,
   managedResourceName,
+  notManaged,
   storageError,
   type DoResourceKind,
   type DoResourceState,
@@ -58,11 +59,23 @@ const grantKey = (grants: readonly DoGrant[] | undefined): string =>
     .sort()
     .join(',');
 
+const outputsOf = (key: DoSpacesKey) => ({
+  accessKeyId: key.access_key,
+  name: key.name,
+  grants: grantKey(key.grants),
+});
+
+/** The key's grants in the spec's shape; undefined for a key without any (not a valid spec). */
+function specOf(key: DoSpacesKey): { grants: string[] } | undefined {
+  const grants = grantKey(key.grants);
+  return grants ? { grants: grants.split(',') } : undefined;
+}
+
 function state(key: DoSpacesKey, secret?: string): DoResourceState {
   return {
     id: key.access_key,
     state: 'ready',
-    outputs: { accessKeyId: key.access_key, name: key.name, grants: grantKey(key.grants) },
+    outputs: outputsOf(key),
     ...(secret !== undefined ? { secretOutputs: { secretKey: secret } } : {}),
   };
 }
@@ -104,16 +117,18 @@ export function spacesKeyKind(client: DoClient): DoResourceKind<SpacesKeySpec> {
   return {
     kind: 'do.spaces-key',
     family: 'storage',
+    description: 'A Spaces access key with per-bucket read or read-write grants (its secret is a secret output)',
     spec: spacesKeySpec as unknown as DoResourceKind<SpacesKeySpec>['spec'],
     outputs: ['accessKeyId', 'name', 'grants'],
     secretOutputs: ['secretKey'],
     regional: false,
     updatable: ['grants'],
 
-    async ensure(name: string, spec: SpacesKeySpec, ctx: CallContext) {
+    async ensure({ name, spec, id }, ctx: CallContext) {
       checkManagedName(name, 'A Spaces key');
       const grants = toGrants(spec.grants);
-      const existing = await byName(name, ctx.signal);
+      // The key an earlier ensure answered wins over the name; one gone is created again.
+      const existing = (id !== undefined ? await read(id, ctx.signal) : undefined) ?? (await byName(name, ctx.signal));
       if (!existing) {
         const created = await client.request<{ key: DoSpacesKey }>('POST', '/spaces/keys', {
           body: { name, grants },
@@ -133,25 +148,23 @@ export function spacesKeyKind(client: DoClient): DoResourceKind<SpacesKeySpec> {
       const updated = await client.request<{ key: DoSpacesKey }>(
         'PUT',
         `/spaces/keys/${existing.access_key}`,
-        { body: { name, grants }, signal: ctx.signal, budget: 'mutate' },
+        { body: { name: existing.name, grants }, signal: ctx.signal, budget: 'mutate' },
       );
       return state(updated.key);
     },
 
     async get(id, ctx) {
       const key = await read(id, ctx.signal);
-      return key ? state(key) : undefined;
+      if (!key) return undefined;
+      const spec = specOf(key);
+      return { ...state(key), ...(spec ? { spec } : {}) };
     },
 
     async delete(id, ctx) {
       const key = await read(id, ctx.signal);
       if (!key) return { id, state: 'deleted' };
       if (!managedResourceName.test(key.name))
-        throw storageError(
-          'INVALID_STATE',
-          `Spaces key ${id} is not one better-compute manages; it was left alone`,
-          'unmanaged',
-        );
+        throw notManaged(`Spaces key ${id} is not one better-compute manages; it was left alone`);
       try {
         await client.request('DELETE', `/spaces/keys/${id}`, {
           signal: ctx.signal,
@@ -167,12 +180,17 @@ export function spacesKeyKind(client: DoClient): DoResourceKind<SpacesKeySpec> {
       for await (const key of client.pages<DoSpacesKey>('/spaces/keys', 'keys', {
         signal: ctx.signal,
         budget: 'sweep',
-      }))
+      })) {
+        const spec = specOf(key);
         yield {
           id: key.access_key,
           name: key.name,
-          ...(managedResourceName.test(key.name) ? { managedBy: 'better-compute' } : {}),
+          // Keys carry no tags: a managed name is all there is (another deployment's looks the same).
+          ...(managedResourceName.test(key.name) ? { managedBy: 'this' as const } : {}),
+          outputs: outputsOf(key),
+          ...(spec ? { spec } : {}),
         };
+      }
     },
   };
 }

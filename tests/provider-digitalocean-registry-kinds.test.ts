@@ -25,7 +25,7 @@ const world = (): Promise<StorageWorld> =>
 describe('do.container-registry', () => {
   it('creates a registry once and reports its endpoint', async () => {
     const w = await world();
-    const created = await w.resources.ensure(
+    const created = await w.ensure(
       'do.container-registry',
       'bc-tenant-a',
       { region: 'nyc3' },
@@ -42,11 +42,11 @@ describe('do.container-registry', () => {
       },
     });
     expect(
-      await w.resources.ensure('do.container-registry', 'bc-tenant-a', { region: 'nyc3' }, w.ctx()),
+      await w.ensure('do.container-registry', 'bc-tenant-a', { region: 'nyc3' }, w.ctx()),
     ).toEqual(created);
     expect(w.emu.requests.filter((r) => r.method === 'POST')).toHaveLength(1);
     const moved = await failure(
-      w.resources.ensure('do.container-registry', 'bc-tenant-a', { region: 'ams3' }, w.ctx()),
+      w.ensure('do.container-registry', 'bc-tenant-a', { region: 'ams3' }, w.ctx()),
     );
     expect(moved.details?.reason).toBe('replaceRequired');
   });
@@ -55,18 +55,18 @@ describe('do.container-registry', () => {
     const w = await world();
     registryWorld(w.emu).registryLimit = 0;
     expect(
-      (await failure(w.resources.ensure('do.container-registry', 'bc-x', { region: 'nyc3' }, w.ctx())))
+      (await failure(w.ensure('do.container-registry', 'bc-x', { region: 'nyc3' }, w.ctx())))
         .code,
     ).toBe('INVALID_INPUT');
     expect(
-      (await failure(w.resources.ensure('do.container-registry', 'acme', { region: 'nyc3' }, w.ctx())))
+      (await failure(w.ensure('do.container-registry', 'acme', { region: 'nyc3' }, w.ctx())))
         .details?.reason,
     ).toBe('name');
   });
 
   it('deletes an empty managed registry and refuses the rest', async () => {
     const w = await world();
-    await w.resources.ensure('do.container-registry', 'bc-tenant-a', { region: 'nyc3' }, w.ctx());
+    await w.ensure('do.container-registry', 'bc-tenant-a', { region: 'nyc3' }, w.ctx());
     registryWorld(w.emu).repositories.set('bc-tenant-a', [{ name: 'app', tag_count: 3 }]);
     const busy = await failure(w.resources.delete('do.container-registry', 'bc-tenant-a', w.ctx()));
     expect(busy.details?.reason).toBe('registryNotEmpty');
@@ -84,7 +84,7 @@ describe('do.container-registry', () => {
     seedRegistry(w.emu, { name: 'acme' });
     expect(
       (await failure(w.resources.delete('do.container-registry', 'acme', w.ctx()))).details?.reason,
-    ).toBe('unmanaged');
+    ).toBe('notManaged');
   });
 
   it('lists repositories and discovers registries', async () => {
@@ -98,9 +98,9 @@ describe('do.container-registry', () => {
     expect(repos).toEqual([{ name: 'app', tags: 3 }]);
     const found = [];
     for await (const entry of w.resources.discover('do.container-registry', w.ctx())) found.push(entry);
-    expect(found).toEqual([
-      { id: 'acme', name: 'acme' },
-      { id: 'bc-tenant-a', name: 'bc-tenant-a', managedBy: 'better-compute' },
+    expect(found.map((e) => [e.id, e.managedBy, e.region, e.spec])).toEqual([
+      ['acme', undefined, 'nyc3', { region: 'nyc3' }],
+      ['bc-tenant-a', 'this', 'nyc3', { region: 'nyc3' }],
     ]);
   });
 });
@@ -110,7 +110,7 @@ describe('do.registry-garbage-collection', () => {
     const w = await world();
     seedRegistry(w.emu, { name: 'bc-tenant-a' });
     const spec = { registry: 'bc-tenant-a', type: 'untagged-manifests' };
-    const started = await w.resources.ensure('do.registry-garbage-collection', 'bc-gc', spec, w.ctx());
+    const started = await w.ensure('do.registry-garbage-collection', 'bc-gc', spec, w.ctx());
     expect(started.state).toBe('pending');
     const gcs = registryWorld(w.emu).collections.get('bc-tenant-a')!;
     expect(gcs).toHaveLength(1);
@@ -118,7 +118,7 @@ describe('do.registry-garbage-collection', () => {
     expect(started.id).toBe(`bc-tenant-a/${gcs[0]!.uuid}`);
 
     // Running: ensure adopts it.
-    expect((await w.resources.ensure('do.registry-garbage-collection', 'bc-gc', spec, w.ctx())).id).toBe(
+    expect((await w.ensure('do.registry-garbage-collection', 'bc-gc', spec, w.ctx())).id).toBe(
       started.id,
     );
     gcs[0]!.status = 'succeeded';
@@ -127,13 +127,13 @@ describe('do.registry-garbage-collection', () => {
     expect(done).toMatchObject({ state: 'ready', outputs: { status: 'succeeded', freedBytes: '1024' } });
     // Done inside the window: still the same one.
     w.clock.advance(23 * 3_600_000);
-    expect((await w.resources.ensure('do.registry-garbage-collection', 'bc-gc', spec, w.ctx())).state).toBe(
+    expect((await w.ensure('do.registry-garbage-collection', 'bc-gc', spec, w.ctx())).state).toBe(
       'ready',
     );
     expect(gcs).toHaveLength(1);
     // Past the window: a new collection.
     w.clock.advance(2 * 3_600_000);
-    const next = await w.resources.ensure('do.registry-garbage-collection', 'bc-gc', spec, w.ctx());
+    const next = await w.ensure('do.registry-garbage-collection', 'bc-gc', spec, w.ctx());
     expect(next.state).toBe('pending');
     expect(next.id).not.toBe(started.id);
     expect(gcs).toHaveLength(2);
@@ -143,7 +143,7 @@ describe('do.registry-garbage-collection', () => {
     const w = await world();
     seedRegistry(w.emu, { name: 'bc-tenant-a' });
     const spec = { registry: 'bc-tenant-a' };
-    const started = await w.resources.ensure('do.registry-garbage-collection', 'bc-gc', spec, w.ctx());
+    const started = await w.ensure('do.registry-garbage-collection', 'bc-gc', spec, w.ctx());
     expect((await w.resources.delete('do.registry-garbage-collection', started.id, w.ctx())).state).toBe(
       'deleting',
     );
@@ -163,7 +163,7 @@ describe('do.registry-garbage-collection', () => {
     registryWorld(w.emu).collections.set('bc-tenant-a', [
       { uuid: 'aaaaaaaa-0000-4000-8000-000000000001', registry_name: 'bc-tenant-a', status: 'scanning manifests', created_at: '2026-01-01T00:00:00Z' },
     ]);
-    const state = await w.resources.ensure('do.registry-garbage-collection', 'bc-gc', { registry: 'bc-tenant-a' }, w.ctx());
+    const state = await w.ensure('do.registry-garbage-collection', 'bc-gc', { registry: 'bc-tenant-a' }, w.ctx());
     expect(state).toMatchObject({ id: 'bc-tenant-a/aaaaaaaa-0000-4000-8000-000000000001', state: 'pending' });
   });
 
@@ -171,11 +171,11 @@ describe('do.registry-garbage-collection', () => {
     const w = await world();
     seedRegistry(w.emu, { name: 'acme' });
     expect(
-      (await failure(w.resources.ensure('do.registry-garbage-collection', 'bc-gc', { registry: 'acme' }, w.ctx())))
+      (await failure(w.ensure('do.registry-garbage-collection', 'bc-gc', { registry: 'acme' }, w.ctx())))
         .code,
     ).toBe('INVALID_INPUT');
     expect(
-      (await failure(w.resources.ensure('do.registry-garbage-collection', 'bc-gc', { registry: 'bc-none' }, w.ctx())))
+      (await failure(w.ensure('do.registry-garbage-collection', 'bc-gc', { registry: 'bc-none' }, w.ctx())))
         .code,
     ).toBe('NOT_FOUND');
   });

@@ -227,7 +227,7 @@ export class DocrEmulator {
     }
     const blob = this.blobs.get(reference!);
     if (!blob) return new Response(JSON.stringify({ errors: [{ code: 'BLOB_UNKNOWN' }] }), { status: 404 });
-    if (this.serveBlobs) return new Response(blob, { status: 200 });
+    if (this.serveBlobs) return new Response(blob as BodyInit, { status: 200 });
     return new Response(null, {
       status: 307,
       headers: {

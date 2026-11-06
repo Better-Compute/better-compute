@@ -3,6 +3,8 @@ import {
   digitalocean,
   doStorageResources,
   type DoConfig,
+  type DoResourceRequest,
+  type DoResourceState,
   type DoResources,
   type DoStorageOptions,
 } from '@better-compute/provider-digitalocean';
@@ -46,6 +48,14 @@ export interface StorageWorld {
   clock: ManualClock;
   resources: DoResources;
   ctx: (key?: string) => CallContext;
+  /** `resources.ensure` with the request spelled out: kind, name, spec, then the context. */
+  ensure: (
+    kind: string,
+    name: string,
+    spec: unknown,
+    context: CallContext,
+    extra?: Omit<DoResourceRequest, 'kind' | 'name' | 'spec'>,
+  ) => Promise<DoResourceState>;
 }
 
 export async function storageWorld(
@@ -65,5 +75,13 @@ export async function storageWorld(
     { clock, secrets: storageSecrets, log: noopLog, account: platformAccount },
     { fetch: emu.fetch, spacesFetch: spaces.fetch, ...options },
   );
-  return { emu, spaces, clock, resources, ctx: (key) => storageCtx(clock, key) };
+  return {
+    emu,
+    spaces,
+    clock,
+    resources,
+    ctx: (key) => storageCtx(clock, key),
+    ensure: (kind, name, spec, context, extra = {}) =>
+      resources.ensure({ kind, name, spec, ...extra }, context),
+  };
 }

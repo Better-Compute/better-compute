@@ -151,7 +151,10 @@ A key with a `.` or `..` segment, a control character, a leading `/` or more tha
 
 ### Storage kinds
 
-`doStorageResources(config, context, options?)` serves an account's storage resources as desired-state kinds. Each kind's metadata (`spec` manifest, `outputs`, `secretOutputs`, `regional`, `updatable`) mirrors the program plan's `ProviderResourceKind`, so the `cloud-resources` module can dispatch them once that contract is in core. Until then `doResources` is the dispatcher, and it validates each spec before any call. Every `ensure` and `delete` is idempotent.
+`doStorageResources(config, context, options?)` serves an account's storage resources in the shape of core's cloud-resources `ProviderResources` contract: `kinds()`, `ensure({ kind, name, spec, id?, parent?, labels? })`, `get`, `delete`, `discover`, `adopt` and `release`. Each kind's metadata (`description`, `spec` manifest, `outputs`, `secretOutputs`, `regional`, `updatable`, `parent`) is a `ProviderResourceKind`. The `cloud-resources` module can therefore take it as a provider's `resources` without an adapter. `doResources` is the dispatcher, and it validates each spec before any call. Every `ensure` and `delete` is idempotent.
+
+- When `ensure` gets an `id` (one an earlier `ensure` or an `adopt` answered), that resource wins over `name`. An adopted bucket is therefore converged in place, and no bucket is created under the derived name. A spec that would move a resource (a bucket's `region`, an endpoint's `origin`) is refused with `replaceRequired`.
+- `get` and `adopt` also return `spec`, the spec as DigitalOcean reports it. Discovery returns `region`, `outputs` and `spec`, plus `managedBy: 'this'` or `'other'`.
 
 | Kind | Spec (updatable in **bold**) | Outputs | Ownership |
 | --- | --- | --- | --- |
@@ -161,7 +164,18 @@ A key with a `.` or `..` segment, a control character, a leading `/` or more tha
 | `do.container-registry` | `region` | `name`, `region`, `endpoint` (`registry.digitalocean.com/<name>`), `storageUsageBytes` | The name is `bc-…` |
 | `do.registry-garbage-collection` | `registry` (a managed one), **`type`**, **`intervalHours`** (default 24) | `registry`, `uuid`, `status`, `blobsDeleted`, `freedBytes` | The registry is managed |
 
-Buckets, keys, CDN endpoints and registries carry no tags, so each kind proves ownership another way. The last column says how. A resource without that proof is never changed or deleted: it is refused with `INVALID_STATE` and `reason` `unmanaged`, `otherDeployment` or `unmanagedOrigin`.
+Buckets, keys, CDN endpoints and registries carry no tags, so each kind proves ownership another way. The last column says how. A resource without that proof is never changed or deleted. It is refused with `INVALID_STATE` and one of these reasons, as the contract names them:
+
+- `notManaged`: this deployment does not manage it. Every refused `delete` uses this reason.
+- `managedByAnother`: another deployment's marker is on the bucket.
+- `unmanagedOrigin`: an `ensure` names a CDN origin that is not a managed bucket.
+
+Adopting and releasing:
+
+- `adopt` on a bucket writes the marker, with the cloud resource id from the `better-compute-resource` label. A bucket another deployment marked is refused.
+- `release` removes the marker and leaves the bucket and its data in place.
+- `adopt` on a CDN endpoint only checks that its origin is a managed bucket: an endpoint has nothing to label.
+- Keys and registries are owned by their `bc-` names, so `adopt` and `release` are `UNSUPPORTED` with `reason` `adopt`. Their discovery reports `managedBy: 'this'` for any `bc-` name, because the name cannot tell two deployments apart.
 
 Tenant data is never deleted to delete a resource:
 

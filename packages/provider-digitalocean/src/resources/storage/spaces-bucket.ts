@@ -1,12 +1,19 @@
 import { field, manifest, type CallContext } from '@better-compute/core';
 import { spacesRegionPattern, xmlValue, xmlValues, type SpacesClient } from '../../spaces/s3.js';
-import { hasCode, storageError, type DoResourceKind, type DoResourceState } from './kind.js';
+import {
+  hasCode,
+  notManaged,
+  storageError,
+  type DoResourceKind,
+  type DoResourceState,
+} from './kind.js';
 
 // `do.spaces-bucket`: a tenant Spaces bucket, managed over the S3 API with the account's Spaces
 // key pair. Bucket names are global and untaggable, so ownership is a marker object
 // (`.better-compute/owner`) naming this deployment: `ensure` never takes over a bucket without
 // it (adopt is an explicit operation), and `delete` refuses a bucket without it, or with anything
-// in it besides the marker. Tenant data is never deleted to delete a bucket.
+// in it besides the marker. Tenant data is never deleted to delete a bucket. `adopt` writes the
+// marker on an unmarked bucket, `release` removes it; neither touches another deployment's.
 
 /** The object that marks a bucket as this deployment's. */
 export const bucketMarkerKey = '.better-compute/owner';
@@ -73,9 +80,31 @@ export function spacesBucketKind(deps: {
   spaces: (region: string) => SpacesClient;
   deploymentTag: string;
 }): DoResourceKind<SpacesBucketSpec> {
-  const marker = new TextEncoder().encode(
-    JSON.stringify({ managedBy: 'better-compute', deployment: deps.deploymentTag }),
-  );
+  /** The marker's bytes; it names the cloud resource when the caller passed its labels. */
+  const markerFor = (labels?: Readonly<Record<string, string>>) =>
+    new TextEncoder().encode(
+      JSON.stringify({
+        managedBy: 'better-compute',
+        deployment: deps.deploymentTag,
+        ...(labels?.['better-compute-resource']
+          ? { resource: labels['better-compute-resource'] }
+          : {}),
+      }),
+    );
+  const marker = markerFor();
+
+  async function putMarker(
+    s3: SpacesClient,
+    bucket: string,
+    body: Uint8Array,
+    signal: AbortSignal,
+  ): Promise<void> {
+    await s3.request('PUT', bucket, bucketMarkerKey, {
+      body,
+      headers: { 'content-type': 'application/json' },
+      signal,
+    });
+  }
 
   async function head(s3: SpacesClient, bucket: string, signal: AbortSignal): Promise<number> {
     const response = await s3.request('HEAD', bucket, undefined, {
@@ -89,12 +118,14 @@ export function spacesBucketKind(deps: {
     bucketOwnership(s3, bucket, deps.deploymentTag, signal);
 
   function refuseOwnership(found: 'missing' | 'other', bucket: string): never {
+    if (found === 'missing')
+      throw notManaged(
+        `Bucket ${bucket} exists in this account but better-compute does not manage it; adopt it to manage it`,
+      );
     throw storageError(
       'INVALID_STATE',
-      found === 'missing'
-        ? `Bucket ${bucket} exists in this account but better-compute does not manage it; adopt it to manage it`
-        : `Bucket ${bucket} is managed by another better-compute deployment`,
-      found === 'missing' ? 'unmanaged' : 'otherDeployment',
+      `Bucket ${bucket} is managed by another better-compute deployment`,
+      'managedByAnother',
     );
   }
 
@@ -117,6 +148,13 @@ export function spacesBucketKind(deps: {
         versioning === 'Enabled' ? 'enabled' : versioning === 'Suspended' ? 'suspended' : 'off',
     };
   }
+
+  /** The bucket's spec as Spaces reports it (a suspended versioning reads as off). */
+  const specOf = (target: BucketTarget, seen: { acl: string; versioning: string }) => ({
+    region: target.region,
+    acl: seen.acl,
+    versioning: seen.versioning === 'enabled',
+  });
 
   function ready(
     target: BucketTarget,
@@ -181,13 +219,21 @@ export function spacesBucketKind(deps: {
   return {
     kind: 'do.spaces-bucket',
     family: 'storage',
+    description: "A Spaces (S3-compatible) bucket, marked as this deployment's by an owner object",
     spec: spacesBucketSpec as unknown as DoResourceKind<SpacesBucketSpec>['spec'],
     outputs: ['bucket', 'region', 'endpoint', 'origin', 'acl', 'versioning'],
     regional: true,
     updatable: ['acl', 'versioning'],
 
-    async ensure(name: string, spec: SpacesBucketSpec, ctx: CallContext) {
-      const target = parseBucketId(`${spec.region}/${name}`);
+    async ensure({ name, spec, id, labels }, ctx: CallContext) {
+      // The bucket an earlier ensure (or an adopt) answered wins over the derived name.
+      const target = parseBucketId(id ?? `${spec.region}/${name}`);
+      if (target.region !== spec.region)
+        throw storageError(
+          'INVALID_STATE',
+          `Bucket ${target.bucket} is in ${target.region}; a bucket cannot move regions`,
+          'replaceRequired',
+        );
       const s3 = deps.spaces(target.region);
       const status = await head(s3, target.bucket, ctx.signal);
       if (status === 403)
@@ -208,11 +254,7 @@ export function spacesBucketKind(deps: {
           headers: { 'x-amz-acl': spec.acl },
           signal: ctx.signal,
         });
-        await s3.request('PUT', target.bucket, bucketMarkerKey, {
-          body: marker,
-          headers: { 'content-type': 'application/json' },
-          signal: ctx.signal,
-        });
+        await putMarker(s3, target.bucket, markerFor(labels), ctx.signal);
         ctx.log.info('digitalocean.spaces-bucket.created', {
           bucket: target.bucket,
           region: target.region,
@@ -230,7 +272,50 @@ export function spacesBucketKind(deps: {
       const s3 = deps.spaces(target.region);
       const status = await head(s3, target.bucket, ctx.signal);
       if (status !== 200) return undefined;
-      return ready(target, await observed(s3, target.bucket, ctx.signal));
+      const seen = await observed(s3, target.bucket, ctx.signal);
+      return { ...ready(target, seen), spec: specOf(target, seen) };
+    },
+
+    async adopt(id, labels, ctx) {
+      const target = parseBucketId(id);
+      const s3 = deps.spaces(target.region);
+      const status = await head(s3, target.bucket, ctx.signal);
+      if (status === 301)
+        throw storageError('INVALID_STATE', `Bucket ${target.bucket} is in another region`, 'region');
+      if (status !== 200)
+        throw storageError(
+          'NOT_FOUND',
+          `This account has no bucket ${target.bucket} in ${target.region}`,
+          'bucket',
+        );
+      const owner = await ownership(s3, target.bucket, ctx.signal);
+      if (owner === 'other') refuseOwnership(owner, target.bucket);
+      if (owner === 'missing') {
+        await putMarker(s3, target.bucket, markerFor(labels), ctx.signal);
+        ctx.log.info('digitalocean.spaces-bucket.adopted', {
+          bucket: target.bucket,
+          region: target.region,
+        });
+      }
+      const seen = await observed(s3, target.bucket, ctx.signal);
+      return { ...ready(target, seen), spec: specOf(target, seen) };
+    },
+
+    async release(id, ctx) {
+      const target = parseBucketId(id);
+      const s3 = deps.spaces(target.region);
+      if ((await head(s3, target.bucket, ctx.signal)) !== 200) return;
+      const owner = await ownership(s3, target.bucket, ctx.signal);
+      if (owner === 'missing') return;
+      if (owner === 'other') refuseOwnership(owner, target.bucket);
+      await s3.request('DELETE', target.bucket, bucketMarkerKey, {
+        signal: ctx.signal,
+        allow: [404],
+      });
+      ctx.log.info('digitalocean.spaces-bucket.released', {
+        bucket: target.bucket,
+        region: target.region,
+      });
     },
 
     async delete(id, ctx) {
@@ -238,8 +323,10 @@ export function spacesBucketKind(deps: {
       const s3 = deps.spaces(target.region);
       const status = await head(s3, target.bucket, ctx.signal);
       if (status === 404 || status === 403) return { id, state: 'deleted' };
-      const owner = await ownership(s3, target.bucket, ctx.signal);
-      if (owner !== 'mine') refuseOwnership(owner, target.bucket);
+      if ((await ownership(s3, target.bucket, ctx.signal)) !== 'mine')
+        throw notManaged(
+          `Bucket ${target.bucket} is not one this deployment manages; it was left alone`,
+        );
       const listing = await (
         await s3.request('GET', target.bucket, undefined, {
           query: { 'list-type': '2', 'max-keys': '2' },
@@ -282,12 +369,7 @@ export function spacesBucketKind(deps: {
         await s3.request('DELETE', target.bucket, undefined, { signal: ctx.signal, allow: [404] });
       } catch (error) {
         // An object arrived between the listing and the delete: the bucket stays, marked as ours.
-        if (hasCode(error, 'INVALID_STATE'))
-          await s3.request('PUT', target.bucket, bucketMarkerKey, {
-            body: marker,
-            headers: { 'content-type': 'application/json' },
-            signal: ctx.signal,
-          });
+        if (hasCode(error, 'INVALID_STATE')) await putMarker(s3, target.bucket, marker, ctx.signal);
         throw error;
       }
       ctx.log.info('digitalocean.spaces-bucket.deleted', {

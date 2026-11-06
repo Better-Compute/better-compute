@@ -26,7 +26,7 @@ describe('do.spaces-key', () => {
   it('creates a key once and returns its secret only from the create', async () => {
     const w = await world();
     const spec = { grants: ['tenant-a-assets:readwrite', 'tenant-a-logs:read'] };
-    const first = await w.resources.ensure('do.spaces-key', 'bc-key1', spec, w.ctx());
+    const first = await w.ensure('do.spaces-key', 'bc-key1', spec, w.ctx());
     expect(first.state).toBe('ready');
     expect(first.outputs).toEqual({
       accessKeyId: first.id,
@@ -37,7 +37,7 @@ describe('do.spaces-key', () => {
     // The secret never sits in the plain outputs.
     expect(JSON.stringify(first.outputs)).not.toContain(first.secretOutputs!.secretKey);
 
-    const again = await w.resources.ensure('do.spaces-key', 'bc-key1', spec, w.ctx());
+    const again = await w.ensure('do.spaces-key', 'bc-key1', spec, w.ctx());
     expect(again.outputs).toEqual(first.outputs);
     expect(again.id).toBe(first.id);
     expect(again.secretOutputs).toBeUndefined();
@@ -55,13 +55,13 @@ describe('do.spaces-key', () => {
 
   it('changes grants in place', async () => {
     const w = await world();
-    const created = await w.resources.ensure(
+    const created = await w.ensure(
       'do.spaces-key',
       'bc-key1',
       { grants: ['tenant-a-assets:read'] },
       w.ctx(),
     );
-    const changed = await w.resources.ensure(
+    const changed = await w.ensure(
       'do.spaces-key',
       'bc-key1',
       { grants: ['*:fullaccess'] },
@@ -88,7 +88,7 @@ describe('do.spaces-key', () => {
       created_at: '2026-11-01T00:00:00Z',
       grants: [{ bucket: 'b-one', permission: 'read' }],
     });
-    const state = await w.resources.ensure('do.spaces-key', 'bc-dup', { grants: ['b-one:read'] }, w.ctx());
+    const state = await w.ensure('do.spaces-key', 'bc-dup', { grants: ['b-one:read'] }, w.ctx());
     expect(state.id).toBe('DOOLDER00001');
   });
 
@@ -96,13 +96,13 @@ describe('do.spaces-key', () => {
     const w = await world();
     for (const grants of [[], ['Bad:read'], ['b-one:fullaccess'], ['*:read'], ['b-one:write']])
       expect(
-        (await failure(w.resources.ensure('do.spaces-key', 'bc-key1', { grants }, w.ctx()))).code,
+        (await failure(w.ensure('do.spaces-key', 'bc-key1', { grants }, w.ctx()))).code,
         JSON.stringify(grants),
       ).toBe('INVALID_INPUT');
     expect(
       (
         await failure(
-          w.resources.ensure('do.spaces-key', 'tenant-key', { grants: ['b-one:read'] }, w.ctx()),
+          w.ensure('do.spaces-key', 'tenant-key', { grants: ['b-one:read'] }, w.ctx()),
         )
       ).details?.reason,
     ).toBe('name');
@@ -111,7 +111,7 @@ describe('do.spaces-key', () => {
 
   it('gets, deletes, and refuses to delete a key it does not manage', async () => {
     const w = await world();
-    const created = await w.resources.ensure(
+    const created = await w.ensure(
       'do.spaces-key',
       'bc-key1',
       { grants: ['b-one:read'] },
@@ -129,7 +129,7 @@ describe('do.spaces-key', () => {
     const foreign = seedSpacesKey(w.emu, { name: 'ci-deploy', access_key: 'DOFOREIGN0001' });
     const refused = await failure(w.resources.delete('do.spaces-key', foreign.access_key, w.ctx()));
     expect(refused.code).toBe('INVALID_STATE');
-    expect(refused.details?.reason).toBe('unmanaged');
+    expect(refused.details?.reason).toBe('notManaged');
     expect(spacesKeys(w.emu).has('DOFOREIGN0001')).toBe(true);
   });
 
@@ -139,15 +139,15 @@ describe('do.spaces-key', () => {
     seedSpacesKey(w.emu, { name: 'bc-mine', access_key: 'DOMINE000001' });
     const found = [];
     for await (const entry of w.resources.discover('do.spaces-key', w.ctx())) found.push(entry);
-    expect(found).toEqual([
-      { id: 'DOFOREIGN0001', name: 'ci-deploy' },
-      { id: 'DOMINE000001', name: 'bc-mine', managedBy: 'better-compute' },
+    expect(found.map((e) => [e.id, e.name, e.managedBy])).toEqual([
+      ['DOFOREIGN0001', 'ci-deploy', undefined],
+      ['DOMINE000001', 'bc-mine', 'this'],
     ]);
   });
 
   it('refuses an unknown kind', async () => {
     const w = await world();
-    expect((await failure(w.resources.ensure('do.nope', 'bc-x', {}, w.ctx()))).code).toBe(
+    expect((await failure(w.ensure('do.nope', 'bc-x', {}, w.ctx()))).code).toBe(
       'UNSUPPORTED',
     );
   });
