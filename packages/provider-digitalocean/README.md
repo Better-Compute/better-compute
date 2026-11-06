@@ -201,7 +201,8 @@ keys, guardrails, the Managed Agents objects; `resources/kinds/named.ts`).
 - **Inference proxy:** `inferenceProxy({ record, endpoint?, fetch?, log? })` forwards `/v1/chat/completions`,
   `/v1/completions` and `/v1/embeddings` to `https://inference.do-ai.run` with the tenant's resolved key and hands each
   answer's token counts (and the caller's `meta`) to `record`, which the host writes as `ai.inference.tokens`.
-  Wiring it to a route is the host's: the server does not import providers.
+  A streamed answer is counted even when the client cancels before its final usage chunk: the proxy reads the rest
+  (at most 16 MiB). Wiring it to a route is the host's: the server does not import providers.
 - **Knowledge bases:** `do.knowledge-base`, an embedding model (uuid) over `webSources` and `spacesSources`,
   indexed into an OpenSearch database DigitalOcean makes (or `database`). Sources change in place (added and removed,
   then one indexing job, owed until it starts: a failed start is retried); Spaces sources, `database` and `vpc`

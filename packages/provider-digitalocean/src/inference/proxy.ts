@@ -8,7 +8,10 @@ import { ComputeError, type Logger } from '@better-compute/core';
 // - Only the inference routes pass, and only JSON bodies that name a model.
 // - The upstream origin is a code-level option (https only), never tenant input, and a redirect is never followed.
 // - A streamed answer passes through byte for byte; the proxy asks for its final usage chunk
-//   (`stream_options.include_usage`) and counts from it.
+//   (`stream_options.include_usage`) and counts from it. A client that cancels its stream before that chunk is still
+//   counted: the proxy reads the rest of the answer itself (bounded by `maxDrainBytes`). An abort of the request's
+//   own `signal` stops the upstream call, and what it used then is not counted: a host that wants every call counted
+//   does not tie that signal to the client's connection.
 // - The key goes in the upstream Authorization header only: it is masked out of an upstream error body, never logged,
 //   never part of an error. Counting never fails a call: a recorder that throws is logged and the answer still goes.
 
@@ -41,6 +44,8 @@ export interface InferenceProxyRequest {
 }
 
 export const defaultInferenceOrigin = 'https://inference.do-ai.run';
+/** How much of a streamed answer the proxy still reads, for its usage chunk, after the client cancelled: 16 MiB. */
+export const maxDrainBytes = 16 * 1024 * 1024;
 
 const routes: Readonly<Record<string, InferenceUsage['route']>> = {
   '/v1/chat/completions': 'chat.completions',
@@ -212,21 +217,70 @@ export function inferenceProxy(
         // Not JSON: passed through, not counted.
       }
     };
-    const counter = new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        controller.enqueue(chunk);
-        pending += decoder.decode(chunk, { stream: true });
-        const lines = pending.split('\n');
-        pending = lines.pop() ?? '';
-        for (const line of lines) scan(line);
+    const take = (chunk: Uint8Array) => {
+      pending += decoder.decode(chunk, { stream: true });
+      const lines = pending.split('\n');
+      pending = lines.pop() ?? '';
+      for (const line of lines) scan(line);
+    };
+    let counted = false;
+    const finish = () => {
+      if (counted) return;
+      counted = true;
+      pending += decoder.decode();
+      if (pending) scan(pending);
+      pending = '';
+      if (usage === undefined)
+        log.warn('inference proxy: a streamed answer without a usage chunk was not counted', {
+          model,
+          route,
+        });
+      record(usage);
+    };
+    // The client's stream is fed from the upstream reader. A client that stops reading (cancels) does not stop the
+    // count: the rest of the answer is still read, up to `maxDrainBytes`, for its final usage chunk, since upstream
+    // bills the tokens whether or not the client reads them.
+    const reader = upstream.body.getReader();
+    let cancelled = false;
+    const drain = async () => {
+      let left = maxDrainBytes;
+      try {
+        while (left > 0) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          take(value);
+          left -= value.byteLength;
+        }
+      } catch {
+        // The upstream ended badly: what was read is what is counted.
+      }
+      finish();
+      if (left <= 0) reader.cancel().catch(() => {});
+    };
+    const passed = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        let next: ReadableStreamReadResult<Uint8Array>;
+        try {
+          next = await reader.read();
+        } catch (error) {
+          finish();
+          if (!cancelled) controller.error(error);
+          return;
+        }
+        if (next.done) {
+          finish();
+          if (!cancelled) controller.close();
+          return;
+        }
+        take(next.value);
+        if (!cancelled) controller.enqueue(next.value);
       },
-      flush() {
-        pending += decoder.decode();
-        if (pending) scan(pending);
-        record(usage);
+      cancel() {
+        cancelled = true;
+        void drain();
       },
     });
-    return new Response(upstream.body.pipeThrough(counter), {
+    return new Response(passed, {
       status: upstream.status,
       headers: { 'content-type': contentType, 'cache-control': 'no-cache' },
     });

@@ -117,6 +117,70 @@ describe('inferenceProxy', () => {
     ]);
   });
 
+  it('a client that cancels the stream before the usage chunk is still counted, once', async () => {
+    const encoder = new TextEncoder();
+    const chunks = [
+      'data: {"choices":[{"delta":{"content":"h"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"i"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"!"}}]}\n\n',
+      'data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}\n\n',
+      'data: [DONE]\n\n',
+    ];
+    let served = 0;
+    let upstreamCancelled = false;
+    const up = upstream(
+      () =>
+        new Response(
+          // One event per pull, as a model streams them: nothing is buffered ahead of the reader.
+          new ReadableStream({
+            pull(controller) {
+              if (served < chunks.length) controller.enqueue(encoder.encode(chunks[served++]!));
+              else controller.close();
+            },
+            cancel() {
+              upstreamCancelled = true;
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        ),
+    );
+    const usage: InferenceUsage[] = [];
+    let counted!: () => void;
+    const done = new Promise<void>((resolve) => (counted = resolve));
+    const proxy = inferenceProxy({
+      fetch: up.fetch,
+      record: (entry) => {
+        usage.push(entry);
+        counted();
+      },
+    });
+    const response = await proxy({
+      path: '/v1/chat/completions',
+      body: { model: 'm1', stream: true, messages: [] },
+      key,
+      meta: { tenantId: 'acme' },
+    });
+    const reader = response.body!.getReader();
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toBe(chunks[0]);
+    // The client has its first token and walks away before the usage chunk.
+    await reader.cancel();
+    await done;
+    expect(usage).toEqual([
+      {
+        route: 'chat.completions',
+        model: 'm1',
+        inputTokens: 5,
+        outputTokens: 3,
+        totalTokens: 8,
+        meta: { tenantId: 'acme' },
+      },
+    ]);
+    // Read to its end, not cancelled.
+    expect(served).toBe(chunks.length);
+    expect(upstreamCancelled).toBe(false);
+  });
+
   it('embeddings count their input tokens', async () => {
     const up = upstream(
       () =>
