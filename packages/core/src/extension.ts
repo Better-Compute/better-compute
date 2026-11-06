@@ -782,6 +782,19 @@ export interface NetworkRef {
   tags?: readonly string[];
 }
 
+/**
+ * (AWS A10) Where a created machine lands relative to its siblings: a provider placement group the
+ * provider makes on first use (an EC2 placement group). `group` is the provider's name for it, chosen
+ * by the module (tenant-scoped); every machine of one group asks for the same `strategy`.
+ */
+export interface ProviderPlacement {
+  group: string;
+  /** `cluster`: one low-latency network segment; `spread`: distinct hardware; `partition`: disjoint racks. */
+  strategy: 'cluster' | 'spread' | 'partition';
+  /** `partition` only: the partition (1-based) to launch into; absent: the provider picks. */
+  partition?: number;
+}
+
 export interface ProviderNetworkSpec {
   name: string;
   description?: string;
@@ -1109,6 +1122,8 @@ export interface ProviderImpl {
       userData: string;
       name: string;
       network?: NetworkRef;
+      /** (AWS A10) The placement group to launch into; a provider without placement groups ignores it. */
+      placement?: ProviderPlacement;
       labels?: Readonly<Record<string, string>>;
       /**
        * The instance's OpenSSH public keys, also rendered into `userData` when it has none. A
