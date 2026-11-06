@@ -1,13 +1,22 @@
 import {
+  ComputeError,
+  isComputeError,
+  type CallContext,
+  type ExternalMachine,
+  type ImageRef,
+  type NetworkRef,
   type Offer,
   type OfferQuery,
   type ProviderContext,
+  type ProviderImpl,
 } from '@better-compute/core';
-import type { QueryClient } from '@better-compute/aws-core';
+import type { QueryClient, QueryParams, XmlElement } from '@better-compute/aws-core';
 import type { AccountCredentials } from './account.js';
 import type { AwsConfig, AwsProviderOptions } from './config.js';
-import { offerId } from './ids.js';
-import type { InstanceTypeCache, ZoneCache } from './shapes.js';
+import { clientToken, offerId, parseInstanceId, parseOfferId, tags, tagValue } from './ids.js';
+import { aliasRootDeviceOf, resolveImage } from './images.js';
+import { toMachine, type InstanceTypeCache, type InstanceTypeInfo, type ZoneCache } from './shapes.js';
+import { packUserData } from './userdata.js';
 
 export interface AwsComputeDeps {
   ec2: QueryClient;
@@ -16,11 +25,49 @@ export interface AwsComputeDeps {
   zones: ZoneCache;
 }
 
+export interface AwsCreateRequest {
+  offerId: string;
+  image: ImageRef;
+  userData: string;
+  name: string;
+  network?: NetworkRef;
+  labels?: Readonly<Record<string, string>>;
+  sshKeys?: readonly string[];
+}
+
 const offeringsTtlMs = 3_600_000;
+const imageTtlMs = 86_400_000;
+/** EC2 allows 50 tags per resource; ours take 3, the rest is for tenant labels. */
+const maxLabels = 40;
+
+/** `stateReason.code` of a terminated instance → what `get` reports. */
+function terminatedFailure(code: string | undefined): ComputeError | 'error' | undefined {
+  if (code === 'Server.InsufficientInstanceCapacity')
+    return new ComputeError('CAPACITY_UNAVAILABLE', 'EC2 had no capacity for the instance', undefined, {
+      provider: 'aws',
+      reason: code,
+    });
+  if (code === 'Client.VolumeLimitExceeded')
+    return new ComputeError('QUOTA_EXCEEDED', 'the EBS volume limit was reached launching the instance', undefined, {
+      provider: 'aws',
+      reason: code,
+    });
+  if (code === 'Server.InternalError') return 'error';
+  return undefined;
+}
+
+/** A tag key for a tenant label: `better-compute:<key>`, only characters EC2 takes. */
+function labelKey(key: string): string | undefined {
+  const clean = Array.from(String(key).replace(/[^\p{L}\p{N} _.:/=+\-@]/gu, '')).slice(0, 100).join('');
+  return clean === '' ? undefined : `better-compute:${clean}`;
+}
 
 /** One AWS account's EC2 client (`ProviderImpl`). */
-export class AwsCompute {
+export class AwsCompute implements ProviderImpl {
   #offerings: { pairs: [string, string][]; at: number } | undefined;
+  readonly #created = new Map<string, number>();
+  readonly #rootDevices = new Map<string, { device: string | undefined; at: number }>();
+  readonly #loggedSsm = new Set<string>();
 
   constructor(
     readonly config: AwsConfig,
@@ -29,15 +76,17 @@ export class AwsCompute {
     readonly deps: AwsComputeDeps,
   ) {}
 
-  /** A signal for calls that the contract gives none (listOffers). */
-  #signal(): AbortSignal {
-    return AbortSignal.timeout(60_000);
-  }
-
   /** Every EC2 call runs after the account's identity checks (memoized). */
   protected async ready(signal: AbortSignal): Promise<void> {
     await this.deps.account.verify({ signal, clock: this.context.clock });
   }
+
+  protected async call(action: string, params: QueryParams, signal: AbortSignal): Promise<XmlElement> {
+    await this.ready(signal);
+    return this.deps.ec2.call(action, params, { signal });
+  }
+
+  // --- Offers -------------------------------------------------------------------------------------
 
   async #offeringPairs(signal: AbortSignal): Promise<[string, string][]> {
     const now = this.context.clock.now();
@@ -46,7 +95,7 @@ export class AwsCompute {
     const seen = new Set<string>();
     let token: string | undefined;
     do {
-      const doc = await this.deps.ec2.call(
+      const doc = await this.call(
         'DescribeInstanceTypeOfferings',
         {
           LocationType: 'availability-zone',
@@ -54,7 +103,7 @@ export class AwsCompute {
           MaxResults: 1000,
           NextToken: token,
         },
-        { signal },
+        signal,
       );
       for (const item of doc.items('instanceTypeOfferingSet')) {
         const zone = item.textOf('location');
@@ -62,7 +111,11 @@ export class AwsCompute {
         if (zone && type && this.config.zones.includes(zone)) pairs.push([zone, type]);
       }
       token = doc.textOf('nextToken') || undefined;
-      if (token && seen.has(token)) break;
+      if (token && seen.has(token))
+        throw new ComputeError('PROVIDER_ERROR', 'AWS returned a pagination token twice', undefined, {
+          provider: 'aws',
+          reason: 'pagination-loop',
+        });
       if (token) seen.add(token);
     } while (token);
     pairs.sort(([az, at], [bz, bt]) => (az === bz ? (at < bt ? -1 : at > bt ? 1 : 0) : az < bz ? -1 : 1));
@@ -73,10 +126,9 @@ export class AwsCompute {
   async listOffers(query: OfferQuery): Promise<Offer[]> {
     if (query.region !== undefined && query.region !== this.config.region) return [];
     if (query.kind === 'metal') return [];
-    const signal = this.#signal();
-    await this.ready(signal);
+    const signal = AbortSignal.timeout(60_000);
     const pairs = await this.#offeringPairs(signal);
-    const types = await this.deps.types.get([...new Set(pairs.map(([, type]) => type))], signal);
+    const types = await this.#types([...new Set(pairs.map(([, type]) => type))], signal);
     const offers: Offer[] = [];
     for (const [zone, type] of pairs) {
       const info = types.get(type);
@@ -97,5 +149,229 @@ export class AwsCompute {
       });
     }
     return offers;
+  }
+
+  async #types(types: readonly string[], signal: AbortSignal): Promise<ReadonlyMap<string, InstanceTypeInfo>> {
+    await this.ready(signal);
+    return this.deps.types.get(types, signal);
+  }
+
+  /** Maps an instance item with the type and zone-id caches. */
+  protected async machine(instance: XmlElement, signal: AbortSignal): Promise<ExternalMachine> {
+    const type = instance.textOf('instanceType');
+    let types: ReadonlyMap<string, InstanceTypeInfo> = new Map();
+    try {
+      if (type) types = await this.#types([type], signal);
+    } catch (error) {
+      // An unknown type (a retired family) still maps, without its shape.
+      if (!isComputeError(error, 'INVALID_INPUT') && !isComputeError(error, 'PROVIDER_ERROR')) throw error;
+    }
+    const zoneIds = await this.deps.zones.all(signal);
+    return toMachine(instance, { region: this.config.region, types, zoneIds });
+  }
+
+  // --- create, get, delete ------------------------------------------------------------------------
+
+  /** The root device of an image: the alias's fixed name, DescribeImages for an AMI, none for SSM. */
+  async #rootDevice(image: ImageRef, imageId: string, signal: AbortSignal): Promise<string | undefined> {
+    const alias = aliasRootDeviceOf(image);
+    if (alias) return alias;
+    if (imageId.startsWith('resolve:ssm:')) {
+      if (!this.#loggedSsm.has(imageId)) {
+        this.#loggedSsm.add(imageId);
+        this.context.log.info('aws: an SSM image parameter has an unknown root device; the root volume keeps the AMI defaults', {
+          provider: 'aws',
+          image: imageId.slice(0, 256),
+        });
+      }
+      return undefined;
+    }
+    const now = this.context.clock.now();
+    const hit = this.#rootDevices.get(imageId);
+    if (hit && now - hit.at < imageTtlMs) return hit.device;
+    let doc: XmlElement;
+    try {
+      doc = await this.call('DescribeImages', { ImageId: [imageId] }, signal);
+    } catch (error) {
+      if (isComputeError(error, 'NOT_FOUND'))
+        throw new ComputeError('INVALID_INPUT', `image ${imageId} does not exist in ${this.config.region}`, undefined, {
+          provider: 'aws',
+          reason: 'image',
+        });
+      throw error;
+    }
+    const device = doc.items('imagesSet')[0]?.textOf('rootDeviceName');
+    this.#rootDevices.set(imageId, { device, at: now });
+    return device;
+  }
+
+  #tagSpecifications(request: AwsCreateRequest, context: CallContext) {
+    const entries = new Map<string, string>();
+    const labels = Object.entries(request.labels ?? {})
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .slice(0, maxLabels);
+    for (const [key, value] of labels) {
+      const tag = labelKey(key);
+      if (tag) entries.set(tag, tagValue(value));
+    }
+    // The ownership tags win over tenant labels.
+    entries.set(tags.name, tagValue(request.name));
+    entries.set(tags.managed, 'true');
+    entries.set(tags.instance, tagValue(context.idempotencyKey));
+    const sorted = [...entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    const tagList = sorted.map(([Key, Value]) => ({ Key, Value }));
+    return [
+      { ResourceType: 'instance', Tag: tagList },
+      { ResourceType: 'volume', Tag: tagList },
+    ];
+  }
+
+  async create(request: AwsCreateRequest, context: CallContext): Promise<ExternalMachine> {
+    const offer = parseOfferId(request.offerId);
+    if (offer.reservation !== undefined || offer.market === 'spot')
+      throw new ComputeError('UNSUPPORTED', 'capacity reservation and spot offers arrive with AWS phase A3', undefined, {
+        provider: 'aws',
+        reason: 'phase-a3',
+      });
+    if (!this.config.zones.includes(offer.zone))
+      throw new ComputeError('INVALID_INPUT', `zone ${offer.zone} is not one of this account's zones`, undefined, {
+        provider: 'aws',
+        reason: 'zone',
+      });
+    const { signal } = context;
+    const info = (await this.#types([offer.instanceType], signal)).get(offer.instanceType);
+    if (!info)
+      throw new ComputeError('INVALID_INPUT', `instance type ${offer.instanceType} does not exist in ${this.config.region}`, undefined, {
+        provider: 'aws',
+        reason: 'instance-type',
+      });
+    const imageId = resolveImage(request.image, info.arch[0] ?? 'x86_64');
+    const rootDevice = await this.#rootDevice(request.image, imageId, signal);
+    const userData = packUserData(request.userData, request.sshKeys);
+    const subnet = request.network?.subnet ?? this.config.subnetId;
+    const groups = this.config.securityGroupIds ?? [];
+    const params: QueryParams = {
+      ClientToken: clientToken(context.idempotencyKey),
+      MinCount: 1,
+      MaxCount: 1,
+      InstanceType: offer.instanceType,
+      Placement: { AvailabilityZone: offer.zone },
+      ImageId: imageId,
+      UserData: userData.base64 === '' ? undefined : userData.base64,
+      MetadataOptions: {
+        HttpTokens: 'required',
+        HttpEndpoint: 'enabled',
+        HttpPutResponseHopLimit: this.config.metadataHopLimit,
+        InstanceMetadataTags: 'disabled',
+      },
+      BlockDeviceMapping: rootDevice
+        ? [
+            {
+              DeviceName: rootDevice,
+              Ebs: {
+                VolumeSize: this.config.rootVolumeGiB,
+                VolumeType: this.config.rootVolumeType,
+                Encrypted: true,
+                KmsKeyId: this.config.kmsKeyId,
+                DeleteOnTermination: true,
+              },
+            },
+          ]
+        : undefined,
+      NetworkInterface: subnet
+        ? [
+            {
+              DeviceIndex: 0,
+              SubnetId: subnet,
+              SecurityGroupId: groups.length ? groups : undefined,
+              AssociatePublicIpAddress: this.config.associatePublicIp,
+              DeleteOnTermination: true,
+            },
+          ]
+        : undefined,
+      SecurityGroupId: !subnet && groups.length ? groups : undefined,
+      IamInstanceProfile: this.config.instanceProfile ? { Arn: this.config.instanceProfile } : undefined,
+      InstanceInitiatedShutdownBehavior: 'stop',
+      TagSpecification: this.#tagSpecifications(request, context),
+    };
+    const doc = await this.call('RunInstances', params, signal);
+    const instance = doc.items('instancesSet')[0];
+    const id = instance?.textOf('instanceId');
+    if (!instance || !id)
+      throw new ComputeError('PROVIDER_ERROR', 'RunInstances returned no instance', undefined, { provider: 'aws' });
+    if (!this.#created.has(id)) this.#created.set(id, this.context.clock.now());
+    return this.machine(instance, signal);
+  }
+
+  /** The instance item by id; undefined when EC2 says it does not exist. */
+  protected async describe(id: string, signal: AbortSignal): Promise<XmlElement | undefined> {
+    try {
+      const doc = await this.call('DescribeInstances', { InstanceId: [id] }, signal);
+      return doc.items('reservationSet').flatMap((reservation) => reservation.items('instancesSet'))
+        .find((item) => item.textOf('instanceId') === id);
+    } catch (error) {
+      if (isComputeError(error, 'NOT_FOUND')) return undefined;
+      throw error;
+    }
+  }
+
+  async #byClientToken(id: string, context: CallContext): Promise<XmlElement | undefined> {
+    const doc = await this.call(
+      'DescribeInstances',
+      { Filter: [{ Name: 'client-token', Value: [clientToken(context.idempotencyKey)] }] },
+      context.signal,
+    );
+    return doc.items('reservationSet').flatMap((reservation) => reservation.items('instancesSet'))
+      .find((item) => item.textOf('instanceId') === id);
+  }
+
+  async get(id: string, context: CallContext): Promise<ExternalMachine | undefined> {
+    try {
+      parseInstanceId(id);
+    } catch {
+      return undefined;
+    }
+    let instance = await this.describe(id, context.signal);
+    // EC2 is eventually consistent right after RunInstances: the ClientToken finds it sooner.
+    instance ??= await this.#byClientToken(id, context);
+    if (!instance) {
+      const created = this.#created.get(id);
+      const window = this.options.consistencyWindowMs ?? 120_000;
+      if (created !== undefined && this.context.clock.now() - created < window)
+        return { id, state: 'pending', addresses: [] };
+      return undefined;
+    }
+    const machine = await this.machine(instance, context.signal);
+    if (instance.child('instanceState')?.textOf('name') === 'terminated') {
+      const failure = terminatedFailure(instance.child('stateReason')?.textOf('code'));
+      if (failure instanceof ComputeError) throw failure;
+      if (failure === 'error') return { ...machine, state: 'error' };
+    }
+    return machine;
+  }
+
+  async delete(id: string, context: CallContext): Promise<void> {
+    parseInstanceId(id);
+    const instance = await this.describe(id, context.signal);
+    if (!instance) return;
+    const state = instance.child('instanceState')?.textOf('name');
+    if (state === 'terminated' || state === 'shutting-down') return;
+    const tagged = new Map(instance.items('tagSet').map((item) => [item.textOf('key'), item.textOf('value')]));
+    if (tagged.get(tags.managed) !== 'true')
+      throw new ComputeError('INVALID_STATE', `instance ${id} is not managed by better-compute`, undefined, {
+        provider: 'aws',
+        reason: 'not-managed',
+      });
+    try {
+      await this.call('TerminateInstances', { InstanceId: [id] }, context.signal);
+    } catch (error) {
+      if (isComputeError(error, 'NOT_FOUND')) return;
+      if (isComputeError(error, 'INVALID_STATE') && error.details?.code === 'OperationNotPermitted')
+        throw new ComputeError('INVALID_STATE', `instance ${id} has termination protection on`, undefined, {
+          provider: 'aws',
+          reason: 'termination-protected',
+        });
+      throw error;
+    }
   }
 }
