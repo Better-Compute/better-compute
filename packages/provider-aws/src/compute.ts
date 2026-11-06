@@ -13,7 +13,7 @@ import {
 } from '@better-compute/core';
 import type { QueryClient, QueryParams, XmlElement } from '@better-compute/aws-core';
 import type { AccountCredentials } from './account.js';
-import type { AwsConfig, AwsProviderOptions } from './config.js';
+import { parseDiscoverTag, type AwsConfig, type AwsProviderOptions } from './config.js';
 import { clientToken, offerId, parseInstanceId, parseOfferId, tags, tagValue } from './ids.js';
 import { aliasRootDeviceOf, resolveImage } from './images.js';
 import { toMachine, type InstanceTypeCache, type InstanceTypeInfo, type ZoneCache } from './shapes.js';
@@ -468,6 +468,72 @@ export class AwsCompute implements ProviderImpl {
         { Name: 'instance-state-name', Value: AwsCompute.liveStates },
       ],
       context,
+    );
+  }
+
+  // --- attach: discover, claim, release -----------------------------------------------------------
+
+  /** Every non-terminated instance the account can see, narrowed by `discoverTag`. */
+  discover(context: CallContext): AsyncIterable<ExternalMachine> {
+    const filters = [{ Name: 'instance-state-name', Value: AwsCompute.liveStates }];
+    if (this.config.discoverTag !== undefined) {
+      const [key, value] = parseDiscoverTag(this.config.discoverTag);
+      filters.push({ Name: `tag:${key}`, Value: [value] });
+    }
+    return this.instances(filters, context);
+  }
+
+  /**
+   * Writes the ownership tag. EC2 tags have no compare-and-swap: the vps unique index on the
+   * external id referees between control planes, and the re-read narrows the window between two
+   * writers here (a lost race is CONFLICT).
+   */
+  async claim(
+    id: string,
+    instanceId: string,
+    context: CallContext,
+    options: { managed?: boolean } = {},
+  ): Promise<ExternalMachine> {
+    const owner = tagValue(instanceId);
+    if (owner === '' || owner !== instanceId)
+      throw new ComputeError('INVALID_INPUT', 'an instance id to claim with is plain text', undefined, { provider: 'aws' });
+    const before = await this.#tagged(id, context.signal);
+    const holder = before.tags.get(tags.instance);
+    if (holder && holder !== instanceId)
+      throw new ComputeError('CONFLICT', `instance ${id} is held by another better-compute instance`, undefined, {
+        provider: 'aws',
+        reason: 'claimed',
+      });
+    const state = before.instance.child('instanceState')?.textOf('name');
+    if (state === 'terminated' || state === 'shutting-down')
+      throw new ComputeError('INVALID_STATE', `instance ${id} is ${state}`, undefined, { provider: 'aws', reason: state });
+    const wanted = [{ Key: tags.instance, Value: instanceId }];
+    if (options.managed) wanted.push({ Key: tags.managed, Value: 'true' });
+    if (holder !== instanceId || (options.managed && before.tags.get(tags.managed) !== 'true'))
+      await this.call('CreateTags', { ResourceId: [id], Tag: wanted }, context.signal);
+    const after = await this.#tagged(id, context.signal);
+    if (after.tags.get(tags.instance) !== instanceId)
+      throw new ComputeError('CONFLICT', `instance ${id} was claimed by another control plane at the same time`, undefined, {
+        provider: 'aws',
+        reason: 'lost-race',
+      });
+    return this.machine(after.instance, context.signal);
+  }
+
+  /** Removes the ownership (and managed) tags if they name `instanceId`; a missing instance is fine. */
+  async release(id: string, instanceId: string, context: CallContext): Promise<void> {
+    let current;
+    try {
+      current = await this.#tagged(id, context.signal);
+    } catch (error) {
+      if (isComputeError(error, 'NOT_FOUND')) return;
+      throw error;
+    }
+    if (current.tags.get(tags.instance) !== instanceId) return;
+    await this.call(
+      'DeleteTags',
+      { ResourceId: [id], Tag: [{ Key: tags.instance, Value: instanceId }, { Key: tags.managed }] },
+      context.signal,
     );
   }
 }

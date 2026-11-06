@@ -65,6 +65,7 @@ export class AwsEmulator {
   #routes: { host: RegExp; handler: ServiceHandler }[] = [];
   #failures: Failure[] = [];
   #before = new Map<string, (request: EmulatorRequest) => void | Promise<void>>();
+  #after = new Map<string, (request: EmulatorRequest) => void | Promise<void>>();
   /** STS, with the platform identity registered. */
   readonly sts: StsEmulator;
   /** The control plane's ambient identity (account 111111111111). */
@@ -96,6 +97,11 @@ export class AwsEmulator {
   /** Runs `hook` before the handler of each `operation` call (race tests). */
   beforeAction(operation: string, hook: (request: EmulatorRequest) => void | Promise<void>): void {
     this.#before.set(operation, hook);
+  }
+
+  /** Runs `hook` after the handler of each `operation` call has applied it (lost-race tests). */
+  afterAction(operation: string, hook: (request: EmulatorRequest) => void | Promise<void>): void {
+    this.#after.set(operation, hook);
   }
 
   /** The emulator's view of now. */
@@ -172,6 +178,7 @@ export class AwsEmulator {
     }
     await this.#before.get(operation)?.(emulated);
     const response = await handler.handle(emulated);
+    await this.#after.get(operation)?.(emulated);
     response.headers.set('date', new Date(this.now()).toUTCString());
     return response;
   };
