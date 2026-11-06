@@ -186,7 +186,6 @@ export class AwsEmulator {
         return { error: new EmuError('AccessDenied', 'Request has expired', 403), service: credential.split('/')[3] };
       checkUrl = new URL(url);
       checkUrl.searchParams.delete('X-Amz-Signature');
-      payloadHash = 'UNSIGNED-PAYLOAD';
     } else {
       const match = /^AWS4-HMAC-SHA256 Credential=([^,]+), SignedHeaders=([^,]+), Signature=([0-9a-f]{64})$/.exec(
         headers.authorization ?? '',
@@ -197,6 +196,8 @@ export class AwsEmulator {
       payloadHash = headers['x-amz-content-sha256'];
     }
     const [accessKeyId, day, region, service, terminator] = credential.split('/');
+    // S3 presigns UNSIGNED-PAYLOAD; other services (rds-db) sign the empty body's hash.
+    if (presigned && service === 's3') payloadHash = 'UNSIGNED-PAYLOAD';
     const secret = this.keys.get(accessKeyId ?? '');
     if (!secret || terminator !== 'aws4_request' || !service || !region || !day)
       return { error: new EmuError('InvalidClientTokenId', 'unknown access key', 403), service };
