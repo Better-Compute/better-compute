@@ -137,6 +137,7 @@ caller's `tenantId`, which the tools act in.
     tenantId: { type: 'string | ((caller?) => string | undefined)', description: "The tenant tools act in. Default: the caller's tenantId. Without one, every tool answers ACCESS_DENIED." },
     execCommand: { type: 'boolean', description: 'Build exec_command. Off: running node commands through a model is a deliberate choice.', default: 'false' },
     fleet: { type: 'boolean', description: 'Build the read-only fleet_export and fleet_plan tools (platform administrators only).', default: 'false' },
+    providers: { type: 'boolean', description: 'Build the read-only list_provider_accounts and check_provider_account tools. Pass the same option to gateTools().', default: 'false' },
     confirmations: {
       type: 'ConfirmationPolling | ((request, caller?) => ConfirmationPolling | undefined)',
       description: 'Wait for people to approve held-back actions inside the tool call. iamConfirmations() builds one per request.',
@@ -226,6 +227,8 @@ framework.
 | `propose_command_batch` (with `execCommand: true`) | `commandBatches.create` (v1.0): a `node.reboot` batch over the given nodes | any authenticated caller | idempotent |
 | `fleet_export` (with `fleet: true`) | `fleet.export` | `compute:fleet:admin` on the fleet | read-only |
 | `fleet_plan` (with `fleet: true`) | `fleet.plan` | `compute:fleet:admin` on the fleet | read-only |
+| `list_provider_accounts` (with `providers: true`) | `providerAccounts.list` | any authenticated caller | read-only |
+| `check_provider_account` (with `providers: true`) | `providerAccounts.check`: what the account's credential may do, read-only at the provider | `compute:providers:read` on the account | read-only |
 
 The GPU tools share one argument shape: `poolId`, `gpus` (1 to 64 whole GPUs), `duration` (such as `30m`, `8h`,
 `3d`), and optionally `gpuModel` (`H100`), `gpuProduct` (`H100-SXM5-80GB`), `nvlink` (all GPUs in one NVLink

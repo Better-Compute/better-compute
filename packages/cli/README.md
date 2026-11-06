@@ -74,7 +74,8 @@ Commands may be two words (`pki init`); `help pki` lists a group.
   `sandbox create|list|get|extend|snapshot|delete|exec|templates`, `sandbox-template …`,
   `sandbox-volume …`.
 - **Bare metal:** `metal enroll|deploy|undeploy|abort|discovered|confirm-mac|power|bulk|…`,
-  `profiles …`, `provider-accounts …`, `sandbox-snapshot …`.
+  `profiles …`, `provider-accounts …` (`check` asks the provider what the credential may do),
+  `digitalocean check|offers|discover` (alias `do`), `sandbox-snapshot …`.
 - **Fleet and operations:** `fleet export|plan|status|apply`, `rollouts …`, `releases register|list`,
   `workflows …`, `commands …`, `events list|watch`, `webhooks …`, catalog groups (`sites`, `projects`,
   `images`, `flavors`) and admin groups (`pools create|update|archive|offer|unoffer`, `secrets`,

@@ -1062,11 +1062,23 @@ Billing, projects, monitoring, security and OAuth. Each is opt-in and needs its 
   `better_compute_external_host_*{source, instance}` gauges.
 - **Security findings.** `readSecurityFindings` reads the latest posture scan, read-only, and `securityAttention`
   turns its findings into admin attention items.
+- **Account check.** `providerAccounts.check` (CLI `better-compute provider-accounts check`, or
+  `better-compute digitalocean check|offers|discover <account>`) runs the probe with the operations scopes on a
+  stored account, read-only: `ok` is false when the account is not `active` or a scope Droplets need is
+  `missing`; the operations scopes it lacks are `optional`, and `details` holds the account and per-family results.
 - **OAuth.** An account may hold `refreshToken` instead of `token`. The host passes
-  `digitaloceanProvider({ oauth: { clientId, clientSecret, rotate } })`, where `rotate` writes each rotated refresh
-  token over the account's secret; a host without it refuses OAuth accounts. A refresh token DigitalOcean no longer
-  accepts is `INVALID_CONFIG` (`oauthGrant`): connect the account again. The console's connect page and the
-  server's callback are not built yet; `exchangeAuthorizationCode` is their token exchange.
+  `digitaloceanProvider({ oauth: { clientId, clientSecret, redirectUris, rotate: rotateInto(store) } })`, where
+  `rotateInto` writes each rotated refresh token over the account's own secret ref in the host's `SecretStore`; a
+  host without `oauth` refuses OAuth accounts. A refresh token DigitalOcean no longer accepts is `INVALID_CONFIG`
+  (`oauthGrant`): connect the account again.
+- **Connect a DigitalOcean account.** With at least one registered `redirectUris` entry, the console's Provider
+  accounts page offers it: `providerAccounts.connectSetup` answers DigitalOcean's authorization URL (scope
+  `read write` by default, `oauth.scope` to change it) for a registered redirect URI and the console's state, and
+  the callback page, after comparing the state with the one its tab kept, calls `providerAccounts.connect` with the
+  code. Compute trades the code, seals the refresh token through the secret broker and stores the account with it as
+  `refreshToken`; a refused account check deletes the sealed token again, and the state keys the call, so a retry
+  replays instead of spending the code twice. Register the console's `/provider-accounts/connect/callback` URL with
+  the OAuth app and in `redirectUris`; any other redirect URI is `INVALID_INPUT`.
 
 Alert policies, Insights rules and uptime checks are cloud resources (a later phase), not provider-account settings.
 
