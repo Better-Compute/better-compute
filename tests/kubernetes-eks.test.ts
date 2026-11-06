@@ -23,6 +23,9 @@ let api: Api;
 let acme: { token: string };
 let acmeTenant: string;
 let poolId: string;
+let accountId: string;
+let rootTenant: string;
+let rootCaller: { token: string };
 const logs: string[] = [];
 
 const tick = async (rounds = 1) => {
@@ -97,6 +100,9 @@ beforeAll(async () => {
     idempotencyKey: 'aws-pool',
   });
   poolId = pool.id;
+  accountId = account.id;
+  rootTenant = tenants.root.id;
+  rootCaller = root;
   await api.pools.offer(root, {
     tenantId: tenants.root.id,
     poolId,
@@ -192,5 +198,36 @@ describe('the kubernetes module on EKS', () => {
       location: 'us-east-1',
     });
     expect(versions.defaultVersion).toBe('1.33');
+  });
+});
+
+describe('providerAccounts.clusters on an AWS account', () => {
+  it('lists the account clusters with the nodeadm settings k8s-join mode eks takes', async () => {
+    const before = eks.calls('ListClusters').length;
+    const { items } = await api.providerAccounts.clusters(rootCaller, { tenantId: rootTenant, accountId });
+    expect(eks.calls('ListClusters').length).toBeGreaterThan(before);
+    // The autopilot cluster of the test above (EKS Auto Mode) is still there.
+    const auto = items.find(
+      (item: { name: string }) => eks.clusters.get(item.name)?.computeConfig?.enabled === true,
+    );
+    expect(auto).toBeDefined();
+    const cluster = eks.clusters.get(auto.name)!;
+    expect(auto).toMatchObject({
+      managed: true,
+      state: 'ready',
+      location: 'us-east-1',
+      eks: { name: auto.name, apiServerEndpoint: cluster.endpoint, cidr: expect.any(String) },
+    });
+    // Plain values only: no token, kubeconfig or secret in what it returns.
+    expect(JSON.stringify(items)).not.toMatch(/k8s-aws-v1|token|secret/i);
+  });
+
+  it('is the account owner read: another tenant cannot list them', async () => {
+    await expect(
+      api.providerAccounts.clusters(acme, { tenantId: rootTenant, accountId }),
+    ).rejects.toMatchObject({ code: expect.stringMatching(/ACCESS_DENIED|NOT_FOUND|UNAUTHENTICATED/) });
+    await expect(
+      api.providerAccounts.clusters(rootCaller, { tenantId: rootTenant, accountId, extra: 1 }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
 });
