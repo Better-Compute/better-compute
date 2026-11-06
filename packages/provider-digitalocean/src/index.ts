@@ -15,3 +15,4 @@ export * from './networks/index.js';
 export * from './probe.js';
 export * from './provider.js';
 export * from './spaces/sigv4.js';
+export * from './spaces/s3.js';
