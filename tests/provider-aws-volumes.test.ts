@@ -292,6 +292,55 @@ describe('provider-aws volumes: ensure, get, delete', () => {
     expect(ebs.volumes.get(foreign.id)!.state).toBe('available');
   });
 
+  it('never touches a root volume (managed and instance tags, no volume name)', async () => {
+    const { volumes, call, ebs, emu, ec2 } = world();
+    const rootTags = { 'better-compute:managed': 'true', 'better-compute:instance': 'ins_a' };
+    const a = ec2.addInstance({ tags: rootTags });
+    const b = ec2.addInstance({
+      tags: { 'better-compute:managed': 'true', 'better-compute:instance': 'ins_b' },
+    });
+    // a's root volume, attached; and a stopped instance's root volume another tenant might want.
+    const attachedRoot = ebs.addVolume({
+      tags: rootTags,
+      attachedTo: { instanceId: a.id, device: '/dev/sdf' },
+    });
+    const freeRoot = ebs.addVolume({ tags: rootTags });
+    await rejects(
+      volumes.attachVolume(freeRoot.id, b.id, call(), 'ins_b'),
+      'INVALID_STATE',
+      'not-managed',
+    );
+    await rejects(
+      volumes.detachVolume(attachedRoot.id, a.id, call()),
+      'INVALID_STATE',
+      'not-managed',
+    );
+    await rejects(
+      volumes.detachVolume(attachedRoot.id, a.id, call(), { force: true }),
+      'INVALID_STATE',
+      'not-managed',
+    );
+    await rejects(
+      volumes.resizeVolume(attachedRoot.id, 200, call()),
+      'INVALID_STATE',
+      'not-managed',
+    );
+    await rejects(
+      volumes.snapshotVolume(attachedRoot.id, 'bc-s-root', call()),
+      'INVALID_STATE',
+      'not-managed',
+    );
+    await rejects(volumes.deleteVolume(freeRoot.id, call()), 'INVALID_STATE', 'not-managed');
+    for (const action of [
+      'AttachVolume',
+      'DetachVolume',
+      'ModifyVolume',
+      'CreateSnapshot',
+      'DeleteVolume',
+    ])
+      expect(emu.calls(action), action).toHaveLength(0);
+  });
+
   it('delete: refused while attached, then deleting, then deleted (idempotent)', async () => {
     const { volumes, call, ebs, emu, managed, ec2 } = world();
     const instance = ec2.addInstance({ tags: { 'better-compute:instance': 'ins_1' } });

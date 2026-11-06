@@ -167,15 +167,37 @@ describe('provider-aws CLI policies', () => {
     const instances = 'arn:aws:ec2:us-east-1:222222222222:instance/*';
     // Creating a volume or snapshot must tag it managed; a restore reads only managed snapshots.
     const create = byAction('ec2:CreateVolume');
+    // A restore reads a managed snapshot carrying its name, and one this account owns.
+    const ownedSnapshot = {
+      StringEquals: {
+        'ec2:ResourceTag/better-compute:managed': 'true',
+        'ec2:Owner': '222222222222',
+      },
+      Null: { 'ec2:ResourceTag/better-compute:snapshot': 'false' },
+    };
     expect(create.map((s) => [s.Resource, s.Condition])).toEqual([
       [volumes, { StringEquals: { 'aws:RequestTag/better-compute:managed': 'true' } }],
-      [snapshots, { StringEquals: { 'ec2:ResourceTag/better-compute:managed': 'true' } }],
+      [snapshots, ownedSnapshot],
     ]);
+    // Without --account the owner is not known: the tags still scope it.
+    const anyAccount = iamPolicy({ region: 'us-east-1' }).Statement.find(
+      (s) => s.Sid === 'EbsRestoreOwned',
+    )!;
+    expect(anyAccount.Condition).toEqual({
+      StringEquals: { 'ec2:ResourceTag/better-compute:managed': 'true' },
+      Null: { 'ec2:ResourceTag/better-compute:snapshot': 'false' },
+    });
     const snap = byAction('ec2:CreateSnapshot');
     expect(snap.map((s) => [s.Resource, s.Condition])).toEqual(
       expect.arrayContaining([
         [snapshots, { StringEquals: { 'aws:RequestTag/better-compute:managed': 'true' } }],
-        [volumes, { StringEquals: { 'ec2:ResourceTag/better-compute:managed': 'true' } }],
+        [
+          volumes,
+          {
+            StringEquals: { 'ec2:ResourceTag/better-compute:managed': 'true' },
+            Null: { 'ec2:ResourceTag/better-compute:volume': 'false' },
+          },
+        ],
       ]),
     );
     // Every change to an existing volume needs it managed; attach/detach need a claimed instance.
@@ -191,6 +213,10 @@ describe('provider-aws CLI policies', () => {
       expect(
         onVolumes[0]!.Condition?.StringEquals?.['ec2:ResourceTag/better-compute:managed'],
       ).toBe('true');
+      // Managed alone is every root volume RunInstances tags: a data volume also carries its name.
+      expect(onVolumes[0]!.Condition?.Null?.['ec2:ResourceTag/better-compute:volume'], action).toBe(
+        'false',
+      );
       for (const statement of statements) expect(statement.Condition, action).toBeDefined();
     }
     for (const action of ['ec2:AttachVolume', 'ec2:DetachVolume']) {
@@ -202,7 +228,7 @@ describe('provider-aws CLI policies', () => {
     }
     const deleteSnapshot = byAction('ec2:DeleteSnapshot');
     expect(deleteSnapshot.map((s) => [s.Resource, s.Condition])).toEqual([
-      [snapshots, { StringEquals: { 'ec2:ResourceTag/better-compute:managed': 'true' } }],
+      [snapshots, ownedSnapshot],
     ]);
     // Without volumes, none of it.
     const ebs = [
