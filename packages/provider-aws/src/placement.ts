@@ -5,6 +5,7 @@ import {
   type ProviderPlacement,
 } from '@better-compute/core';
 import type { QueryParams, XmlElement } from '@better-compute/aws-core';
+import type { IamStatement } from './cli.js';
 import { tags } from './ids.js';
 
 // EC2 placement groups (AWS A10). A create that asks for a placement launches into the named group,
@@ -154,4 +155,42 @@ export class PlacementGroups {
       .find((group) => group.textOf('groupName') === name && group.textOf('state') !== 'deleted');
     return item ? readGroup(item) : undefined;
   }
+}
+
+/**
+ * (A10) The IAM statements placement groups and topology need (`aws iam-policy --phases A10`):
+ * reads, creates only tagged `better-compute:managed=true` (the tag on create), and launches only
+ * into groups so tagged.
+ */
+export function mlIamStatements(ec2: (resource: string) => string): IamStatement[] {
+  const groups = ec2('placement-group/*');
+  return [
+    {
+      Sid: 'MlFabricRead',
+      Effect: 'Allow',
+      Action: ['ec2:DescribePlacementGroups', 'ec2:DescribeInstanceTopology'],
+      Resource: '*',
+    },
+    {
+      Sid: 'PlacementGroupCreate',
+      Effect: 'Allow',
+      Action: 'ec2:CreatePlacementGroup',
+      Resource: groups,
+      Condition: { StringEquals: { [`aws:RequestTag/${tags.managed}`]: 'true' } },
+    },
+    {
+      Sid: 'PlacementGroupTagOnCreate',
+      Effect: 'Allow',
+      Action: 'ec2:CreateTags',
+      Resource: groups,
+      Condition: { StringEquals: { 'ec2:CreateAction': 'CreatePlacementGroup' } },
+    },
+    {
+      Sid: 'RunInPlacementGroup',
+      Effect: 'Allow',
+      Action: 'ec2:RunInstances',
+      Resource: groups,
+      Condition: { StringEquals: { [`ec2:ResourceTag/${tags.managed}`]: 'true' } },
+    },
+  ];
 }

@@ -21,28 +21,29 @@ vps({ providers: [aws] });
 
 One provider account is one AWS account in one region. A fleet in several regions is several accounts with the same credentials.
 
-| Field                        | Default    | Meaning                                                                                                                                         |
-| ---------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `region`                     | (required) | The AWS region, `us-east-1`. Checked against the region grammar: it is the only config text that reaches a host name.                           |
-| `zones`                      | (required) | Availability Zone names as this account sees them (`us-east-1a`), or Local Zones (`us-west-2-lax-1a`). Offers and creates are limited to these. |
-| `credentials`                | –          | A secret reference to `{ "accessKeyId", "secretAccessKey" }`. Allowed, but a role is better.                                                    |
-| `assumeRoleArn`              | –          | The IAM role to assume, in the region's partition.                                                                                              |
-| `subnetId`                   | –          | The subnet create uses (else the zone's default subnet).                                                                                        |
-| `securityGroupIds`           | –          | The security groups create uses.                                                                                                                |
-| `instanceProfile`            | –          | The instance profile ARN passed to `RunInstances`.                                                                                              |
-| `rootVolumeGiB`              | `100`      | Root EBS volume size (8–16384).                                                                                                                 |
-| `rootVolumeType`             | `gp3`      | `gp3`, `gp2` or `io2`.                                                                                                                          |
-| `kmsKeyId`                   | –          | The KMS key for EBS encryption (else the account's default EBS key).                                                                            |
-| `metadataHopLimit`           | `1`        | The IMDSv2 hop limit (2 when containers on the instance need IMDS).                                                                             |
-| `associatePublicIp`          | `true`     | Give instances a public IPv4 address (with a subnet).                                                                                           |
-| `discoverTag`                | –          | `key=value`: discovery yields only instances carrying this tag.                                                                                 |
-| `ipamPoolId`                 | –          | Networks: allocate each VPC range from this Amazon VPC IPAM pool (the network's `cidr` gives the size).                                         |
-| `securityGroupsPerInterface` | `5`        | Networks: the account's security groups per network interface quota; network tags past it are `QUOTA_EXCEEDED`.                                 |
-| `spot`                       | `false`    | Offer and launch Spot capacity (`<zone>/<type>:spot`).                                                                                          |
-| `quotas`                     | `true`     | Cap offers at the EC2 vCPU quota headroom (Service Quotas).                                                                                     |
-| `pricing`                    | `off`      | `off`, `on-demand` (the AWS Price List) or `all` (adds Spot prices).                                                                            |
-| `allowPurchases`             | `false`    | Allow buying capacity (Capacity Blocks, new ODCRs) in this platform account. Spends money.                                                      |
-| `eventQueueUrl`              | –          | The SQS intake queue the account's EventBridge rules feed (`aws event-rules`), in this account and region. See [Events](#events).               |
+| Field                        | Default                 | Meaning                                                                                                                                         |
+| ---------------------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `region`                     | (required)              | The AWS region, `us-east-1`. Checked against the region grammar: it is the only config text that reaches a host name.                           |
+| `zones`                      | (required)              | Availability Zone names as this account sees them (`us-east-1a`), or Local Zones (`us-west-2-lax-1a`). Offers and creates are limited to these. |
+| `credentials`                | –                       | A secret reference to `{ "accessKeyId", "secretAccessKey" }`. Allowed, but a role is better.                                                    |
+| `assumeRoleArn`              | –                       | The IAM role to assume, in the region's partition.                                                                                              |
+| `subnetId`                   | –                       | The subnet create uses (else the zone's default subnet).                                                                                        |
+| `securityGroupIds`           | –                       | The security groups create uses.                                                                                                                |
+| `instanceProfile`            | –                       | The instance profile ARN passed to `RunInstances`.                                                                                              |
+| `rootVolumeGiB`              | `100`                   | Root EBS volume size (8–16384).                                                                                                                 |
+| `rootVolumeType`             | `gp3`                   | `gp3`, `gp2` or `io2`.                                                                                                                          |
+| `kmsKeyId`                   | –                       | The KMS key for EBS encryption (else the account's default EBS key).                                                                            |
+| `metadataHopLimit`           | `1`                     | The IMDSv2 hop limit (2 when containers on the instance need IMDS).                                                                             |
+| `associatePublicIp`          | `true`                  | Give instances a public IPv4 address (with a subnet).                                                                                           |
+| `discoverTag`                | –                       | `key=value`: discovery yields only instances carrying this tag.                                                                                 |
+| `ipamPoolId`                 | –                       | Networks: allocate each VPC range from this Amazon VPC IPAM pool (the network's `cidr` gives the size).                                         |
+| `securityGroupsPerInterface` | `5`                     | Networks: the account's security groups per network interface quota; network tags past it are `QUOTA_EXCEEDED`.                                 |
+| `spot`                       | `false`                 | Offer and launch Spot capacity (`<zone>/<type>:spot`).                                                                                          |
+| `quotas`                     | `true`                  | Cap offers at the EC2 vCPU quota headroom (Service Quotas).                                                                                     |
+| `pricing`                    | `off`                   | `off`, `on-demand` (the AWS Price List) or `all` (adds Spot prices).                                                                            |
+| `allowPurchases`             | `false`                 | Allow buying capacity (Capacity Blocks, new ODCRs) in this platform account. Spends money.                                                      |
+| `efa`                        | `off`                   | `auto`: an EFA-capable type launches with one EFA interface per network card (needs `subnetId` or a network). See [ML fabric](#ml-fabric).      |
+| `eventQueueUrl`              | –                       | The SQS intake queue the account's EventBridge rules feed (`aws event-rules`), in this account and region. See [Events](#events).               |
 | `eventSources`               | `aws.ec2`, `aws.health` | The EventBridge sources taken from the queue; `aws.guardduty` is opt-in. Anything else is dropped.                                              |
 
 `awsConfig.parse` checks field shapes (`INVALID_INPUT`); the provider checks the region, that every zone is in it, and the role ARN's shape and partition (`INVALID_CONFIG`), so `providerAccounts.create` refuses a bad account before it is stored.
@@ -146,15 +147,15 @@ The vCPU quota codes beyond standard, G/VT and P (and their Spot twins) are mark
 
 `pollEvents` is the account's event intake (A4, AD12), read by vps's `vps.provider-events` worker. With `eventQueueUrl`, it long-polls the queue (`ReceiveMessage`, at most 10 messages, `WaitTimeSeconds` at most 10) and maps EventBridge envelopes:
 
-| `detail-type`                                                     | Event                                                     |
-| ----------------------------------------------------------------- | --------------------------------------------------------- |
-| `EC2 Instance State-change Notification`                          | `machine-changed`                                         |
-| `EC2 Spot Instance Interruption Warning`                          | `interruption-warning`, deadline = event time + 2 minutes |
-| `EC2 Instance Rebalance Recommendation`                           | `rebalance-recommended`                                   |
-| `AWS Health Event` (service `EC2`, naming instances)              | `maintenance-scheduled` per instance, deadline = `startTime` |
-| Capacity Reservation, Capacity Block and ODCR types (by name)     | `reservation-changed`                                     |
-| `AWS API Call via CloudTrail` (succeeded EC2 instance calls)      | `api-call` per instance                                   |
-| `GuardDuty Finding` (when `aws.guardduty` is allowed)             | `health`                                                  |
+| `detail-type`                                                 | Event                                                        |
+| ------------------------------------------------------------- | ------------------------------------------------------------ |
+| `EC2 Instance State-change Notification`                      | `machine-changed`                                            |
+| `EC2 Spot Instance Interruption Warning`                      | `interruption-warning`, deadline = event time + 2 minutes    |
+| `EC2 Instance Rebalance Recommendation`                       | `rebalance-recommended`                                      |
+| `AWS Health Event` (service `EC2`, naming instances)          | `maintenance-scheduled` per instance, deadline = `startTime` |
+| Capacity Reservation, Capacity Block and ODCR types (by name) | `reservation-changed`                                        |
+| `AWS API Call via CloudTrail` (succeeded EC2 instance calls)  | `api-call` per instance                                      |
+| `GuardDuty Finding` (when `aws.guardduty` is allowed)         | `health`                                                     |
 
 An envelope counts only when its `account` is the account's verified AWS id, its `region` the account's region and its `source` allowed. Everything else (and anything malformed) is dropped, with counts logged and no message content, and deleted with the batch, so a forged message is read once and never loops. Messages are deleted (`DeleteMessageBatch`) only when vps calls the batch's `ack()`, after its transaction commits; a queue in another AWS account than the identity is `INVALID_CONFIG`. Events only wake reconcilers early: polling stays the source of truth, so a forged event can at worst cause a harmless re-read. The Capacity Reservation detail-type names are matched by pattern until they are verified against AWS.
 
@@ -162,9 +163,21 @@ Without a queue, `pollEvents` reads scheduled events with `DescribeInstanceStatu
 
 `better-compute aws event-rules --queue-name <name> --account <id>` prints the CloudFormation stack to deploy in the account: the queue and its dead-letter queue (SSE-SQS, 14-day retention), the EventBridge rules (`--api-calls` adds CloudTrail EC2 calls, `--guardduty` GuardDuty findings), and a queue policy that lets only `events.amazonaws.com` send, only from those rule ARNs in the account, only over TLS, and denies `sqs:SendMessage` to every other sender (a same-account role with `sqs:SendMessage` on `*` included: its forged body could otherwise carry the right account, region and source). Its `QueueUrl` output is `eventQueueUrl`. `aws iam-policy` includes `ec2:DescribeInstanceStatus`, and `--event-queue <name>` adds `sqs:ReceiveMessage` and `sqs:DeleteMessage` on the queue. Add `awsEventRulesCommand()` to the CLI configuration next to the policy commands.
 
+## ML fabric
+
+Phase A10 (`src/placement.ts`, `src/topology.ts`):
+
+- **Placement groups.** A create's `placement` (`{ group, strategy: 'cluster' | 'spread' | 'partition', partition? }`) sets `Placement.GroupName` (and `PartitionNumber`). The group is read with `DescribePlacementGroups` and made when absent with `CreatePlacementGroup`, tagged `better-compute:managed=true` (partition groups get 7 partitions); a group made or read is trusted for an hour. A `Duplicate` answer is read again, and a group EC2 does not show yet is `UNAVAILABLE` (`placement-group-propagating`), never launched into blind. A group better-compute did not make is `CONFLICT` (`placement-group-foreign`): it is never adopted. Another strategy is `CONFLICT` (`placement-strategy`), a deleting group `UNAVAILABLE` (`placement-group-deleting`), and a placement with a reservation offer (`@cr-…`) `INVALID_INPUT` (`placement-reservation`).
+- **EFA.** With `efa: 'auto'`, a type whose `NetworkInfo` reports EFA launches with one `InterfaceType=efa` interface per network card, up to `MaximumEfaInterfaces`: card 0 as device 0, every other card as device 1, and no public address when there is more than one interface (EC2 refuses it). EFA needs explicit interfaces, so a launch without a subnet is `INVALID_CONFIG` (`efa-subnet`) rather than a machine without its fabric. EFA traffic also needs the security group to allow all traffic from itself. (verify) whether the newer `efa-only` interface type should take the secondary cards on p5.
+- **Topology.** `get` of a running machine of an EFA family reads `DescribeInstanceTopology` (once an hour per machine) and labels it `topology.aws/network-node-1..N`, top to bottom. A malformed answer is no topology, a failed read warns once and leaves the labels out, and a tag never poses as one of these labels.
+- **Neuron.** `NeuronInfo` devices are the machine's `gpus`: Trainium `TRN1`, Trainium2 `TRN2`, Inferentia `INF1`, Inferentia2 `INF2` (an unknown name is `other`), so flavors and `gpuModel` queries treat them like GPUs. (verify) bcd's inventory model strings for `/dev/neuron*`.
+- **Graviton.** Offers carry `arch`, image aliases resolve the arm64 build on arm64 types, and an AMI whose `DescribeImages` architecture the type cannot run is `INVALID_INPUT` (`image-arch`) before `RunInstances`.
+
+`aws iam-policy --phases A1,A10` adds `MlFabricRead` (`DescribePlacementGroups`, `DescribeInstanceTopology`), `CreatePlacementGroup` only with `aws:RequestTag/better-compute:managed=true` (and the tag on create), and `RunInstances` on `placement-group/*` only when the group carries that tag.
+
 ## What comes next
 
-EBS volumes (A5), EC2 hosts joining as bcd nodes (A6), workload roles (A7), EKS (A9), placement groups and EFA (A10), and costs (A11), per `docs/superpowers/plans/2026-10-18-aws-integration-program.md`.
+EBS volumes (A5), EC2 hosts joining as bcd nodes (A6), workload roles (A7), EKS (A9), shared filesystems and Capacity Block proposals (A10), and costs (A11), per `docs/superpowers/plans/2026-10-18-aws-integration-program.md`.
 
 ## Testing
 

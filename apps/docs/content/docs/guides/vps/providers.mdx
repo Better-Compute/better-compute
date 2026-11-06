@@ -1121,6 +1121,12 @@ in one region: a fleet in several regions is several accounts.
         'Allow buying Capacity Blocks and new ODCRs in this platform account (spends money).',
       default: 'false',
     },
+    efa: {
+      type: "'off' | 'auto'",
+      description:
+        'auto launches EFA-capable types with one EFA interface per network card (needs subnetId or a network).',
+      default: "'off'",
+    },
   }}
 />
 
@@ -1162,6 +1168,13 @@ in one region: a fleet in several regions is several accounts.
   as network ACL entries (network-wide only); see [tenant networks on AWS](/docs/guides/vps/networking#on-aws). The
   account fields `ipamPoolId` (VPC ranges from Amazon VPC IPAM) and `securityGroupsPerInterface` (default 5) apply to
   them, and `aws iam-policy --phases A1,A2` prints the permissions they need.
+- **ML fabric.** A create with a `placement` (`cluster`, `spread` or `partition`) launches into that EC2 placement
+  group, made on first use and tagged `better-compute:managed=true`; a group better-compute did not make, or one with
+  another strategy, is `CONFLICT`. With `efa: 'auto'` an EFA-capable type launches with one EFA interface per network
+  card. Running EFA-family machines carry `topology.aws/network-node-1..N` labels from `DescribeInstanceTopology`.
+  Trainium and Inferentia devices are the accelerator models `TRN1`, `TRN2`, `INF1` and `INF2`, and an AMI of the
+  wrong architecture for a Graviton (or x86) type is refused before launch (`image-arch`). `aws iam-policy --phases
+A1,A10` prints the permissions.
 
 `tests/provider-aws.test.ts`, `tests/provider-aws-credentials.test.ts`, `tests/provider-aws-attach.test.ts`,
 `tests/provider-aws-cli.test.ts` and `tests/provider-aws-networks.test.ts` run the conformance cases and the EC2 and VPC

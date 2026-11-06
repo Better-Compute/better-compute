@@ -5,6 +5,9 @@ import {
   accountCredentials,
   AwsCompute,
   awsConfig,
+  awsIamPolicyCommand,
+  iamPolicy,
+  type IamStatement,
   instanceTypeCache,
   zoneCache,
   type AwsConfig,
@@ -500,5 +503,55 @@ describe('Graviton', () => {
       w.call(),
     );
     expect(w.runs()).toHaveLength(1);
+  });
+});
+
+describe('aws iam-policy --phases A10', () => {
+  const run = async (phases?: string) => {
+    const out: string[] = [];
+    await awsIamPolicyCommand().run({
+      flags: phases === undefined ? {} : { phases },
+      io: { out: (message: string) => out.push(message) },
+      note() {},
+      path: (value: string) => value,
+    });
+    return JSON.parse(out.join('\n')) as { Statement: IamStatement[] };
+  };
+  const sid = (policy: { Statement: readonly IamStatement[] }, name: string) =>
+    policy.Statement.find((statement) => statement.Sid === name);
+
+  it('adds placement groups and topology, tag-scoped; A1 alone has none of it', async () => {
+    const policy = await run('A1,A10');
+    expect(policy).toEqual(iamPolicy({ ml: true }));
+    expect(sid(policy, 'MlFabricRead')).toEqual({
+      Sid: 'MlFabricRead',
+      Effect: 'Allow',
+      Action: ['ec2:DescribePlacementGroups', 'ec2:DescribeInstanceTopology'],
+      Resource: '*',
+    });
+    expect(sid(policy, 'PlacementGroupCreate')).toEqual({
+      Sid: 'PlacementGroupCreate',
+      Effect: 'Allow',
+      Action: 'ec2:CreatePlacementGroup',
+      Resource: 'arn:aws:ec2:*:*:placement-group/*',
+      Condition: { StringEquals: { 'aws:RequestTag/better-compute:managed': 'true' } },
+    });
+    expect(sid(policy, 'PlacementGroupTagOnCreate')).toMatchObject({
+      Action: 'ec2:CreateTags',
+      Resource: 'arn:aws:ec2:*:*:placement-group/*',
+      Condition: { StringEquals: { 'ec2:CreateAction': 'CreatePlacementGroup' } },
+    });
+    // Launches go only into groups better-compute made.
+    expect(sid(policy, 'RunInPlacementGroup')).toEqual({
+      Sid: 'RunInPlacementGroup',
+      Effect: 'Allow',
+      Action: 'ec2:RunInstances',
+      Resource: 'arn:aws:ec2:*:*:placement-group/*',
+      Condition: { StringEquals: { 'ec2:ResourceTag/better-compute:managed': 'true' } },
+    });
+    const a1 = await run();
+    expect(JSON.stringify(a1)).not.toContain('PlacementGroup');
+    expect(JSON.stringify(a1)).not.toContain('placement-group');
+    expect(JSON.stringify(await run('A2,A10'))).toContain('CreateVpc');
   });
 });

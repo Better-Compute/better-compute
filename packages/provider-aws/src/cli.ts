@@ -4,6 +4,7 @@ import { assertRegion, parseArn, type AwsPartition } from '@better-compute/aws-c
 import { parseDiscoverTag } from './config.js';
 import { tags } from './ids.js';
 import { networksIamStatements } from './networks.js';
+import { mlIamStatements } from './placement.js';
 import { marketStatements } from './markets/iam.js';
 
 // The CLI commands that onboard an AWS account (`aws iam-policy`, `aws trust-policy`). The CLI never
@@ -51,6 +52,8 @@ export function iamPolicy(
     kmsKeyArn?: string;
     /** (A2) Adds what tenant networks need: VPCs, subnets, gateways, security groups, ACL entries. */
     networks?: boolean;
+    /** (A10) Adds placement groups (made tagged, launched into only when tagged) and topology reads. */
+    ml?: boolean;
     /** (A3) Accounts with `spot`: Spot launches and the Spot service-linked role. */
     spot?: boolean;
     /** (A3) Accounts with `pricing`: the Price List. */
@@ -220,6 +223,7 @@ export function iamPolicy(
   }
   if (options.networks === true)
     statements.push(...networksIamStatements((resource) => ec2(resource)));
+  if (options.ml === true) statements.push(...mlIamStatements((resource) => ec2(resource)));
   // A4: scheduled events without a queue (DescribeInstanceStatus), and the intake queue's reads.
   statements.push({
     Sid: 'ScheduledEvents',
@@ -334,7 +338,7 @@ export function awsIamPolicyCommand() {
     group: 'Providers' as const,
     summary: 'Print the IAM permissions policy an AWS provider account needs',
     description:
-      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; --phases A1,A2 adds tenant networks (VPC, subnet, gateway, security group and endpoint creates tagged better-compute:managed=true, changes and deletes only on resources so tagged, route and network ACL entry edits, and security group swaps on claimed instances). Capacity markets: capacity reservation, Capacity Block offering and Spot price reads, EC2 vCPU quota reads and launches into capacity reservations always; --spot adds Spot launches, --pricing the Price List, --allow-purchases buying Capacity Blocks and creating ODCRs (only tagged better-compute:managed=true). ec2:DescribeInstanceStatus reads scheduled events, and --event-queue adds sqs:ReceiveMessage and sqs:DeleteMessage on the event intake queue (aws event-rules).',
+      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; --phases A1,A2 adds tenant networks (VPC, subnet, gateway, security group and endpoint creates tagged better-compute:managed=true, changes and deletes only on resources so tagged, route and network ACL entry edits, and security group swaps on claimed instances); --phases A10 adds the ML fabric (placement group reads and topology reads, placement group creates tagged better-compute:managed=true, and launches only into groups so tagged). Capacity markets: capacity reservation, Capacity Block offering and Spot price reads, EC2 vCPU quota reads and launches into capacity reservations always; --spot adds Spot launches, --pricing the Price List, --allow-purchases buying Capacity Blocks and creating ODCRs (only tagged better-compute:managed=true). ec2:DescribeInstanceStatus reads scheduled events, and --event-queue adds sqs:ReceiveMessage and sqs:DeleteMessage on the event intake queue (aws event-rules).',
     target: 'none' as const,
     output: 'text' as const,
     flags: {
@@ -373,7 +377,7 @@ export function awsIamPolicyCommand() {
         type: 'string' as const,
         value: 'LIST',
         description:
-          'Program phases to cover, comma-separated (A1 always; A2 adds tenant networks: VPCs, subnets, gateways, security groups, network ACL entries)',
+          'Program phases to cover, comma-separated (A1 always; A2 adds tenant networks: VPCs, subnets, gateways, security groups, network ACL entries; A10 adds placement groups and instance topology)',
       },
       spot: {
         type: 'boolean' as const,
@@ -392,7 +396,8 @@ export function awsIamPolicyCommand() {
       'event-queue': {
         type: 'string' as const,
         value: 'NAME',
-        description: 'The intake queue of the accounts (aws event-rules): adds sqs:ReceiveMessage and sqs:DeleteMessage on it',
+        description:
+          'The intake queue of the accounts (aws event-rules): adds sqs:ReceiveMessage and sqs:DeleteMessage on it',
       },
       out: outFlag,
     },
@@ -405,8 +410,8 @@ export function awsIamPolicyCommand() {
           .filter(Boolean),
       );
       for (const phase of phases)
-        if (phase !== 'A1' && phase !== 'A2')
-          throw usage(`--phases knows A1 and A2, not ${phase.slice(0, 16)}`);
+        if (phase !== 'A1' && phase !== 'A2' && phase !== 'A10')
+          throw usage(`--phases knows A1, A2 and A10, not ${phase.slice(0, 16)}`);
       await emit(
         context,
         iamPolicy({
@@ -421,6 +426,7 @@ export function awsIamPolicyCommand() {
             ? { discoverTag: text(context.flags['discover-tag'])! }
             : {}),
           ...(phases.has('A2') ? { networks: true } : {}),
+          ...(phases.has('A10') ? { ml: true } : {}),
           ...(context.flags.spot === true ? { spot: true } : {}),
           ...(context.flags.pricing === true ? { pricing: true } : {}),
           ...(context.flags['allow-purchases'] === true ? { purchases: true } : {}),
