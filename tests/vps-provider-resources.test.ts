@@ -945,6 +945,44 @@ describe('providerVolumes', () => {
     expect(Math.max(...offsets)).toBeLessThan(3_600_000);
   });
 
+  it('a ready volume deleted at the provider outside better-compute is an error, never created again', async () => {
+    const instanceId = await insertInstance();
+    const volume = await createVolume({ instanceId });
+    await drain();
+    const ready = await getVolume(volume.id);
+    expect(ready).toMatchObject({ state: 'ready', attachment: { state: 'ready' } });
+    const externalId = [...cloud.volumes.keys()][0]!;
+    // Deleted at the provider by hand (console, API, another tool).
+    cloud.volumes.delete(externalId);
+    cloud.calls.length = 0;
+    events.length = 0;
+    await driftNow();
+    await drain();
+    const after = await getVolume(volume.id);
+    expect(after.state).toBe('error');
+    expect(after.message).toMatch(/deleted at the provider outside better-compute/);
+    expect(cloud.volumes.size).toBe(0);
+    expect(cloud.calls.filter((label) => !label.startsWith('getVolume'))).toEqual([]);
+    expect(events.map((event) => event.type)).toEqual(['providerVolume.error']);
+    const { rows } = await db.query<{ external_id: string }>(
+      `SELECT external_id FROM provider_volumes WHERE id = $1`,
+      [volume.id],
+    );
+    expect(rows[0]!.external_id).toBe(externalId);
+    // Another pass changes nothing and publishes nothing new.
+    await runKey('all');
+    await drain();
+    expect(cloud.volumes.size).toBe(0);
+    expect(events).toHaveLength(1);
+    // Its delete finishes without a provider write, and refunds its quota.
+    await call('providerVolumes', 'detach', { tenantId: 'root', volumeId: volume.id }).catch(() => undefined);
+    await call('providerVolumes', 'delete', { tenantId: 'root', volumeId: volume.id });
+    await drain();
+    expect((await getVolume(volume.id)).state).toBe('deleted');
+    expect(await quotaUsed('diskGiB')).toBe(0);
+    expect(cloud.calls.filter((label) => !label.startsWith('getVolume'))).toEqual([]);
+  });
+
   it('a volume never sent to the provider is deleted without a provider call', async () => {
     const volume = await createVolume();
     await call('providerVolumes', 'delete', { tenantId: 'root', volumeId: volume.id });

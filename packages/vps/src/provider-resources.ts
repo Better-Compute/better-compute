@@ -2399,6 +2399,31 @@ function volumeSpec(volume: VolumeRow, snapshotId: string | undefined): Provider
   };
 }
 
+/** The message of a volume the provider no longer has although vps made it and never deleted it. */
+const volumeDeletedOutsideMessage =
+  'The volume was deleted at the provider outside better-compute; its data is gone and it is never created again. Delete this volume';
+
+/**
+ * A volume vps made that the provider no longer has: `error` (published once), its external id kept, and never
+ * created again. A detach asked meanwhile is settled without a provider call; a wanted attachment says why it is not.
+ */
+async function volumeGone(
+  run: Run,
+  volume: VolumeRow,
+  attachments: readonly VolumeAttachment[],
+): Promise<void> {
+  run.deps.log.warn('providerResources: volume deleted at the provider outside better-compute', {
+    volumeId: volume.id,
+    providerAccountId: volume.provider_account_id,
+  });
+  for (const attachment of attachments) {
+    if (attachment.desired_state === 'deleted') await settleDetached(run, attachment, volume);
+    else if (attachment.state !== 'error' || attachment.message !== 'The volume is gone')
+      await writeAttachment(run, attachment, { state: 'error', message: 'The volume is gone' });
+  }
+  await setVolume(run, volume, settled('error', volumeDeletedOutsideMessage));
+}
+
 async function convergeVolume(
   run: Run,
   volumes: ProviderVolumes,
@@ -2412,23 +2437,40 @@ async function convergeVolume(
     attachments.some((a) => a.desired_state === 'present' && a.instance_state === 'deleting')
   )
     return;
-  let snapshotId: string | undefined;
-  if (volume.source_snapshot_id) {
-    // A restore waits for its snapshot's provider id; a snapshot that went away fails it.
-    if (!source?.external_id) {
-      if (!source || source.state === 'deleted' || source.state === 'error')
-        await setVolume(run, volume, settled('error', `Snapshot ${volume.source_snapshot_id} is gone`));
-      else run.inFlight = true;
+  let ensured: ProviderResourceState | 'missing' | undefined;
+  if (volume.external_id) {
+    // Made already: only read. A volume gone from the provider was deleted outside better-compute; an ensure by name
+    // would quietly make a new, empty one at the same guest path, so the row fails instead and nothing is created.
+    const id = volume.external_id;
+    const observed = await run.attempt(`get ${volume.id}`, () =>
+      volumes.getVolume(id, run.call(`get:${volume.id}`)),
+    );
+    if (observed === undefined) return;
+    if (observed === 'missing' || observed.state === 'deleted') {
+      await volumeGone(run, volume, attachments);
       return;
     }
-    snapshotId = source.external_id;
+    ensured = observed;
+  } else {
+    let snapshotId: string | undefined;
+    if (volume.source_snapshot_id) {
+      // A restore waits for its snapshot's provider id; a snapshot that went away fails it.
+      if (!source?.external_id) {
+        if (!source || source.state === 'deleted' || source.state === 'error')
+          await setVolume(run, volume, settled('error', `Snapshot ${volume.source_snapshot_id} is gone`));
+        else run.inFlight = true;
+        return;
+      }
+      snapshotId = source.external_id;
+    }
+    if (!volume.ensure_requested) {
+      if (!(await run.write('provider_volumes', volume, { ensure_requested: true }))) return;
+    }
+    // First create, or a create whose answer was lost: the ensure finds by name what an earlier attempt made.
+    ensured = await run.attempt(`ensure ${volume.id}`, () =>
+      volumes.ensureVolume(volumeSpec(volume, snapshotId), run.call(`ensure:${volume.id}`)),
+    );
   }
-  if (!volume.ensure_requested) {
-    if (!(await run.write('provider_volumes', volume, { ensure_requested: true }))) return;
-  }
-  const ensured = await run.attempt(`ensure ${volume.id}`, () =>
-    volumes.ensureVolume(volumeSpec(volume, snapshotId), run.call(`ensure:${volume.id}`)),
-  );
   if (ensured === undefined) return;
   if (ensured === 'missing' || ensured.state === 'error') {
     // A refusal created nothing: a delete then needs no provider call, and its quota is refunded at once.
