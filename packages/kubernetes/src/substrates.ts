@@ -264,6 +264,22 @@ export function substrateClusterName(poolId: string): string {
   return `pool-${body.slice(0, 30)}`;
 }
 
+/**
+ * The provider name of a flavor's node pool in an ADOPTED cluster: `bc-<the pool id's last 6 characters>-<flavor>`.
+ * ProviderKubernetes cannot list a cluster's node pools, and `ensureNodePool` / `deleteNodePool` address a pool by
+ * name, so a flavor named like one of the tenant's own pools (`default-pool`) would resize it and, on teardown,
+ * delete it. The prefix keeps the substrate's pools apart from anything it did not create. A created cluster is the
+ * substrate's own: its node pools are named as the flavors are.
+ */
+export function substrateNodePoolName(poolId: string, flavor: string): string {
+  const body = poolId.slice(poolId.indexOf('_') + 1).toLowerCase().replace(/[^a-z0-9]/g, '');
+  return `bc-${body.slice(-6).padStart(6, '0')}-${flavor}`;
+}
+
+/** The node pool name of a flavor: prefixed in an adopted cluster (`substrateNodePoolName`). */
+const nodePoolNameOf = (mode: 'create' | 'adopt', poolId: string, flavor: SubstrateFlavor): string =>
+  mode === 'adopt' ? substrateNodePoolName(poolId, flavor.name) : flavor.name;
+
 /** The labels of a flavor's node pool: the substrate label, and `capacity: spot` for Spot. */
 export function flavorLabels(poolId: string, flavor: SubstrateFlavor): Record<string, string> {
   return { [substratePoolLabel]: poolId, ...(flavor.spot ? { [substrateCapacityLabel]: 'spot' } : {}) };
@@ -282,7 +298,14 @@ class Refused extends Error {}
 
 async function insertFlavorPool(
   tx: SqlTx,
-  input: { clusterId: string; tenantId: string; poolId: string; flavor: SubstrateFlavor; initial: boolean },
+  input: {
+    clusterId: string;
+    tenantId: string;
+    poolId: string;
+    flavor: SubstrateFlavor;
+    initial: boolean;
+    mode: 'create' | 'adopt';
+  },
 ): Promise<string> {
   const { flavor } = input;
   const id = newId('knp');
@@ -297,7 +320,7 @@ async function insertFlavorPool(
       id,
       input.clusterId,
       input.tenantId,
-      flavor.name,
+      nodePoolNameOf(input.mode, input.poolId, flavor),
       flavor.machineType,
       flavor.nodes,
       flavor.autoscaling?.minNodes ?? null,
@@ -403,6 +426,7 @@ async function establishCluster(
       poolId: pool.id,
       flavor,
       initial: true,
+      mode: 'create',
     });
   await deps.authz.upsert(tx, {
     type: 'kubernetes-cluster',
@@ -434,8 +458,8 @@ function adoptedLocation(adoptId: string, provider: { zones: string[]; regions: 
 
 /**
  * `cluster: { adopt }`: an `adopted` cluster row for the provider's cluster (the cluster reconciler reads it with
- * `getCluster`, never creates, changes or deletes it) and a node pool row per flavor (created in it, and deleted
- * with the substrate). One substrate per adopted cluster.
+ * `getCluster`, never creates, changes or deletes it) and a node pool row per flavor (created in it under a name of
+ * its own, `substrateNodePoolName`, and deleted with the substrate). One substrate per adopted cluster.
  */
 async function establishAdopted(
   deps: SubstrateDeps,
@@ -491,7 +515,14 @@ async function establishAdopted(
     ],
   );
   for (const flavor of substrate.flavors)
-    await insertFlavorPool(tx, { clusterId, tenantId: pool.owner_tenant_id, poolId: pool.id, flavor, initial: false });
+    await insertFlavorPool(tx, {
+      clusterId,
+      tenantId: pool.owner_tenant_id,
+      poolId: pool.id,
+      flavor,
+      initial: false,
+      mode: 'adopt',
+    });
   await deps.authz.upsert(tx, {
     type: 'kubernetes-cluster',
     id: clusterId,
@@ -537,9 +568,11 @@ async function syncFlavors(
   );
   const problems: string[] = [];
   let changed = false;
+  const nameOf = (flavor: SubstrateFlavor) => nodePoolNameOf(row.mode, row.pool_id, flavor);
   for (const flavor of substrate.flavors) {
-    const live = pools.find((pool) => pool.name === flavor.name && pool.desired_state === 'present');
-    const leaving = pools.find((pool) => pool.name === flavor.name && pool.desired_state === 'deleted');
+    const name = nameOf(flavor);
+    const live = pools.find((pool) => pool.name === name && pool.desired_state === 'present');
+    const leaving = pools.find((pool) => pool.name === name && pool.desired_state === 'deleted');
     if (!live) {
       if (leaving) continue; // re-added while its old node pool is still being deleted: next run
       await insertFlavorPool(tx, {
@@ -548,9 +581,10 @@ async function syncFlavors(
         poolId: row.pool_id,
         flavor,
         initial: false,
+        mode: row.mode,
       });
       await publishCluster(deps, tx, { id: clusterId, tenant_id: row.tenant_id }, 'kubernetes.nodepool.created', {
-        name: flavor.name,
+        name,
         substratePoolId: row.pool_id,
       });
       changed = true;
@@ -589,7 +623,7 @@ async function syncFlavors(
   }
   for (const pool of pools) {
     if (pool.desired_state !== 'present') continue;
-    if (substrate.flavors.some((flavor) => flavor.name === pool.name)) continue;
+    if (substrate.flavors.some((flavor) => nameOf(flavor) === pool.name)) continue;
     await tx.query(
       `UPDATE kubernetes_node_pools
           SET desired_state = 'deleted', state = 'deleting', message = NULL, version = version + 1,

@@ -67,6 +67,8 @@ describe('parsePoolSubstrate', () => {
       [{ ...create, cluster: {} }, {}, /create or adopt/],
       [{ ...create, cluster: { create: { location: 'us-central1' }, adopt: 'x' } }, {}, /create or adopt/],
       [{ ...create, cluster: { adopt: 'has space' } }, {}, /adopt/],
+      // An adopted cluster's substrate node pools are named bc-<pool>-<flavor> (40 characters at most).
+      [{ ...create, cluster: { adopt: 'projects/p/locations/us-central1/clusters/prod' }, flavors: [{ ...gpu, name: 'g'.repeat(31) }] }, {}, /30 characters/],
       [{ ...create, flavors: [] }, {}, /at least one flavor/],
       [{ ...create, flavors: [gpu, gpu] }, {}, /twice/],
       [{ ...create, flavors: [{ ...gpu, nodes: -1 }] }, {}, /nodes/],

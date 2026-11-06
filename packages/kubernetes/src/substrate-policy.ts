@@ -54,6 +54,12 @@ export interface PoolSubstrate {
   drainTimeoutMs?: number;
 }
 
+/**
+ * The longest flavor name of an adopted cluster: its substrate node pools are named `bc-<6>-<flavor>` (see
+ * `substrateNodePoolName`), and a node pool name has at most 40 characters.
+ */
+export const maxAdoptedFlavorName = 30;
+
 /** A provider cluster id to adopt: printable, no whitespace (GKE `projects/…/clusters/…`, a DOKS or EKS id). */
 const adoptPattern = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}$/;
 
@@ -208,6 +214,12 @@ export function parsePoolSubstrate(policy: Readonly<Record<string, unknown>>): P
     if (names.has(flavor.name)) refuse(`.flavors names ${flavor.name} twice`);
     names.add(flavor.name);
   }
+  if ('adopt' in cluster)
+    for (const flavor of flavors)
+      if (flavor.name.length > maxAdoptedFlavorName)
+        refuse(
+          `.flavors: ${flavor.name} is too long for an adopted cluster, whose substrate node pools are named bc-<pool>-<flavor> (flavor names of at most ${maxAdoptedFlavorName} characters)`,
+        );
   if ('create' in cluster && flavors.length === 0)
     refuse('.flavors: a created cluster needs at least one flavor (its first node pool)');
   const allowSpot = flag(input.allowSpot, '.allowSpot');
