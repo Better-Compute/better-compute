@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, createPublicKey, randomBytes, verify } from 'node:crypto';
 import {
   ComputeError,
   systemClock,
@@ -7,7 +7,6 @@ import {
 } from '@better-compute/core';
 import {
   buildCertificateWithSigner,
-  createRevocationSet,
   der,
   distinguishedName,
   ecdsaWithSha256,
@@ -36,9 +35,9 @@ export interface KmsCertificateAuthorityOptions extends AwsServiceOptions {
   /**
    * The set `revoke` writes, which the host must also hand its verifiers (the gateway's
    * `revocations`, `certificateAuthenticate`), and persist if revocations must survive a restart.
-   * Required for kind 'node' (a node revoke must reach the gateway); other kinds default to a new set.
+   * Required for every kind: a revoke into a set no verifier reads would succeed without effect.
    */
-  revocations?: RevocationSet;
+  revocations: RevocationSet;
   organization?: string;
 }
 
@@ -102,10 +101,11 @@ export function kmsCertificateAuthority(options: KmsCertificateAuthorityOptions)
   const kind = checkCaKind(options.kind ?? 'internal');
   const maxTtl = caMaxTtl(kind, options.maxTtlSeconds);
   const clock = options.clock ?? systemClock;
-  // Fail closed: a node revoke into a set no verifier reads would leave the certificate working.
-  if (kind === 'node' && !options.revocations)
-    throw new ComputeError('INVALID_CONFIG', 'a node KMS CA needs the revocations set its verifiers read (options.revocations)');
-  const revocations = options.revocations ?? createRevocationSet();
+  // Fail closed: a revoke into a set no verifier reads would leave the certificate working.
+  if (!options.revocations || typeof options.revocations.add !== 'function')
+    throw new ComputeError('INVALID_CONFIG', `a ${kind} KMS CA needs the revocations set its verifiers read (options.revocations)`);
+  const revocations = options.revocations;
+  const caKey = createPublicKey({ key: Buffer.from(own.subjectPublicKeyInfo), format: 'der', type: 'spki' });
   const organization = options.organization ?? 'better-compute';
   const client = kms(options);
   const signer = kmsCertificateSigner(client, keyId);
@@ -151,6 +151,12 @@ export function kmsCertificateAuthority(options: KmsCertificateAuthorityOptions)
         signer,
       );
       const parsed = parseCertificate(certificate);
+      // Every certificate must verify under the CA certificate's key: the first-use key check is
+      // cached, and an alias re-pointed at another key (or a bad signature) must not issue.
+      if (!verify('sha256', parsed.tbs, { key: caKey, dsaEncoding: 'der' }, parsed.signature)) {
+        checked = undefined;
+        throw new ComputeError('INVALID_STATE', `CA ${options.id}: the KMS signature does not verify under the CA certificate`);
+      }
       return { serial: parsed.serial, certificate, chain: chain.map((item) => item.slice()), notBefore: parsed.notBefore, notAfter: parsed.notAfter };
     },
 

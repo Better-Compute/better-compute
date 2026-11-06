@@ -274,10 +274,31 @@ describe('KMS CA', () => {
     await ca.revoke!(issued.serial, 'reclaimed');
     expect(ca.isRevoked(issued.serial)).toBe(true);
     expect(verify).toThrow();
-    // Other kinds default to a set of their own, still readable through the CA.
-    const internal = kmsCertificateAuthority({ ...base, id: 'internal', keyId: 'ca-key', kind: 'internal', certificate: caCertificate });
+    // Every kind needs the verifiers' set (review): a revoke into a private set is fail-open.
+    for (const kind of ['serving', 'internal'] as const)
+      expect(() => kmsCertificateAuthority({ ...base, id: kind, keyId: 'ca-key', kind, certificate: caCertificate })).toThrow(/revocations/);
+    const internalSet = createRevocationSet();
+    const internal = kmsCertificateAuthority({ ...base, id: 'internal', keyId: 'ca-key', kind: 'internal', certificate: caCertificate, revocations: internalSet });
     await internal.revoke!('0a', undefined);
     expect(internal.isRevoked('0a')).toBe(true);
+    expect(internalSet.has('0a')).toBe(true);
+  });
+
+  it('a signature that does not verify under the CA certificate is refused (review: key re-pointed)', async () => {
+    const { base, caCertificate, root, kms, emu } = await kmsWorld();
+    const ca = kmsCertificateAuthority({ ...base, id: 'node', keyId: 'ca-key', kind: 'node', certificate: caCertificate, chain: [root.certificate], revocations: createRevocationSet() });
+    await ca.sign(createCsr(generateP256KeyPair().privateKey), nodeProfile);
+    expect(emu.calls('GetPublicKey')).toHaveLength(2); // kmsCaCsr's and the CA's first-use check
+    // The alias now names another P-256 key: KMS signs, but not with the key the CA certificate certifies.
+    kms.ecc.set('ca-key', kms.ecc.get('other-key')!);
+    const error = (await ca.sign(createCsr(generateP256KeyPair().privateKey), nodeProfile).catch((e: unknown) => e)) as ComputeError;
+    expect(error).toBeInstanceOf(ComputeError);
+    expect(error.code).toBe('INVALID_STATE');
+    // The key check is redone on the next sign, which now fails on the mismatch before signing.
+    const signs = kms.signs.length;
+    await expect(ca.sign(createCsr(generateP256KeyPair().privateKey), nodeProfile)).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
+    expect(emu.calls('GetPublicKey')).toHaveLength(3);
+    expect(kms.signs).toHaveLength(signs);
   });
 
   it('the kms-ca-csr command prints a PEM request', async () => {
