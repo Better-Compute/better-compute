@@ -56,7 +56,7 @@ betterCompute({
 
 ### `awsSecretsManagerStore(options)`
 
-Refs are `secret://aws-sm/<tenantId>/<id>`; secrets are named `<prefix>/<tenantId>/<id>` (prefix `better-compute`) and tagged `better-compute:tenant`. Values are at most 64 KiB. `put` with `{ ref }` rotates in place (`PutSecretValue`), only for the ref's own tenant. `resolve(ref, { tenantId })` refuses another tenant's ref with `ACCESS_DENIED` before any AWS call; ref segments are `[A-Za-z0-9_-]`, so `..` and `/` cannot reach another path. `delete` uses `recoveryWindowDays` (default 7; 0 forces deletion). `cacheTtlMs` caches resolved values.
+Refs are `secret://aws-sm/<tenantId>/<id>`; secrets are named `<prefix>/<tenantId>/<id>` (prefix `better-compute`) and tagged `better-compute:tenant`. Values are at most 64 KiB. `put` with `{ ref }` rotates in place (`PutSecretValue`), only for the ref's own tenant. `resolve(ref, { tenantId })` refuses another tenant's ref with `ACCESS_DENIED` before any AWS call; ref segments are `[A-Za-z0-9._-]` and never `.` or `..`, so no segment can reach another path. local-sealed also accepts tenant ids containing `:`, but `:` is not valid in Secrets Manager or SSM names, so such a tenant's `put` to these stores fails with `INVALID_INPUT`. `delete` uses `recoveryWindowDays` (default 7; 0 forces deletion). `cacheTtlMs` caches resolved values.
 
 ```json
 { "Effect": "Allow",
@@ -79,7 +79,7 @@ Refs are `secret://aws-ssm/<tenantId>/<id>`, stored as `SecureString` parameters
 
 ### `routeSecretStores({ routes, fallback, putTo })`
 
-One `secret`-scheme store over several: refs route by the longest matching prefix, everything else goes to `fallback`, and new secrets go to `putTo`. Existing local-sealed refs keep resolving while new ones land in Secrets Manager.
+One `secret`-scheme store over several: refs route by the longest matching prefix, everything else goes to `fallback`, and new secrets go to `putTo`. A ref goes to a route only in the AWS stores' shape, with exactly `<tenant>/<id>` after the prefix. A local-sealed ref `secret://aws-sm/<id>` (a tenant whose id is `aws-sm`) therefore still goes to the fallback. Existing local-sealed refs keep resolving while new ones land in Secrets Manager.
 
 ### `kmsSealingKeys(options)` and `generateKmsSealingKey(options)`
 

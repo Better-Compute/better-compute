@@ -184,6 +184,32 @@ describe('routing', () => {
     expect(emu.calls('CreateSecret')).toHaveLength(1);
     expect(() => routeSecretStores({ routes: [{ prefix: 'aws-sm', store: sm }], fallback: local, putTo: sm })).toThrow(ComputeError);
   });
+
+  it('a local-sealed tenant named aws-sm keeps resolving through the fallback (review)', async () => {
+    const { store: sm, emu } = smWorld();
+    const local = memoryStore('local');
+    // local-sealed refs are secret://<tenant>/<id>: tenant "aws-sm" looks like the route prefix.
+    const legacy = await local.put('aws-sm', 'tenant-value');
+    expect(legacy).toBe('secret://aws-sm/local-0');
+    const routed = routeSecretStores({ routes: [{ prefix: 'secret://aws-sm/', store: sm }], fallback: local, putTo: sm });
+    await expect(routed.resolve(legacy)).resolves.toBe('tenant-value');
+    await routed.put('aws-sm', 'rotated', { ref: legacy });
+    expect(local.values.get(legacy)).toBe('rotated');
+    await routed.delete(legacy);
+    expect(emu.requests).toHaveLength(0);
+    // The AWS ref shape (two segments after the prefix) still goes to the store.
+    const fresh = await routed.put('aws-sm', 'in-sm');
+    await expect(routed.resolve(fresh)).resolves.toBe('in-sm');
+  });
+
+  it("tenant ids with '.' work in the AWS stores; '.', '..' and ':' are refused", async () => {
+    const { store: sm } = smWorld();
+    const ref = await sm.put('acme.eu', 'dotted');
+    expect(ref.startsWith('secret://aws-sm/acme.eu/')).toBe(true);
+    await expect(sm.resolve(ref, { tenantId: 'acme.eu' })).resolves.toBe('dotted');
+    for (const tenantId of ['.', '..', 'acme:eu', 'a/b']) expect(await codeOf(sm.put(tenantId, 'x'))).toBe('INVALID_INPUT');
+    expect(await codeOf(sm.resolve('secret://aws-sm/../x' as SecretRef))).toBe('INVALID_INPUT');
+  });
 });
 
 describe('Parameter Store', () => {

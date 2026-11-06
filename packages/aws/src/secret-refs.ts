@@ -1,6 +1,10 @@
 import { ComputeError, type SecretRef, type SecretResolveContext } from '@better-compute/core';
 
-const segment = /^[A-Za-z0-9_-]{1,128}$/;
+// local-sealed's tenant ids allow `.` and `:` (pki/src/secrets.ts). `.` is valid in Secrets
+// Manager names, SSM parameter paths and S3 keys, so it is allowed here except as a whole `.`/`..`
+// segment; `:` is not valid in SSM or Secrets Manager names, so such tenants cannot use these stores.
+const segmentPattern = /^[A-Za-z0-9._-]{1,128}$/;
+const segment = { source: segmentPattern.source, test: (value: string) => segmentPattern.test(value) && value !== '.' && value !== '..' };
 
 /** A parsed `secret://<store>/<tenantId>/<id>` ref of one of this package's stores. */
 export interface AwsSecretRef {
@@ -11,7 +15,7 @@ export interface AwsSecretRef {
 /** Validates a tenant id or secret id as one path segment (no `/`, `.`, `..` or control characters). */
 export function checkSegment(value: string, what: string): string {
   if (typeof value !== 'string' || !segment.test(value))
-    throw new ComputeError('INVALID_INPUT', `${what} must match ${segment.source}`);
+    throw new ComputeError('INVALID_INPUT', `${what} must match ${segment.source} and not be . or ..`);
   return value;
 }
 
