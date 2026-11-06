@@ -8,6 +8,7 @@ import {
   type MethodContext,
   type ModuleContext,
   type ProviderCertificateSpec,
+  type ProviderDnsRecordSpec,
   type ProviderLoadBalancerSpec,
   type ProviderResourceState,
   type SqlExecutor,
@@ -61,6 +62,11 @@ interface FakeLoadBalancer {
 const cloud = {
   certificates: new Map<string, FakeCertificate>(),
   loadBalancers: new Map<string, FakeLoadBalancer>(),
+  /** zone -> whether this deployment made it (an adopted or foreign one was not). */
+  zones: new Map<string, { ours: boolean }>(),
+  /** Zones on the account that no vps row made (the operator's own). */
+  foreignZones: new Set<string>(),
+  records: new Map<string, { zone: string; spec: ProviderDnsRecordSpec }>(),
   calls: [] as string[],
   failNext: undefined as ComputeError | undefined,
   /** Managed certificates and load balancers answer `pending` this many times first. */
@@ -70,6 +76,9 @@ const cloud = {
   reset() {
     this.certificates.clear();
     this.loadBalancers.clear();
+    this.zones.clear();
+    this.foreignZones.clear();
+    this.records.clear();
     this.calls.length = 0;
     this.failNext = undefined;
     this.pendingTicks = 0;
@@ -180,6 +189,40 @@ const edgeLike = defineProvider({
       async deleteLoadBalancer(id) {
         cloud.call(`deleteLoadBalancer ${id}`);
         cloud.loadBalancers.delete(id);
+        return { id, state: 'deleted' };
+      },
+    },
+    dns: {
+      async ensureZone(spec) {
+        cloud.call(`ensureZone ${spec.name}${spec.adopt ? ' adopt' : ''}`);
+        if (cloud.foreignZones.has(spec.name) && !spec.adopt)
+          throw new ComputeError('CONFLICT', 'zone exists', undefined, { reason: 'zoneExists' });
+        if (!cloud.zones.has(spec.name)) cloud.zones.set(spec.name, { ours: !cloud.foreignZones.has(spec.name) });
+        return { id: spec.name, state: 'ready', outputs: { nameServers: 'ns1.example.net,ns2.example.net' } };
+      },
+      async getZone(zone) {
+        return cloud.zones.has(zone) ? { id: zone, state: 'ready' } : undefined;
+      },
+      async deleteZone(zone) {
+        cloud.call(`deleteZone ${zone}`);
+        if (!cloud.zones.get(zone)?.ours)
+          throw new ComputeError('INVALID_STATE', 'not ours', undefined, { reason: 'notManaged' });
+        cloud.zones.delete(zone);
+        return { id: zone, state: 'deleted' };
+      },
+      async ensureRecord(zone, spec) {
+        cloud.call(`ensureRecord ${zone} ${spec.name} ${spec.type} ${spec.data}${spec.id ? ' #' + spec.id : ''}`);
+        if (!cloud.zones.has(zone)) throw new ComputeError('NOT_FOUND', 'no zone');
+        const id = spec.id ?? `rec-${++cloud.counter}`;
+        cloud.records.set(id, { zone, spec });
+        return { id, state: 'ready' };
+      },
+      async getRecord(zone, id) {
+        return cloud.records.get(id)?.zone === zone ? { id, state: 'ready' } : undefined;
+      },
+      async deleteRecord(zone, id) {
+        cloud.call(`deleteRecord ${zone} ${id}`);
+        cloud.records.delete(id);
         return { id, state: 'deleted' };
       },
     },
@@ -296,7 +339,7 @@ async function run(definition: Definition, raw: unknown, who: Caller): Promise<a
     throw error;
   }
 }
-const call = (group: 'certificates' | 'loadBalancers', method: string, raw: unknown, who: Caller = alice) =>
+const call = (group: 'certificates' | 'loadBalancers' | 'dnsZones' | 'dnsRecords', method: string, raw: unknown, who: Caller = alice) =>
   run((api[group] as unknown as Record<string, Definition>)[method]!, raw, who);
 const codeOf = (promise: Promise<unknown>) =>
   promise.then(
@@ -425,6 +468,8 @@ afterAll(async () => {
 });
 beforeEach(async () => {
   await db.query(`DELETE FROM provider_load_balancers`);
+  await db.query(`DELETE FROM provider_dns_records`);
+  await db.query(`DELETE FROM provider_dns_zones`);
   await db.query(`DELETE FROM provider_certificates`);
   await db.query(`DELETE FROM instance_usage_intervals`);
   await db.query(`DELETE FROM instances`);
@@ -443,7 +488,7 @@ beforeEach(async () => {
 describe('api surface', () => {
   it('every list row has a get, so the list recipe knows its item kind', async () => {
     const { apiMethod, apiSurface } = await import('@better-compute/core');
-    for (const group of ['certificates', 'loadBalancers']) {
+    for (const group of ['certificates', 'loadBalancers', 'dnsZones']) {
       expect(apiMethod(group, 'get')?.resource, group).toMatch(/^provider-/);
       const rows = apiSurface.filter((row) => row.group === group);
       expect(Object.keys(api[group as keyof VpsApi] as object).sort(), group).toEqual(
@@ -639,5 +684,112 @@ describe('loadBalancers', () => {
     );
     await call('loadBalancers', 'delete', { tenantId: 'root', loadBalancerId: global.id });
     await drain();
+  });
+});
+
+describe('dnsZones and dnsRecords', () => {
+  const createZone = (raw: Record<string, unknown> = {}, who: Caller = alice) =>
+    call(
+      'dnsZones',
+      'create',
+      { tenantId: who.tenantId, poolId: pool, zone: 'example.com', idempotencyKey: `z-${++keyCounter}`, ...raw },
+      who,
+    );
+  const createRecord = (zoneId: string, raw: Record<string, unknown> = {}, who: Caller = alice) =>
+    call(
+      'dnsRecords',
+      'create',
+      { tenantId: who.tenantId, zoneId, name: 'www', type: 'A', data: '203.0.113.10', idempotencyKey: `r-${++keyCounter}`, ...raw },
+      who,
+    );
+
+  it('a zone is one per account: never shared with another tenant, and its name servers are reported', async () => {
+    const zone = await createZone({ idempotencyKey: 'z-a' });
+    expect(zone).toMatchObject({ zone: 'example.com', adopt: false, state: 'pending' });
+    expect(await createZone({ idempotencyKey: 'z-a' })).toMatchObject({ id: zone.id });
+    expect(await codeOf(createZone({}, mallory))).toBe('CONFLICT');
+    await drain();
+    expect(await call('dnsZones', 'get', { tenantId: 'root', zoneId: zone.id })).toMatchObject({
+      state: 'ready',
+      nameServers: ['ns1.example.net', 'ns2.example.net'],
+    });
+    expect(await codeOf(call('dnsZones', 'get', { tenantId: 'other', zoneId: zone.id }, mallory))).toBe('ACCESS_DENIED');
+  });
+
+  it("adopting the account's zone is for its owner tenant only, and an adopted zone is never deleted", async () => {
+    cloud.foreignZones.add('ops.example.org');
+    expect(await codeOf(createZone({ zone: 'ops.example.org', adopt: true }, mallory))).toBe('ACCESS_DENIED');
+    const refused = await createZone({ zone: 'ops.example.org' });
+    await drain();
+    expect((await call('dnsZones', 'get', { tenantId: 'root', zoneId: refused.id })).state).toBe('error');
+    await call('dnsZones', 'delete', { tenantId: 'root', zoneId: refused.id });
+    await drain();
+    const adopted = await createZone({ zone: 'ops.example.org', adopt: true });
+    await drain();
+    expect((await call('dnsZones', 'get', { tenantId: 'root', zoneId: adopted.id })).state).toBe('ready');
+    await call('dnsZones', 'delete', { tenantId: 'root', zoneId: adopted.id });
+    await drain();
+    expect(cloud.calls.filter((entry) => entry.startsWith('deleteZone'))).toEqual([]);
+    expect(cloud.zones.has('ops.example.org')).toBe(true);
+  });
+
+  it('records wait for their zone, change in place and are deleted before the zone can be', async () => {
+    const zone = await createZone();
+    const record = await createRecord(zone.id, { ttlSeconds: 300 });
+    expect(record).toMatchObject({ name: 'www', type: 'A', fqdn: 'www.example.com', state: 'pending' });
+    expect(await codeOf(createRecord(zone.id))).toBe('CONFLICT');
+    await drain();
+    expect((await call('dnsRecords', 'get', { tenantId: 'root', zoneId: zone.id, recordId: record.id })).state).toBe('ready');
+    await call('dnsRecords', 'update', { tenantId: 'root', zoneId: zone.id, recordId: record.id, data: '203.0.113.11' });
+    await drain();
+    expect(cloud.calls.filter((entry) => entry.startsWith('ensureRecord'))).toEqual([
+      'ensureRecord example.com www A 203.0.113.10',
+      expect.stringMatching(/^ensureRecord example\.com www A 203\.0\.113\.11 #rec-/),
+    ]);
+    expect(await codeOf(call('dnsZones', 'delete', { tenantId: 'root', zoneId: zone.id }))).toBe('INVALID_STATE');
+    await call('dnsRecords', 'delete', { tenantId: 'root', zoneId: zone.id, recordId: record.id });
+    await drain();
+    await call('dnsZones', 'delete', { tenantId: 'root', zoneId: zone.id });
+    await drain();
+    expect(cloud.records.size).toBe(0);
+    expect(cloud.zones.size).toBe(0);
+  });
+
+  it('refuses reserved names and data that does not fit the type, before anything is written', async () => {
+    const zone = await createZone();
+    expect(await codeOf(createRecord(zone.id, { name: '_better-compute', type: 'TXT', data: 'x' }))).toBe('INVALID_INPUT');
+    expect(await codeOf(createRecord(zone.id, { name: '@', type: 'NS', data: 'ns.example.net.' }))).toBe('INVALID_INPUT');
+    expect(await codeOf(createRecord(zone.id, { type: 'AAAA', data: '203.0.113.1' }))).toBe('INVALID_INPUT');
+    expect(await codeOf(createRecord(zone.id, { type: 'CNAME', data: 'no-final-dot.example.net' }))).toBe('INVALID_INPUT');
+    expect(await codeOf(createRecord(zone.id, { type: 'TXT', data: 'v=spf1', priority: 1 }))).toBe('INVALID_INPUT');
+    expect((await call('dnsRecords', 'list', { tenantId: 'root', zoneId: zone.id })).items).toEqual([]);
+  });
+
+  it("a record that follows an instance publishes its public address and goes with it; another tenant's is refused", async () => {
+    const zone = await createZone();
+    await drain();
+    const theirs = await insertInstance({ tenantId: 'other' });
+    expect(await codeOf(createRecord(zone.id, { name: 'vm', data: undefined, instanceId: theirs.instanceId }))).toBe(
+      'ACCESS_DENIED',
+    );
+    const mine = await insertInstance();
+    const record = await createRecord(zone.id, { name: 'vm', data: undefined, instanceId: mine.instanceId });
+    expect(required).toContainEqual(expect.stringMatching(new RegExp('^compute:instances:update .*' + mine.instanceId + '$')));
+    await drain();
+    expect((await call('dnsRecords', 'get', { tenantId: 'root', zoneId: zone.id, recordId: record.id })).message).toMatch(
+      /public address/,
+    );
+    await db.query(`UPDATE instances SET addresses = '{10.0.0.5,198.51.100.7}' WHERE id = $1`, [mine.instanceId]);
+    await runKey('all');
+    await drain();
+    expect(await call('dnsRecords', 'get', { tenantId: 'root', zoneId: zone.id, recordId: record.id })).toMatchObject({
+      state: 'ready',
+      data: '198.51.100.7',
+    });
+    const { onInstanceDeleted } = await import('@better-compute/vps');
+    await db.transaction((tx) => onInstanceDeleted(moduleContext(db), tx, mine.instanceId, { machineDeleted: true }));
+    await drain();
+    expect(cloud.records.size).toBe(0);
+    expect((await call('dnsRecords', 'list', { tenantId: 'root', zoneId: zone.id })).items).toEqual([]);
   });
 });

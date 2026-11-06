@@ -282,6 +282,20 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
       'Load balancers on a provider account (DO P4): created { poolId, providerAccountId, name, scope, region? }, updated { changed }, ready { address? }, error { message }, deleting, deleted; data { loadBalancerId, ... }',
   },
   {
+    type: 'providerDnsZone.*',
+    subject: 'provider-dns-zone/{id}',
+    module: 'vps',
+    description:
+      'DNS zones on a provider account (DO P4): created { poolId, providerAccountId, zone, adopt }, ready, error { message }, deleting, deleted; data { zoneId, ... }',
+  },
+  {
+    type: 'providerDnsRecord.*',
+    subject: 'provider-dns-record/{id}',
+    module: 'vps',
+    description:
+      'DNS records (DO P4): created { zoneId, name, type, instanceId? }, updated { changed }, ready, error { message }, deleting { instanceId? }, deleted; data { recordId, ... }',
+  },
+  {
     type: 'kubernetes.cluster.*',
     subject: 'kubernetes-cluster/{id}',
     module: 'kubernetes',

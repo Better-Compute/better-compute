@@ -83,6 +83,7 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
         // (DO P4) Certificates and load balancers: their `list` methods are gated on the tenant.
         ...action('certificates', 'read'),
         ...action('load-balancers', 'read'),
+        ...action('dns', 'read'),
         // §13 destructive-batch quorum (v1.0).
         ...action('batches', 'read', 'create', 'approve'),
       ],
@@ -253,6 +254,11 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
         region: 'string',
         scope: 'string',
       },
+    },
+    [`${p}provider-dns-zone`]: {
+      parent: `${p}tenant`,
+      actions: action('dns', 'read', 'manage'),
+      attributes: { providerAccountId: 'string', poolId: 'string', projectId: 'string', zone: 'string' },
     },
   };
 }

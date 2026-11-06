@@ -32,6 +32,13 @@ import {
   unsettledLoadBalancersSql,
 } from './provider-load-balancers.js';
 import {
+  liveDnsSql,
+  onDnsInstanceGone,
+  reconcileDnsRecord,
+  reconcileDnsZone,
+  unsettledDnsSql,
+} from './provider-dns.js';
+import {
   ambiguousCodes,
   columns,
   assertNameFree,
@@ -2651,6 +2658,8 @@ export async function onInstanceDeleted(
     await deps.work.enqueue(tx, providerResourcesWork, id);
   // (P4) Its load balancers stop sending it traffic now, not at the periodic pass.
   await onLoadBalancedInstanceGone(deps, tx, instanceId);
+  // (P4) The DNS records that follow it are deleted.
+  await onDnsInstanceGone(deps, tx, instanceId);
 }
 
 // --- Entry points ------------------------------------------------------------------------------
@@ -2672,6 +2681,8 @@ export async function reconcileProviderResource(
   else if (resourceId.startsWith('paddr_')) await reconcileAddress(run, resourceId);
   else if (resourceId.startsWith('pcert_')) await reconcileCertificate(run, resourceId);
   else if (resourceId.startsWith('plb_')) await reconcileLoadBalancer(run, resourceId);
+  else if (resourceId.startsWith('pdz_')) await reconcileDnsZone(run, resourceId);
+  else if (resourceId.startsWith('pdr_')) await reconcileDnsRecord(run, resourceId);
   else return undefined;
   return run.next();
 }
@@ -2698,7 +2709,8 @@ const unsettledIds = `
           OR (instance_id IS NULL AND assignment_state <> 'none')
           OR (instance_id IS NOT NULL AND assignment_state <> 'ready'))
   UNION ALL ${unsettledCertificatesSql}
-  UNION ALL ${unsettledLoadBalancersSql}`;
+  UNION ALL ${unsettledLoadBalancersSql}
+  UNION ALL ${unsettledDnsSql}`;
 
 /** Live rows that are settled (the complement of `unsettledIds`). */
 const settledSql = `
@@ -2706,7 +2718,8 @@ const settledSql = `
                   UNION ALL SELECT id FROM provider_snapshots WHERE state <> 'deleted'
                   UNION ALL SELECT id FROM provider_addresses WHERE state <> 'deleted'
                   UNION ALL ${liveCertificatesSql}
-                  UNION ALL ${liveLoadBalancersSql}) live
+                  UNION ALL ${liveLoadBalancersSql}
+                  UNION ALL ${liveDnsSql}) live
   EXCEPT SELECT id FROM (${unsettledIds}) unsettled
   ORDER BY id`;
 

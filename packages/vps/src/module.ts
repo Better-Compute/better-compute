@@ -400,6 +400,36 @@ import {
   type UpdateProviderLoadBalancerInput,
 } from './provider-load-balancers.js';
 import {
+  clearStagedProviderDnsZone,
+  createProviderDnsRecord,
+  createProviderDnsZone,
+  deleteProviderDnsRecord,
+  deleteProviderDnsZone,
+  getProviderDnsRecord,
+  getProviderDnsZone,
+  listProviderDnsRecords,
+  listProviderDnsZones,
+  parseCreateProviderDnsRecord,
+  parseCreateProviderDnsZone,
+  parseListProviderDnsRecords,
+  parseListProviderDnsZones,
+  parseProviderDnsRecordRef,
+  parseProviderDnsZoneRef,
+  parseUpdateProviderDnsRecord,
+  prepareCreateProviderDnsZone,
+  providerDnsSchemas,
+  updateProviderDnsRecord,
+  type CreateProviderDnsRecordInput,
+  type CreateProviderDnsZoneInput,
+  type ListProviderDnsRecordsInput,
+  type ListProviderDnsZonesInput,
+  type ProviderDnsRecordRef,
+  type ProviderDnsRecordView,
+  type ProviderDnsZoneRef,
+  type ProviderDnsZoneView,
+  type UpdateProviderDnsRecordInput,
+} from './provider-dns.js';
+import {
   deleteSnapshot,
   getSnapshot,
   instanceSnapshotKind,
@@ -639,6 +669,21 @@ export type VpsApi = {
     update: MethodDefinition<UpdateProviderLoadBalancerInput, ProviderLoadBalancerView>;
     delete: MethodDefinition<ProviderLoadBalancerRef, ProviderLoadBalancerView>;
   };
+  /** (DO P4) DNS zones on a provider account (provider-dns.ts). */
+  dnsZones: {
+    create: MethodDefinition<CreateProviderDnsZoneInput, ProviderDnsZoneView>;
+    list: MethodDefinition<ListProviderDnsZonesInput, { items: ProviderDnsZoneView[] }>;
+    get: MethodDefinition<ProviderDnsZoneRef, ProviderDnsZoneView>;
+    delete: MethodDefinition<ProviderDnsZoneRef, ProviderDnsZoneView>;
+  };
+  /** (DO P4) The records of a DNS zone, decided on the zone (provider-dns.ts). */
+  dnsRecords: {
+    create: MethodDefinition<CreateProviderDnsRecordInput, ProviderDnsRecordView>;
+    list: MethodDefinition<ListProviderDnsRecordsInput, { items: ProviderDnsRecordView[] }>;
+    get: MethodDefinition<ProviderDnsRecordRef, ProviderDnsRecordView>;
+    update: MethodDefinition<UpdateProviderDnsRecordInput, ProviderDnsRecordView>;
+    delete: MethodDefinition<ProviderDnsRecordRef, ProviderDnsRecordView>;
+  };
 };
 
 function tenantResource<I extends { tenantId: string }>(input: I) {
@@ -719,6 +764,9 @@ function providerCertificateResource<I extends { certificateId: string }>(input:
 }
 function providerLoadBalancerResource<I extends { loadBalancerId: string }>(input: I) {
   return { type: 'provider-load-balancer', id: input.loadBalancerId };
+}
+function providerDnsZoneResource<I extends { zoneId: string }>(input: I) {
+  return { type: 'provider-dns-zone', id: input.zoneId };
 }
 
 function parsePool(raw: unknown): PoolInput {
@@ -2330,6 +2378,93 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         ),
         handler: (context, input) =>
           deleteProviderLoadBalancer(networkDeps(context), context.sql, input),
+      }),
+    },
+    dnsZones: {
+      create: defineMethod({
+        action: 'compute:dns:manage',
+        kind: 'mutation',
+        resource: (input: CreateProviderDnsZoneInput) => ({
+          type: 'provider-dns-zone',
+          id: `draft:${input.idempotencyKey}`,
+        }),
+        validate: describedBy(providerDnsSchemas.createZone, parseCreateProviderDnsZone),
+        admission: {
+          prepare: (context, input, tx) =>
+            prepareCreateProviderDnsZone(networkDeps(context), context, input, tx),
+          denied: (context, input, tx) => clearStagedProviderDnsZone(context, input, tx),
+          abandoned: (context, input, tx) => clearStagedProviderDnsZone(context, input, tx),
+        },
+        handler: (context, input) => createProviderDnsZone(networkDeps(context), context, input),
+      }),
+      list: defineMethod({
+        action: 'compute:dns:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(providerDnsSchemas.listZones, parseListProviderDnsZones),
+        handler: (context, input) => listProviderDnsZones(context.sql, input),
+      }),
+      get: defineMethod({
+        action: 'compute:dns:read',
+        kind: 'read',
+        resource: providerDnsZoneResource,
+        validate: describedBy(providerDnsSchemas.zone, parseProviderDnsZoneRef),
+        handler: (context, input) => getProviderDnsZone(context.sql, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:dns:manage',
+        kind: 'mutation',
+        resource: providerDnsZoneResource,
+        validate: describedBy(providerDnsSchemas.zone, parseProviderDnsZoneRef),
+        handler: (context, input) =>
+          deleteProviderDnsZone(networkDeps(context), context.sql, input),
+      }),
+    },
+    dnsRecords: {
+      create: defineMethod({
+        action: 'compute:dns:manage',
+        kind: 'mutation',
+        resource: providerDnsZoneResource,
+        validate: describedBy(providerDnsSchemas.createRecord, parseCreateProviderDnsRecord),
+        admission: {
+          prepare: async (_context, input) => ({
+            status: 'decide',
+            resource: providerDnsZoneResource(input),
+          }),
+          // Publishing an instance's address under a name: decided on the instance too.
+          check: (context, input) => targetInstanceCheck(context, input.tenantId, input.instanceId),
+        },
+        handler: (context, input) => createProviderDnsRecord(networkDeps(context), context, input),
+      }),
+      list: defineMethod({
+        action: 'compute:dns:read',
+        kind: 'read',
+        resource: providerDnsZoneResource,
+        validate: describedBy(providerDnsSchemas.listRecords, parseListProviderDnsRecords),
+        handler: (context, input) => listProviderDnsRecords(context.sql, input),
+      }),
+      get: defineMethod({
+        action: 'compute:dns:read',
+        kind: 'read',
+        resource: providerDnsZoneResource,
+        validate: describedBy(providerDnsSchemas.record, parseProviderDnsRecordRef),
+        handler: (context, input) => getProviderDnsRecord(context.sql, input),
+      }),
+      update: defineMethod({
+        action: 'compute:dns:manage',
+        kind: 'mutation',
+        resource: providerDnsZoneResource,
+        validate: describedBy(providerDnsSchemas.updateRecord, parseUpdateProviderDnsRecord),
+        handler: (context, input) =>
+          updateProviderDnsRecord(networkDeps(context), context.sql, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:dns:manage',
+        kind: 'mutation',
+        resource: providerDnsZoneResource,
+        validate: describedBy(providerDnsSchemas.record, parseProviderDnsRecordRef),
+        handler: (context, input) =>
+          deleteProviderDnsRecord(networkDeps(context), context.sql, input),
       }),
     },
   });

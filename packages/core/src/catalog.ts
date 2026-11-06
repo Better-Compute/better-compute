@@ -46,6 +46,7 @@ export const computeResourceKinds = [
   'provider-address',
   'provider-certificate',
   'provider-load-balancer',
+  'provider-dns-zone',
 ] as const;
 export type ComputeResourceKind = (typeof computeResourceKinds)[number];
 
@@ -112,6 +113,7 @@ const definitions = {
       // (DO P4) Certificates and load balancers: their `list` methods are gated on the tenant.
       ...a('certificates', 'read'),
       ...a('load-balancers', 'read'),
+      ...a('dns', 'read'),
       // v1.0 destructive-batch quorum (§13): on top of the approvers' signatures, never instead.
       ...a('batches', 'read', 'create', 'approve'),
     ],
@@ -323,6 +325,13 @@ const definitions = {
       region: 'string',
       scope: 'string',
     },
+  },
+  'provider-dns-zone': {
+    description:
+      "A tenant's DNS zone on a provider account and the records in it (the records are decided on their zone)",
+    parent: 'tenant',
+    actions: a('dns', 'read', 'manage'),
+    attributes: { providerAccountId: 'string', poolId: 'string', projectId: 'string', zone: 'string' },
   },
 } as const satisfies Record<ComputeResourceKind, KindDefinition>;
 
@@ -775,6 +784,20 @@ group('loadBalancers', 'vps', [
   ['get', 'read', 'load-balancers:read', 'provider-load-balancer', 'v1.0'],
   ['update', 'mutation', 'load-balancers:manage', 'provider-load-balancer', 'v1.0'],
   ['delete', 'mutation', 'load-balancers:manage', 'provider-load-balancer', 'v1.0'],
+]);
+// (DO P4) DNS zones and their records (vps provider-dns.ts); a record is decided on its zone.
+group('dnsZones', 'vps', [
+  ['create', 'mutation', 'dns:manage', 'provider-dns-zone', 'v1.0'],
+  ['list', 'read', 'dns:read', 'tenant', 'v1.0', list],
+  ['get', 'read', 'dns:read', 'provider-dns-zone', 'v1.0'],
+  ['delete', 'mutation', 'dns:manage', 'provider-dns-zone', 'v1.0'],
+]);
+group('dnsRecords', 'vps', [
+  ['create', 'mutation', 'dns:manage', 'provider-dns-zone', 'v1.0'],
+  ['list', 'read', 'dns:read', 'provider-dns-zone', 'v1.0'],
+  ['get', 'read', 'dns:read', 'provider-dns-zone', 'v1.0'],
+  ['update', 'mutation', 'dns:manage', 'provider-dns-zone', 'v1.0'],
+  ['delete', 'mutation', 'dns:manage', 'provider-dns-zone', 'v1.0'],
 ]);
 // Managed Kubernetes (GKE, …) on a provider account; the provider runs the control plane (kubernetes module).
 group('kubernetesClusters', 'kubernetes', [

@@ -17,6 +17,7 @@ import {
 } from './provider-resources.js';
 import { providerCertificatesMigration } from './provider-certificates.js';
 import { providerLoadBalancersMigration } from './provider-load-balancers.js';
+import { providerDnsMigration } from './provider-dns.js';
 import {
   vpsIdentityRebindMigration,
   vpsSandboxExpiringMigration,
@@ -218,4 +219,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   providerAddressesMigration,
   providerCertificatesMigration,
   providerLoadBalancersMigration,
+  providerDnsMigration,
 ]);
