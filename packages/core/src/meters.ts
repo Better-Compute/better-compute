@@ -203,6 +203,8 @@ export function meterCatalog(options: MeterCatalogOptions): MeterSpec[] {
   // (DO P2) Reserved provider addresses and provider volume snapshots.
   add('vps.address.hours', 'Reserved address hours', 'hour');
   add('vps.snapshot.gib.hours', 'Provider volume snapshot GiB hours', 'gib-hour');
+  // (DO P6) Shared provider volumes (network file shares), priced apart from block volumes.
+  add('vps.share.gib.hours', 'Shared volume GiB hours', 'gib-hour');
 
   for (const key of options.flavorMeters ?? []) {
     if (!key.startsWith('flavor.'))

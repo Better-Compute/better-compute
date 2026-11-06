@@ -1688,6 +1688,30 @@ describe('usage', () => {
     expect((await windows('address', address.id))[1]!.quantity).toBe(1);
   });
 
+  it('bills a shared volume on its own meter (DO P6)', async () => {
+    const meterAll = () =>
+      db.transaction((tx) => meterAncillaries(tx, clock.now(), { rootTenantId: 'root', meterGraceMs: 0 }));
+    const networkId = await insertNetwork();
+    const shared = await createVolume({ kind: 'shared', sizeGiB: 50, networkId });
+    const block = await createVolume({ sizeGiB: 12 });
+    await drain();
+    const top = Math.floor(clock.now() / HOUR) * HOUR;
+    await advanceTo(top + 2 * HOUR + 1_000);
+    await meterAll();
+    const sharedWindows = await windows('volume', shared.id);
+    expect(sharedWindows).toHaveLength(2);
+    expect(sharedWindows[1]).toMatchObject({
+      meter: 'vps.share.gib.hours',
+      quantity: 50,
+      tags: { source: 'provider-volume', region: 'nyc3' },
+    });
+    expect((await windows('volume', block.id))[1]).toMatchObject({
+      meter: 'vps.volume.gib.hours',
+      quantity: 12,
+      tags: { source: 'provider-volume', region: 'nyc3' },
+    });
+  });
+
   it('volume and address windows are accepted with the kubernetes module installed after vps', async () => {
     const { kubernetesMigrations } = await import('@better-compute/kubernetes');
     const fresh = pglite();
