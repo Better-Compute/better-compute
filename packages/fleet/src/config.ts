@@ -226,7 +226,12 @@ function list<T>(
 const kubernetesName = /^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$/;
 const kubernetesLocation = /^[a-z][a-z0-9-]{1,38}[a-z0-9]$/;
 const kubernetesVersion = /^[0-9]{1,3}\.[0-9]{1,3}(\.[0-9]{1,3})?(-[a-z0-9.]{1,40})?$/;
-const machineType = /^[a-z0-9][a-z0-9-]{0,62}$/;
+/**
+ * Machine and accelerator types: GCE (`e2-standard-4`), DigitalOcean (`s-2vcpu-4gb`) and EC2
+ * (`m5.large`). Deliberately the widest form any provider lane's kubernetes module takes, never
+ * narrower: an exported document must always validate, and the module checks the call again.
+ */
+const machineType = /^[a-z0-9][a-z0-9.-]{0,62}$/;
 const diskType = /^[a-z][a-z0-9-]{1,40}$/;
 const labelKey =
   /^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?\/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$/;

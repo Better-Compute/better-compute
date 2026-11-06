@@ -140,6 +140,29 @@ describe('fleet.export with Kubernetes clusters', () => {
     expect((await exported()).kubernetesClusters).toBeUndefined();
   });
 
+  it('exports an EKS-style dotted machine type as a document that plans nothing', async () => {
+    const cluster: KubernetesClusterView = await world.api.kubernetesClusters.create(
+      world.root,
+      clusterBody({ name: 'eks-like', idempotencyKey: 'export-eks-like' }),
+    );
+    // As an EKS node pool is stored (m5.large); this module's own parser may not take it yet.
+    await world.fixture.database.query(
+      `UPDATE kubernetes_node_pools SET machine_type = 'm5.large' WHERE cluster_id = $1`,
+      [cluster.id],
+    );
+    const config = await exported();
+    expect(config.kubernetesClusters?.[0]?.nodePools).toEqual([
+      { name: 'system', machineType: 'm5.large', nodeCount: 1 },
+    ]);
+    const planned = await world.api.fleet.plan(world.root, {
+      tenantId: world.rootTenant,
+      config: JSON.parse(JSON.stringify(config)),
+      prune: true,
+    });
+    expect(planned.blocked).toBe(false);
+    expect(planned.calls).toEqual([]);
+  });
+
   it('names a substrate pool account by its document name', async () => {
     const pool = await world.api.pools.create(world.root, {
       tenantId: world.rootTenant,

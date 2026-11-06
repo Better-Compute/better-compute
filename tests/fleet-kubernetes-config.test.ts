@@ -176,6 +176,25 @@ describe('kubernetesClusters in the document', () => {
     ).toMatch(/at most 10/);
   });
 
+  it('takes every provider machine type the kubernetes module may take: GKE, DOKS and EKS (dotted)', () => {
+    const pool = (machineType: string, extra: Record<string, unknown> = {}) =>
+      document([cluster({ nodePools: [{ name: 'p', machineType, nodeCount: 1, ...extra }] })]);
+    for (const machineType of [
+      'e2-standard-4',
+      's-2vcpu-4gb',
+      'm5.large',
+      'g5.xlarge',
+      'm7i.48xlarge',
+    ])
+      expect(message(pool(machineType))).toBe('valid');
+    expect(message(pool('g5.xlarge', { accelerators: { type: 'nvidia-a10g', count: 1 } }))).toBe(
+      'valid',
+    );
+    // Still a provider-style name: no upper case, spaces or a leading dot.
+    expect(message(pool('.large'))).toMatch(/nodePools\[0\]\.machineType/);
+    expect(message(pool('M5.Large'))).toMatch(/nodePools\[0\]\.machineType/);
+  });
+
   it('round-trips through JSON as a document a person can commit', () => {
     const config: FleetConfig = validateFleetConfig(document([cluster()]));
     expect(validateFleetConfig(JSON.parse(JSON.stringify(config)))).toEqual(config);
