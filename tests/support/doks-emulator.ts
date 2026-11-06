@@ -1,4 +1,5 @@
 import { isoSeconds } from './do-emulator/actions.js';
+import { seedDroplet } from './do-emulator/droplets.js';
 import { DoEmulator, type Json, type RouteContext, type RouteResult } from './do-emulator/index.js';
 
 // An in-memory emulator of the DigitalOcean Kubernetes (DOKS) endpoints of API v2 that
@@ -12,6 +13,10 @@ import { DoEmulator, type Json, type RouteContext, type RouteResult } from './do
 // cluster, a list, or a read of one of its node pools), none of DO's timing. `kube` is a fake of
 // each cluster's own Kubernetes API, reached through `kube.transport`; it accepts only a
 // cluster-admin token that `/credentials` issued for that cluster and that has not expired.
+//
+// Each node is also a worker Droplet in the account (`droplet_id`), tagged as DOKS tags them:
+// `k8s`, `k8s:<cluster uuid>`, `k8s-worker` and the pool's own tags (assumed, not verified live).
+// It goes when its node does, so the Droplet code meets cluster nodes as it would on DO.
 
 const caPem = '-----BEGIN CERTIFICATE-----\nMIIBemulateddokscluster\n-----END CERTIFICATE-----\n';
 export const doksCaPem = caPem;
@@ -226,28 +231,41 @@ export class DoksEmulator {
     return pool;
   }
 
-  #node(pool: Json): Json {
+  #node(cluster: Json, pool: Json): Json {
     const now = isoSeconds(this.now());
+    const name = `${pool.name}-${Math.random().toString(36).slice(2, 7)}`;
+    const droplet = seedDroplet(this.do.state, {
+      name,
+      region: cluster.region as string,
+      size_slug: pool.size as string,
+      tags: [...(pool.tags as string[])],
+    });
     return {
       id: this.#uuid(),
-      name: `${pool.name}-${Math.random().toString(36).slice(2, 7)}`,
+      name,
       status: { state: 'provisioning' },
-      droplet_id: String(this.do.state.nextId()),
+      droplet_id: String(droplet.id),
       created_at: now,
       updated_at: now,
     };
+  }
+
+  /** Takes the worker Droplets of these nodes out of the account. */
+  #dropWorkers(nodes: Json[]): void {
+    for (const node of nodes) this.do.state.droplets.delete(Number(node.droplet_id));
   }
 
   /** Brings the pool's nodes to `count`: new ones provision, extra ones drain, both settle later. */
   #resize(cluster: Json, pool: Json, count: number): void {
     const nodes = pool.nodes as Json[];
     const live = nodes.filter((node) => node.status.state !== 'deleting');
-    for (let i = live.length; i < count; i++) nodes.push(this.#node(pool));
+    for (let i = live.length; i < count; i++) nodes.push(this.#node(cluster, pool));
     for (const node of live.slice(count)) node.status = { state: 'deleting' };
     this.later(cluster.id as string, `pool:${pool.id}:nodes`, () => this.#settleNodes(pool));
   }
 
   #settleNodes(pool: Json): void {
+    this.#dropWorkers((pool.nodes as Json[]).filter((node) => node.status.state === 'deleting'));
     pool.nodes = (pool.nodes as Json[])
       .filter((node) => node.status.state !== 'deleting')
       .map((node) => ({ ...node, status: { state: 'running' } }));
@@ -338,6 +356,7 @@ export class DoksEmulator {
       if (found.status.state === 'deleting') return { status: 204 };
       found.status = { state: 'deleting', message: 'deleting' };
       this.later(found.id as string, 'cluster', () => {
+        for (const p of found.node_pools as Json[]) this.#dropWorkers(p.nodes as Json[]);
         this.clusters.delete(found.id as string);
         this.#transitions.delete(found.id as string);
       });
@@ -467,6 +486,7 @@ export class DoksEmulator {
       if (this.#deletingPools.has(p.id as string)) return { status: 204 };
       this.#deletingPools.add(p.id as string);
       this.later(found.id as string, `pool:${p.id}:delete`, () => {
+        this.#dropWorkers(p.nodes as Json[]);
         found.node_pools = (found.node_pools as Json[]).filter((x) => x.id !== p.id);
       });
       return { status: 204 };

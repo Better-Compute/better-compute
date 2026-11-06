@@ -23,6 +23,7 @@ import {
   type DoProviderOptions,
 } from '@better-compute/provider-digitalocean';
 import { createServingCa, generateP256KeyPair, privateKeyPem, toPem } from '@better-compute/pki';
+import { seedDroplet } from './support/do-emulator/droplets.js';
 import { DoEmulator, type Json } from './support/do-emulator/index.js';
 import { seedVpc } from './support/do-emulator/vpcs.js';
 import { doAccount, freshBudgets, platformAccount, secrets } from './support/do-harness.js';
@@ -663,6 +664,37 @@ describe('doks node pools', () => {
     const later = await failure(s.k8s.ensureCluster(spec, s.ctx()));
     expect([later.code, later.details?.reason]).toEqual(['UNSUPPORTED', 'spotUnverified']);
     expect(posted(s, '/kubernetes/clusters')).toHaveLength(1);
+  });
+
+  it('keeps the worker Droplets of its pools out of discovery, claims and deletes', async () => {
+    const s = await setup();
+    const cluster = await readyCluster(s);
+    await settle(() => s.k8s.ensureNodePool(cluster, cpuPool, s.ctx()), 'ready');
+    const hand = seedDroplet(s.doks.do.state, { tags: [] });
+    const workers = s.doks.clusters
+      .get(cluster)!
+      .node_pools.flatMap((p: Json) => p.nodes.map((n: Json) => n.droplet_id as string));
+    expect(workers).toHaveLength(2);
+    for (const id of workers)
+      expect(s.doks.do.state.droplets.get(Number(id))!.tags).toEqual([
+        'k8s',
+        `k8s:${cluster}`,
+        'k8s-worker',
+        ...ours,
+      ]);
+    const found: string[] = [];
+    for await (const machine of s.impl.discover!(s.ctx())) found.push(machine.id);
+    expect(found).toEqual([String(hand.id)]);
+    const before = mutations(s).length;
+    for (const id of workers) {
+      const claim = await failure(s.impl.claim!(id, 'inst_1', s.ctx(), { managed: true }));
+      expect([claim.code, claim.details?.reason]).toEqual(['INVALID_STATE', 'kubernetesNode']);
+      expect((await failure(s.impl.delete!(id, s.ctx()))).code).toBe('INVALID_STATE');
+    }
+    expect(mutations(s)).toHaveLength(before);
+    // Its workers go with the pool.
+    await settle(() => s.k8s.deleteNodePool(cluster, 'general', s.ctx()), 'deleted');
+    for (const id of workers) expect(s.doks.do.state.droplets.has(Number(id))).toBe(false);
   });
 
   it('refuses differences that cannot change in place with INVALID_STATE', async () => {
