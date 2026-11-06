@@ -11,8 +11,12 @@ import { labels, labelsFromTags } from '../ids.js';
 //   also from the preview (the preview of a closed month is the next one).
 // - An item is yielded when its usage overlaps the window, not only when it starts in it: a month aggregate starts
 //   on the 1st, and the month-to-date amount must keep being corrected after the lookback has passed that day.
-// - A row's id leaves out what grows through the month (amount, duration, end time), so a later read of the same
-//   item corrects the stored row. The preview's `end_time` (the month's end) is clamped to the read: usage that has
+// - A row's id is the month, the product, the resource (`resource_uuid`, else `resource_id`) and the cost type
+//   (regular, tax, adjustment), nothing else: it leaves out what grows through the month (amount, duration, end
+//   time) and what the final invoice may word differently from the preview (descriptions, project, category, start
+//   time; unverified either way). So a later read of the month, the final invoice included, corrects the stored
+//   row instead of adding one beside it. Items that share an id are summed (resourceless items of one product, a
+//   resource's items of one product). The preview's `end_time` (the month's end) is clamped to the read: usage that has
 //   not happened is never reported. `exportTime` is the invoice's `updated_at` (the read time when absent).
 // - Items carry no tags: a Droplet item is labelled from this deployment's Droplet with that id, read once per pass
 //   (the managed and the claimed ones). A Droplet already deleted, or not this deployment's, labels nothing, and its
@@ -114,23 +118,13 @@ export function costRecordOfItem(
     throw malformed('A DigitalOcean invoice item has an amount that is not a decimal');
   const quantity = Number(item.duration);
   const resource = text(item.resource_uuid) ?? text(item.resource_id);
-  const identity = [
-    period,
-    item.product ?? '',
-    item.resource_uuid ?? '',
-    item.resource_id ?? '',
-    item.group_description ?? '',
-    item.description ?? '',
-    item.category ?? '',
-    item.project_name ?? '',
-    new Date(start).toISOString(),
-  ];
+  const costType = costTypeOf(item, costMicros);
+  const identity = [period, item.product ?? '', resource ?? '', costType ?? 'regular'];
   const dropletId = text(item.resource_id);
   const tagged =
     dropletId !== undefined && dropletProduct(item.product)
       ? options.labelsOf?.(dropletId)
       : undefined;
-  const costType = costTypeOf(item, costMicros);
   const optional = {
     skuDescription: text(item.description),
     project: text(item.project_name),
@@ -154,10 +148,11 @@ export function costRecordOfItem(
   };
 }
 
-/** Two parts of one item: amounts and usage summed, the later end and export time kept. */
+/** Two parts of one item: amounts and usage summed, the earlier start and the later end and export time kept. */
 function sum(a: ProviderCostRecord, b: ProviderCostRecord): ProviderCostRecord {
   return {
     ...a,
+    usageStart: Math.min(a.usageStart, b.usageStart),
     quantity: Math.round((a.quantity + b.quantity) * 1e9) / 1e9,
     costMicros: a.costMicros + b.costMicros || 0,
     usageEnd: Math.max(a.usageEnd, b.usageEnd),

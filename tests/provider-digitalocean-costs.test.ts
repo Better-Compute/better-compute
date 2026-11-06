@@ -185,6 +185,44 @@ describe('costs', () => {
     });
   });
 
+  it('keeps the row when the final invoice words an item differently from the preview', async () => {
+    const { emu, billing } = world();
+    const compute = await build(emu, account);
+    const preview = await collect(compute.costs!(october, at(now)));
+    const previewTotal = preview.reduce((total, r) => total + r.costMicros, 0);
+    expect(previewTotal).toBe(2_090_000);
+    // October closes; its final invoice describes both items differently (unverified at DigitalOcean, so the id
+    // must not depend on it) and starts the Droplet's usage at another time.
+    billing.invoices.unshift({
+      invoice_uuid: 'inv-2026-10',
+      invoice_period: '2026-10',
+      amount: '2.09',
+      updated_at: '2026-11-01T06:00:00Z',
+    });
+    const [droplet, volume] = billing.items.get('preview-2026-10')!;
+    billing.items.set('inv-2026-10', [
+      {
+        ...droplet!,
+        description: 's-1vcpu-1gb (final)',
+        group_description: 'Droplets (October)',
+        project_name: 'Renamed',
+        category: 'iaas',
+        start_time: '2026-10-01T00:30:00Z',
+      },
+      { ...volume!, description: '100 GiB volume', project_name: 'Renamed' },
+    ]);
+    billing.items.set('preview-2026-10', []);
+    const closed = Date.parse('2026-11-02T00:00:00Z');
+    const final = await collect(
+      compute.costs!({ from: Date.parse('2026-10-25T00:00:00Z'), to: closed }, at(closed)),
+    );
+    // Upserted by id, the stored month is the final invoice's: the same ids, the same total, no row beside them.
+    const stored = new Map(preview.map((r) => [r.sourceRowId, r]));
+    for (const record of final) stored.set(record.sourceRowId, record);
+    expect(new Set(final.map((r) => r.sourceRowId))).toEqual(new Set(stored.keys()));
+    expect([...stored.values()].reduce((total, r) => total + r.costMicros, 0)).toBe(previewTotal);
+  });
+
   it('prefers the final invoice when a month has both', async () => {
     const { emu, billing } = world();
     billing.invoices.unshift({
