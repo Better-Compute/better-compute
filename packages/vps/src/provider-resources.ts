@@ -1103,6 +1103,34 @@ async function resourceProvider(
   return { accountId: account.id, account, client, regions };
 }
 
+/**
+ * What the provider would refuse of the volume before any request, refused now, before quota is charged: a shared
+ * volume on a provider that makes none (UNSUPPORTED, reason `sharedVolumes`), and whatever its `checkVolume` refuses
+ * (a share below DigitalOcean's minimum size, say). The spec is the one the reconciler sends.
+ */
+function assertVolumeSpec(
+  provider: ResourceProvider,
+  input: { volumeId: string; region: string; sizeGiB: number; kind?: ProviderVolumeKind; networkId?: string; filesystem?: 'ext4' | 'xfs' | 'none' },
+): void {
+  const volumes = provider.client.volumes!;
+  const kind = input.kind ?? 'block';
+  if (kind === 'shared' && !(volumes.kinds ?? ['block']).includes('shared'))
+    throw new ComputeError(
+      'UNSUPPORTED',
+      `Provider ${provider.account.provider} does not make shared volumes`,
+      undefined,
+      { reason: 'sharedVolumes' },
+    );
+  volumes.checkVolume?.({
+    name: providerResourceName(input.volumeId),
+    region: input.region,
+    sizeGiB: input.sizeGiB,
+    kind,
+    ...(input.filesystem !== undefined && kind === 'block' ? { filesystem: input.filesystem } : {}),
+    ...(input.networkId !== undefined ? { network: { network: providerResourceName(input.networkId) } } : {}),
+  });
+}
+
 function assertRegion(provider: ResourceProvider, region: string): void {
   if (provider.regions.length > 0 && !provider.regions.includes(region))
     throw new ComputeError(
@@ -1330,6 +1358,7 @@ export async function prepareCreateProviderVolume(
   // Refusals come before anything is staged, so a refused request leaves no projection row behind.
   const provider = await resourceProvider(deps, tx, input.tenantId, input.poolId, 'volumes');
   assertRegion(provider, input.region);
+  assertVolumeSpec(provider, { ...input, volumeId });
   if (input.kind === 'shared')
     await sharedNetwork(tx, { ...input, networkId: input.networkId! }, provider.accountId);
   await assertNameFree(tx, 'provider_volumes', input.tenantId, input.name);
@@ -1503,6 +1532,7 @@ export async function createProviderVolume(
   }
   const provider = await resourceProvider(deps, tx, input.tenantId, input.poolId, 'volumes');
   assertRegion(provider, input.region);
+  assertVolumeSpec(provider, { ...input, volumeId });
   if (input.kind === 'shared')
     await sharedNetwork(tx, { ...input, networkId: input.networkId! }, provider.accountId);
   return insertVolume(deps, tx, {

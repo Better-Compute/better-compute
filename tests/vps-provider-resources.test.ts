@@ -90,6 +90,8 @@ const cloud = {
   selective: true,
   /** Like DO: an accepted attach runs on at the provider until `finishAttaches`; a detach meanwhile is `deleting`. */
   slowAttach: false,
+  /** (DO P6) Whether the provider makes shared volumes (its `kinds` list `shared`). */
+  shares: true,
   finishAttaches() {
     for (const volume of this.volumes.values())
       if (volume.attaching) {
@@ -98,6 +100,7 @@ const cloud = {
       }
   },
   reset() {
+    this.shares = true;
     this.selective = true;
     this.slowAttach = false;
     this.volumes.clear();
@@ -200,6 +203,14 @@ const doLike = defineProvider({
         if (address.assignedTo === machineId) delete address.assignedTo;
     },
     volumes: {
+      get kinds() {
+        return cloud.shares ? (['block', 'shared'] as const) : (['block'] as const);
+      },
+      // Like DO: a share is 50 GiB at least, refused before any request.
+      checkVolume(spec) {
+        if (spec.kind === 'shared' && spec.sizeGiB < 50)
+          throw new ComputeError('INVALID_INPUT', 'a share is 50 GiB at least', undefined, { reason: 'size' });
+      },
       async ensureVolume(spec) {
         cloud.call(`ensureVolume ${spec.name}`);
         const existing = [...cloud.volumes.values()].find((volume) => volume.spec.name === spec.name);
@@ -1236,6 +1247,26 @@ describe('shared provider volumes (DO P6)', () => {
     expect(await run(networks.delete!, { tenantId: 'root', networkId }, alice)).toMatchObject({
       state: 'deleting',
     });
+  });
+
+  it('a share the provider would refuse, or one it does not make, is refused before quota is charged', async () => {
+    const networkId = await insertNetwork();
+    const small = await createShared({ networkId, sizeGiB: 10 }).then(
+      () => undefined,
+      (error: { code?: string; details?: unknown }) => error,
+    );
+    expect(small).toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'size' } });
+    cloud.shares = false;
+    const none = await createShared({ networkId }).then(
+      () => undefined,
+      (error: { code?: string; details?: unknown }) => error,
+    );
+    expect(none).toMatchObject({ code: 'UNSUPPORTED', details: { reason: 'sharedVolumes' } });
+    // A block volume on that provider is made as before.
+    expect((await createVolume({ sizeGiB: 10 })).kind).toBe('block');
+    expect(await quotaUsed('diskGiB')).toBe(10);
+    expect(await db.query(`SELECT id FROM provider_volumes WHERE kind = 'shared'`)).toMatchObject({ rows: [] });
+    expect(cloud.calls).toEqual([]);
   });
 
   it("a subnet in a shared volume's region is not removed while the share lives", async () => {

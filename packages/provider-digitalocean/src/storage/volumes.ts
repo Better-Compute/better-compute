@@ -308,6 +308,15 @@ export class DoVolumes implements ProviderVolumes {
     return state(found.id, 'ready', volumeOutputs(found));
   }
 
+  /** Block Storage volumes, and (P6) Network File Storage shares. */
+  readonly kinds = ['block', 'shared'] as const;
+
+  /** What `ensureVolume` refuses before any request, with no request. */
+  checkVolume(spec: ProviderVolumeSpec): void {
+    if (spec.kind === 'shared') this.shares.check(spec);
+    else this.validate(spec);
+  }
+
   async ensureVolume(spec: ProviderVolumeSpec, ctx: CallContext): Promise<ProviderResourceState> {
     if (spec.kind === 'shared') return this.shares.ensure(spec, ctx);
     const tags = this.validate(spec);

@@ -386,6 +386,11 @@ export class DoShares {
     return name;
   }
 
+  /** What `ensure` refuses before any request, with no request. */
+  check(spec: ProviderVolumeSpec): void {
+    this.validate(spec);
+  }
+
   async ensure(spec: ProviderVolumeSpec, ctx: CallContext): Promise<ProviderResourceState> {
     const name = this.validate(spec);
     const { signal } = ctx;

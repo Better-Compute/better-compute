@@ -177,7 +177,13 @@ describe('provider-digitalocean NFS shares: ensure and get', () => {
     for (const [bad, code, reason] of refusals) {
       const error = await failure(impl.volumes.ensureVolume(bad, ctx()));
       expect([error.code, error.details?.reason], JSON.stringify(bad)).toEqual([code, reason]);
+      // checkVolume refuses the same, synchronously, so vps refuses it before booking quota.
+      const checked = await failure(Promise.resolve().then(() => impl.volumes.checkVolume!(bad)));
+      expect([checked.code, checked.details?.reason], JSON.stringify(bad)).toEqual([code, reason]);
     }
+    expect(impl.volumes.kinds).toEqual(['block', 'shared']);
+    impl.volumes.checkVolume!(spec);
+    impl.volumes.checkVolume!({ name: 'bc-pvol-2', region: 'nyc3', sizeGiB: 10, kind: 'block' });
     expect(emu.requests).toHaveLength(0);
   });
 

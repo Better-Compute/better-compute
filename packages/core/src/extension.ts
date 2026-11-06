@@ -828,6 +828,17 @@ export interface ProviderVolumeSpec {
  * `kind` is `shared`. A shared volume that any machine still has attached is not deleted (`INVALID_STATE`).
  */
 export interface ProviderVolumes {
+  /**
+   * (v1.x) The volume kinds the provider makes; absent: `block` only. A caller refuses a `kind: 'shared'` volume
+   * (`UNSUPPORTED`) on a provider that does not list `shared`, before anything is booked.
+   */
+  readonly kinds?: readonly ProviderVolumeSpec['kind'][];
+  /**
+   * (v1.x) Refuses a spec `ensureVolume` would refuse before any request (`INVALID_INPUT`, `UNSUPPORTED`: a size
+   * the provider does not make, a share without a network), synchronously and with no provider call, so a caller
+   * refuses it before anything is booked. Optional: without it the refusal comes from `ensureVolume`.
+   */
+  checkVolume?(spec: ProviderVolumeSpec): void;
   ensureVolume(spec: ProviderVolumeSpec, context: CallContext): Promise<ProviderResourceState>;
   /** The volume as it is; undefined when it does not exist. */
   getVolume(volumeId: string, context: CallContext): Promise<ProviderResourceState | undefined>;

@@ -547,6 +547,26 @@ describe('provider-digitalocean through vps, end to end', () => {
     expect(await settle(w, first.id, 'running')).toMatchObject({ state: 'running' });
     expect(await settle(w, second.id, 'running')).toMatchObject({ state: 'running' });
 
+    // A share below DigitalOcean's minimum is refused at once, before any quota or provider call.
+    const nfsWrites = () => requests(w, 'POST', /^\/v2\/nfs/).length;
+    const small = await w.api.providerVolumes
+      .create(w.acme, {
+        tenantId,
+        poolId: w.poolId,
+        name: 'small-share',
+        region: REGION,
+        sizeGiB: 10,
+        kind: 'shared',
+        networkId: network.id,
+        idempotencyKey: 'v-small-share',
+      })
+      .then(
+        () => undefined,
+        (error: { code?: string; details?: unknown }) => error,
+      );
+    expect(small).toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'size' } });
+    expect(nfsWrites()).toBe(0);
+
     const volume = await w.api.providerVolumes.create(w.acme, {
       tenantId,
       poolId: w.poolId,
