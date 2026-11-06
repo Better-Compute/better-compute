@@ -9,7 +9,9 @@ import {
   type Logger,
   type ProviderContext,
 } from '@better-compute/core';
+import { runConformance } from '@better-compute/core/conformance';
 import { ec2Client, parseXml } from '@better-compute/aws-core';
+import { providerConformanceCases } from '@better-compute/vps';
 import {
   accountCredentials,
   AwsCompute,
@@ -566,5 +568,125 @@ describe('compute', () => {
     await expect(
       Promise.resolve().then(() => provider.create({ ...config, zones: ['eu-west-1a'] }, tenant)),
     ).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
+  });
+});
+
+describe('power & reinstall', () => {
+  it.each([
+    ['on', 'StartInstances', undefined],
+    ['graceful-off', 'StopInstances', undefined],
+    ['off', 'StopInstances', 'true'],
+    ['reset', 'RebootInstances', undefined],
+    ['cycle', 'RebootInstances', undefined],
+    ['graceful-restart', 'RebootInstances', undefined],
+  ] as const)('maps power actions: %s', async (action, operation, force) => {
+    const { emu, create, impl, call } = await providerWorld();
+    const machine = await create('ins_power');
+    await impl.power(machine.id, action, call('ins_power'));
+    const [request] = emu.calls(operation);
+    expect(request!.params.get('InstanceId.1')).toBe(machine.id);
+    expect(request!.params.get('Force') ?? undefined).toBe(force);
+  });
+
+  it('power refuses an unclaimed instance', async () => {
+    const { emu, ec2emu, impl, call } = await providerWorld();
+    const foreign = ec2emu.addInstance();
+    const error = await rejection(() => impl.power(foreign.id, 'off', call()));
+    expect(error).toMatchObject({ code: 'INVALID_STATE', details: { reason: 'not-claimed' } });
+    expect(emu.calls('StopInstances')).toHaveLength(0);
+    expect((await rejection(() => impl.power('i-0000000000000dead', 'on', call()))).code).toBe('NOT_FOUND');
+    expect(
+      (await rejection(() => impl.power(foreign.id, 'hibernate' as never, call()))).code,
+    ).toBe('UNSUPPORTED');
+    expect((await rejection(() => impl.reinstall(foreign.id, 'al2023', call()))).details?.reason).toBe('not-claimed');
+  });
+
+  it('nmi sends a diagnostic interrupt', async () => {
+    const { ec2emu, create, impl, call } = await providerWorld();
+    const machine = await create('ins_nmi');
+    await impl.power(machine.id, 'nmi', call('ins_nmi'));
+    expect(ec2emu.diagnosticInterrupts).toEqual([machine.id]);
+  });
+
+  it('reinstall replaces the root volume with the resolved image', async () => {
+    const { emu, ec2emu, create, impl, call } = await providerWorld();
+    const machine = await create('ins_re', { offerId: 'us-east-1a/m7g.large' });
+    await impl.reinstall(machine.id, 'ubuntu-22.04', call('ins_re'));
+    await impl.reinstall(machine.id, 'ubuntu-22.04', call('ins_re'));
+    const [request] = emu.calls('CreateReplaceRootVolumeTask');
+    expect(request!.params.get('InstanceId')).toBe(machine.id);
+    expect(request!.params.get('DeleteReplacedRootVolume')).toBe('true');
+    expect(request!.params.get('ImageId')).toBe(
+      'resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/arm64/hvm/ebs-gp2/ami-id',
+    );
+    expect(request!.params.get('ClientToken')).toBe(clientToken('ins_re:reinstall:ubuntu-22.04'));
+    // A retried reinstall is the same task.
+    expect(ec2emu.replaceRootTasks).toHaveLength(1);
+  });
+
+  it('list pages managed instances only', async () => {
+    const { emu, ec2emu, create, impl, call } = await providerWorld();
+    const created = [];
+    for (const key of ['ins_l1', 'ins_l2', 'ins_l3']) created.push((await create(key)).id);
+    ec2emu.addInstance();
+    const gone = await create('ins_gone');
+    ec2emu.instances.get(gone.id)!.state = 'terminated';
+    const listed: string[] = [];
+    for await (const machine of impl.list(call())) listed.push(machine.id);
+    expect(listed.sort()).toEqual(created.sort());
+    const describes = emu.calls('DescribeInstances');
+    expect(describes.length).toBeGreaterThanOrEqual(2);
+    expect(describes.at(-1)!.params.get('NextToken')).toMatch(/^tok-/);
+  });
+});
+
+describe('conformance', () => {
+  it('passes every case of the ProviderImpl contract', async () => {
+    const report = await runConformance(providerConformanceCases(), () => {
+      const emu = new AwsEmulator();
+      const ec2emu = new Ec2Emulator(emu);
+      const attachable = ec2emu.addInstance({ tags: { Name: 'legacy' } });
+      return {
+        provider: awsProvider({ fetch: emu.fetch, credentials: emu.ambient }),
+        config: { region: 'us-east-1', zones: ['us-east-1a', 'us-east-1b'] },
+        offerId: 'us-east-1a/t3.micro',
+        image: 'ubuntu-24.04',
+        context: {
+          clock: emu.clock,
+          account: { id: 'pa_platform', tenantId: 'root', platform: true },
+          secrets: { resolve: async () => '' },
+        },
+        attachable: attachable.id,
+        prefix: 'aws-conf',
+      };
+    });
+    expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
+    expect(report.passed).toHaveLength(providerConformanceCases().length);
+  });
+});
+
+describe('never logs', () => {
+  it('provider never logs credentials', async () => {
+    const world = await providerWorld();
+    const { emu, ec2emu, create, impl, call, records } = world;
+    const errors: string[] = [];
+    const attempt = async (run: () => Promise<unknown>) => {
+      try {
+        await run();
+      } catch (error) {
+        errors.push(String((error as Error).message), JSON.stringify((error as ComputeError).details ?? {}));
+      }
+    };
+    const machine = await create('ins_logs', { sshKeys: ['ssh-ed25519 AAAA key'] });
+    await attempt(() => impl.get(machine.id, call('ins_logs')));
+    await attempt(() => create('ins_logs', { offerId: 'us-east-1b/t3.micro' }));
+    emu.failNext('DescribeInstances', 'AuthFailure', 401);
+    await attempt(() => impl.get(machine.id, call('ins_logs')));
+    await attempt(() => impl.delete(ec2emu.addInstance().id, call()));
+    await attempt(() => impl.listOffers({}));
+    const joined = [...records, ...errors].join('\n');
+    expect(records.length).toBeGreaterThan(3);
+    for (const secret of ['AKIATESTKEY', 'ASIA', 'testsecret', 'Signature=', 'minted-session-token'])
+      expect(joined).not.toContain(secret);
   });
 });

@@ -7,6 +7,7 @@ import {
   type NetworkRef,
   type Offer,
   type OfferQuery,
+  type PowerAction,
   type ProviderContext,
   type ProviderImpl,
 } from '@better-compute/core';
@@ -373,5 +374,100 @@ export class AwsCompute implements ProviderImpl {
         });
       throw error;
     }
+  }
+
+  // --- power, reinstall, list ---------------------------------------------------------------------
+
+  /** The instance's tags, or NOT_FOUND. */
+  async #tagged(id: string, signal: AbortSignal): Promise<{ instance: XmlElement; tags: Map<string, string> }> {
+    parseInstanceId(id);
+    const instance = await this.describe(id, signal);
+    if (!instance)
+      throw new ComputeError('NOT_FOUND', `instance ${id} does not exist`, undefined, { provider: 'aws' });
+    const found = new Map<string, string>();
+    for (const item of instance.items('tagSet')) {
+      const key = item.textOf('key');
+      if (key !== undefined) found.set(key, item.textOf('value') ?? '');
+    }
+    return { instance, tags: found };
+  }
+
+  /** power and reinstall act only on an instance that names a better-compute instance. */
+  async #claimed(id: string, signal: AbortSignal): Promise<XmlElement> {
+    const { instance, tags: found } = await this.#tagged(id, signal);
+    if (!found.get(tags.instance))
+      throw new ComputeError('INVALID_STATE', `${id} is not an instance of better-compute and is never changed by it`, undefined, {
+        provider: 'aws',
+        reason: 'not-claimed',
+      });
+    return instance;
+  }
+
+  async power(id: string, action: PowerAction, context: CallContext): Promise<void> {
+    const actions: Record<PowerAction, [string, QueryParams] | undefined> = {
+      on: ['StartInstances', { InstanceId: [id] }],
+      'graceful-off': ['StopInstances', { InstanceId: [id] }],
+      off: ['StopInstances', { InstanceId: [id], Force: true }],
+      reset: ['RebootInstances', { InstanceId: [id] }],
+      cycle: ['RebootInstances', { InstanceId: [id] }],
+      'graceful-restart': ['RebootInstances', { InstanceId: [id] }],
+      nmi: ['SendDiagnosticInterrupt', { InstanceId: id }],
+    };
+    const call = Object.hasOwn(actions, action) ? actions[action] : undefined;
+    if (!call)
+      throw new ComputeError('UNSUPPORTED', `EC2 has no power action ${String(action)}`, undefined, { provider: 'aws' });
+    await this.#claimed(id, context.signal);
+    await this.call(call[0], call[1], context.signal);
+  }
+
+  async reinstall(id: string, image: ImageRef, context: CallContext): Promise<void> {
+    const instance = await this.#claimed(id, context.signal);
+    const type = instance.textOf('instanceType');
+    const arch =
+      (instance.textOf('architecture') as 'x86_64' | 'arm64' | undefined) ??
+      (type ? (await this.#types([type], context.signal)).get(type)?.arch[0] : undefined) ??
+      'x86_64';
+    const imageId = resolveImage(image, arch === 'arm64' ? 'arm64' : 'x86_64');
+    await this.call(
+      'CreateReplaceRootVolumeTask',
+      {
+        InstanceId: id,
+        ImageId: imageId,
+        DeleteReplacedRootVolume: true,
+        ClientToken: clientToken(`${context.idempotencyKey}:reinstall:${image}`),
+      },
+      context.signal,
+    );
+  }
+
+  /** Pages DescribeInstances with filters, mapping every instance. */
+  protected async *instances(filters: { Name: string; Value: string[] }[], context: CallContext): AsyncIterable<ExternalMachine> {
+    const seen = new Set<string>();
+    let token: string | undefined;
+    do {
+      const doc = await this.call('DescribeInstances', { Filter: filters, MaxResults: 1000, NextToken: token }, context.signal);
+      for (const reservation of doc.items('reservationSet'))
+        for (const instance of reservation.items('instancesSet')) yield await this.machine(instance, context.signal);
+      token = doc.textOf('nextToken') || undefined;
+      if (token && seen.has(token))
+        throw new ComputeError('PROVIDER_ERROR', 'AWS returned a pagination token twice', undefined, {
+          provider: 'aws',
+          reason: 'pagination-loop',
+        });
+      if (token) seen.add(token);
+    } while (token);
+  }
+
+  /** Live states: everything but terminated. */
+  static readonly liveStates = ['pending', 'running', 'stopping', 'stopped', 'shutting-down'];
+
+  list(context: CallContext): AsyncIterable<ExternalMachine> {
+    return this.instances(
+      [
+        { Name: `tag:${tags.managed}`, Value: ['true'] },
+        { Name: 'instance-state-name', Value: AwsCompute.liveStates },
+      ],
+      context,
+    );
   }
 }
