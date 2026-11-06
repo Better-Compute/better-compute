@@ -1,3 +1,7 @@
+import { once } from 'node:events';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
+import type { AddressInfo } from 'node:net';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   isComputeError,
@@ -12,11 +16,13 @@ import {
 import {
   deploymentTag,
   digitaloceanProvider,
+  httpsKubeTransport,
   tagFor,
   type DoCompute,
   type DoConfig,
   type DoProviderOptions,
 } from '@better-compute/provider-digitalocean';
+import { createServingCa, generateP256KeyPair, privateKeyPem, toPem } from '@better-compute/pki';
 import { DoEmulator, type Json } from './support/do-emulator/index.js';
 import { seedVpc } from './support/do-emulator/vpcs.js';
 import { doAccount, freshBudgets, platformAccount, secrets } from './support/do-harness.js';
@@ -1069,5 +1075,130 @@ describe('doks upgrades and deletes', () => {
     }
     expect(mutations(s)).toEqual([]);
     expect(s.doks.clusters.size).toBe(2);
+  });
+});
+
+describe('doks https transport', () => {
+  const token = 'doks-admin-transport-secret';
+
+  async function server(
+    dnsName: string,
+    answer: (request: IncomingMessage, response: ServerResponse) => void,
+  ) {
+    const ca = createServingCa();
+    const key = generateP256KeyPair();
+    const issued = await ca.issue(key.publicKey, {
+      usage: 'server',
+      dnsSans: [dnsName],
+      ttlSeconds: 3600,
+    });
+    const seen: { authorization?: string; method?: string; url?: string; body: string }[] = [];
+    const https = createHttpsServer(
+      { key: privateKeyPem(key.privateKey), cert: toPem(issued.certificate) },
+      (request, response) => {
+        let body = '';
+        request.on('data', (chunk) => (body += String(chunk)));
+        request.on('end', () => {
+          seen.push({
+            authorization: request.headers.authorization,
+            method: request.method,
+            url: request.url,
+            body,
+          });
+          answer(request, response);
+        });
+      },
+    );
+    https.listen(0, 'localhost');
+    await once(https, 'listening');
+    const { port } = https.address() as AddressInfo;
+    return { caPem: toPem(ca.certificate), port, seen, close: () => https.close() };
+  }
+
+  const json = (status: number, payload: unknown) => (_: unknown, response: ServerResponse) => {
+    response.writeHead(status, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(payload));
+  };
+
+  async function rejection(promise: Promise<unknown>): Promise<Error> {
+    try {
+      await promise;
+    } catch (error) {
+      return error as Error;
+    }
+    throw new Error('expected the request to be rejected');
+  }
+
+  it("reaches the cluster's API trusting its CA, and resolves any HTTP status", async () => {
+    const api = await server('localhost', json(201, { kind: 'Namespace' }));
+    try {
+      const answer = await httpsKubeTransport({
+        url: `https://localhost:${api.port}/api/v1/namespaces`,
+        method: 'POST',
+        body: { kind: 'Namespace' },
+        caPem: api.caPem,
+        token,
+        signal: new AbortController().signal,
+      });
+      expect(answer).toEqual({ status: 201, body: { kind: 'Namespace' } });
+      expect(api.seen).toEqual([
+        {
+          authorization: `Bearer ${token}`,
+          method: 'POST',
+          url: '/api/v1/namespaces',
+          body: '{"kind":"Namespace"}',
+        },
+      ]);
+    } finally {
+      api.close();
+    }
+  });
+
+  it('refuses another CA, a name the certificate does not carry, no CA, plain http and a huge answer', async () => {
+    const api = await server('localhost', json(200, { ok: true }));
+    const elsewhere = await server('kube.example.test', json(200, { ok: true }));
+    const huge = await server('localhost', (_, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(`"${'x'.repeat((1 << 20) + 1024)}"`);
+    });
+    const other = toPem(createServingCa().certificate);
+    const call = (url: string, caPem: string) =>
+      httpsKubeTransport({
+        url,
+        method: 'GET',
+        caPem,
+        token,
+        signal: new AbortController().signal,
+      });
+    try {
+      const errors = [
+        // Signed by a CA the request does not trust (the public roots are never added).
+        await rejection(call(`https://localhost:${api.port}/api`, other)),
+        // The right CA, but the certificate names another host.
+        await rejection(call(`https://localhost:${elsewhere.port}/api`, elsewhere.caPem)),
+        // No CA at all would mean Node's public roots: refused before connecting.
+        await rejection(call(`https://localhost:${api.port}/api`, '')),
+        await rejection(call(`http://localhost:${api.port}/api`, api.caPem)),
+        await rejection(call(`https://localhost:${huge.port}/api`, huge.caPem)),
+      ];
+      expect(errors.map((error) => error.message)).toEqual([
+        expect.stringMatching(/self.signed|unable to (verify|get)|certificate/i),
+        expect.stringMatching(/altnames|does not match|hostname/i),
+        'The Kubernetes API is reached only with its own CA certificate',
+        'The Kubernetes API is only reached over https',
+        'The Kubernetes API answer is too large',
+      ]);
+      // No request refused by TLS or before connecting reached a handler.
+      expect(api.seen).toHaveLength(0);
+      expect(elsewhere.seen).toHaveLength(0);
+      for (const error of errors) {
+        expect(error.message).not.toContain(token);
+        expect(String(error.stack)).not.toContain(token);
+      }
+    } finally {
+      api.close();
+      elsewhere.close();
+      huge.close();
+    }
   });
 });

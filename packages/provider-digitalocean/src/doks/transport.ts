@@ -42,6 +42,11 @@ export const httpsKubeTransport: KubeTransport = (req) =>
       reject(new Error('The Kubernetes API is only reached over https'));
       return;
     }
+    // An empty `ca` would mean Node's public roots: only the cluster's own CA is ever trusted.
+    if (typeof req.caPem !== 'string' || !req.caPem.includes('-----BEGIN CERTIFICATE-----')) {
+      reject(new Error('The Kubernetes API is reached only with its own CA certificate'));
+      return;
+    }
     const host = url.hostname.replace(/^\[(.*)\]$/, '$1');
     const payload = req.body !== undefined ? JSON.stringify(req.body) : undefined;
     const call = httpsRequest(
