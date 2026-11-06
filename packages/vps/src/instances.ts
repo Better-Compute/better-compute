@@ -839,6 +839,13 @@ export const duplicateMachineCondition = 'DuplicateMachine';
  */
 export const provisionFailedCondition = 'ProvisionFailed';
 
+/**
+ * (P3) A provider-pool instance on Spot (preemptible) capacity whose machine vanished: the provider
+ * reclaimed it. Set with the `lost` state and the `instance.preempted` event; a pool whose policy
+ * says `replacePreempted: true` recreates the instance in place (a new machine, the same id).
+ */
+export const preemptedCondition = 'Preempted';
+
 /** Whether the instance's provider create failed for good (it holds no machine to act on). */
 export function provisionFailed(conditions: readonly Condition[]): boolean {
   return conditions.some(

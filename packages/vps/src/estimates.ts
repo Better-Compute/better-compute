@@ -16,6 +16,7 @@ import {
 } from './billing.js';
 import type { FlavorRecord } from './flavors.js';
 import { id, name, object, tenant } from './input.js';
+import { isSpotOffer } from './spot.js';
 
 // Tenant price estimates (platform compute billing, D15): what one hour of a flavor costs the caller's tenant,
 // priced with `IamPort.quote` (so a negotiated price shows) on the meter lines the flavor would be metered on. Only
@@ -146,7 +147,8 @@ function shapeOfFlavor(
     ...(flavor.gpus > 0 ? { gpus: { model, count: flavor.gpus } } : {}),
     // No flavor or offer says Spot yet (ruling F6-2); an offer on a reservation is metered as reserved.
     spot: false,
-    reserved: flavor.offerId?.includes('@') === true,
+    // (P3) An `@spot` offer is Spot capacity, not a reservation's (its Spot meter is the billing owner's follow-up).
+    reserved: flavor.offerId?.includes('@') === true && !isSpotOffer(flavor.offerId),
     granted: false,
     ...(flavor.billing?.meter !== undefined ? { flavorMeter: flavor.billing.meter } : {}),
   };

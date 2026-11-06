@@ -20,6 +20,7 @@ import { readAccount, type ClientDeps, type ProviderClients } from './accounts.j
 import { createFlavor, deleteFlavor } from './flavors.js';
 import { checkGrantCapacity, reservationGone } from './reservation-grants.js';
 import { key as keyOf, name, object, optional, tenant, id } from './input.js';
+import { isSpotOffer } from './spot.js';
 
 // Provider capacity reservations (GCE reservations and the like): the `vps.reservations` worker
 // reads what each account's provider reports into `provider_reservations`, publishes
@@ -744,6 +745,8 @@ export async function claimReservationSlot(
   const refuse = (message: string, details: Record<string, Json>): never => {
     throw new ComputeError('CAPACITY_UNAVAILABLE', message, undefined, details);
   };
+  // (P3) `<region>/<size>@spot` is Spot capacity, not a reservation, unless a reservation answers to it.
+  if (!row && isSpotOffer(input.offerId)) return undefined;
   if (!row)
     return refuse(`Reservation of offer ${input.offerId} is not known`, {
       reservationId: input.offerId.slice(input.offerId.indexOf('@') + 1),

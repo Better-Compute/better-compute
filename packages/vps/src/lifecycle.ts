@@ -34,6 +34,7 @@ import {
   instanceWork,
   isSecretRef,
   moveInstance,
+  preemptedCondition,
   publishInstance,
   readInstance,
   renderUserData,
@@ -49,6 +50,7 @@ import { closeOpenInterval, openInterval } from './instance-usage.js';
 import { releaseAddress } from './ipam.js';
 import { networkTag, providerResourceName } from './networks.js';
 import { specPlacement, type HostPlacement } from './placement.js';
+import { isSpotOffer } from './spot.js';
 import { markSandboxReady, sandboxWork } from './sandboxes.js';
 import { instanceVolumeSpecs, volumePlacement } from './volumes.js';
 
@@ -452,6 +454,61 @@ function providerAction(row: InstanceRow): ProviderAction {
   return { kind: 'get' };
 }
 
+/**
+ * A provider-pool instance whose machine is gone (or reported deleted): `lost`, unbilled from now.
+ * (P3) One created on Spot capacity (an `@spot` offer) was reclaimed by the provider: it also
+ * carries a `Preempted` condition and gets `instance.preempted`, and a pool whose policy says
+ * `replacePreempted: true` recreates it in place: back to `scheduling` with no machine, so the
+ * next step creates a new one under the same id. An attached machine is never recreated.
+ */
+async function loseMachine(
+  deps: InstanceDeps,
+  tx: SqlTx,
+  row: InstanceRow,
+  conditions: Condition[],
+  now: number,
+): Promise<number | undefined> {
+  const preempted = row.origin !== 'attached' && isSpotOffer(row.shape.offerId);
+  const lost = await moveInstance(tx, row, 'lose', 'lost', {
+    conditions: preempted
+      ? withCondition(
+          conditions,
+          {
+            type: preemptedCondition,
+            status: 'true',
+            reason: 'Reclaimed',
+            message: `The provider reclaimed Spot machine ${row.externalId ?? '(unknown)'}`,
+          },
+          now,
+        )
+      : conditions,
+    reportedState: 'absent',
+  });
+  // The lost span is not billed: a recovery opens a new interval.
+  await closeUsage(deps, tx, lost);
+  await publishInstance(deps, tx, lost, 'instance.lost');
+  if (!preempted) return undefined;
+  await publishInstance(deps, tx, lost, 'instance.preempted', {
+    ...(row.externalId !== undefined ? { externalId: row.externalId } : {}),
+  });
+  if (!(await replacePreempted(tx, lost.poolId))) return undefined;
+  const again = await moveInstance(tx, lost, 'recreate', 'scheduling', {
+    externalId: null,
+    addresses: [],
+    reportedState: null,
+  });
+  await publishInstance(deps, tx, again, 'instance.recreating', { reason: 'preempted' });
+  return now;
+}
+
+async function replacePreempted(tx: SqlTx, poolId: string): Promise<boolean> {
+  const { rows } = await tx.query<{ replace: boolean | null }>(
+    `SELECT (policy->>'replacePreempted')::boolean AS replace FROM pools WHERE id = $1`,
+    [poolId],
+  );
+  return rows[0]?.replace === true;
+}
+
 const machineStates: Partial<Record<ExternalMachine['state'], ReportedState>> = {
   running: 'running',
   stopped: 'stopped',
@@ -722,14 +779,7 @@ async function reconcileProvider(
       if (current.state === 'lost') return undefined;
       if (current.state === 'scheduling')
         current = await moveInstance(tx, current, 'complete', 'provisioning');
-      const lost = await moveInstance(tx, current, 'lose', 'lost', {
-        conditions,
-        reportedState: 'absent',
-      });
-      // The lost span is not billed: a recovery opens a new interval.
-      await closeUsage(deps, tx, lost);
-      await publishInstance(deps, tx, lost, 'instance.lost');
-      return undefined;
+      return loseMachine(deps, tx, current, conditions, now);
     }
     const reported = machineStates[machine.state];
     const machineKnown = current.externalId !== undefined;
@@ -789,12 +839,8 @@ async function reconcileProvider(
         await publishInstance(deps, tx, failed, 'instance.failed', { reason: 'provider' });
         return undefined;
       }
-      if (reported === 'absent' && current.state !== 'deleting') {
-        const lost = await moveInstance(tx, current, 'lose', 'lost');
-        await closeUsage(deps, tx, lost);
-        await publishInstance(deps, tx, lost, 'instance.lost');
-        return undefined;
-      }
+      if (reported === 'absent' && current.state !== 'deleting')
+        return await loseMachine(deps, tx, current, current.conditions, now);
       if (reported === 'running' || reported === 'stopped') {
         // A machine that booted while `stopped` is wanted gets powered off next round, and vice versa.
         const booting = current.state === 'provisioning' || current.state === 'starting';
