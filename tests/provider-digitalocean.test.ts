@@ -2217,9 +2217,11 @@ describe('definition', () => {
       const hand = seedDroplet(emu.state, { name: 'legacy', tags: [] });
       return {
         provider: digitaloceanProvider({ fetch: emu.fetch }),
-        config: { ...doAccount, sshKeyFingerprint: key.fingerprint },
+        config: { ...doAccount, regions: ['nyc3', 'sfo3'], sshKeyFingerprint: key.fingerprint },
         attachable: String(hand.id),
         offerId: 'nyc3/s-1vcpu-1gb',
+        // The volume and address cases attach and assign across regions too (INVALID_INPUT).
+        otherRegionOfferId: 'sfo3/s-1vcpu-1gb',
         image: 'ubuntu-24-04-x64',
         context: { secrets, account: platformAccount },
       };
