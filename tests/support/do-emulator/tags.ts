@@ -53,8 +53,15 @@ function namedDroplets(context: RouteContext): Json[] | undefined {
   if (!Array.isArray(resources) || resources.length === 0) return undefined;
   const droplets: Json[] = [];
   for (const resource of resources) {
-    if (resource?.resource_type !== 'droplet' || typeof resource.resource_id !== 'string')
-      return undefined;
+    if (typeof resource?.resource_id !== 'string') return undefined;
+    // Database clusters are taggable too, by uuid.
+    if (resource.resource_type === 'database') {
+      const database = context.state.databases.get(resource.resource_id);
+      if (!database) return [];
+      droplets.push(database);
+      continue;
+    }
+    if (resource.resource_type !== 'droplet') return undefined;
     const droplet = context.state.droplets.get(Number(resource.resource_id));
     if (!droplet) return [];
     droplets.push(droplet);

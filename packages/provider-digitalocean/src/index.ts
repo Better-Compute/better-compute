@@ -14,3 +14,6 @@ export * from './ids.js';
 export * from './networks/index.js';
 export * from './probe.js';
 export * from './provider.js';
+export * from './resources/kind.js';
+export * from './resources/registry.js';
+export * from './resources/kinds/databases.js';

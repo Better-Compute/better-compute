@@ -2,6 +2,7 @@ import { registerAccount } from './account.js';
 import { registerActions } from './actions.js';
 import { registerAutoscale } from './autoscale.js';
 import { registerCatalog } from './catalog.js';
+import { registerDatabases } from './databases.js';
 import { registerDroplets } from './droplets.js';
 import { registerFirewalls } from './firewalls.js';
 import { registerKeys } from './keys.js';
@@ -88,6 +89,8 @@ export class DoEmulator {
    * turns `succeeded` (list entries count). The create or replace itself always answers `waiting`.
    */
   firewallReads = 0;
+  /** How many reads a database cluster (or replica) that is being created, resized or upgraded takes to be online. */
+  databaseReads = 1;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -272,5 +275,6 @@ export class DoEmulator {
     registerActions(this);
     registerVpcs(this);
     registerFirewalls(this);
+    registerDatabases(this);
   }
 }

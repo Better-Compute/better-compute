@@ -26,6 +26,7 @@ import {
   tagFor,
 } from '../ids.js';
 import { DoNetworks } from '../networks/index.js';
+import { DoResources } from '../resources/registry.js';
 import { networkNamer, vpcForNetwork } from '../networks/vpcs.js';
 import { poolMembers } from './autoscale.js';
 import { ensureSshKeys } from './keys.js';
@@ -174,6 +175,8 @@ export class DoCompute implements ProviderImpl {
   protected readonly deploymentTag: string;
   /** Tenant networks: VPCs, Cloud Firewalls and Droplet tags. */
   readonly networks: DoNetworks;
+  /** Managed databases and the rest of the long tail, through the generic resource contract (P7). */
+  readonly resources: DoResources;
 
   constructor(
     config: DoConfig,
@@ -187,6 +190,7 @@ export class DoCompute implements ProviderImpl {
     this.client = client;
     this.deploymentTag = deploymentTag(options.deployment);
     this.networks = new DoNetworks(client, config, options.deployment);
+    this.resources = new DoResources(client, config, options.deployment);
   }
 
   /** Whether better-compute may delete the Droplet: managed, and in this deployment (R3). */
