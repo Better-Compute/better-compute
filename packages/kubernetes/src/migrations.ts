@@ -105,7 +105,7 @@ ALTER TABLE usage_windows DROP CONSTRAINT IF EXISTS usage_windows_source_kind_ck
 ALTER TABLE usage_windows
   ADD CONSTRAINT usage_windows_source_kind_ck
     CHECK (source_kind IN ('allocation', 'instance', 'grant', 'network', 'snapshot', 'cost', 'kubernetes', 'volume',
-                           'address')) NOT VALID;
+                           'address', 'loadBalancer')) NOT VALID;
 `,
 };
 

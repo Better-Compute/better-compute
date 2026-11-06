@@ -133,7 +133,9 @@ export type UsageSourceKind =
   | 'kubernetes'
   /** (DO P2) A provider volume or reserved address (vps provider-resource-usage.ts; core/0044 adds both). */
   | 'volume'
-  | 'address';
+  | 'address'
+  /** (DO P4) A provider load balancer (vps provider-resource-usage.ts; core/0060 adds it). */
+  | 'loadBalancer';
 
 /** The idempotency key of one source window (D2): `cmp:<kind>:<id>:<windowStartMs>[:<meter>]`. */
 export function sourceUsageKey(

@@ -14,6 +14,7 @@ import { billingModeOf, poolAccountTenantSql } from './billing.js';
 // | volume   | `volume`    | vps.volume.gib.hours   | its GiB (what the provider reports, else asked) |
 // | snapshot | `snapshot`  | vps.snapshot.gib.hours | its GiB (what the provider reported)        |
 // | address  | `address`   | vps.address.hours      | 1                                           |
+// | load balancer | `loadBalancer` | vps.load-balancer.hours | 1 (a global one's region tag is `global`) |
 //
 // `usage_windows.source_kind` accepts `volume` and `address` from core/0044 on (the kubernetes module's rewrite of
 // that CHECK lists them too), so every kind is metered by default.
@@ -23,17 +24,20 @@ export const defaultProviderResourceKinds: readonly ProviderResourceKind[] = Obj
   'volume',
   'snapshot',
   'address',
+  'loadBalancer',
 ]);
 
-export type ProviderResourceKind = 'volume' | 'snapshot' | 'address';
+export type ProviderResourceKind = 'volume' | 'snapshot' | 'address' | 'loadBalancer';
 
 interface Metered {
-  table: 'provider_volumes' | 'provider_snapshots' | 'provider_addresses';
+  table: 'provider_volumes' | 'provider_snapshots' | 'provider_addresses' | 'provider_load_balancers';
   sourceKind: Exclude<UsageSourceKind, 'allocation' | 'cost'>;
   meter: string;
   /** SQL for one hour's quantity of row `r`. */
   quantity: string;
   tag: string;
+  /** SQL for row `r`'s region tag (default `r.region`). */
+  region?: string;
 }
 
 const metered: Record<ProviderResourceKind, Metered> = {
@@ -57,6 +61,14 @@ const metered: Record<ProviderResourceKind, Metered> = {
     meter: 'vps.address.hours',
     quantity: '1',
     tag: 'provider-address',
+  },
+  loadBalancer: {
+    table: 'provider_load_balancers',
+    sourceKind: 'loadBalancer',
+    meter: 'vps.load-balancer.hours',
+    quantity: '1',
+    tag: 'provider-load-balancer',
+    region: "coalesce(r.region, 'global')",
   },
 };
 
@@ -92,7 +104,7 @@ async function meterKind(
 ): Promise<{ rows: number; windows: number }> {
   const { rows } = await tx.query<Due>(
     `SELECT r.id, r.tenant_id, r.project_id, r.pool_id, p.class AS pool_class, p.owner_tenant_id AS pool_owner,
-            p.policy, ${poolAccountTenantSql} AS account_tenant, a.provider, r.region,
+            p.policy, ${poolAccountTenantSql} AS account_tenant, a.provider, ${kind.region ?? 'r.region'} AS region,
             (${kind.quantity})::text AS quantity,
             (extract(epoch FROM coalesce(r.metered_until, r.ready_at)) * 1000)::float8 AS metered,
             (extract(epoch FROM r.deleted_at) * 1000)::float8 AS ended

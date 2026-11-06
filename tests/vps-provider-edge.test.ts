@@ -19,6 +19,7 @@ import { pglite } from '@better-compute/postgres/pglite';
 import { capacityMigrations, capacityModule, setQuota } from '@better-compute/capacity';
 import {
   defineProvider,
+  meterProviderResources,
   providerResourceName,
   providerResourcesWork,
   vps,
@@ -791,5 +792,36 @@ describe('dnsZones and dnsRecords', () => {
     await drain();
     expect(cloud.records.size).toBe(0);
     expect((await call('dnsRecords', 'list', { tenantId: 'root', zoneId: zone.id })).items).toEqual([]);
+  });
+});
+
+describe('metering', () => {
+  it('bills a load balancer in hours from ready until deleted (core/0060 accepts its kind)', async () => {
+    const HOUR = 3_600_000;
+    const regional = await createLoadBalancer();
+    await drain();
+    const global = await createLoadBalancer({
+      scope: 'global',
+      region: undefined,
+      targets: { loadBalancerIds: [regional.id] },
+    });
+    await drain();
+    const top = Math.floor(clock.now() / HOUR) * HOUR;
+    clock.advance(top + 2 * HOUR + 1_000 - clock.now());
+    await useSimClock(db, clock.now());
+    await db.transaction((tx) => meterProviderResources(tx, clock.now(), { rootTenantId: 'root', meterGraceMs: 0 }));
+    const rows = async (id: string) =>
+      (
+        await db.query<{ meter: string; quantity: string; tags: Record<string, string> | string }>(
+          `SELECT meter, quantity::text, tags FROM usage_windows
+            WHERE source_kind = 'loadBalancer' AND source_id = $1 ORDER BY window_start`,
+          [id],
+        )
+      ).rows.map((row) => ({ ...row, quantity: Number(row.quantity), tags: typeof row.tags === 'string' ? JSON.parse(row.tags) : row.tags }));
+    const windows = await rows(regional.id);
+    expect(windows).toHaveLength(2);
+    expect(windows[0]).toMatchObject({ meter: 'vps.load-balancer.hours', tags: { source: 'provider-load-balancer', region: 'nyc3' } });
+    expect(windows[1]!.quantity).toBe(1);
+    expect((await rows(global.id))[0]).toMatchObject({ tags: { region: 'global' } });
   });
 });
