@@ -313,18 +313,24 @@ export function accountWide(spec: AppSpecInput): string[] {
   return found;
 }
 
-/** A copy with every SecretRef in a secret slot resolved through the call's resolver. */
+/** A copy with every SecretRef in a secret slot resolved through the call's resolver; the values go to `seen`. */
 async function resolveSecrets(
   value: unknown,
   context: CallContext,
+  seen: string[],
   key?: string,
 ): Promise<unknown> {
+  const resolve = async (ref: SecretRef) => {
+    const secret = await context.secrets.resolve(ref);
+    if (secret.length > 0) seen.push(secret);
+    return secret;
+  };
   if (Array.isArray(value)) {
     const out: unknown[] = [];
     for (const entry of value) {
       if (key === 'envs' && isObject(entry) && entry.type === 'SECRET' && isSecretRef(entry.value))
-        out.push({ ...entry, value: await context.secrets.resolve(entry.value as SecretRef) });
-      else out.push(await resolveSecrets(entry, context));
+        out.push({ ...entry, value: await resolve(entry.value) });
+      else out.push(await resolveSecrets(entry, context, seen));
     }
     return out;
   }
@@ -333,11 +339,38 @@ async function resolveSecrets(
     for (const [name, entry] of Object.entries(value))
       out[name] =
         sensitiveKeys.has(name) && isSecretRef(entry)
-          ? await context.secrets.resolve(entry)
-          : await resolveSecrets(entry, context, name);
+          ? await resolve(entry)
+          : await resolveSecrets(entry, context, seen, name);
     return out;
   }
   return value;
+}
+
+/** Sends a spec with resolved secrets; an error that echoes one of them has it masked before it goes anywhere. */
+async function sendSpec(
+  env: DoKindEnv,
+  method: 'POST' | 'PUT',
+  path: string,
+  sending: { spec: Json; secrets: readonly string[] },
+  signal: AbortSignal,
+): Promise<DoApp> {
+  try {
+    const reply = await env.client.request<{ app: DoApp }>(method, path, {
+      body: { spec: sending.spec },
+      signal,
+      budget: 'mutate',
+    });
+    return reply.app;
+  } catch (error) {
+    if (!(error instanceof ComputeError)) throw error;
+    const mask = (text: string) =>
+      sending.secrets.reduce((out, secret) => out.split(secret).join('********'), text);
+    const details = error.details ? JSON.parse(mask(JSON.stringify(error.details))) : undefined;
+    const masked = mask(error.message);
+    if (masked === error.message && JSON.stringify(details) === JSON.stringify(error.details))
+      throw error;
+    throw new ComputeError(error.code, masked, undefined, details);
+  }
 }
 
 /** The spec DO reports, as a tenant spec: no name, no ownership envs, no secret values (not even ciphertext). */
@@ -489,7 +522,7 @@ async function desired(
   env: DoKindEnv,
   request: ProviderResourceRequest,
   context: CallContext,
-): Promise<Json> {
+): Promise<{ spec: Json; secrets: string[] }> {
   const spec = request.spec as AppSpecInput;
   if (request.accountScope !== 'tenant') {
     const wide = accountWide(spec);
@@ -501,14 +534,18 @@ async function desired(
         { provider: 'digitalocean', reason: 'accountWide', fields: wide },
       );
   }
-  const resolved = (await resolveSecrets(spec, context)) as Json;
+  const secrets: string[] = [];
+  const resolved = (await resolveSecrets(spec, context, secrets)) as Json;
   return {
-    ...resolved,
-    name: request.name,
-    envs: [
-      ...((resolved.envs as DoEnv[] | undefined) ?? []),
-      ...ownEnvs(ownershipTags(env, request.labels, context), fingerprint(spec)),
-    ],
+    spec: {
+      ...resolved,
+      name: request.name,
+      envs: [
+        ...((resolved.envs as DoEnv[] | undefined) ?? []),
+        ...ownEnvs(ownershipTags(env, request.labels, context), fingerprint(spec)),
+      ],
+    },
+    secrets,
   };
 }
 
@@ -549,14 +586,10 @@ export function appKind(): DoKind {
         assertOwned(env, envTags(app.spec.envs), what(app.id));
       } else app = await byKey(env, context);
       if (!app) {
-        const spec = await desired(env, request, context);
+        const sending = await desired(env, request, context);
         try {
-          const created = await env.client.request<{ app: DoApp }>('POST', '/apps', {
-            body: { spec },
-            signal: context.signal,
-            budget: 'mutate',
-          });
-          return await appState(env, created.app, context.signal);
+          const created = await sendSpec(env, 'POST', '/apps', sending, context.signal);
+          return await appState(env, created, context.signal);
         } catch (error) {
           // The name is taken: a racing create of ours made it (its key env finds it), or it is someone else's.
           if (!isComputeError(error, 'CONFLICT')) throw error;
@@ -568,13 +601,15 @@ export function appKind(): DoKind {
       if (wanted.region !== undefined && region !== undefined && wanted.region !== region)
         throw replaceRequired(appKindName, 'region');
       if (printOf(app) === fingerprint(wanted)) return appState(env, app, context.signal);
-      const spec = await desired(env, request, context);
-      const updated = await env.client.request<{ app: DoApp }>(
+      const sending = await desired(env, request, context);
+      const updated = await sendSpec(
+        env,
         'PUT',
         `/apps/${encodeURIComponent(app.id)}`,
-        { body: { spec }, signal: context.signal, budget: 'mutate' },
+        sending,
+        context.signal,
       );
-      const state = await appState(env, updated.app, context.signal);
+      const state = await appState(env, updated, context.signal);
       return state.state === 'ready' ? { ...state, state: 'updating' } : state;
     },
 

@@ -258,6 +258,23 @@ describe('do.app: lifecycle', () => {
     expect(ready.secretOutputs).toBeUndefined();
   });
 
+  it('a DigitalOcean error echoing a resolved secret is scrubbed before it goes anywhere', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const spec = {
+      ...web(),
+      envs: [{ key: 'DB_PASSWORD', type: 'SECRET', value: 'secret://acme/db-password' }],
+    };
+    emu.failNext({ method: 'POST', path: /^\/apps$/ }, 422, {
+      id: 'unprocessable_entity',
+      message: `env DB_PASSWORD: invalid value "${dbPassword}"`,
+    });
+    const error = await failure(resources.ensure(request(spec), call()));
+    expect(error.code).toBe('INVALID_INPUT');
+    expect(error.message).toContain('DB_PASSWORD');
+    expect(JSON.stringify([error.message, error.details])).not.toContain(dbPassword);
+  });
+
   it('a converged app is never redeployed; a spec change is one PUT; region is replaceRequired', async () => {
     const emu = emulator();
     const { resources } = await build(emu);
