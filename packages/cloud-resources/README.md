@@ -20,6 +20,8 @@ interface ProviderResources {
     ctx: CallContext,
   ): Promise<ProviderResourceState>;
   release?(kind: string, id: string, ctx: CallContext): Promise<void>;
+  catalog?(ctx: CallContext): Promise<readonly ProviderCatalogEntry[]>;
+  signals?(ctx: CallContext): Promise<readonly ProviderResourceSignal[]>; // read-only
 }
 ```
 
@@ -43,13 +45,18 @@ betterCompute({
 });
 ```
 
-- **API:** `cloudResources.kinds`, `catalog`, `create`, `list`, `get`, `update`, `delete`, `discover`,
+- **API:** `cloudResources.kinds`, `catalog`, `signals`, `create`, `list`, `get`, `update`, `delete`, `discover`,
   `adopt` and `release`, on a provider pool the tenant owns or is offered. Discover, adopt and release work only on
   the tenant's own account.
 - **Catalog.** `cloudResources.catalog` lists the installable applications the pool's provider offers
   (`ProviderResources.catalog`; DigitalOcean's 1-Click apps), optionally by `installsOn`: `instance` (the slug is
   an instance create's image) or `kubernetes` (an add-on of a managed cluster). Read-only: they are installed
   through those surfaces, never through `create`.
+- **Signals.** `cloudResources.signals` lists the read-only signals the pool's provider raises about its resources
+  (`ProviderResources.signals`; DigitalOcean's Managed Agents Signals), newest first, at most 500, for an attention
+  list. A tenant of a shared pool sees the signals about its own resources only; the pool's owner sees every one,
+  recorded or not. The provider is asked with no transaction open and sends no mutation; malformed signals are
+  dropped, and titles and details are one bounded line.
 - **IAM** on `cloud-resource/{id}` (`compute:cloud-resources:create|read|update|delete`) with the attributes `kind`,
   `family`, `provider`, `providerAccountId`, `poolId`, `region` and `projectId`: `resource.family == 'data'`
   allows databases without allowing apps.
@@ -74,6 +81,12 @@ betterCompute({
   the Droplet's instance tag), so it is safe on a hosted pool.
 - **Secrets in a spec** are SecretRefs, resolved only within the resource's tenant, just before the provider call.
 - **Quota** per tenant and kind: `maxPerKind` (default 20) and `quotas: { 'do.database.pg': 5 }`.
+- **Capacity quota bookings.** A kind may declare a pure `quota(spec)`: what the spec books against the tenant's
+  quota on the pool (`{ gpu: 2 }` for a DigitalOcean Dedicated Inference endpoint), with no node to place it on.
+  `create` books it in the transaction that records the resource and `update` re-books the difference (growth is
+  charged, `QUOTA_EXCEEDED` refuses and leaves nothing behind; a shrink is returned); the reconciler returns it
+  once, when the resource is deleted or released. The bookings live in vps (`vps/0108_quota_bookings`, over
+  capacity's quota charges). A kind that books quota cannot be adopted (`UNSUPPORTED`, `reason 'quotaBooked'`).
 - **Events** `cloud.resource.*` (`created`, `ready`, `updating`, `updated`, `failed`, `deleting`, `deleted`,
   `adopted`, `releasing`, `released`), never carrying a secret value.
 - **Metering** (`cloud.resources.usage`, every 5 minutes): `cloud.resource.hours`, one per resource per hour from
