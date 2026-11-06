@@ -20,3 +20,8 @@ export * from './resources/kinds/databases.js';
 export { appInstanceHoursMeter, appInstances } from './resources/kinds/apps.js';
 export { addonHoursMeter } from './resources/kinds/addons.js';
 export { partnerHoursMeter } from './resources/kinds/partner.js';
+export {
+  dedicatedInferenceKindName,
+  inferenceGpuSizes,
+  type DedicatedInferenceSpec,
+} from './resources/kinds/inference.js';

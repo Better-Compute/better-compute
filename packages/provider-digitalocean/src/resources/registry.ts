@@ -15,6 +15,7 @@ import { addonKind } from './kinds/addons.js';
 import { appKind } from './kinds/apps.js';
 import { databaseKinds } from './kinds/databases.js';
 import { functionsKinds } from './kinds/functions.js';
+import { dedicatedInferenceKind } from './kinds/inference.js';
 import { partnerKind } from './kinds/partner.js';
 import { oneClickCatalog } from './one-clicks.js';
 import type { DoKind, DoKindEnv } from './kind.js';
@@ -25,7 +26,14 @@ import type { DoKind, DoKindEnv } from './kind.js';
 
 /** Every kind this provider serves, in catalog order. */
 export function doResourceKinds(): DoKind[] {
-  return [...databaseKinds(), appKind(), ...functionsKinds(), addonKind(), partnerKind()];
+  return [
+    ...databaseKinds(),
+    appKind(),
+    ...functionsKinds(),
+    addonKind(),
+    partnerKind(),
+    dedicatedInferenceKind(),
+  ];
 }
 
 export class DoResources implements ProviderResources {

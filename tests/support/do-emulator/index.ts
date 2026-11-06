@@ -9,6 +9,7 @@ import { registerDatabases } from './databases.js';
 import { registerDroplets } from './droplets.js';
 import { registerFirewalls } from './firewalls.js';
 import { registerFunctions } from './functions.js';
+import { registerInference } from './inference.js';
 import { registerKeys } from './keys.js';
 import { registerPartner } from './partner.js';
 import { registerTags } from './tags.js';
@@ -104,6 +105,10 @@ export class DoEmulator {
   addonReads = 1;
   /** How many reads a partner attachment stays `PENDING` (or `DELETING`). */
   partnerReads = 1;
+  /** How many reads a dedicated inference endpoint stays `PROVISIONING` (or `UPDATING`, `DELETING`). */
+  inferenceReads = 1;
+  /** GPU sizes a dedicated inference create is refused for (insufficient capacity). */
+  inferenceSoldOut = new Set<string>();
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -294,5 +299,6 @@ export class DoEmulator {
     registerAddons(this);
     registerPartner(this);
     registerOneClicks(this);
+    registerInference(this);
   }
 }
