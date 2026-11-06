@@ -599,6 +599,114 @@ func (x *NodeInventory) GetImages() *ImagesSection {
 	return nil
 }
 
+type CloudSection struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// "aws".
+	Provider string `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"`
+	// e.g. "i-0123456789abcdef0".
+	InstanceId string `protobuf:"bytes,2,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
+	// e.g. "p5.48xlarge", "c7i.metal-48xl".
+	InstanceType string `protobuf:"bytes,3,opt,name=instance_type,json=instanceType,proto3" json:"instance_type,omitempty"`
+	// e.g. "us-east-1".
+	Region string `protobuf:"bytes,4,opt,name=region,proto3" json:"region,omitempty"`
+	// The zone name, e.g. "us-east-1a" (names map to physical zones per account).
+	Zone string `protobuf:"bytes,5,opt,name=zone,proto3" json:"zone,omitempty"`
+	// The zone id, e.g. "use1-az4" (the same physical zone in every account).
+	ZoneId string `protobuf:"bytes,6,opt,name=zone_id,json=zoneId,proto3" json:"zone_id,omitempty"`
+	// "on-demand", "spot" or "capacity-block"; empty when the metadata names something else.
+	Lifecycle string `protobuf:"bytes,7,opt,name=lifecycle,proto3" json:"lifecycle,omitempty"`
+	// Elastic Fabric Adapter devices (/sys/class/infiniband/* bound to the efa driver).
+	EfaDevices    uint32 `protobuf:"varint,8,opt,name=efa_devices,json=efaDevices,proto3" json:"efa_devices,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CloudSection) Reset() {
+	*x = CloudSection{}
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CloudSection) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CloudSection) ProtoMessage() {}
+
+func (x *CloudSection) ProtoReflect() protoreflect.Message {
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CloudSection.ProtoReflect.Descriptor instead.
+func (*CloudSection) Descriptor() ([]byte, []int) {
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *CloudSection) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *CloudSection) GetInstanceId() string {
+	if x != nil {
+		return x.InstanceId
+	}
+	return ""
+}
+
+func (x *CloudSection) GetInstanceType() string {
+	if x != nil {
+		return x.InstanceType
+	}
+	return ""
+}
+
+func (x *CloudSection) GetRegion() string {
+	if x != nil {
+		return x.Region
+	}
+	return ""
+}
+
+func (x *CloudSection) GetZone() string {
+	if x != nil {
+		return x.Zone
+	}
+	return ""
+}
+
+func (x *CloudSection) GetZoneId() string {
+	if x != nil {
+		return x.ZoneId
+	}
+	return ""
+}
+
+func (x *CloudSection) GetLifecycle() string {
+	if x != nil {
+		return x.Lifecycle
+	}
+	return ""
+}
+
+func (x *CloudSection) GetEfaDevices() uint32 {
+	if x != nil {
+		return x.EfaDevices
+	}
+	return 0
+}
+
 type ImagesSection struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Sorted by sha256; at most 1,000 entries (the most recently used).
@@ -612,7 +720,7 @@ type ImagesSection struct {
 
 func (x *ImagesSection) Reset() {
 	*x = ImagesSection{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[1]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -624,7 +732,7 @@ func (x *ImagesSection) String() string {
 func (*ImagesSection) ProtoMessage() {}
 
 func (x *ImagesSection) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[1]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -637,7 +745,7 @@ func (x *ImagesSection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ImagesSection.ProtoReflect.Descriptor instead.
 func (*ImagesSection) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{1}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ImagesSection) GetImages() []*CachedImage {
@@ -678,7 +786,7 @@ type CachedImage struct {
 
 func (x *CachedImage) Reset() {
 	*x = CachedImage{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[2]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -690,7 +798,7 @@ func (x *CachedImage) String() string {
 func (*CachedImage) ProtoMessage() {}
 
 func (x *CachedImage) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[2]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -703,7 +811,7 @@ func (x *CachedImage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CachedImage.ProtoReflect.Descriptor instead.
 func (*CachedImage) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{2}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *CachedImage) GetImageId() string {
@@ -772,7 +880,7 @@ type SystemSection struct {
 
 func (x *SystemSection) Reset() {
 	*x = SystemSection{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[3]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -784,7 +892,7 @@ func (x *SystemSection) String() string {
 func (*SystemSection) ProtoMessage() {}
 
 func (x *SystemSection) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[3]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -797,7 +905,7 @@ func (x *SystemSection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SystemSection.ProtoReflect.Descriptor instead.
 func (*SystemSection) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{3}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *SystemSection) GetVendor() string {
@@ -903,7 +1011,7 @@ type Tpm struct {
 
 func (x *Tpm) Reset() {
 	*x = Tpm{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[4]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -915,7 +1023,7 @@ func (x *Tpm) String() string {
 func (*Tpm) ProtoMessage() {}
 
 func (x *Tpm) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[4]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -928,7 +1036,7 @@ func (x *Tpm) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Tpm.ProtoReflect.Descriptor instead.
 func (*Tpm) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{4}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Tpm) GetVersion() string {
@@ -975,7 +1083,7 @@ type CpuSection struct {
 
 func (x *CpuSection) Reset() {
 	*x = CpuSection{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[5]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -987,7 +1095,7 @@ func (x *CpuSection) String() string {
 func (*CpuSection) ProtoMessage() {}
 
 func (x *CpuSection) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[5]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1000,7 +1108,7 @@ func (x *CpuSection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CpuSection.ProtoReflect.Descriptor instead.
 func (*CpuSection) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{5}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *CpuSection) GetVendor() string {
@@ -1081,7 +1189,7 @@ type NumaNode struct {
 
 func (x *NumaNode) Reset() {
 	*x = NumaNode{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[6]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1093,7 +1201,7 @@ func (x *NumaNode) String() string {
 func (*NumaNode) ProtoMessage() {}
 
 func (x *NumaNode) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[6]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1106,7 +1214,7 @@ func (x *NumaNode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NumaNode.ProtoReflect.Descriptor instead.
 func (*NumaNode) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{6}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *NumaNode) GetId() uint32 {
@@ -1152,7 +1260,7 @@ type MemorySection struct {
 
 func (x *MemorySection) Reset() {
 	*x = MemorySection{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[7]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1164,7 +1272,7 @@ func (x *MemorySection) String() string {
 func (*MemorySection) ProtoMessage() {}
 
 func (x *MemorySection) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[7]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1177,7 +1285,7 @@ func (x *MemorySection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MemorySection.ProtoReflect.Descriptor instead.
 func (*MemorySection) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{7}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *MemorySection) GetTotalBytes() uint64 {
@@ -1219,7 +1327,7 @@ type HugepagePool struct {
 
 func (x *HugepagePool) Reset() {
 	*x = HugepagePool{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[8]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1231,7 +1339,7 @@ func (x *HugepagePool) String() string {
 func (*HugepagePool) ProtoMessage() {}
 
 func (x *HugepagePool) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[8]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1244,7 +1352,7 @@ func (x *HugepagePool) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HugepagePool.ProtoReflect.Descriptor instead.
 func (*HugepagePool) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{8}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *HugepagePool) GetPageSizeBytes() uint64 {
@@ -1278,7 +1386,7 @@ type Dimm struct {
 
 func (x *Dimm) Reset() {
 	*x = Dimm{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[9]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1290,7 +1398,7 @@ func (x *Dimm) String() string {
 func (*Dimm) ProtoMessage() {}
 
 func (x *Dimm) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[9]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1303,7 +1411,7 @@ func (x *Dimm) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Dimm.ProtoReflect.Descriptor instead.
 func (*Dimm) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{9}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Dimm) GetSlot() string {
@@ -1372,7 +1480,7 @@ type EdacCounters struct {
 
 func (x *EdacCounters) Reset() {
 	*x = EdacCounters{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[10]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1384,7 +1492,7 @@ func (x *EdacCounters) String() string {
 func (*EdacCounters) ProtoMessage() {}
 
 func (x *EdacCounters) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[10]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1397,7 +1505,7 @@ func (x *EdacCounters) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EdacCounters.ProtoReflect.Descriptor instead.
 func (*EdacCounters) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{10}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *EdacCounters) GetCorrectable() uint64 {
@@ -1424,7 +1532,7 @@ type DisksSection struct {
 
 func (x *DisksSection) Reset() {
 	*x = DisksSection{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[11]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1436,7 +1544,7 @@ func (x *DisksSection) String() string {
 func (*DisksSection) ProtoMessage() {}
 
 func (x *DisksSection) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[11]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1449,7 +1557,7 @@ func (x *DisksSection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DisksSection.ProtoReflect.Descriptor instead.
 func (*DisksSection) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{11}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *DisksSection) GetDisks() []*Disk {
@@ -1479,7 +1587,7 @@ type Disk struct {
 
 func (x *Disk) Reset() {
 	*x = Disk{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[12]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1491,7 +1599,7 @@ func (x *Disk) String() string {
 func (*Disk) ProtoMessage() {}
 
 func (x *Disk) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[12]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1504,7 +1612,7 @@ func (x *Disk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Disk.ProtoReflect.Descriptor instead.
 func (*Disk) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{12}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Disk) GetName() string {
@@ -1581,7 +1689,7 @@ type SmartStatus struct {
 
 func (x *SmartStatus) Reset() {
 	*x = SmartStatus{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[13]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1593,7 +1701,7 @@ func (x *SmartStatus) String() string {
 func (*SmartStatus) ProtoMessage() {}
 
 func (x *SmartStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[13]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1606,7 +1714,7 @@ func (x *SmartStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SmartStatus.ProtoReflect.Descriptor instead.
 func (*SmartStatus) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{13}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *SmartStatus) GetHealthy() bool {
@@ -1640,7 +1748,7 @@ type NicsSection struct {
 
 func (x *NicsSection) Reset() {
 	*x = NicsSection{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[14]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1652,7 +1760,7 @@ func (x *NicsSection) String() string {
 func (*NicsSection) ProtoMessage() {}
 
 func (x *NicsSection) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[14]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1665,7 +1773,7 @@ func (x *NicsSection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NicsSection.ProtoReflect.Descriptor instead.
 func (*NicsSection) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{14}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *NicsSection) GetNics() []*Nic {
@@ -1697,7 +1805,7 @@ type Nic struct {
 
 func (x *Nic) Reset() {
 	*x = Nic{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[15]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1709,7 +1817,7 @@ func (x *Nic) String() string {
 func (*Nic) ProtoMessage() {}
 
 func (x *Nic) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[15]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1722,7 +1830,7 @@ func (x *Nic) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Nic.ProtoReflect.Descriptor instead.
 func (*Nic) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{15}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Nic) GetName() string {
@@ -1817,7 +1925,7 @@ type GpusSection struct {
 
 func (x *GpusSection) Reset() {
 	*x = GpusSection{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[16]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1829,7 +1937,7 @@ func (x *GpusSection) String() string {
 func (*GpusSection) ProtoMessage() {}
 
 func (x *GpusSection) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[16]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1842,7 +1950,7 @@ func (x *GpusSection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GpusSection.ProtoReflect.Descriptor instead.
 func (*GpusSection) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{16}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *GpusSection) GetDriverVersion() string {
@@ -1911,7 +2019,7 @@ type Gpu struct {
 
 func (x *Gpu) Reset() {
 	*x = Gpu{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[17]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1923,7 +2031,7 @@ func (x *Gpu) String() string {
 func (*Gpu) ProtoMessage() {}
 
 func (x *Gpu) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[17]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1936,7 +2044,7 @@ func (x *Gpu) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Gpu.ProtoReflect.Descriptor instead.
 func (*Gpu) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{17}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Gpu) GetIndex() uint32 {
@@ -2102,7 +2210,7 @@ type GpuMig struct {
 
 func (x *GpuMig) Reset() {
 	*x = GpuMig{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[18]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2114,7 +2222,7 @@ func (x *GpuMig) String() string {
 func (*GpuMig) ProtoMessage() {}
 
 func (x *GpuMig) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[18]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2127,7 +2235,7 @@ func (x *GpuMig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GpuMig.ProtoReflect.Descriptor instead.
 func (*GpuMig) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{18}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *GpuMig) GetCapable() bool {
@@ -2179,7 +2287,7 @@ type MigProfile struct {
 
 func (x *MigProfile) Reset() {
 	*x = MigProfile{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[19]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2191,7 +2299,7 @@ func (x *MigProfile) String() string {
 func (*MigProfile) ProtoMessage() {}
 
 func (x *MigProfile) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[19]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2204,7 +2312,7 @@ func (x *MigProfile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigProfile.ProtoReflect.Descriptor instead.
 func (*MigProfile) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{19}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *MigProfile) GetId() uint32 {
@@ -2248,7 +2356,7 @@ type MigInstance struct {
 
 func (x *MigInstance) Reset() {
 	*x = MigInstance{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[20]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2260,7 +2368,7 @@ func (x *MigInstance) String() string {
 func (*MigInstance) ProtoMessage() {}
 
 func (x *MigInstance) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[20]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2273,7 +2381,7 @@ func (x *MigInstance) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MigInstance.ProtoReflect.Descriptor instead.
 func (*MigInstance) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{20}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *MigInstance) GetGiId() uint32 {
@@ -2317,7 +2425,7 @@ type NvlinkLink struct {
 
 func (x *NvlinkLink) Reset() {
 	*x = NvlinkLink{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[21]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2329,7 +2437,7 @@ func (x *NvlinkLink) String() string {
 func (*NvlinkLink) ProtoMessage() {}
 
 func (x *NvlinkLink) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[21]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2342,7 +2450,7 @@ func (x *NvlinkLink) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NvlinkLink.ProtoReflect.Descriptor instead.
 func (*NvlinkLink) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{21}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *NvlinkLink) GetLink() uint32 {
@@ -2386,7 +2494,7 @@ type GpuPeerLink struct {
 
 func (x *GpuPeerLink) Reset() {
 	*x = GpuPeerLink{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[22]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2398,7 +2506,7 @@ func (x *GpuPeerLink) String() string {
 func (*GpuPeerLink) ProtoMessage() {}
 
 func (x *GpuPeerLink) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[22]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2411,7 +2519,7 @@ func (x *GpuPeerLink) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GpuPeerLink.ProtoReflect.Descriptor instead.
 func (*GpuPeerLink) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{22}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *GpuPeerLink) GetPeerUuid() string {
@@ -2446,7 +2554,7 @@ type GpuFabric struct {
 
 func (x *GpuFabric) Reset() {
 	*x = GpuFabric{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[23]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2458,7 +2566,7 @@ func (x *GpuFabric) String() string {
 func (*GpuFabric) ProtoMessage() {}
 
 func (x *GpuFabric) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[23]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2471,7 +2579,7 @@ func (x *GpuFabric) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GpuFabric.ProtoReflect.Descriptor instead.
 func (*GpuFabric) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{23}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *GpuFabric) GetClusterUuid() string {
@@ -2503,7 +2611,7 @@ type GpuEcc struct {
 
 func (x *GpuEcc) Reset() {
 	*x = GpuEcc{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[24]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2515,7 +2623,7 @@ func (x *GpuEcc) String() string {
 func (*GpuEcc) ProtoMessage() {}
 
 func (x *GpuEcc) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[24]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2528,7 +2636,7 @@ func (x *GpuEcc) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GpuEcc.ProtoReflect.Descriptor instead.
 func (*GpuEcc) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{24}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *GpuEcc) GetEnabled() bool {
@@ -2571,7 +2679,7 @@ type EccCounts struct {
 
 func (x *EccCounts) Reset() {
 	*x = EccCounts{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[25]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2583,7 +2691,7 @@ func (x *EccCounts) String() string {
 func (*EccCounts) ProtoMessage() {}
 
 func (x *EccCounts) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[25]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2596,7 +2704,7 @@ func (x *EccCounts) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EccCounts.ProtoReflect.Descriptor instead.
 func (*EccCounts) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{25}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *EccCounts) GetCorrectable() uint64 {
@@ -2627,7 +2735,7 @@ type GpuRowRemap struct {
 
 func (x *GpuRowRemap) Reset() {
 	*x = GpuRowRemap{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[26]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2639,7 +2747,7 @@ func (x *GpuRowRemap) String() string {
 func (*GpuRowRemap) ProtoMessage() {}
 
 func (x *GpuRowRemap) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[26]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2652,7 +2760,7 @@ func (x *GpuRowRemap) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GpuRowRemap.ProtoReflect.Descriptor instead.
 func (*GpuRowRemap) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{26}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *GpuRowRemap) GetCorrectable() uint32 {
@@ -2697,7 +2805,7 @@ type BmcSection struct {
 
 func (x *BmcSection) Reset() {
 	*x = BmcSection{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[27]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2709,7 +2817,7 @@ func (x *BmcSection) String() string {
 func (*BmcSection) ProtoMessage() {}
 
 func (x *BmcSection) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[27]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2722,7 +2830,7 @@ func (x *BmcSection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BmcSection.ProtoReflect.Descriptor instead.
 func (*BmcSection) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{27}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *BmcSection) GetIp() string {
@@ -2787,7 +2895,7 @@ type OsSection struct {
 
 func (x *OsSection) Reset() {
 	*x = OsSection{}
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[28]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2799,7 +2907,7 @@ func (x *OsSection) String() string {
 func (*OsSection) ProtoMessage() {}
 
 func (x *OsSection) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[28]
+	mi := &file_bettercompute_agent_v1_inventory_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2812,7 +2920,7 @@ func (x *OsSection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OsSection.ProtoReflect.Descriptor instead.
 func (*OsSection) Descriptor() ([]byte, []int) {
-	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{28}
+	return file_bettercompute_agent_v1_inventory_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *OsSection) GetDistro() string {
@@ -2892,7 +3000,18 @@ const file_bettercompute_agent_v1_inventory_proto_rawDesc = "" +
 	"\x06images\x18\x12 \x01(\v2%.bettercompute.agent.v1.ImagesSectionR\x06images\x1a@\n" +
 	"\x12SectionHashesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"\x92\x01\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"\xf4\x01\n" +
+	"\fCloudSection\x12\x1a\n" +
+	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x1f\n" +
+	"\vinstance_id\x18\x02 \x01(\tR\n" +
+	"instanceId\x12#\n" +
+	"\rinstance_type\x18\x03 \x01(\tR\finstanceType\x12\x16\n" +
+	"\x06region\x18\x04 \x01(\tR\x06region\x12\x12\n" +
+	"\x04zone\x18\x05 \x01(\tR\x04zone\x12\x17\n" +
+	"\azone_id\x18\x06 \x01(\tR\x06zoneId\x12\x1c\n" +
+	"\tlifecycle\x18\a \x01(\tR\tlifecycle\x12\x1f\n" +
+	"\vefa_devices\x18\b \x01(\rR\n" +
+	"efaDevices\"\x92\x01\n" +
 	"\rImagesSection\x12;\n" +
 	"\x06images\x18\x01 \x03(\v2#.bettercompute.agent.v1.CachedImageR\x06images\x12%\n" +
 	"\x0ecapacity_bytes\x18\x02 \x01(\x04R\rcapacityBytes\x12\x1d\n" +
@@ -3156,7 +3275,7 @@ func file_bettercompute_agent_v1_inventory_proto_rawDescGZIP() []byte {
 }
 
 var file_bettercompute_agent_v1_inventory_proto_enumTypes = make([]protoimpl.EnumInfo, 8)
-var file_bettercompute_agent_v1_inventory_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
+var file_bettercompute_agent_v1_inventory_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
 var file_bettercompute_agent_v1_inventory_proto_goTypes = []any{
 	(CachedImageState)(0),         // 0: bettercompute.agent.v1.CachedImageState
 	(BootMode)(0),                 // 1: bettercompute.agent.v1.BootMode
@@ -3167,80 +3286,81 @@ var file_bettercompute_agent_v1_inventory_proto_goTypes = []any{
 	(GpuLinkType)(0),              // 6: bettercompute.agent.v1.GpuLinkType
 	(CgroupVersion)(0),            // 7: bettercompute.agent.v1.CgroupVersion
 	(*NodeInventory)(nil),         // 8: bettercompute.agent.v1.NodeInventory
-	(*ImagesSection)(nil),         // 9: bettercompute.agent.v1.ImagesSection
-	(*CachedImage)(nil),           // 10: bettercompute.agent.v1.CachedImage
-	(*SystemSection)(nil),         // 11: bettercompute.agent.v1.SystemSection
-	(*Tpm)(nil),                   // 12: bettercompute.agent.v1.Tpm
-	(*CpuSection)(nil),            // 13: bettercompute.agent.v1.CpuSection
-	(*NumaNode)(nil),              // 14: bettercompute.agent.v1.NumaNode
-	(*MemorySection)(nil),         // 15: bettercompute.agent.v1.MemorySection
-	(*HugepagePool)(nil),          // 16: bettercompute.agent.v1.HugepagePool
-	(*Dimm)(nil),                  // 17: bettercompute.agent.v1.Dimm
-	(*EdacCounters)(nil),          // 18: bettercompute.agent.v1.EdacCounters
-	(*DisksSection)(nil),          // 19: bettercompute.agent.v1.DisksSection
-	(*Disk)(nil),                  // 20: bettercompute.agent.v1.Disk
-	(*SmartStatus)(nil),           // 21: bettercompute.agent.v1.SmartStatus
-	(*NicsSection)(nil),           // 22: bettercompute.agent.v1.NicsSection
-	(*Nic)(nil),                   // 23: bettercompute.agent.v1.Nic
-	(*GpusSection)(nil),           // 24: bettercompute.agent.v1.GpusSection
-	(*Gpu)(nil),                   // 25: bettercompute.agent.v1.Gpu
-	(*GpuMig)(nil),                // 26: bettercompute.agent.v1.GpuMig
-	(*MigProfile)(nil),            // 27: bettercompute.agent.v1.MigProfile
-	(*MigInstance)(nil),           // 28: bettercompute.agent.v1.MigInstance
-	(*NvlinkLink)(nil),            // 29: bettercompute.agent.v1.NvlinkLink
-	(*GpuPeerLink)(nil),           // 30: bettercompute.agent.v1.GpuPeerLink
-	(*GpuFabric)(nil),             // 31: bettercompute.agent.v1.GpuFabric
-	(*GpuEcc)(nil),                // 32: bettercompute.agent.v1.GpuEcc
-	(*EccCounts)(nil),             // 33: bettercompute.agent.v1.EccCounts
-	(*GpuRowRemap)(nil),           // 34: bettercompute.agent.v1.GpuRowRemap
-	(*BmcSection)(nil),            // 35: bettercompute.agent.v1.BmcSection
-	(*OsSection)(nil),             // 36: bettercompute.agent.v1.OsSection
-	nil,                           // 37: bettercompute.agent.v1.NodeInventory.SectionHashesEntry
-	(*timestamppb.Timestamp)(nil), // 38: google.protobuf.Timestamp
+	(*CloudSection)(nil),          // 9: bettercompute.agent.v1.CloudSection
+	(*ImagesSection)(nil),         // 10: bettercompute.agent.v1.ImagesSection
+	(*CachedImage)(nil),           // 11: bettercompute.agent.v1.CachedImage
+	(*SystemSection)(nil),         // 12: bettercompute.agent.v1.SystemSection
+	(*Tpm)(nil),                   // 13: bettercompute.agent.v1.Tpm
+	(*CpuSection)(nil),            // 14: bettercompute.agent.v1.CpuSection
+	(*NumaNode)(nil),              // 15: bettercompute.agent.v1.NumaNode
+	(*MemorySection)(nil),         // 16: bettercompute.agent.v1.MemorySection
+	(*HugepagePool)(nil),          // 17: bettercompute.agent.v1.HugepagePool
+	(*Dimm)(nil),                  // 18: bettercompute.agent.v1.Dimm
+	(*EdacCounters)(nil),          // 19: bettercompute.agent.v1.EdacCounters
+	(*DisksSection)(nil),          // 20: bettercompute.agent.v1.DisksSection
+	(*Disk)(nil),                  // 21: bettercompute.agent.v1.Disk
+	(*SmartStatus)(nil),           // 22: bettercompute.agent.v1.SmartStatus
+	(*NicsSection)(nil),           // 23: bettercompute.agent.v1.NicsSection
+	(*Nic)(nil),                   // 24: bettercompute.agent.v1.Nic
+	(*GpusSection)(nil),           // 25: bettercompute.agent.v1.GpusSection
+	(*Gpu)(nil),                   // 26: bettercompute.agent.v1.Gpu
+	(*GpuMig)(nil),                // 27: bettercompute.agent.v1.GpuMig
+	(*MigProfile)(nil),            // 28: bettercompute.agent.v1.MigProfile
+	(*MigInstance)(nil),           // 29: bettercompute.agent.v1.MigInstance
+	(*NvlinkLink)(nil),            // 30: bettercompute.agent.v1.NvlinkLink
+	(*GpuPeerLink)(nil),           // 31: bettercompute.agent.v1.GpuPeerLink
+	(*GpuFabric)(nil),             // 32: bettercompute.agent.v1.GpuFabric
+	(*GpuEcc)(nil),                // 33: bettercompute.agent.v1.GpuEcc
+	(*EccCounts)(nil),             // 34: bettercompute.agent.v1.EccCounts
+	(*GpuRowRemap)(nil),           // 35: bettercompute.agent.v1.GpuRowRemap
+	(*BmcSection)(nil),            // 36: bettercompute.agent.v1.BmcSection
+	(*OsSection)(nil),             // 37: bettercompute.agent.v1.OsSection
+	nil,                           // 38: bettercompute.agent.v1.NodeInventory.SectionHashesEntry
+	(*timestamppb.Timestamp)(nil), // 39: google.protobuf.Timestamp
 }
 var file_bettercompute_agent_v1_inventory_proto_depIdxs = []int32{
-	38, // 0: bettercompute.agent.v1.NodeInventory.collected_at:type_name -> google.protobuf.Timestamp
-	37, // 1: bettercompute.agent.v1.NodeInventory.section_hashes:type_name -> bettercompute.agent.v1.NodeInventory.SectionHashesEntry
-	11, // 2: bettercompute.agent.v1.NodeInventory.system:type_name -> bettercompute.agent.v1.SystemSection
-	13, // 3: bettercompute.agent.v1.NodeInventory.cpu:type_name -> bettercompute.agent.v1.CpuSection
-	15, // 4: bettercompute.agent.v1.NodeInventory.memory:type_name -> bettercompute.agent.v1.MemorySection
-	19, // 5: bettercompute.agent.v1.NodeInventory.disks:type_name -> bettercompute.agent.v1.DisksSection
-	22, // 6: bettercompute.agent.v1.NodeInventory.nics:type_name -> bettercompute.agent.v1.NicsSection
-	24, // 7: bettercompute.agent.v1.NodeInventory.gpus:type_name -> bettercompute.agent.v1.GpusSection
-	35, // 8: bettercompute.agent.v1.NodeInventory.bmc:type_name -> bettercompute.agent.v1.BmcSection
-	36, // 9: bettercompute.agent.v1.NodeInventory.os:type_name -> bettercompute.agent.v1.OsSection
-	9,  // 10: bettercompute.agent.v1.NodeInventory.images:type_name -> bettercompute.agent.v1.ImagesSection
-	10, // 11: bettercompute.agent.v1.ImagesSection.images:type_name -> bettercompute.agent.v1.CachedImage
+	39, // 0: bettercompute.agent.v1.NodeInventory.collected_at:type_name -> google.protobuf.Timestamp
+	38, // 1: bettercompute.agent.v1.NodeInventory.section_hashes:type_name -> bettercompute.agent.v1.NodeInventory.SectionHashesEntry
+	12, // 2: bettercompute.agent.v1.NodeInventory.system:type_name -> bettercompute.agent.v1.SystemSection
+	14, // 3: bettercompute.agent.v1.NodeInventory.cpu:type_name -> bettercompute.agent.v1.CpuSection
+	16, // 4: bettercompute.agent.v1.NodeInventory.memory:type_name -> bettercompute.agent.v1.MemorySection
+	20, // 5: bettercompute.agent.v1.NodeInventory.disks:type_name -> bettercompute.agent.v1.DisksSection
+	23, // 6: bettercompute.agent.v1.NodeInventory.nics:type_name -> bettercompute.agent.v1.NicsSection
+	25, // 7: bettercompute.agent.v1.NodeInventory.gpus:type_name -> bettercompute.agent.v1.GpusSection
+	36, // 8: bettercompute.agent.v1.NodeInventory.bmc:type_name -> bettercompute.agent.v1.BmcSection
+	37, // 9: bettercompute.agent.v1.NodeInventory.os:type_name -> bettercompute.agent.v1.OsSection
+	10, // 10: bettercompute.agent.v1.NodeInventory.images:type_name -> bettercompute.agent.v1.ImagesSection
+	11, // 11: bettercompute.agent.v1.ImagesSection.images:type_name -> bettercompute.agent.v1.CachedImage
 	0,  // 12: bettercompute.agent.v1.CachedImage.state:type_name -> bettercompute.agent.v1.CachedImageState
-	38, // 13: bettercompute.agent.v1.CachedImage.last_used:type_name -> google.protobuf.Timestamp
+	39, // 13: bettercompute.agent.v1.CachedImage.last_used:type_name -> google.protobuf.Timestamp
 	1,  // 14: bettercompute.agent.v1.SystemSection.boot_mode:type_name -> bettercompute.agent.v1.BootMode
-	12, // 15: bettercompute.agent.v1.SystemSection.tpm:type_name -> bettercompute.agent.v1.Tpm
-	14, // 16: bettercompute.agent.v1.CpuSection.numa_nodes:type_name -> bettercompute.agent.v1.NumaNode
-	16, // 17: bettercompute.agent.v1.NumaNode.hugepages:type_name -> bettercompute.agent.v1.HugepagePool
-	16, // 18: bettercompute.agent.v1.MemorySection.hugepages:type_name -> bettercompute.agent.v1.HugepagePool
-	17, // 19: bettercompute.agent.v1.MemorySection.dimms:type_name -> bettercompute.agent.v1.Dimm
-	18, // 20: bettercompute.agent.v1.MemorySection.edac:type_name -> bettercompute.agent.v1.EdacCounters
-	20, // 21: bettercompute.agent.v1.DisksSection.disks:type_name -> bettercompute.agent.v1.Disk
+	13, // 15: bettercompute.agent.v1.SystemSection.tpm:type_name -> bettercompute.agent.v1.Tpm
+	15, // 16: bettercompute.agent.v1.CpuSection.numa_nodes:type_name -> bettercompute.agent.v1.NumaNode
+	17, // 17: bettercompute.agent.v1.NumaNode.hugepages:type_name -> bettercompute.agent.v1.HugepagePool
+	17, // 18: bettercompute.agent.v1.MemorySection.hugepages:type_name -> bettercompute.agent.v1.HugepagePool
+	18, // 19: bettercompute.agent.v1.MemorySection.dimms:type_name -> bettercompute.agent.v1.Dimm
+	19, // 20: bettercompute.agent.v1.MemorySection.edac:type_name -> bettercompute.agent.v1.EdacCounters
+	21, // 21: bettercompute.agent.v1.DisksSection.disks:type_name -> bettercompute.agent.v1.Disk
 	2,  // 22: bettercompute.agent.v1.Disk.transport:type_name -> bettercompute.agent.v1.DiskTransport
-	21, // 23: bettercompute.agent.v1.Disk.smart:type_name -> bettercompute.agent.v1.SmartStatus
-	23, // 24: bettercompute.agent.v1.NicsSection.nics:type_name -> bettercompute.agent.v1.Nic
+	22, // 23: bettercompute.agent.v1.Disk.smart:type_name -> bettercompute.agent.v1.SmartStatus
+	24, // 24: bettercompute.agent.v1.NicsSection.nics:type_name -> bettercompute.agent.v1.Nic
 	3,  // 25: bettercompute.agent.v1.Nic.rdma:type_name -> bettercompute.agent.v1.RdmaType
 	4,  // 26: bettercompute.agent.v1.Nic.link:type_name -> bettercompute.agent.v1.LinkState
-	25, // 27: bettercompute.agent.v1.GpusSection.gpus:type_name -> bettercompute.agent.v1.Gpu
-	26, // 28: bettercompute.agent.v1.Gpu.mig:type_name -> bettercompute.agent.v1.GpuMig
-	29, // 29: bettercompute.agent.v1.Gpu.nvlinks:type_name -> bettercompute.agent.v1.NvlinkLink
-	30, // 30: bettercompute.agent.v1.Gpu.topology:type_name -> bettercompute.agent.v1.GpuPeerLink
-	31, // 31: bettercompute.agent.v1.Gpu.fabric:type_name -> bettercompute.agent.v1.GpuFabric
-	32, // 32: bettercompute.agent.v1.Gpu.ecc:type_name -> bettercompute.agent.v1.GpuEcc
-	34, // 33: bettercompute.agent.v1.Gpu.row_remap:type_name -> bettercompute.agent.v1.GpuRowRemap
+	26, // 27: bettercompute.agent.v1.GpusSection.gpus:type_name -> bettercompute.agent.v1.Gpu
+	27, // 28: bettercompute.agent.v1.Gpu.mig:type_name -> bettercompute.agent.v1.GpuMig
+	30, // 29: bettercompute.agent.v1.Gpu.nvlinks:type_name -> bettercompute.agent.v1.NvlinkLink
+	31, // 30: bettercompute.agent.v1.Gpu.topology:type_name -> bettercompute.agent.v1.GpuPeerLink
+	32, // 31: bettercompute.agent.v1.Gpu.fabric:type_name -> bettercompute.agent.v1.GpuFabric
+	33, // 32: bettercompute.agent.v1.Gpu.ecc:type_name -> bettercompute.agent.v1.GpuEcc
+	35, // 33: bettercompute.agent.v1.Gpu.row_remap:type_name -> bettercompute.agent.v1.GpuRowRemap
 	5,  // 34: bettercompute.agent.v1.GpuMig.current:type_name -> bettercompute.agent.v1.MigMode
 	5,  // 35: bettercompute.agent.v1.GpuMig.pending:type_name -> bettercompute.agent.v1.MigMode
-	27, // 36: bettercompute.agent.v1.GpuMig.profiles:type_name -> bettercompute.agent.v1.MigProfile
-	28, // 37: bettercompute.agent.v1.GpuMig.instances:type_name -> bettercompute.agent.v1.MigInstance
+	28, // 36: bettercompute.agent.v1.GpuMig.profiles:type_name -> bettercompute.agent.v1.MigProfile
+	29, // 37: bettercompute.agent.v1.GpuMig.instances:type_name -> bettercompute.agent.v1.MigInstance
 	4,  // 38: bettercompute.agent.v1.NvlinkLink.state:type_name -> bettercompute.agent.v1.LinkState
 	6,  // 39: bettercompute.agent.v1.GpuPeerLink.link:type_name -> bettercompute.agent.v1.GpuLinkType
-	33, // 40: bettercompute.agent.v1.GpuEcc.volatile_counts:type_name -> bettercompute.agent.v1.EccCounts
-	33, // 41: bettercompute.agent.v1.GpuEcc.aggregate_counts:type_name -> bettercompute.agent.v1.EccCounts
+	34, // 40: bettercompute.agent.v1.GpuEcc.volatile_counts:type_name -> bettercompute.agent.v1.EccCounts
+	34, // 41: bettercompute.agent.v1.GpuEcc.aggregate_counts:type_name -> bettercompute.agent.v1.EccCounts
 	7,  // 42: bettercompute.agent.v1.OsSection.cgroup:type_name -> bettercompute.agent.v1.CgroupVersion
 	43, // [43:43] is the sub-list for method output_type
 	43, // [43:43] is the sub-list for method input_type
@@ -3254,18 +3374,18 @@ func file_bettercompute_agent_v1_inventory_proto_init() {
 	if File_bettercompute_agent_v1_inventory_proto != nil {
 		return
 	}
-	file_bettercompute_agent_v1_inventory_proto_msgTypes[3].OneofWrappers = []any{}
-	file_bettercompute_agent_v1_inventory_proto_msgTypes[13].OneofWrappers = []any{}
-	file_bettercompute_agent_v1_inventory_proto_msgTypes[15].OneofWrappers = []any{}
-	file_bettercompute_agent_v1_inventory_proto_msgTypes[17].OneofWrappers = []any{}
-	file_bettercompute_agent_v1_inventory_proto_msgTypes[24].OneofWrappers = []any{}
+	file_bettercompute_agent_v1_inventory_proto_msgTypes[4].OneofWrappers = []any{}
+	file_bettercompute_agent_v1_inventory_proto_msgTypes[14].OneofWrappers = []any{}
+	file_bettercompute_agent_v1_inventory_proto_msgTypes[16].OneofWrappers = []any{}
+	file_bettercompute_agent_v1_inventory_proto_msgTypes[18].OneofWrappers = []any{}
+	file_bettercompute_agent_v1_inventory_proto_msgTypes[25].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bettercompute_agent_v1_inventory_proto_rawDesc), len(file_bettercompute_agent_v1_inventory_proto_rawDesc)),
 			NumEnums:      8,
-			NumMessages:   30,
+			NumMessages:   31,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
