@@ -1,4 +1,4 @@
-import { ComputeError, isId, type PoolPolicyValidator } from '@better-compute/core';
+import { ComputeError, isId, parseDuration, type PoolPolicyValidator } from '@better-compute/core';
 import { canonical } from './input.js';
 import {
   acceleratorPattern,
@@ -46,6 +46,10 @@ export interface PoolSubstrate {
   cluster: { create: SubstrateCreate } | { adopt: string };
   flavors: SubstrateFlavor[];
   allowSpot: boolean;
+  /** How a version change of a created cluster reaches its nodes (default `surge`). */
+  upgrades: 'surge' | 'drain';
+  /** With `drain`: upgrade anyway once the drain took this long. */
+  drainTimeoutMs?: number;
 }
 
 /** A provider cluster id to adopt: printable, no whitespace (GKE `projects/…/clusters/…`, a DOKS or EKS id). */
@@ -173,7 +177,15 @@ function checkKubernetesPolicy(raw: unknown): void {
 /** The substrate of a pool policy, checked; undefined when the policy has none. */
 export function parsePoolSubstrate(policy: Readonly<Record<string, unknown>>): PoolSubstrate | undefined {
   if (policy.substrate === undefined) return undefined;
-  const input = record(policy.substrate, '', ['kind', 'account', 'cluster', 'flavors', 'allowSpot']);
+  const input = record(policy.substrate, '', [
+    'kind',
+    'account',
+    'cluster',
+    'flavors',
+    'allowSpot',
+    'upgrades',
+    'drainTimeout',
+  ]);
   if (input.kind !== 'kubernetes') refuse('.kind must be kubernetes');
   if (!isId(input.account, 'pacct')) refuse('.account must be a provider account id (pacct_…)');
   const cluster = clusterOf(input.cluster);
@@ -191,8 +203,29 @@ export function parsePoolSubstrate(policy: Readonly<Record<string, unknown>>): P
   const allowSpot = flag(input.allowSpot, '.allowSpot');
   for (const flavor of flavors)
     if (flavor.spot && !allowSpot) refuse(`.flavors: ${flavor.name} asks for Spot nodes; set allowSpot`);
+  if (input.upgrades !== undefined && input.upgrades !== 'surge' && input.upgrades !== 'drain')
+    refuse('.upgrades must be surge or drain');
+  const upgrades = (input.upgrades as 'surge' | 'drain' | undefined) ?? 'surge';
+  if (upgrades === 'drain' && 'adopt' in cluster)
+    refuse('.upgrades: an adopted cluster is never upgraded by better-compute (only a created one is)');
+  let drainTimeoutMs: number | undefined;
+  if (input.drainTimeout !== undefined) {
+    if (upgrades !== 'drain') refuse(".drainTimeout needs upgrades: 'drain'");
+    if (typeof input.drainTimeout !== 'string') refuse('.drainTimeout must be a duration such as 24h');
+    drainTimeoutMs = at('.drainTimeout', () => parseDuration(input.drainTimeout as string));
+    if (drainTimeoutMs < 60_000 || drainTimeoutMs > 30 * 86_400_000)
+      refuse('.drainTimeout must be from 1m to 30d');
+  }
   checkKubernetesPolicy(policy.kubernetes);
-  return { kind: 'kubernetes', account: input.account as string, cluster, flavors, allowSpot };
+  return {
+    kind: 'kubernetes',
+    account: input.account as string,
+    cluster,
+    flavors,
+    allowSpot,
+    upgrades,
+    ...(drainTimeoutMs !== undefined ? { drainTimeoutMs } : {}),
+  };
 }
 
 /**

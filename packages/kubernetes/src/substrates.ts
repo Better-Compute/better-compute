@@ -165,12 +165,15 @@ export interface SubstrateRow {
   nodes_listed: number | null;
   nodes_joined: number | null;
   pool_version: string | number | null;
+  /** `upgrades: 'drain'`: the version being drained for (or pushed after a drain, until the cluster runs it). */
+  upgrade_version: string | null;
+  upgrade_since: Date | string | null;
   version: string | number;
 }
 
 const substrateColumns = `pool_id, tenant_id, provider_account_id, mode, adopt_id, identity, cluster_id, create_spec,
   state, desired_state, message, join_token_id, token_applied, manifests_sha256, applied_at, nodes_listed,
-  nodes_joined, pool_version, version`;
+  nodes_joined, pool_version, upgrade_version, upgrade_since, version`;
 
 interface PoolRow {
   id: string;
@@ -567,24 +570,124 @@ async function syncFlavors(
   return problems;
 }
 
-/** Pushes a changed release channel, version or authorized networks to the created cluster (an upgrade). */
+/** The NoSchedule reason on a pool's nodes while an `upgrades: 'drain'` upgrade drains them (until it is done). */
+export const substrateUpgradeReason = 'substrate-upgrade';
+/** How often a drain before an upgrade looks again for the bookings it waits on. */
+export const substrateUpgradeRecheckMs = 60_000;
+
+/** Bookings on the pool's nodes that have not ended. */
+async function liveBookings(sql: Pick<SqlTx, 'query'>, poolId: string): Promise<number> {
+  const { rows } = await sql.query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM allocations a JOIN nodes n ON n.id = a.node_id
+      WHERE n.pool_id = $1 AND a.released_at IS NULL
+        AND (upper_inf(a.during) OR upper(a.during) > compute_now())`,
+    [poolId],
+  );
+  return Number(rows[0]?.count ?? 0);
+}
+
+/** Whether a cluster runs `version` (`1.34` runs as `1.34.2-gke.1100`). */
+function runsVersion(actual: string | null, version: string): boolean {
+  if (actual === null) return false;
+  return actual === version || actual.startsWith(`${version}.`) || actual.startsWith(`${version}-`);
+}
+
+/**
+ * Pushes a changed release channel, version or authorized networks to the created cluster (an upgrade). With
+ * `upgrades: 'drain'`, a version bump waits: the pool's nodes go NoSchedule `substrate-upgrade` (no new bookings),
+ * and the version is pushed once their bookings ended, or once the drain took `drainTimeout`; the other settings
+ * are pushed at once meanwhile. Returns what was pushed, and the drain still waiting.
+ */
 async function syncCreateSpec(
   deps: SubstrateDeps,
   tx: SqlTx,
   row: SubstrateRow,
+  substrate: PoolSubstrate,
   create: SubstrateCreate,
-): Promise<Record<string, Json> | undefined> {
+): Promise<{ pushed?: Record<string, Json>; drain?: { version: string; bookings: number } }> {
   const wanted = createSpecOf(create);
   const pushed = row.create_spec === null ? null : json(row.create_spec);
-  if (pushed !== null && canonical(pushed) === canonical(wanted)) return undefined;
+  if (pushed !== null && canonical(pushed) === canonical(wanted)) return {};
+  let target = wanted;
+  let drain: { version: string; bookings: number } | undefined;
+  const bump =
+    substrate.upgrades === 'drain' &&
+    create.version !== undefined &&
+    pushed !== null &&
+    pushed.version !== create.version;
+  if (bump) {
+    const version = create.version!;
+    let since =
+      row.upgrade_version === version && row.upgrade_since !== null ? new Date(row.upgrade_since).getTime() : undefined;
+    await tx.query(
+      `UPDATE nodes SET no_schedule_reasons = array_append(no_schedule_reasons, $2), version = version + 1
+        WHERE pool_id = $1 AND provision_state NOT IN ('retiring', 'retired') AND NOT ($2 = ANY(no_schedule_reasons))`,
+      [row.pool_id, substrateUpgradeReason],
+    );
+    const bookings = await liveBookings(tx, row.pool_id);
+    if (since === undefined) {
+      since = deps.clock.now();
+      await tx.query(
+        `UPDATE kubernetes_pool_substrates SET upgrade_version = $2, upgrade_since = compute_now(),
+                version = version + 1 WHERE pool_id = $1`,
+        [row.pool_id, version],
+      );
+      await publishSubstrate(deps, tx, row, 'kubernetes.substrate.draining', { version, bookings });
+    }
+    const timedOut = substrate.drainTimeoutMs !== undefined && deps.clock.now() - since >= substrate.drainTimeoutMs;
+    if (bookings > 0 && !timedOut) {
+      // Hold the version; push the rest.
+      target = { ...wanted };
+      delete target.version;
+      if (pushed.version !== undefined) target.version = pushed.version;
+      drain = { version, bookings };
+    } else
+      await publishSubstrate(deps, tx, row, 'kubernetes.substrate.upgrading', { version, drained: bookings === 0 });
+  }
+  if (pushed !== null && canonical(pushed) === canonical(target)) return { ...(drain ? { drain } : {}) };
   await tx.query(
     `UPDATE kubernetes_clusters
         SET requested_version = $2, release_channel = $3, authorized_networks = $4::jsonb
       WHERE id = $1 AND desired_state = 'present'`,
-    [row.cluster_id, create.version ?? null, create.releaseChannel, JSON.stringify(create.authorizedNetworks)],
+    [
+      row.cluster_id,
+      typeof target.version === 'string' ? target.version : null,
+      target.releaseChannel,
+      JSON.stringify(target.authorizedNetworks),
+    ],
   );
   await reopen(deps, tx, row.cluster_id!);
-  return wanted;
+  return { pushed: target, ...(drain ? { drain } : {}) };
+}
+
+/**
+ * Lifts a drain's `substrate-upgrade` once the cluster runs the version it drained for, or once that version is no
+ * longer the one wanted (the policy changed back, or `upgrades` is `surge` again).
+ */
+async function finishUpgrade(
+  tx: SqlTx,
+  row: SubstrateRow,
+  wantedVersion: string | undefined,
+  cluster: ClusterRow | undefined,
+): Promise<void> {
+  if (row.upgrade_version === null) return;
+  const done =
+    wantedVersion !== row.upgrade_version ||
+    (cluster !== undefined && cluster.state === 'ready' && runsVersion(cluster.kubernetes_version, row.upgrade_version));
+  if (!done) return;
+  await tx.query(
+    `UPDATE nodes SET no_schedule_reasons = array_remove(no_schedule_reasons, $2), version = version + 1
+      WHERE pool_id = $1 AND $2 = ANY(no_schedule_reasons)`,
+    [row.pool_id, substrateUpgradeReason],
+  );
+  await tx.query(
+    `UPDATE kubernetes_pool_substrates SET upgrade_version = NULL, upgrade_since = NULL, version = version + 1
+      WHERE pool_id = $1`,
+    [row.pool_id],
+  );
+  row.upgrade_version = null;
+  row.upgrade_since = null;
+  row.version = Number(row.version) + 1;
 }
 
 // --- the reconcile step -------------------------------------------------------------------------------------------
@@ -594,6 +697,8 @@ interface Plan {
   pool: PoolRow;
   substrate: PoolSubstrate;
   cluster?: ClusterRow;
+  /** An `upgrades: 'drain'` version bump still waiting for bookings to end. */
+  drain?: { version: string; bookings: number };
 }
 
 /** Writes the substrate's state (guarded by the version decided on) and publishes the transitions. */
@@ -666,6 +771,7 @@ async function prepare(
     let row = await readSubstrate(tx, poolId, { lock: true });
     let substrate: PoolSubstrate | undefined;
     let parseError: string | undefined;
+    let drain: Plan['drain'];
     if (pool) {
       try {
         substrate = parsePoolSubstrate(json(pool.policy));
@@ -701,7 +807,8 @@ async function prepare(
               SET tenant_id = $2, provider_account_id = $3, mode = $4, adopt_id = $5, identity = $6, cluster_id = NULL,
                   create_spec = NULL, state = 'pending', desired_state = 'present', message = NULL,
                   join_token_id = NULL, token_applied = false, manifests_sha256 = NULL, applied_at = NULL,
-                  nodes_listed = NULL, nodes_joined = NULL, deleted_at = NULL, updated_at = compute_now(),
+                  nodes_listed = NULL, nodes_joined = NULL, upgrade_version = NULL, upgrade_since = NULL,
+                  deleted_at = NULL, updated_at = compute_now(),
                   version = version + 1
             WHERE pool_id = $1`,
           [poolId, pool!.owner_tenant_id, substrate.account, fresh.mode, fresh.adopt, identity],
@@ -757,11 +864,12 @@ async function prepare(
     } else {
       const problems = await syncFlavors(deps, tx, row, substrate);
       if ('create' in substrate.cluster) {
-        const pushed = await syncCreateSpec(deps, tx, row, substrate.cluster.create);
-        if (pushed)
+        const synced = await syncCreateSpec(deps, tx, row, substrate, substrate.cluster.create);
+        drain = synced.drain;
+        if (synced.pushed)
           await tx.query(
             `UPDATE kubernetes_pool_substrates SET create_spec = $2::jsonb, version = version + 1 WHERE pool_id = $1`,
-            [poolId, JSON.stringify(pushed)],
+            [poolId, JSON.stringify(synced.pushed)],
           );
       }
       if (problems.length > 0) {
@@ -789,7 +897,16 @@ async function prepare(
       `SELECT ${clusterColumns} FROM kubernetes_clusters WHERE id = $1`,
       [row.cluster_id],
     );
-    return { plan: { row, pool: pool!, substrate, ...(clusters[0] ? { cluster: clusters[0] } : {}) } };
+    if (!drain)
+      await finishUpgrade(
+        tx,
+        row,
+        'create' in substrate.cluster && substrate.upgrades === 'drain' ? substrate.cluster.create.version : undefined,
+        clusters[0],
+      );
+    return {
+      plan: { row, pool: pool!, substrate, ...(clusters[0] ? { cluster: clusters[0] } : {}), ...(drain ? { drain } : {}) },
+    };
   });
 }
 
@@ -1096,9 +1213,12 @@ async function applyBcd(
       });
     });
   }
+  const drain = plan.drain;
   const written = await setState(deps, sql, row, {
-    state: 'ready',
-    message: null,
+    state: drain ? 'updating' : 'ready',
+    message: drain
+      ? `Draining before the upgrade to ${drain.version}: waiting for ${drain.bookings} booking(s) on the pool's nodes to end (no new bookings meanwhile)`
+      : null,
     fields: {
       ...(due ? { applied: true, manifests_sha256: hash } : {}),
       nodes_listed: nodes.length,
@@ -1108,9 +1228,12 @@ async function applyBcd(
     },
   });
   if (!written) return deps.clock.now();
-  // Nodes still joining, or the cluster still converging (a resize, an upgrade): look again soon. Otherwise the
+  // Nodes still joining, or the cluster still converging (a resize, an upgrade): look again soon. A drain looks
+  // again for its bookings now and then; a drained upgrade until the cluster runs the version. Otherwise the
   // periodic refresh comes back.
-  return gap > 0 || cluster.state !== 'ready' ? deps.clock.now() + substratePollMs : undefined;
+  if (gap > 0 || cluster.state !== 'ready') return deps.clock.now() + substratePollMs;
+  if (drain) return deps.clock.now() + substrateUpgradeRecheckMs;
+  return row.upgrade_version !== null ? deps.clock.now() + substratePollMs : undefined;
 }
 
 /** The NoSchedule reason on a pool's nodes once its substrate is being torn down. */
@@ -1163,13 +1286,7 @@ async function teardown(
     row = marked;
   }
   // Drain semantics: wait for the bookings on the pool's nodes to end.
-  const { rows: live } = await sql.query<{ count: string }>(
-    `SELECT count(*)::text AS count FROM allocations a JOIN nodes n ON n.id = a.node_id
-      WHERE n.pool_id = $1 AND a.released_at IS NULL
-        AND (upper_inf(a.during) OR upper(a.during) > compute_now())`,
-    [row.pool_id],
-  );
-  const bookings = Number(live[0]?.count ?? 0);
+  const bookings = await liveBookings(sql, row.pool_id);
   if (bookings > 0) {
     const message = `Waiting for ${bookings} booking(s) on the pool's nodes to end before the cluster is torn down`;
     if (row.message !== message) await setState(deps, sql, row, { state: 'deleting', message });

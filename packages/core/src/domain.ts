@@ -229,6 +229,14 @@ export interface KubernetesPoolSubstrate {
   flavors?: KubernetesSubstrateFlavor[];
   /** Lets flavors ask for Spot nodes (default false). */
   allowSpot?: boolean;
+  /**
+   * How a `version` change of a created cluster reaches its nodes. `surge` (default): at once; the provider replaces
+   * the Nodes and the bookings on a replaced Node end. `drain`: the pool's nodes first take no new bookings, and the
+   * version is pushed once they hold none (or after `drainTimeout`).
+   */
+  upgrades?: 'surge' | 'drain';
+  /** With `upgrades: 'drain'`: upgrade anyway once the drain took this long (e.g. `24h`); absent, wait. */
+  drainTimeout?: Duration;
 }
 
 /** A scheduling and policy domain in one site, with exactly one GPU model. */

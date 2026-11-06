@@ -40,6 +40,7 @@ describe('parsePoolSubstrate', () => {
       },
       flavors: [{ name: 'gpu', machineType: 'g2-standard-8', nodes: 2, gpus: { type: 'nvidia-l4', count: 1 }, spot: false }],
       allowSpot: false,
+      upgrades: 'surge',
     });
     expect(parsePoolSubstrate({})).toBeUndefined();
   });

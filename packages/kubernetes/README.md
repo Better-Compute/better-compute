@@ -122,6 +122,8 @@ await compute.api.pools.create(credential, {
         { name: 'gpu-spot', machineType: 'g2-standard-8', nodes: 4, gpus: { type: 'nvidia-l4', count: 1 }, spot: true },
       ],
       allowSpot: true,
+      upgrades: 'drain', // version bumps wait for the pool's bookings to end
+      drainTimeout: '24h',
     },
   },
   idempotencyKey: 'l4-pool',
@@ -142,6 +144,13 @@ await compute.api.pools.create(credential, {
   Secret exist only while nodes are still to join; then the token is revoked and the Secret deleted. A Node
   replaced by an upgrade, a scale-down or a Spot reclaim gets a new one. Compute books the nodes' GPUs like any
   `binding: 'kubernetes'` pool's.
+- **Upgrades.** By default (`upgrades: 'surge'`) a `version` change reaches the provider at once: its surge upgrade
+  replaces the Nodes, and the bookings on a replaced Node end as below. With `upgrades: 'drain'` the pool's nodes
+  first go NoSchedule `substrate-upgrade` (no new bookings; running ones keep going), and the version is pushed
+  once their bookings ended, or once the drain took `drainTimeout` (e.g. `24h`; absent, it waits). Other settings
+  (`releaseChannel`, `authorizedNetworks`) are pushed at once. The reason goes once the cluster runs the version.
+  Events `draining { version, bookings }` and `upgrading { version, drained }`. The provider, not better-compute,
+  picks which Node it replaces next, so `disruptionBudget` does not apply.
 - **Removed Nodes.** A pool node maps to its Kubernetes Node by the OS hostname bcd reports. One that is not
   connected and whose Node is gone from the cluster's full Node list (a scale-down, a Spot reclaim, a repair) gets
   NoSchedule `substrate-node-removed`, and its reservations end through capacity's `endNodeReservations`: bound ones
@@ -156,7 +165,7 @@ await compute.api.pools.create(credential, {
 - **Doctor.** `selfCheck` reports `kubernetes.substrate-agent-missing` (pools declare `policy.substrate` but
   `kubernetes({ substrate })` is not configured) and `kubernetes.substrate-error` (substrates in error, by pool).
 - **Events** `kubernetes.substrate.*` (`created`, `ready`, `error`, `token-issued`, `token-revoked`, `node-removed`,
-  `deleting`, `deleted`), subject `pool/{id}`. Migration `kubernetes/0002_substrates`. Adopted clusters bill no
+  `draining`, `upgrading`, `deleting`, `deleted`), subject `pool/{id}`. Migration `kubernetes/0002_substrates`. Adopted clusters bill no
   `kubernetes.cluster.hours`.
 
 ## License

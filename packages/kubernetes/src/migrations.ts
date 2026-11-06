@@ -155,6 +155,10 @@ CREATE TABLE kubernetes_pool_substrates (
   -- Nodes of the substrate's node pools the cluster last listed, and of them the ones whose bcd joined the pool.
   nodes_listed integer,
   nodes_joined integer,
+  -- upgrades: 'drain': the version being drained for, and since when (the pool's nodes are NoSchedule
+  -- substrate-upgrade until the cluster is ready on it).
+  upgrade_version text,
+  upgrade_since timestamptz,
   created_at timestamptz NOT NULL DEFAULT compute_now(),
   updated_at timestamptz NOT NULL DEFAULT compute_now(),
   deleted_at timestamptz,
