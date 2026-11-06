@@ -79,6 +79,12 @@ export const awsConfig = manifest({
     .describe(
       'Read the EC2 vCPU quotas (Service Quotas) so offers carry their headroom as a machine count',
     ),
+  pricing: field
+    .option(['off', 'on-demand', 'all'])
+    .default('off')
+    .describe(
+      'Offer prices: on-demand from the AWS Price List (cached a day), all adds Spot prices (cached 10 minutes)',
+    ),
 });
 
 /** The validated account configuration. */
@@ -100,6 +106,8 @@ export interface AwsConfig {
   spot: boolean;
   /** (A3) Cap offers at the EC2 vCPU quota headroom. */
   quotas: boolean;
+  /** (A3) Which offer prices to read. */
+  pricing: 'off' | 'on-demand' | 'all';
 }
 
 export interface AwsProviderOptions {

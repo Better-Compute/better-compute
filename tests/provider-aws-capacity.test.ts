@@ -11,7 +11,11 @@ import {
 } from '@better-compute/provider-aws';
 import { AwsEmulator } from './support/aws-emulator/index.js';
 import { Ec2Emulator } from './support/aws-emulator/ec2.js';
-import { CapacityEmulator, ServiceQuotasEmulator } from './support/aws-emulator/capacity.js';
+import {
+  CapacityEmulator,
+  PricingEmulator,
+  ServiceQuotasEmulator,
+} from './support/aws-emulator/capacity.js';
 
 // AWS A3, capacity markets: On-Demand Capacity Reservations and Capacity Blocks as
 // ExternalReservations and reservation offers, launches into them, Spot, quota headroom and
@@ -25,6 +29,7 @@ function world(overrides: Partial<AwsConfig> = {}, logs: unknown[][] = []) {
   const ec2emu = new Ec2Emulator(emu);
   const capacity = new CapacityEmulator(emu, ec2emu);
   const quotas = new ServiceQuotasEmulator(emu);
+  const pricing = new PricingEmulator(emu);
   const config = {
     ...(awsConfig.parse({ region: 'us-east-1', zones: ['us-east-1a', 'us-east-1b'] }) as AwsConfig),
     ...overrides,
@@ -59,6 +64,15 @@ function world(overrides: Partial<AwsConfig> = {}, logs: unknown[][] = []) {
       jsonVersion: '1.1',
       targetPrefix: 'ServiceQuotasV20190624',
     }),
+    pricing: jsonClient({
+      service: 'pricing',
+      region: config.region,
+      credentials: account.source,
+      fetch: emu.fetch,
+      clock: emu.clock,
+      jsonVersion: '1.1',
+      targetPrefix: 'AWSPriceListService',
+    }),
     account,
     types: instanceTypeCache(ec2, { clock: emu.clock }),
     zones: zoneCache(ec2, { clock: emu.clock }),
@@ -70,7 +84,7 @@ function world(overrides: Partial<AwsConfig> = {}, logs: unknown[][] = []) {
     secrets: context.secrets,
     log,
   });
-  return { emu, ec2emu, capacity, quotas, compute, config, call, logs };
+  return { emu, ec2emu, capacity, quotas, pricing, compute, config, call, logs };
 }
 
 describe('capacity reservations', () => {
@@ -433,5 +447,80 @@ describe('quota errors', () => {
     expect(offers.find((offer) => offer.id === 'us-east-1a/m7i.large')?.count).toBe(5);
     expect(offers.find((offer) => offer.id === 'us-east-1a/g6.xlarge')?.count).toBeUndefined();
     expect(logs.filter(([level]) => level === 'warn')).toEqual([]);
+  });
+});
+
+describe('pricing', () => {
+  const priced = async (w: ReturnType<typeof world>) =>
+    new Map(
+      (await w.compute.listOffers({})).map((offer) => [
+        offer.id,
+        offer.pricePerHour === undefined ? undefined : [offer.pricePerHour, offer.currency],
+      ]),
+    );
+
+  it('is off by default', async () => {
+    const w = world({ spot: true });
+    const prices = await priced(w);
+    expect([...prices.values()].every((price) => price === undefined)).toBe(true);
+    expect(w.emu.calls('GetProducts')).toHaveLength(0);
+    expect(w.emu.calls('DescribeSpotPriceHistory')).toHaveLength(0);
+  });
+
+  it('on-demand prices come from the Price List, cached for a day', async () => {
+    const w = world({ spot: true, pricing: 'on-demand' });
+    const prices = await priced(w);
+    expect(prices.get('us-east-1a/m7i.large')).toEqual([0.1008, 'USD']);
+    expect(prices.get('us-east-1b/g6.xlarge')).toEqual([0.8048, 'USD']);
+    // Spot prices only with pricing: all.
+    expect(prices.get('us-east-1a/t3.micro:spot')).toBeUndefined();
+    // A type the Price List does not know stays unpriced.
+    expect(prices.get('us-east-1a/c7i.metal-24xl')).toBeUndefined();
+    const filters = JSON.parse(w.emu.calls('GetProducts')[0]!.body).Filters;
+    expect(filters).toEqual(
+      expect.arrayContaining([
+        { Type: 'TERM_MATCH', Field: 'regionCode', Value: 'us-east-1' },
+        { Type: 'TERM_MATCH', Field: 'operatingSystem', Value: 'Linux' },
+        { Type: 'TERM_MATCH', Field: 'tenancy', Value: 'Shared' },
+        { Type: 'TERM_MATCH', Field: 'preInstalledSw', Value: 'NA' },
+        { Type: 'TERM_MATCH', Field: 'capacitystatus', Value: 'Used' },
+      ]),
+    );
+    // Paged (page size 2), then cached.
+    const pages = w.emu.calls('GetProducts').length;
+    expect(pages).toBeGreaterThan(1);
+    await priced(w);
+    expect(w.emu.calls('GetProducts')).toHaveLength(pages);
+    w.emu.clock.advance(25 * HOUR);
+    await priced(w);
+    expect(w.emu.calls('GetProducts').length).toBeGreaterThan(pages);
+  });
+
+  it('spot prices are the latest per zone and type', async () => {
+    const w = world({ spot: true, pricing: 'all' });
+    const prices = await priced(w);
+    expect(prices.get('us-east-1a/t3.micro:spot')).toEqual([0.0035, 'USD']);
+    expect(prices.get('us-east-1b/t3.micro:spot')).toEqual([0.0037, 'USD']);
+    expect(prices.get('us-east-1a/g6.xlarge:spot')).toEqual([0.3121, 'USD']);
+    expect(prices.get('us-east-1b/g6.xlarge:spot')).toBeUndefined();
+    expect(prices.get('us-east-1a/t3.micro')).toEqual([0.0104, 'USD']);
+    const history = w.emu.calls('DescribeSpotPriceHistory')[0]!.params;
+    expect(history.get('ProductDescription.1')).toBe('Linux/UNIX');
+    expect(history.get('StartTime')).toBe(new Date(w.emu.now()).toISOString());
+  });
+
+  it('pricing failure leaves price unset', async () => {
+    const logs: unknown[][] = [];
+    const w = world({ spot: true, pricing: 'all' }, logs);
+    w.emu.failNext('GetProducts', 'ThrottlingException', 400);
+    w.emu.failNext('DescribeSpotPriceHistory', 'RequestLimitExceeded', 503);
+    const offers = await w.compute.listOffers({});
+    expect(offers.length).toBeGreaterThan(0);
+    expect(offers.every((offer) => offer.pricePerHour === undefined)).toBe(true);
+    expect(logs.filter(([level]) => level === 'warn').length).toBeGreaterThan(0);
+    // A failure is retried after a short while, not a day.
+    w.emu.clock.advance(11 * 60_000);
+    const later = await w.compute.listOffers({});
+    expect(later.find((offer) => offer.id === 'us-east-1a/m7i.large')?.pricePerHour).toBe(0.1008);
   });
 });

@@ -48,8 +48,14 @@ const live = (instance: EmuInstance) =>
 
 export class CapacityEmulator {
   readonly reservations = new Map<string, EmuReservation>();
-  /** Page size cap for DescribeCapacityReservations. */
+  /** Page size cap for DescribeCapacityReservations and DescribeSpotPriceHistory. */
   pageSize = 2;
+  /** `<zone>/<type>` → the current Linux/UNIX Spot price in USD per hour. */
+  readonly spotPrices = new Map<string, number>([
+    ['us-east-1a/t3.micro', 0.0035],
+    ['us-east-1b/t3.micro', 0.0037],
+    ['us-east-1a/g6.xlarge', 0.3121],
+  ]);
   #next = 0;
 
   constructor(
@@ -57,6 +63,7 @@ export class CapacityEmulator {
     private readonly ec2: Ec2Emulator,
   ) {
     ec2.extra.set('DescribeCapacityReservations', (request) => this.#describe(request));
+    ec2.extra.set('DescribeSpotPriceHistory', (request) => this.#spotPrices(request));
     ec2.runHooks.push({
       check: (params) => this.#check(params),
       launched: (instance, params) => this.#launched(instance, params),
@@ -148,6 +155,43 @@ export class CapacityEmulator {
       items(
         'capacityReservationSet',
         page.map((r) => this.#xml(r)),
+      ) + el('nextToken', next),
+    );
+  }
+
+  #spotPrices(request: EmulatorRequest): Response {
+    const p = request.params;
+    const products = listOf(p, 'ProductDescription');
+    const types = listOf(p, 'InstanceType');
+    const zones = filtersOf(p).get('availability-zone');
+    if (!p.get('StartTime')) return ec2Error('MissingParameter', 'StartTime (latest prices only)');
+    const all = [...this.spotPrices].filter(([key]) => {
+      const [zone, type] = key.split('/');
+      return (
+        (products.length === 0 || products.includes('Linux/UNIX')) &&
+        (types.length === 0 || types.includes(type!)) &&
+        (!zones || zones.includes(zone!))
+      );
+    });
+    const start = Number(p.get('NextToken')?.replace(/^tok-/, '') ?? '0');
+    const max = Math.min(Number(p.get('MaxResults') ?? Infinity), this.pageSize);
+    const page = all.slice(start, start + max);
+    const next = start + max < all.length ? `tok-${start + max}` : undefined;
+    const at = new Date(this.emu.now() - 3_600_000).toISOString();
+    return ec2Response(
+      'DescribeSpotPriceHistory',
+      items(
+        'spotPriceHistorySet',
+        page.map(([key, price]) => {
+          const [zone, type] = key.split('/');
+          return [
+            el('instanceType', type),
+            el('productDescription', 'Linux/UNIX'),
+            el('spotPrice', price.toFixed(6)),
+            el('timestamp', at),
+            el('availabilityZone', zone),
+          ].join('');
+        }),
       ) + el('nextToken', next),
     );
   }
@@ -263,5 +307,104 @@ export class ServiceQuotasEmulator {
         Adjustable: true,
       },
     });
+  }
+}
+
+/**
+ * The Price List Query API (JSON 1.1, `AWSPriceListService`): GetProducts for AmazonEC2, paged,
+ * answering only the Linux / Shared / no-software / Used filter set provider-aws sends.
+ */
+export class PricingEmulator {
+  /** Instance type → on-demand USD per hour, for us-east-1. */
+  readonly prices = new Map<string, number>([
+    ['t3.micro', 0.0104],
+    ['m7i.large', 0.1008],
+    ['g6.xlarge', 0.8048],
+    ['p5.48xlarge', 98.32],
+    ['m7g.large', 0.0816],
+  ]);
+  pageSize = 2;
+
+  constructor(emu: AwsEmulator) {
+    emu.register(/^api\.pricing\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$/, {
+      service: 'pricing',
+      protocol: 'json',
+      handle: (request) => this.#handle(request),
+    });
+  }
+
+  #handle(request: EmulatorRequest): Response {
+    if (request.headers.get('x-amz-target')?.split('.')[0] !== 'AWSPriceListService')
+      return jsonError('UnknownOperationException', 'wrong target prefix');
+    if (request.operation !== 'GetProducts')
+      return jsonError('UnknownOperationException', request.operation);
+    const body = JSON.parse(request.body || '{}') as {
+      ServiceCode?: string;
+      Filters?: { Type: string; Field: string; Value: string }[];
+      MaxResults?: number;
+      NextToken?: string;
+    };
+    if (body.ServiceCode !== 'AmazonEC2') return jsonError('InvalidParameterException', 'service');
+    const filters = new Map((body.Filters ?? []).map((f) => [f.Field, f.Value]));
+    const wanted: Record<string, string> = {
+      regionCode: 'us-east-1',
+      operatingSystem: 'Linux',
+      tenancy: 'Shared',
+      preInstalledSw: 'NA',
+      capacitystatus: 'Used',
+    };
+    let all = [...this.prices];
+    for (const [field, value] of Object.entries(wanted)) if (filters.get(field) !== value) all = [];
+    const type = filters.get('instanceType');
+    if (type) all = all.filter(([name]) => name === type);
+    const start = Number(body.NextToken?.replace(/^p-/, '') ?? '0');
+    const max = Math.min(body.MaxResults ?? 100, this.pageSize);
+    const page = all.slice(start, start + max);
+    const next = start + max < all.length ? `p-${start + max}` : undefined;
+    const product = ([name, usd]: [string, number], index: number) => {
+      const sku = `SKU${String(start + index).padStart(6, '0')}`;
+      return JSON.stringify({
+        product: {
+          productFamily: 'Compute Instance',
+          attributes: {
+            instanceType: name,
+            regionCode: 'us-east-1',
+            operatingSystem: 'Linux',
+            tenancy: 'Shared',
+            preInstalledSw: 'NA',
+            capacitystatus: 'Used',
+            marketoption: 'OnDemand',
+          },
+          sku,
+        },
+        serviceCode: 'AmazonEC2',
+        terms: {
+          OnDemand: {
+            [`${sku}.JRTCKXETXF`]: {
+              priceDimensions: {
+                [`${sku}.JRTCKXETXF.6YS6EN2CT7`]: {
+                  unit: 'Hrs',
+                  pricePerUnit: { USD: usd.toFixed(10) },
+                  description: `On Demand Linux ${name} Instance Hour`,
+                },
+              },
+              sku,
+              offerTermCode: 'JRTCKXETXF',
+            },
+          },
+        },
+      });
+    };
+    return new Response(
+      JSON.stringify({
+        FormatVersion: 'aws_v1',
+        PriceList: page.map(product),
+        ...(next ? { NextToken: next } : {}),
+      }),
+      {
+        status: 200,
+        headers: { 'content-type': 'application/x-amz-json-1.1', 'x-amzn-requestid': requestId() },
+      },
+    );
   }
 }

@@ -35,11 +35,14 @@ import {
   type CapacityReservationInfo,
 } from './markets/reservations.js';
 import { quotaClassOf, quotaReader, type QuotaReader } from './markets/quotas.js';
+import { priceReader, type PriceReader } from './markets/pricing.js';
 
 export interface AwsComputeDeps {
   ec2: QueryClient;
   /** (A3) Service Quotas (JSON 1.1); absent: offers carry no quota headroom. */
   quotas?: JsonClient;
+  /** (A3) The Price List Query API (JSON 1.1); absent: offers carry no on-demand price. */
+  pricing?: JsonClient;
   account: AccountCredentials;
   types: InstanceTypeCache;
   zones: ZoneCache;
@@ -153,6 +156,7 @@ export class AwsCompute implements ProviderImpl {
   readonly #warned = new Set<string>();
   readonly #ssmPrefixes: readonly string[];
   readonly #quotas: QuotaReader | undefined;
+  readonly #prices: PriceReader;
 
   constructor(
     readonly config: AwsConfig,
@@ -170,6 +174,16 @@ export class AwsCompute implements ProviderImpl {
             onError: (error) => this.warnOnce('EC2 vCPU quotas', error),
           })
         : undefined;
+    this.#prices = priceReader({
+      mode: config.pricing,
+      region: config.region,
+      zones: config.zones,
+      clock: context.clock,
+      ...(deps.pricing ? { pricing: deps.pricing } : {}),
+      ec2: deps.ec2,
+      ready: (signal) => this.ready(signal),
+      onError: (topic, error) => this.warnOnce(topic, error),
+    });
   }
 
   /** How long EC2 may not yet show what this client just launched or tagged. */
@@ -290,8 +304,28 @@ export class AwsCompute implements ProviderImpl {
         });
     }
     await this.#applyQuotas(offers, signal);
+    await this.#applyPrices(offers, signal);
     offers.push(...(await this.#reservationOffers(query, signal)));
     return offers;
+  }
+
+  // --- Capacity markets (A3): prices -------------------------------------------------------------
+
+  /** On-demand prices by type and Spot prices by zone and type; unknown prices stay unset. */
+  async #applyPrices(offers: Offer[], signal: AbortSignal): Promise<void> {
+    if (this.config.pricing === 'off' || offers.length === 0) return;
+    const onDemand = await this.#prices.onDemand(signal);
+    const spot = offers.some((offer) => offer.market === 'spot')
+      ? await this.#prices.spot(signal)
+      : new Map();
+    for (const offer of offers) {
+      const { zone, instanceType } = parseOfferId(offer.id);
+      const price =
+        offer.market === 'spot' ? spot.get(`${zone}/${instanceType}`) : onDemand.get(instanceType);
+      if (!price) continue;
+      offer.pricePerHour = price.pricePerHour;
+      offer.currency = price.currency;
+    }
   }
 
   // --- Capacity markets (A3): quotas -------------------------------------------------------------

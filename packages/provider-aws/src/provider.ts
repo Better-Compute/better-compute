@@ -43,9 +43,27 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
           : {}),
         ...(options.rateLimit ? { rateLimit: options.rateLimit } : {}),
       });
+      const pricing =
+        config.pricing === 'off'
+          ? undefined
+          : jsonClient({
+              service: 'pricing',
+              region: config.region,
+              credentials: account.source,
+              fetch: options.fetch,
+              clock: context.clock,
+              log: context.log,
+              jsonVersion: '1.1',
+              targetPrefix: 'AWSPriceListService',
+              ...(options.endpoints?.pricing !== undefined
+                ? { endpoint: options.endpoints.pricing }
+                : {}),
+              ...(options.rateLimit ? { rateLimit: options.rateLimit } : {}),
+            });
       return new AwsCompute(config, context, options, {
         ec2,
         quotas,
+        ...(pricing ? { pricing } : {}),
         account,
         types: instanceTypeCache(ec2, { clock: context.clock }),
         zones: zoneCache(ec2, { clock: context.clock }),
