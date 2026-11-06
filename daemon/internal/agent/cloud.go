@@ -32,7 +32,9 @@ type Interruption struct {
 
 // InterruptionCondition is the node condition of a pending interruption, true while the notice
 // stands: reason "<action>:<RFC 3339 deadline>". The control plane makes the node NoSchedule
-// (gateway daemonNodeConditions) and drains what it can before the deadline.
+// (gateway daemonNodeConditions) and records a changed notice; that is all. Draining the node's
+// reservations is AWS program A4's interruption-warning path (taint aws.spot/interruption), not this
+// condition.
 const InterruptionCondition = "SpotInterruption"
 
 // cloudSectionName is the inventory section the cloud instance is reported in.

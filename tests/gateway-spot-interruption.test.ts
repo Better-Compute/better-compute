@@ -29,8 +29,40 @@ const status = (generation: number, interruption?: string) =>
   });
 
 describe('SpotInterruption', () => {
-  it('is a NoSchedule daemon condition', () => {
-    expect(daemonNodeConditions.SpotInterruption).toEqual({ noSchedule: true });
+  it('is a NoSchedule daemon condition whose reason carries data', () => {
+    expect(daemonNodeConditions.SpotInterruption).toEqual({ noSchedule: true, reasonCarriesData: true });
+  });
+
+  it('records a changed notice while it stays true (new action or deadline)', async () => {
+    f = await gatewayFixture({ reports: { status: xidStatusHandler } });
+    const node = await f.addNode();
+    const { handle } = await f.connect(node);
+    const reason = async () =>
+      (
+        await f.db.query<{ status: string; reason: string | null }>(
+          `SELECT status, reason FROM node_conditions WHERE node_id = $1 AND type = 'SpotInterruption'`,
+          [node],
+        )
+      ).rows;
+
+    await handle.receive(status(1, 'stop:2026-11-05T10:02:00Z'));
+    await f.gateway.jobs.status.tick();
+    await handle.receive(status(2, 'terminate:2026-11-05T10:04:00Z'));
+    await f.gateway.jobs.status.tick();
+    expect(await reason()).toEqual([{ status: 'true', reason: 'terminate:2026-11-05T10:04:00Z' }]);
+    const events = await f.outbox('node.condition.changed');
+    expect(events.map((event) => (event as { payload: { data: { reason: string } } }).payload.data.reason)).toEqual([
+      'stop:2026-11-05T10:02:00Z',
+      'terminate:2026-11-05T10:04:00Z',
+    ]);
+
+    // The same notice again changes nothing and publishes nothing.
+    await handle.receive(status(3, 'terminate:2026-11-05T10:04:00Z'));
+    await f.gateway.jobs.status.tick();
+    expect(await f.outbox('node.condition.changed')).toHaveLength(2);
+    const reasons = (await f.db.query<{ no_schedule_reasons: string[] }>('SELECT no_schedule_reasons FROM nodes WHERE id = $1', [node]))
+      .rows[0]!.no_schedule_reasons;
+    expect(reasons).toEqual(['SpotInterruption']);
   });
 
   it('makes the node NoSchedule with the deadline while the notice stands, and clears with it', async () => {
