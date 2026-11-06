@@ -67,6 +67,12 @@ export const awsConfig = manifest({
     .string({ maxLength: 512 })
     .optional()
     .describe('"key=value": discovery yields only instances carrying this tag'),
+  spot: field
+    .boolean()
+    .default(false)
+    .describe(
+      'Offer Spot capacity (<zone>/<type>:spot): one-time requests that EC2 may reclaim, terminated on interruption',
+    ),
 });
 
 /** The validated account configuration. */
@@ -84,6 +90,8 @@ export interface AwsConfig {
   metadataHopLimit: number;
   associatePublicIp: boolean;
   discoverTag?: string;
+  /** (A3) Offer and launch Spot capacity. */
+  spot: boolean;
 }
 
 export interface AwsProviderOptions {

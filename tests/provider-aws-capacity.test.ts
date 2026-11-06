@@ -289,3 +289,62 @@ describe('launches into reservations', () => {
     expect(w.emu.calls('RunInstances')).toHaveLength(0);
   });
 });
+
+describe('spot', () => {
+  it('spot offers are listed only when the account enables spot', async () => {
+    const off = world();
+    expect((await off.compute.listOffers({})).some((offer) => offer.id.endsWith(':spot'))).toBe(
+      false,
+    );
+    const on = world({ spot: true });
+    const offers = await on.compute.listOffers({ gpuModel: 'L4' });
+    expect(offers.map((offer) => [offer.id, offer.market ?? 'on-demand'])).toEqual([
+      ['us-east-1a/g6.xlarge', 'on-demand'],
+      ['us-east-1a/g6.xlarge:spot', 'spot'],
+      ['us-east-1b/g6.xlarge', 'on-demand'],
+      ['us-east-1b/g6.xlarge:spot', 'spot'],
+    ]);
+  });
+
+  it('a spot create is a one-time spot request that terminates on interruption', async () => {
+    const w = world({ spot: true });
+    const machine = await w.compute.create(createRequest('us-east-1a/t3.micro:spot'), w.call());
+    const run = w.emu.calls('RunInstances')[0]!.params;
+    expect(run.get('InstanceMarketOptions.MarketType')).toBe('spot');
+    expect(run.get('InstanceMarketOptions.SpotOptions.SpotInstanceType')).toBe('one-time');
+    expect(run.get('InstanceMarketOptions.SpotOptions.InstanceInterruptionBehavior')).toBe(
+      'terminate',
+    );
+    expect(run.get('InstanceInitiatedShutdownBehavior')).toBe('terminate');
+    expect(machine).toMatchObject({ market: 'spot', offerId: 'us-east-1a/t3.micro:spot' });
+  });
+
+  it('a spot create on an account without spot is refused', async () => {
+    const w = world();
+    await expect(
+      w.compute.create(createRequest('us-east-1a/t3.micro:spot'), w.call()),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'spot-disabled' } });
+    expect(w.emu.calls('RunInstances')).toHaveLength(0);
+  });
+
+  it('spot termination surfaces as an interruption', async () => {
+    const w = world({ spot: true });
+    const machine = await w.compute.create(createRequest('us-east-1a/t3.micro:spot'), w.call());
+    w.ec2emu.tick();
+    const reclaimedAt = w.emu.now();
+    w.emu.clock.advance(60_000);
+    w.ec2emu.asyncFailure(machine.id, 'Server.SpotInstanceTermination');
+    w.ec2emu.instances.get(machine.id)!.transitionReason =
+      `Service initiated (${new Date(reclaimedAt).toISOString().slice(0, 19).replace('T', ' ')} GMT)`;
+    const read = await w.compute.get(machine.id, w.call());
+    expect(read).toMatchObject({
+      state: 'deleted',
+      market: 'spot',
+      interruption: { kind: 'spot', at: reclaimedAt, action: 'terminate' },
+    });
+    // An on-demand termination is no interruption.
+    const plain = await w.compute.create(createRequest('us-east-1a/t3.micro'), w.call('ins_2'));
+    w.ec2emu.asyncFailure(plain.id, 'Client.UserInitiatedShutdown');
+    expect((await w.compute.get(plain.id, w.call('ins_2')))?.interruption).toBeUndefined();
+  });
+});

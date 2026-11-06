@@ -32,6 +32,8 @@ export interface EmuInstance {
   volumeTags: Map<string, string>;
   launchTime: number;
   stateReason?: string;
+  /** `reason` (StateTransitionReason), e.g. `Service initiated (2026-10-01 12:00:00 GMT)`. */
+  transitionReason?: string;
   privateIp: string;
   publicIp?: string;
   subnetId: string;
@@ -246,6 +248,7 @@ export class Ec2Emulator {
       instance.stateReason
         ? `<stateReason>${el('code', instance.stateReason)}${el('message', instance.stateReason)}</stateReason>`
         : '',
+      el('reason', instance.transitionReason),
       el('capacityReservationId', instance.capacityReservationId),
       el('instanceLifecycle', instance.lifecycle),
       el('architecture', this.types.get(instance.type)?.arch[0] ?? 'x86_64'),

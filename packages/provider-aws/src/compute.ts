@@ -269,6 +269,12 @@ export class AwsCompute implements ProviderImpl {
         available: true,
         ...(info.arch[0] ? { arch: info.arch[0] } : {}),
       });
+      if (this.config.spot)
+        offers.push({
+          ...offers[offers.length - 1]!,
+          id: offerId({ zone, instanceType: type, market: 'spot' }),
+          market: 'spot',
+        });
     }
     offers.push(...(await this.#reservationOffers(query, signal)));
     return offers;
@@ -421,7 +427,12 @@ export class AwsCompute implements ProviderImpl {
         throw error;
     }
     const zoneIds = await this.deps.zones.all(signal);
-    return toMachine(instance, { region: this.config.region, types, zoneIds });
+    return toMachine(instance, {
+      region: this.config.region,
+      types,
+      zoneIds,
+      now: this.context.clock.now(),
+    });
   }
 
   // --- create, get, delete ------------------------------------------------------------------------
@@ -500,11 +511,13 @@ export class AwsCompute implements ProviderImpl {
         'cannot take a Spot launch',
         'capacity-reservation',
       );
-    if (offer.market === 'spot')
-      throw new ComputeError('UNSUPPORTED', 'spot offers arrive with AWS phase A3', undefined, {
-        provider: 'aws',
-        reason: 'phase-a3',
-      });
+    if (offer.market === 'spot' && !this.config.spot)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        'this AWS account does not offer Spot capacity (config spot)',
+        undefined,
+        { provider: 'aws', reason: 'spot-disabled' },
+      );
     if (!this.config.zones.includes(offer.zone))
       throw new ComputeError(
         'INVALID_INPUT',
@@ -579,8 +592,20 @@ export class AwsCompute implements ProviderImpl {
       IamInstanceProfile: this.config.instanceProfile
         ? { Arn: this.config.instanceProfile }
         : undefined,
-      InstanceInitiatedShutdownBehavior: 'stop',
+      // A one-time Spot Instance cannot stop: a shutdown from inside it terminates it.
+      InstanceInitiatedShutdownBehavior: offer.market === 'spot' ? 'terminate' : 'stop',
       TagSpecification: this.#tagSpecifications(request, context),
+      ...(offer.market === 'spot'
+        ? {
+            InstanceMarketOptions: {
+              MarketType: 'spot',
+              SpotOptions: {
+                SpotInstanceType: 'one-time',
+                InstanceInterruptionBehavior: 'terminate',
+              },
+            },
+          }
+        : {}),
       ...(target
         ? {
             CapacityReservationSpecification: {

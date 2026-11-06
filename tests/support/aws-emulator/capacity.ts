@@ -157,6 +157,15 @@ export class CapacityEmulator {
       'CapacityReservationSpecification.CapacityReservationTarget.CapacityReservationId',
     );
     const market = p.get('InstanceMarketOptions.MarketType');
+    if (
+      market === 'spot' &&
+      (p.get('InstanceMarketOptions.SpotOptions.SpotInstanceType') ?? 'one-time') === 'one-time' &&
+      p.get('InstanceInitiatedShutdownBehavior') === 'stop'
+    )
+      return ec2Error(
+        'InvalidParameterCombination',
+        'A one-time Spot Instance cannot stop on an instance-initiated shutdown',
+      );
     if (!target) {
       if (market === 'capacity-block')
         return ec2Error(

@@ -178,6 +178,21 @@ export function machineState(state: string | undefined): ExternalMachine['state'
   return state !== undefined && Object.hasOwn(states, state) ? states[state]! : 'unknown';
 }
 
+/** `Service initiated (2026-10-01 12:00:00 GMT)` → epoch ms. */
+function transitionTime(reason: string | undefined): number | undefined {
+  const match = reason ? /\((\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) GMT\)/.exec(reason) : null;
+  if (!match) return undefined;
+  const at = Date.parse(`${match[1]}T${match[2]}Z`);
+  return Number.isFinite(at) ? at : undefined;
+}
+
+/** The state reasons EC2 gives a Spot Instance it reclaimed, and what it did. */
+const spotReclaims: Readonly<Record<string, 'terminate' | 'stop' | 'hibernate'>> = {
+  'Server.SpotInstanceTermination': 'terminate',
+  'Server.SpotInstanceShutdown': 'stop',
+  'Server.SpotInstanceHibernate': 'hibernate',
+};
+
 /** The `better-compute:` security groups (AD10) an interface carries, by name. */
 const managedGroup = /^bc-/;
 
@@ -188,6 +203,8 @@ export function toMachine(
     region: string;
     types: ReadonlyMap<string, InstanceTypeInfo>;
     zoneIds: ReadonlyMap<string, string>;
+    /** When the read happened: the interruption time when EC2's reason has none. */
+    now?: number;
   },
 ): ExternalMachine {
   const id = instance.textOf('instanceId') ?? '';
@@ -265,5 +282,14 @@ export function toMachine(
     ...(Number.isFinite(launched) ? { createdAt: launched } : {}),
     ...(claimedBy ? { claimedBy } : {}),
     ...(market ? { market } : {}),
+    ...interruptionOf(),
   };
+
+  function interruptionOf(): Pick<ExternalMachine, 'interruption'> {
+    const code = instance.child('stateReason')?.textOf('code');
+    if (!spot || code === undefined || !Object.hasOwn(spotReclaims, code)) return {};
+    const at = transitionTime(instance.textOf('reason')) ?? info.now;
+    if (at === undefined) return {};
+    return { interruption: { kind: 'spot', at, action: spotReclaims[code]! } };
+  }
 }
