@@ -95,6 +95,11 @@ gap over `max(leakToleranceHours, 5%)` of the billed hours raises `billing.leak`
 `billing.leaks` lists the raised ones for root. A leak usually means a Droplet compute no longer tracks: find it
 with `better-compute digitalocean discover <account>`, then attach or delete it.
 
+`providerAccounts.billing` reads the account's own bill at DigitalOcean (balance, month to date, final invoices and the
+newest 50 billing history entries, scope `billing:read`), read-only, in micros of USD. Its history names payments, so
+it is decided as `compute:providers:manage` on the account. A leak is what compute meters against what DigitalOcean
+bills per Droplet; the bill is the account's total.
+
 ## Findings
 
 `providerAccounts.findings` reads the account's latest DigitalOcean security scan, read-only, as findings

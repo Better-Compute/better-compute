@@ -435,6 +435,41 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       },
     },
     {
+      name: 'billingSummary (when offered) answers integer amounts in a currency and holds no secret',
+      async run(subject) {
+        if (!subject.provider.billingSummary) return;
+        const seen: string[] = [];
+        const bill = await subject.provider.billingSummary(await configOf(subject), {
+          ...contextOf(subject, seen),
+          signal: new AbortController().signal,
+        });
+        check(/^[A-Z]{3}$/.test(bill.currency), 'billing.currency is an ISO 4217 code');
+        for (const key of ['monthToDateMicros', 'balanceMicros', 'monthToDateUsageMicros'] as const)
+          if (bill[key] !== undefined)
+            check(Number.isSafeInteger(bill[key]), `billing.${key} is integer micros`);
+        check(
+          Array.isArray(bill.invoices) && Array.isArray(bill.history),
+          'invoices and history are lists',
+        );
+        for (const invoice of bill.invoices)
+          check(
+            typeof invoice.id === 'string' &&
+              /^\d{4}-\d{2}$/.test(invoice.period) &&
+              Number.isSafeInteger(invoice.amountMicros),
+            `invoice ${String(invoice.id)}: an id, a YYYY-MM period and integer micros`,
+          );
+        for (const entry of bill.history)
+          check(
+            Number.isFinite(entry.at) &&
+              typeof entry.type === 'string' &&
+              typeof entry.description === 'string' &&
+              Number.isSafeInteger(entry.amountMicros),
+            'a history entry has a time, a type, a description and integer micros',
+          );
+        checkNoSecret(bill, seen, 'billingSummary');
+      },
+    },
+    {
       name: 'connect (when offered) refuses a redirect URI the platform did not register',
       async run(subject) {
         const connect = subject.provider.connect;

@@ -244,6 +244,12 @@ describe('the P9 optional hooks (listPrices, readMetrics, probeAccount, findings
               details: { id: 'a1' },
             };
       },
+      billingSummary: async () => ({
+        currency: breaks ? 'dollars' : 'USD',
+        monthToDateMicros: 5,
+        invoices: [{ id: 'i1', period: '2026-09', amountMicros: 1 }],
+        history: [],
+      }),
       findings: async () =>
         breaks
           ? [
@@ -306,6 +312,7 @@ describe('the P9 optional hooks (listPrices, readMetrics, probeAccount, findings
     'readMetrics (when offered) answers well-formed samples of the machines asked only',
     'probeAccount (when offered) answers a well-formed probe that holds no secret',
     'findings (when offered) are well formed, uniquely named and hold no secret',
+    'billingSummary (when offered) answers integer amounts in a currency and holds no secret',
     'connect (when offered) refuses a redirect URI the platform did not register',
   ];
 

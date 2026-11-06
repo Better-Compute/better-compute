@@ -1146,6 +1146,26 @@ export interface ProviderFinding {
 }
 
 /**
+ * (P9, additive) A provider account's own billing state at the provider (`ProviderInput.billingSummary`): what the
+ * provider bills the account, not what compute meters. Amounts are integer micros of `currency`. Never a secret.
+ */
+export interface ProviderAccountBilling {
+  currency: string;
+  /** Owed for the month so far. */
+  monthToDateMicros?: number;
+  /** The balance as of the last invoice; negative is credit. */
+  balanceMicros?: number;
+  /** Usage so far this month. */
+  monthToDateUsageMicros?: number;
+  /** Epoch ms the provider computed the balance. */
+  generatedAt?: number;
+  /** Final invoices, newest first: `period` is `YYYY-MM`. */
+  invoices: { id: string; period: string; amountMicros: number }[];
+  /** The newest billing history entries (invoices, payments, credits), newest first; `at` is epoch ms. */
+  history: { at: number; type: string; description: string; amountMicros: number }[];
+}
+
+/**
  * (P9) A provider's OAuth connect flow (`providerAccounts.connectSetup` and `connect`): the person's browser goes
  * to `authorizeUrl`, comes back to the redirect URI with a code, and `exchange` trades the code (single use) for the
  * credential vps seals as the new account's secret. The OAuth app's client id and secret are the platform's,
@@ -1207,6 +1227,14 @@ export interface ProviderInput<C> {
     config: C,
     context: ProviderContext & { signal: AbortSignal },
   ): Promise<ProviderFinding[]>;
+  /**
+   * (P9, additive) The account's own billing state at the provider (balance, invoices, billing history), for
+   * `providerAccounts.billing`. Read-only at the provider, with the account's own credential.
+   */
+  billingSummary?(
+    config: C,
+    context: ProviderContext & { signal: AbortSignal },
+  ): Promise<ProviderAccountBilling>;
   /** (P9) An OAuth connect flow, when the provider has one configured (`providerAccounts.connect`). */
   connect?: ProviderConnect;
   /** A key no two accounts of this provider may share (e.g. a federation audience). Pure; no I/O. */

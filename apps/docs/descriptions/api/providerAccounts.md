@@ -53,6 +53,15 @@ Returns what the provider says an operator should look at on a stored account (D
 - **IAM.** Decided as `compute:providers:read` on the provider account.
 - **Errors.** `NOT_FOUND` for a missing account; `UNSUPPORTED` for a provider that reports no findings; the provider's errors as in `check`.
 
+## billing
+
+Returns the account's own bill at its provider (DigitalOcean: its balance, month to date, invoices and billing history), read-only at the provider: `{ accountId, provider, readAt, currency, monthToDateMicros?, balanceMicros?, monthToDateUsageMicros?, generatedAt?, invoices, history }`. This is what the provider charges the account, not what compute meters; the platform's margins and leaks are `billing.margins` and `billing.leaks`.
+
+- **Output.** Amounts are integer micros of `currency`. `balanceMicros` is the balance as of the last invoice (negative is credit). `invoices` (`{ id, period, amountMicros }`, `period` `YYYY-MM`) are the final invoices, newest first, at most 120; `history` (`{ at, type, description, amountMicros }`) the newest billing history entries (invoices, payments, credits), newest first, at most 50. Malformed entries are left out and text is bounded. Never a secret.
+- **Reads.** With the account's own credential (DigitalOcean: scope `billing:read`), as `check`; the call stops reaching the provider when the request is cancelled.
+- **IAM.** Decided as `compute:providers:manage` on the provider account: the history names payments, so reading the bill takes the right to manage the account, not only to read it.
+- **Errors.** `NOT_FOUND` for a missing account; `UNSUPPORTED` for a provider that cannot read an account's bill; `ACCESS_DENIED` when the credential may not read billing; the provider's other errors as in `check`.
+
 ## federationSetup
 
 Returns what a tenant sets up at its cloud to give a provider account keyless sign-in (Google Cloud workload identity federation), for the account it is about to create: `{ issuer, jwksUri, subject, attributeCondition, allowedAudienceHint }`.

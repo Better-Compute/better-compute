@@ -35,7 +35,7 @@ export interface ComputeMcpOptions {
   fleet?: boolean;
   /**
    * Build the read-only provider tools (off by default; P9): `list_provider_accounts`, `check_provider_account`,
-   * `provider_account_findings` and `list_billing_leaks` (platform operators).
+   * `provider_account_findings`, `provider_account_billing` and `list_billing_leaks` (platform operators).
    */
   providers?: boolean;
   /**
@@ -443,6 +443,14 @@ export function gateTools(
       }),
     };
     rules.provider_account_findings = rules.check_provider_account;
+    // The bill names payments: compute decides it as managing the account.
+    rules.provider_account_billing = {
+      action: 'compute:providers:manage',
+      resource: (args: Record<string, unknown>) => ({
+        type: `${prefix}provider-account`,
+        id: idOf(args.accountId, /^pacct_[0-9a-hjkmnp-tv-z]{26,52}$/, 'accountId'),
+      }),
+    };
     // Leaks are the platform's (root's) billing: decided on the fleet, which resolves only in the root tenant.
     rules.list_billing_leaks = {
       action: 'compute:billing:read',

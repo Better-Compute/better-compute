@@ -4,6 +4,7 @@ import { clientFor } from './client/build.js';
 import { DoCompute } from './compute/droplets.js';
 import { doConfig, type DoConfig, type DoProviderOptions } from './config.js';
 import { deploymentTag } from './ids.js';
+import { accountBilling, billingSummary } from './ops/billing.js';
 import { doBilling, readInvoiceCosts } from './ops/costs.js';
 import { doConnect } from './ops/oauth.js';
 import { withTenantProjects } from './ops/projects.js';
@@ -49,6 +50,9 @@ export function digitaloceanProvider(
       checkReport(await probeAccount(config, context, options, { operations: true })),
     // providerAccounts.findings (P9): the latest security scan.
     findings: (config: DoConfig, context) => readFindings(config, context, options),
+    // providerAccounts.billing (P9): the balance, invoices and billing history (billing:read).
+    billingSummary: async (config: DoConfig, context) =>
+      accountBilling(await billingSummary(config, context, options)),
     create: (config: DoConfig, context: ProviderContext) => {
       if (config.regions.length === 0)
         throw invalidConfig('A DigitalOcean account lists at least one region', 'regions');

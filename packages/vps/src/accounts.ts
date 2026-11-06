@@ -7,6 +7,7 @@ import {
   type Clock,
   type Json,
   type Logger,
+  type ProviderAccountBilling,
   type ProviderAccountProbe,
   type ProviderFinding,
   type ProviderContext,
@@ -1083,6 +1084,95 @@ export async function readStoredFindings(
     if (items.length === findingsLimit) break;
   }
   return { accountId: account.id, provider: account.provider, readAt: deps.clock.now(), items };
+}
+
+/** What `providerAccounts.billing` answers: the account's billing state at its provider (never a secret). */
+export interface ProviderAccountBillingView extends ProviderAccountBilling {
+  accountId: string;
+  provider: string;
+  /** Epoch ms. */
+  readAt: number;
+}
+
+/** The most invoices and history entries one answer keeps, and the longest text kept (characters). */
+export const billingInvoicesLimit = 120;
+export const billingHistoryLimit = 50;
+const billingTextLimit = 200;
+
+const micros = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isSafeInteger(value) ? value : undefined;
+const bounded = (value: unknown): string | undefined =>
+  typeof value === 'string' ? value.trim().slice(0, billingTextLimit) : undefined;
+
+/** A provider's billing summary as vps answers it: integer amounts, bounded text, malformed entries left out. */
+function providerBillingOf(raw: ProviderAccountBilling): ProviderAccountBilling {
+  const value = (
+    typeof raw === 'object' && raw !== null ? raw : {}
+  ) as Partial<ProviderAccountBilling>;
+  const currency = bounded(value.currency);
+  if (!currency || !/^[A-Z]{3}$/.test(currency))
+    throw new ComputeError(
+      'PROVIDER_ERROR',
+      'The provider answered a billing summary without a currency',
+    );
+  const out: ProviderAccountBilling = { currency, invoices: [], history: [] };
+  for (const key of ['monthToDateMicros', 'balanceMicros', 'monthToDateUsageMicros'] as const) {
+    const amount = micros(value[key]);
+    if (amount !== undefined) out[key] = amount;
+  }
+  const generatedAt = micros(value.generatedAt);
+  if (generatedAt !== undefined && generatedAt >= 0) out.generatedAt = generatedAt;
+  for (const invoice of Array.isArray(value.invoices) ? value.invoices : []) {
+    const id = bounded(invoice?.id);
+    const period = bounded(invoice?.period);
+    const amountMicros = micros(invoice?.amountMicros);
+    if (!id || !period || !/^\d{4}-\d{2}$/.test(period) || amountMicros === undefined) continue;
+    out.invoices.push({ id, period, amountMicros });
+    if (out.invoices.length === billingInvoicesLimit) break;
+  }
+  for (const entry of Array.isArray(value.history) ? value.history : []) {
+    const at = micros(entry?.at);
+    const amountMicros = micros(entry?.amountMicros);
+    if (at === undefined || at < 0 || amountMicros === undefined) continue;
+    out.history.push({
+      at,
+      type: bounded(entry.type) ?? '',
+      description: bounded(entry.description) ?? '',
+      amountMicros,
+    });
+    if (out.history.length === billingHistoryLimit) break;
+  }
+  return out;
+}
+
+/**
+ * `providerAccounts.billing` (P9): the account's own billing state at the provider (`ProviderInput.billingSummary`),
+ * read-only at the provider, with the account's own credential. Amounts are integers, text bounded, at most
+ * `billingInvoicesLimit` invoices and `billingHistoryLimit` history entries. A provider without the hook is
+ * `UNSUPPORTED`. Errors propagate.
+ */
+export async function readStoredBilling(
+  providers: ReadonlyMap<string, ProviderDefinition>,
+  account: ProviderAccount,
+  deps: ClientDeps,
+  signal: AbortSignal,
+): Promise<ProviderAccountBillingView> {
+  const provider = providerOf(providers, account.provider);
+  if (!provider.billingSummary)
+    throw new ComputeError(
+      'UNSUPPORTED',
+      `Provider ${account.provider} cannot read an account's billing`,
+      undefined,
+      { provider: account.provider },
+    );
+  const { config, context } = await storedAccountContext(provider, account, deps, signal);
+  const summary = providerBillingOf(await provider.billingSummary(config, context));
+  return {
+    accountId: account.id,
+    provider: account.provider,
+    readAt: deps.clock.now(),
+    ...summary,
+  };
 }
 
 /** Builds provider clients from accounts, cached per (account id, version). */

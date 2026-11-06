@@ -32,6 +32,7 @@ import {
   passThroughMeterCheck,
   parseFederationSetup,
   probeStoredAccount,
+  readStoredBilling,
   readStoredFindings,
   parseTenantVaultPaths,
   providerOf,
@@ -46,6 +47,7 @@ import {
   type FederationSetupInput,
   type ProviderAccount,
   type ProviderAccountCheck,
+  type ProviderAccountBillingView,
   type ProviderAccountFindings,
   type TenantVaultPaths,
 } from './accounts.js';
@@ -472,6 +474,8 @@ export type VpsApi = {
     check: MethodDefinition<AccountRef, ProviderAccountCheck>;
     /** (P9) What the provider says an operator should look at on the account (read-only). */
     findings: MethodDefinition<AccountRef, ProviderAccountFindings>;
+    /** (P9) The account's own billing state at its provider: balance, invoices, history (read-only). */
+    billing: MethodDefinition<AccountRef, ProviderAccountBillingView>;
     update: MethodDefinition<
       AccountRef & { config: unknown; billing?: AccountBilling },
       ProviderAccountView
@@ -1598,6 +1602,25 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           if (!account)
             throw new ComputeError('NOT_FOUND', `Provider account ${input.accountId} not found`);
           return readStoredFindings(
+            providers,
+            account,
+            accountCheck(context),
+            context.signal ?? AbortSignal.timeout(55_000),
+          );
+        },
+      }),
+      // The account's own bill at its provider (P9: DigitalOcean's balance, invoices and billing history),
+      // read-only. Its history names payments, so it is decided as managing the account, not reading it.
+      billing: defineMethod({
+        action: 'compute:providers:manage',
+        kind: 'read',
+        resource: accountResource,
+        validate: describedBy(schemas.account, (raw) => parseAccountRef(raw) as AccountRef),
+        handler: async (context, input) => {
+          const account = await readAccount(context.sql, input.accountId, input.tenantId);
+          if (!account)
+            throw new ComputeError('NOT_FOUND', `Provider account ${input.accountId} not found`);
+          return readStoredBilling(
             providers,
             account,
             accountCheck(context),

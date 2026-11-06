@@ -50,6 +50,7 @@ describe('provider account tools', () => {
       'list_provider_accounts',
       'check_provider_account',
       'provider_account_findings',
+      'provider_account_billing',
       'list_billing_leaks',
     ];
     const tools = mcpWith(api, true).tools.filter((tool) => names.includes(tool.name));
@@ -76,19 +77,24 @@ describe('provider account tools', () => {
     const { api, calls } = recorder();
     const mcp = mcpWith(api, true);
     await call(mcp, 'provider_account_findings', { accountId: PACCT });
+    await call(mcp, 'provider_account_billing', { accountId: PACCT });
     await call(mcp, 'list_billing_leaks', { days: 7 });
     expect(calls[0]).toEqual({
       path: 'providerAccounts/findings',
       input: { tenantId: 'org_acme', accountId: PACCT },
     });
-    const leaks = calls[1]!;
+    expect(calls[1]).toEqual({
+      path: 'providerAccounts/billing',
+      input: { tenantId: 'org_acme', accountId: PACCT },
+    });
+    const leaks = calls[2]!;
     expect(leaks.path).toBe('billing/leaks');
     const { from, to } = leaks.input as { from: number; to: number };
     expect(to - from).toBe(8 * 86_400_000);
     expect(to).toBeGreaterThan(Date.now());
     expect((await call(mcp, 'list_billing_leaks', { days: 0 })).isError).toBe(true);
     expect((await call(mcp, 'provider_account_findings', { accountId: 'x' })).isError).toBe(true);
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3);
   });
 
   it('the gate checks providers:read on the account a check names', () => {
@@ -106,6 +112,15 @@ describe('provider account tools', () => {
     });
     expect(() => rule.resource({ accountId: '../x' })).toThrow();
     expect(rules.provider_account_findings).toBe(rule);
+    const bill = rules.provider_account_billing as {
+      action: string;
+      resource(args: object): unknown;
+    };
+    expect(bill.action).toBe('compute:providers:manage');
+    expect(bill.resource({ accountId: PACCT })).toEqual({
+      type: 'compute-provider-account',
+      id: PACCT,
+    });
     const leaks = rules.list_billing_leaks as { action: string; resource(args: object): unknown };
     expect(leaks.action).toBe('compute:billing:read');
     expect(leaks.resource({})).toEqual({ type: 'compute-fleet', id: 'global' });

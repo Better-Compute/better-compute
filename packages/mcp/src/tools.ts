@@ -1101,6 +1101,24 @@ export function computeTools(
           }),
       },
       {
+        name: 'provider_account_billing',
+        title: 'Read a provider account’s bill',
+        description:
+          "The account's own bill at its provider (DigitalOcean: balance, month to date, invoices and billing history), read-only, in integer micros of its currency. What the provider charges the account, not what compute meters. Needs permission to manage the account.",
+        inputSchema: {
+          type: 'object',
+          required: ['accountId'],
+          properties: { accountId: id('pacct', 'The provider account') },
+          additionalProperties: false,
+        },
+        annotations: { readOnlyHint: true, openWorldHint: true },
+        run: (args, context) =>
+          context.api.$request('providerAccounts/billing', {
+            tenantId: context.tenantId,
+            accountId: args.accountId,
+          }),
+      },
+      {
         name: 'list_billing_leaks',
         title: 'List billing leaks',
         description:

@@ -1,4 +1,8 @@
-import { ComputeError, type ProviderContext } from '@better-compute/core';
+import {
+  ComputeError,
+  type ProviderAccountBilling,
+  type ProviderContext,
+} from '@better-compute/core';
 import { clientFor } from '../client/build.js';
 import { readDeadline } from '../client/deadline.js';
 import type { DoClient } from '../client/http.js';
@@ -168,4 +172,35 @@ export async function billingSummary(
   } finally {
     deadline.done();
   }
+}
+
+/** A summary as `ProviderInput.billingSummary` answers it (`providerAccounts.billing`): invoices newest first. */
+export function accountBilling(summary: DoBillingSummary): ProviderAccountBilling {
+  const { balance } = summary;
+  return {
+    currency: summary.currency,
+    ...(balance.monthToDateBalanceMicros !== undefined
+      ? { monthToDateMicros: balance.monthToDateBalanceMicros }
+      : {}),
+    ...(balance.accountBalanceMicros !== undefined
+      ? { balanceMicros: balance.accountBalanceMicros }
+      : {}),
+    ...(balance.monthToDateUsageMicros !== undefined
+      ? { monthToDateUsageMicros: balance.monthToDateUsageMicros }
+      : {}),
+    ...(balance.generatedAt !== undefined ? { generatedAt: balance.generatedAt } : {}),
+    invoices: summary.invoices
+      .map((invoice) => ({
+        id: invoice.uuid,
+        period: invoice.period,
+        amountMicros: invoice.amountMicros,
+      }))
+      .sort((a, b) => b.period.localeCompare(a.period)),
+    history: summary.history.map((entry) => ({
+      at: entry.date,
+      type: entry.type,
+      description: entry.description,
+      amountMicros: entry.amountMicros,
+    })),
+  };
 }

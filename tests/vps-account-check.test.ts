@@ -10,6 +10,7 @@ import { digitaloceanProvider, resetBudgets } from '@better-compute/provider-dig
 import { closeFixtures, computeFixture } from '@better-compute/testing';
 import { defineProvider, vps } from '@better-compute/vps';
 import { DoEmulator } from './support/do-emulator/index.js';
+import { billingOf } from './support/do-emulator/billing.js';
 import { securityOf } from './support/do-emulator/security.js';
 
 // providerAccounts.check (P9): a read-only look at what a stored account's credential may do. vps validates the
@@ -285,5 +286,142 @@ describe('providerAccounts.findings', () => {
     ]);
     expect(denied.items[0].detail).toMatch(/security:read/);
     expect(JSON.stringify(denied)).not.toContain('acme-token');
+  });
+});
+
+// providerAccounts.billing (P9): the account's own bill at its provider (DigitalOcean: balance, invoices, billing
+// history), read-only, with the account's own credential; vps keeps integer amounts and bounded text only.
+describe('providerAccounts.billing', () => {
+  async function doWorld() {
+    const emu = new DoEmulator();
+    emu.validTokens = new Set(['acme-token']);
+    const billing = billingOf(emu);
+    billing.invoices = [
+      { invoice_uuid: 'i8', invoice_period: '2026-08', amount: '38.00' },
+      { invoice_uuid: 'i9', invoice_period: '2026-09', amount: '40.01' },
+    ];
+    billing.history = [
+      { description: 'Payment (card)', amount: '-40.01', date: '2026-10-02T00:00:00Z', type: 'Payment' },
+      { description: 'Invoice for September 2026', amount: '40.01', date: '2026-10-01T00:00:00Z', type: 'Invoice' },
+    ];
+    const fixture = await computeFixture({
+      modules: [vps({ providers: [digitaloceanProvider({ fetch: emu.fetch })] })],
+    });
+    const { compute, tenants, iam } = fixture;
+    iam.allow({ token: tenants.acme.token });
+    const api = compute.api as any;
+    const acme = { token: tenants.acme.token };
+    const { ref } = await api.secrets.put(acme, {
+      tenantId: tenants.acme.id,
+      name: 'do',
+      value: 'acme-token',
+      idempotencyKey: 'do',
+    });
+    const account = await api.providerAccounts.create(acme, {
+      tenantId: tenants.acme.id,
+      provider: 'digitalocean',
+      name: 'do',
+      config: { token: ref, regions: ['nyc3'] },
+    });
+    const read = () =>
+      api.providerAccounts.billing(acme, { tenantId: tenants.acme.id, accountId: account.id });
+    return { emu, account, read };
+  }
+
+  it('DigitalOcean: the balance, the invoices newest first and the history, read-only', async () => {
+    const { emu, account, read } = await doWorld();
+    const before = emu.requests.length;
+    const result = await read();
+    expect(result).toEqual({
+      accountId: account.id,
+      provider: 'digitalocean',
+      readAt: expect.any(Number),
+      currency: 'USD',
+      monthToDateMicros: 23_440_000,
+      balanceMicros: 12_230_000,
+      monthToDateUsageMicros: 11_210_000,
+      generatedAt: Date.parse('2026-10-05T12:00:00Z'),
+      invoices: [
+        { id: 'i9', period: '2026-09', amountMicros: 40_010_000 },
+        { id: 'i8', period: '2026-08', amountMicros: 38_000_000 },
+      ],
+      history: [
+        { at: Date.parse('2026-10-02T00:00:00Z'), type: 'Payment', description: 'Payment (card)', amountMicros: -40_010_000 },
+        { at: Date.parse('2026-10-01T00:00:00Z'), type: 'Invoice', description: 'Invoice for September 2026', amountMicros: 40_010_000 },
+      ],
+    });
+    expect(emu.requests.slice(before).every((r) => r.method === 'GET')).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('acme-token');
+    // A token without billing:read is ACCESS_DENIED, as DigitalOcean answers it.
+    emu.failNext({ path: /^\/customers\// }, 403, emu.error('forbidden').body);
+    await expect(read()).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+  });
+
+  it('keeps well-formed amounts and bounded text only, and is UNSUPPORTED without the hook', async () => {
+    const provider = defineProvider<{ key: string }>({
+      id: 'billfake',
+      version: '1.0.0',
+      provides: ['vps'],
+      config: manifest({ key: field.secret() }) as never,
+      billingSummary: async () =>
+        ({
+          currency: 'EUR',
+          balanceMicros: 1.5,
+          monthToDateMicros: 7,
+          invoices: [
+            { id: 'a', period: '2026-09', amountMicros: 5 },
+            { id: 'b', period: 'September', amountMicros: 5 },
+            { id: 'c', period: '2026-08', amountMicros: '5' },
+          ],
+          history: [
+            { at: 1, type: 'Payment', description: 'y'.repeat(500), amountMicros: -5 },
+            { at: 'yesterday', type: 'x', description: 'x', amountMicros: 1 },
+          ],
+        }) as never,
+      create: async () => ({
+        listOffers: async () => [],
+        create: async () => {
+          throw new ComputeError('UNIMPLEMENTED', 'test');
+        },
+        get: async () => undefined,
+        delete: async () => {},
+      }),
+    });
+    const fixture = await computeFixture({ modules: [vps({ providers: [provider] })] });
+    const { compute, tenants, iam } = fixture;
+    iam.allow({ token: tenants.acme.token });
+    const api = compute.api as any;
+    const acme = { token: tenants.acme.token };
+    const { ref } = await api.secrets.put(acme, {
+      tenantId: tenants.acme.id,
+      name: 'key',
+      value: 'the-key-value',
+      idempotencyKey: 'key',
+    });
+    const account = await api.providerAccounts.create(acme, {
+      tenantId: tenants.acme.id,
+      provider: 'billfake',
+      name: 'main',
+      config: { key: ref },
+    });
+    const result = await api.providerAccounts.billing(acme, {
+      tenantId: tenants.acme.id,
+      accountId: account.id,
+    });
+    expect(result).toMatchObject({
+      currency: 'EUR',
+      monthToDateMicros: 7,
+      invoices: [{ id: 'a', period: '2026-09', amountMicros: 5 }],
+      history: [{ at: 1, type: 'Payment', description: 'y'.repeat(200), amountMicros: -5 }],
+    });
+    expect(result.balanceMicros).toBeUndefined();
+
+    const bare = await fakeWorld({ check: true });
+    await expect(
+      bare.api.providerAccounts.billing(
+        { token: bare.tenants.acme.token },
+        { tenantId: bare.tenants.acme.id, accountId: bare.account.id },
+      ),
+    ).rejects.toMatchObject({ code: 'UNSUPPORTED' });
   });
 });

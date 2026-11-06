@@ -463,6 +463,7 @@ describe('apiSurface (§9.2)', () => {
       'providerAccounts.check': 'v1.0',
       'billing.leaks': 'v1.0',
       'providerAccounts.findings': 'v1.0',
+      'providerAccounts.billing': 'v1.0',
       'providerAccounts.connectSetup': 'v1.0',
       'providerAccounts.connect': 'v1.0',
       'instances.attach': 'v1.0',
