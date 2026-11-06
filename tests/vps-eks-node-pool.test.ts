@@ -59,6 +59,13 @@ async function world(policy?: Record<string, unknown>) {
     toTenantId: tenants.acme.id,
     quota: { vcpu: 64, memoryGiB: 256, diskGiB: 1000, gpu: 4 },
   });
+  // The owner's own quota on its pool.
+  await api.pools.offer(root, {
+    tenantId: tenants.root.id,
+    poolId: pool.id,
+    toTenantId: tenants.root.id,
+    quota: { vcpu: 64, memoryGiB: 256, diskGiB: 1000, gpu: 4 },
+  });
   await api.flavors.create(root, {
     tenantId: tenants.root.id,
     poolId: pool.id,
@@ -68,9 +75,12 @@ async function world(policy?: Record<string, unknown>) {
     diskGiB: 100,
     offerId: `${ZONE}/m7i.large`,
   });
-  const launch = async (extra: Record<string, unknown> = {}) => {
-    const created = await api.instances.create(acme, {
-      tenantId: tenants.acme.id,
+  // The pool owner (the cluster's operator) launches its nodes; `as: 'acme'` is a tenant it is offered to.
+  const launch = async (extra: Record<string, unknown> = {}, as: 'root' | 'acme' = 'root') => {
+    const caller = as === 'root' ? root : acme;
+    const tenantId = as === 'root' ? tenants.root.id : tenants.acme.id;
+    const created = await api.instances.create(caller, {
+      tenantId,
       poolId: pool.id,
       flavor: 'm7i.large',
       imageId: 'eks-al2023-1.33',
@@ -86,10 +96,23 @@ async function world(policy?: Record<string, unknown>) {
     const vm = [...ec2.instances.values()].find(
       (instance: EmuInstance) => instance.tags.get('better-compute:instance') === created.id,
     );
-    const view = await api.instances.get(acme, { tenantId: tenants.acme.id, instanceId: created.id });
+    const view = await api.instances.get(caller, { tenantId, instanceId: created.id });
     return { created, vm, view };
   };
-  return { emu, ec2, api, launch };
+  const createPool = (policy: Record<string, unknown>, kind: string) =>
+    api.sites
+      .create(root, { tenantId: tenants.root.id, kind, region: 'us-east-1', idempotencyKey: `site-${kind}` })
+      .then((site: { id: string }) =>
+        api.pools.create(root, {
+          tenantId: tenants.root.id,
+          siteId: site.id,
+          class: 'provider',
+          providerAccountId: account.id,
+          policy,
+          idempotencyKey: `pool-${kind}`,
+        }),
+      );
+  return { emu, ec2, api, launch, createPool };
 }
 
 const eksPolicy = {
@@ -123,6 +146,24 @@ function parts(text: string): { type: string; body: string }[] {
 }
 
 describe('vps on a provider pool that joins an EKS cluster', () => {
+  it('refuses an EKS pool on a platform site unless the platform operates the cluster', async () => {
+    const w = await world();
+    const { platformOperated: _, ...kubernetes } = eksPolicy.kubernetes;
+    await expect(w.createPool({ kubernetes }, 'shared')).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      message: expect.stringMatching(/platformOperated/),
+    });
+  });
+
+  it('never launches a node of the cluster for a tenant the pool is offered to', async () => {
+    // Its user data and SSH keys would give that tenant root on a node of the operator's cluster.
+    const w = await world(eksPolicy);
+    const { vm, view } = await w.launch({}, 'acme');
+    expect(vm).toBeUndefined();
+    expect(w.emu.calls('RunInstances')).toHaveLength(0);
+    expect(JSON.stringify(view)).toMatch(/pool owner/);
+  });
+
   it('launches every machine with the NodeConfig first, keys and user data in the same multipart', async () => {
     const w = await world(eksPolicy);
     const { vm, view } = await w.launch({ userData: '#!/bin/sh\necho tenant-script\n' });

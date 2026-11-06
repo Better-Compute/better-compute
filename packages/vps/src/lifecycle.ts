@@ -534,7 +534,7 @@ async function reconcileProvider(
       if (!row.shape.offerId)
         throw new ComputeError('INVALID_STATE', `Flavor ${row.shape.name} names no offer`);
       // (AWS A9) A pool that joins an EKS cluster: nodeadm's NodeConfig goes first in the user data.
-      const eks = await poolEksJoin(sql, row.poolId);
+      const eks = await poolEksJoin(sql, row.poolId, row.tenantId);
       machine = await client.create(
         {
           offerId: row.shape.offerId,
