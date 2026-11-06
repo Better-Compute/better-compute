@@ -1,5 +1,6 @@
 import { registerAccount } from './account.js';
 import { registerActions } from './actions.js';
+import { registerAddons } from './addons.js';
 import { registerApps } from './apps.js';
 import { registerAutoscale } from './autoscale.js';
 import { registerCatalog } from './catalog.js';
@@ -97,6 +98,8 @@ export class DoEmulator {
   appReads = 1;
   /** App Platform deployments end `ERROR` instead of `ACTIVE`. */
   failDeployments = false;
+  /** How many reads an add-on stays `provisioning` (or `deprovisioning`). */
+  addonReads = 1;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -284,5 +287,6 @@ export class DoEmulator {
     registerDatabases(this);
     registerApps(this);
     registerFunctions(this);
+    registerAddons(this);
   }
 }

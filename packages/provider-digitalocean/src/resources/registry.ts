@@ -10,6 +10,7 @@ import {
 import type { DoClient } from '../client/http.js';
 import type { DoConfig } from '../config.js';
 import { deploymentTag } from '../ids.js';
+import { addonKind } from './kinds/addons.js';
 import { appKind } from './kinds/apps.js';
 import { databaseKinds } from './kinds/databases.js';
 import { functionsKinds } from './kinds/functions.js';
@@ -21,7 +22,7 @@ import type { DoKind, DoKindEnv } from './kind.js';
 
 /** Every kind this provider serves, in catalog order. */
 export function doResourceKinds(): DoKind[] {
-  return [...databaseKinds(), appKind(), ...functionsKinds()];
+  return [...databaseKinds(), appKind(), ...functionsKinds(), addonKind()];
 }
 
 export class DoResources implements ProviderResources {

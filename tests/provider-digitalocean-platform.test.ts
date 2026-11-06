@@ -5,6 +5,7 @@ import {
   type ProviderResourcesConformanceSubject,
 } from '@better-compute/cloud-resources';
 import { deploymentTag, digitaloceanProvider } from '@better-compute/provider-digitalocean';
+import { seedAddon } from './support/do-emulator/addons.js';
 import { seedApp } from './support/do-emulator/apps.js';
 import { seedNamespace } from './support/do-emulator/functions.js';
 import { DoEmulator, type RecordedRequest } from './support/do-emulator/index.js';
@@ -593,5 +594,125 @@ describe('do.functions-namespace and do.functions-trigger', () => {
     expect(
       (await failure(resources.get('do.functions-trigger', 'not-a-namespace/n', call()))).code,
     ).toBe('INVALID_INPUT');
+  });
+});
+
+describe('ProviderResources conformance: do.addon', () => {
+  const subject = (): ProviderResourcesConformanceSubject => {
+    const emu = emulator();
+    const unmanaged = seedAddon(emu.state);
+    return {
+      provider: digitaloceanProvider({ fetch: emu.fetch }),
+      config: doAccount,
+      context: { secrets, account: platformAccount },
+      kind: 'do.addon',
+      spec: { app: 'acme-mail', plan: 'free' },
+      updatedSpec: { app: 'acme-mail', plan: 'pro' },
+      replaceSpec: { app: 'acme-search', plan: 'starter' },
+      unmanaged: unmanaged.uuid,
+    };
+  };
+  for (const test of providerResourcesConformanceCases())
+    it(test.name, async () => {
+      freshBudgets();
+      await test.run(subject());
+    });
+});
+
+describe('do.addon', () => {
+  const request = (spec: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
+    kind: 'do.addon',
+    name: 'bc-r-mail',
+    spec,
+    labels,
+    ...extra,
+  });
+
+  it('provisions under a name carrying this deployment; the plan changes in place, app and metadata do not', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const spec = { app: 'acme-mail', plan: 'free', metadata: { domain: 'mail.example.com' } };
+    const first = await resources.ensure(request(spec), call('crs_mail'));
+    expect(first.state).toBe('pending');
+    expect(mutations(emu, 'POST', /^\/v2\/add-ons\/saas$/)[0]!.body).toEqual({
+      app_slug: 'acme-mail',
+      plan_slug: 'free',
+      name: `bc-r-mail-bc${deploymentHash}`,
+      metadata: [{ name: 'domain', value: 'mail.example.com' }],
+    });
+    // A retry without the id finds it by name.
+    expect((await resources.ensure(request(spec), call('crs_mail'))).id).toBe(first.id);
+    const ready = await resources.ensure(request(spec, { id: first.id }), call('crs_mail'));
+    expect(ready).toMatchObject({
+      state: 'ready',
+      outputs: { app: 'acme-mail', plan: 'free', status: 'provisioned' },
+      spec,
+    });
+    expect(JSON.stringify(ready)).not.toContain('sso');
+    const upgraded = await resources.ensure(
+      request({ ...spec, plan: 'pro' }, { id: first.id }),
+      call('crs_mail'),
+    );
+    expect(upgraded.outputs!.plan).toBe('pro');
+    expect(mutations(emu, 'PATCH', /\/plan$/)[0]!.body).toEqual({ plan_slug: 'pro' });
+    for (const changed of [
+      { ...spec, plan: 'pro', app: 'acme-search' },
+      { ...spec, plan: 'pro', metadata: { domain: 'other.example.com' } },
+    ]) {
+      const error = await failure(
+        resources.ensure(request(changed, { id: first.id }), call('crs_mail')),
+      );
+      expect(error.details?.reason).toBe('replaceRequired');
+    }
+    expect(mutations(emu, 'POST', /^\/v2\/add-ons\/saas$/)).toHaveLength(1);
+  });
+
+  it('refuses specs that are not an app on a plan', async () => {
+    const { resources } = await build(emulator());
+    const spec = resources.kinds().find((kind) => kind.kind === 'do.addon')!.spec;
+    for (const bad of [
+      { app: 'acme-mail' },
+      { app: 'Acme Mail', plan: 'free' },
+      { app: 'acme-mail', plan: 'free', metadata: { x: { nested: true } } },
+      { app: 'acme-mail', plan: 'free', linked_droplet_id: 42 },
+    ])
+      expect((await spec['~standard'].validate(bad)).issues).toBeDefined();
+  });
+
+  it('delete, discover, adopt and release respect who manages each add-on', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const byHand = seedAddon(emu.state, { name: 'newsletter' });
+    const foreign = seedAddon(emu.state, {
+      name: `x-bc${deploymentTag('another').split(':')[1]}`,
+    });
+    for (const addon of [byHand, foreign])
+      expect(
+        (await failure(resources.delete('do.addon', addon.uuid, call()))).details?.reason,
+      ).toBe('notManaged');
+    expect(mutations(emu, 'DELETE', /^\/v2\/add-ons\//)).toEqual([]);
+    const found = [];
+    for await (const item of resources.discover('do.addon', call())) found.push(item);
+    expect(Object.fromEntries(found.map((item) => [item.name, item.managedBy ?? 'none']))).toEqual({
+      newsletter: 'none',
+      [foreign.name]: 'other',
+    });
+    expect(JSON.stringify(found)).not.toContain('sso-secret');
+    expect(
+      (await failure(resources.adopt('do.addon', foreign.uuid, labels, call()))).details?.reason,
+    ).toBe('managedByAnother');
+    const adopted = await resources.adopt('do.addon', byHand.uuid, labels, call());
+    expect(adopted.state).toBe('ready');
+    expect(byHand.name).toBe(`newsletter-bc${deploymentHash}`);
+    await resources.adopt('do.addon', byHand.uuid, labels, call());
+    expect(mutations(emu, 'PATCH', /^\/v2\/add-ons\/saas\/[^/]+$/)).toHaveLength(1);
+    await resources.release('do.addon', byHand.uuid, call());
+    expect(byHand.name).toBe('newsletter');
+    // Ours again, then deleted: deprovisioning, then gone.
+    await resources.adopt('do.addon', byHand.uuid, labels, call());
+    expect((await resources.delete('do.addon', byHand.uuid, call())).state).toBe('deleting');
+    expect((await resources.delete('do.addon', byHand.uuid, call())).state).toBe('deleting');
+    expect((await resources.delete('do.addon', byHand.uuid, call())).state).toBe('deleted');
+    expect(mutations(emu, 'DELETE', /^\/v2\/add-ons\//)).toHaveLength(1);
   });
 });

@@ -49,6 +49,8 @@ export class DoState {
   databases = new Map<string, Json>();
   /** Keyed by id. DO App Platform apps (with their deployments). */
   apps = new Map<string, Json>();
+  /** Keyed by uuid. DO Marketplace SaaS add-on resources. */
+  addons = new Map<string, Json>();
   /** Keyed by namespace id. DO Functions namespaces (with their triggers). */
   functionsNamespaces = new Map<string, Json>();
   /** Keyed by uuid. DO autoscale pool resources. */
