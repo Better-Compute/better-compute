@@ -525,6 +525,11 @@ async function insertInstance(
 const reconciler = () => module.reconcilers!.find((entry) => entry.name === providerResourcesWork)!;
 const runKey = (key: string) =>
   reconciler().run({ ...moduleContext(db), signal: new AbortController().signal } as never, key);
+/** The hourly drift pass, with every row it spread across the hour made due at once. */
+async function driftNow(): Promise<void> {
+  await runKey('drift');
+  for (const key of queue.keys()) queue.set(key, clock.now());
+}
 /** Five seconds pass, then every key that has come due runs once. */
 async function tick(): Promise<void> {
   clock.advance(5_000);
@@ -838,7 +843,8 @@ describe('providerVolumes', () => {
     // As if an attach the tenant no longer wanted finished after its detach was settled.
     byName(volume.id).attachedTo = machine;
     byName(other.id).attachedTo = 'droplet-stranger';
-    await runKey('all');
+    // Settled rows are read again by the hourly drift pass.
+    await driftNow();
     await drain();
     expect(byName(volume.id).attachedTo).toBeUndefined();
     expect(cloud.calls).toContain(`detachVolume ${byName(volume.id).id} ${machine}`);
@@ -902,6 +908,33 @@ describe('providerVolumes', () => {
     expect(cloud.volumes.size).toBe(0);
     expect(cloud.calls.some((label) => label.startsWith('ensureVolume'))).toBe(false);
     expect(cloud.calls).toContain('deleteVolume vol-landed');
+  });
+
+  it('the 5-minute pass wakes only rows that are not settled; the hourly drift pass spreads the settled ones', async () => {
+    const instanceId = await insertInstance();
+    const ready = await createVolume();
+    const attached = await createVolume({ instanceId });
+    const address = await createAddress();
+    await drain();
+    const failing = await createVolume();
+    cloud.failNext = new ComputeError('INVALID_INPUT', 'refused');
+    await tick();
+    expect((await getVolume(failing.id)).state).toBe('error');
+    // Wanted elsewhere: an attachment and an assignment not yet where they are wanted.
+    const moving = await createAddress();
+    await drain();
+    await call('providerAddresses', 'assign', { tenantId: 'root', addressId: moving.id, instanceId });
+    queue.clear();
+    await runKey('all');
+    expect([...queue.keys()].sort()).toEqual([failing.id, moving.id].sort());
+    queue.clear();
+    await runKey('drift');
+    const spread = [...queue].sort(([a], [b]) => a.localeCompare(b));
+    expect(spread.map(([key]) => key).sort()).toEqual([ready.id, attached.id, address.id].sort());
+    const offsets = spread.map(([, at]) => at - clock.now());
+    expect(offsets[0]).toBe(0);
+    expect(new Set(offsets).size).toBe(3);
+    expect(Math.max(...offsets)).toBeLessThan(3_600_000);
   });
 
   it('a volume never sent to the provider is deleted without a provider call', async () => {
@@ -1277,9 +1310,8 @@ describe('usage', () => {
         ])
       ).rows[0]!.deleted_at,
     );
-    expect(total(await windows('snapshot', snapshot.id))).toBe(
-      Math.round(((8 * (deletedAt - readyAt)) / HOUR) * 1e6) / 1e6,
-    );
+    // Each window is rounded to the micro-unit: the sum may differ from the rounded whole by one in the last place.
+    expect(total(await windows('snapshot', snapshot.id))).toBeCloseTo((8 * (deletedAt - readyAt)) / HOUR, 5);
   });
 
   it('bills volumes in GiB-hours and addresses in hours, by default (core/0044 accepts their kinds)', async () => {

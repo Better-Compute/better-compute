@@ -3037,24 +3037,68 @@ export async function reconcileProviderResource(
   return run.next();
 }
 
-/** The `vps.provider-resources` reconciler: `all` (periodic) wakes every live row, then each converges by id. */
+/** How often every settled row is read once at the provider for drift, its reads spread across the interval. */
+export const providerResourceDriftMs = 3_600_000;
+
+/**
+ * Live rows that are not settled: anything not `ready` (pending, updating, deleting, error), a volume with an
+ * attachment not yet where it is wanted, an address whose assignment is not yet what is wanted.
+ */
+const unsettledIds = `
+  SELECT v.id FROM provider_volumes v
+   WHERE v.state <> 'deleted'
+     AND (v.state <> 'ready' OR v.desired_state <> 'present'
+          OR EXISTS (SELECT 1 FROM provider_volume_attachments a
+                      WHERE a.volume_id = v.id AND a.state <> 'deleted'
+                        AND NOT (a.desired_state = 'present' AND a.state = 'ready')))
+  UNION ALL SELECT id FROM provider_snapshots
+   WHERE state <> 'deleted' AND (state <> 'ready' OR desired_state <> 'present')
+  UNION ALL SELECT id FROM provider_addresses
+   WHERE state <> 'deleted'
+     AND (state <> 'ready' OR desired_state <> 'present'
+          OR (instance_id IS NULL AND assignment_state <> 'none')
+          OR (instance_id IS NOT NULL AND assignment_state <> 'ready'))`;
+
+/** Live rows that are settled (the complement of `unsettledIds`). */
+const settledSql = `
+  SELECT id FROM (SELECT id FROM provider_volumes WHERE state <> 'deleted'
+                  UNION ALL SELECT id FROM provider_snapshots WHERE state <> 'deleted'
+                  UNION ALL SELECT id FROM provider_addresses WHERE state <> 'deleted') live
+  EXCEPT SELECT id FROM (${unsettledIds}) unsettled
+  ORDER BY id`;
+
+/**
+ * The `vps.provider-resources` reconciler, then each row converges by id. Two periodic passes keep the provider's
+ * request budget for what needs it (Review Focus 3): `all` (every 5 minutes) wakes the rows that are not settled, and
+ * `drift` (hourly) wakes every settled row once, spread across the hour, to notice what changed at the provider.
+ */
 export function providerResourcesReconciler(
   depsOf: (context: ModuleContext) => ProviderResourceDeps,
 ): Reconciler {
   return {
     name: providerResourcesWork,
     shardBy: 'none',
-    periodic: [{ key: 'all', every: '5m' }],
+    periodic: [
+      { key: 'all', every: '5m' },
+      { key: 'drift', every: '1h' },
+    ],
     async run(context, key) {
       if (key === 'all') {
         await context.sql.transaction(async (tx) => {
-          const { rows } = await tx.query<{ id: string }>(
-            `SELECT id FROM provider_volumes WHERE state <> 'deleted'
-             UNION ALL SELECT id FROM provider_snapshots WHERE state <> 'deleted'
-             UNION ALL SELECT id FROM provider_addresses WHERE state <> 'deleted'
-             ORDER BY id`,
-          );
+          const { rows } = await tx.query<{ id: string }>(`${unsettledIds} ORDER BY id`);
           for (const row of rows) await context.work.enqueue(tx, providerResourcesWork, row.id);
+        });
+        return 'DONE';
+      }
+      if (key === 'drift') {
+        await context.sql.transaction(async (tx) => {
+          const { rows } = await tx.query<{ id: string }>(settledSql);
+          const now = context.clock.now();
+          const step = rows.length > 0 ? providerResourceDriftMs / rows.length : 0;
+          for (const [index, row] of rows.entries())
+            await context.work.enqueue(tx, providerResourcesWork, row.id, {
+              notBefore: now + Math.floor(index * step),
+            });
         });
         return 'DONE';
       }
