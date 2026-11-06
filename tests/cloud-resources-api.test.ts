@@ -426,3 +426,74 @@ describe('account-wide specs', () => {
     ).toBeUndefined();
   });
 });
+
+describe('cloudResources.catalog', () => {
+  it('lists the installable applications the pool’s provider offers, filtered by where they install', async () => {
+    const { items } = await world.api.cloudResources.catalog(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: world.poolId,
+    });
+    expect(items).toEqual([
+      { slug: 'fake-wordpress', installsOn: 'instance', name: 'WordPress' },
+      { slug: 'fake-monitoring', installsOn: 'kubernetes' },
+    ]);
+    const kubernetes = await world.api.cloudResources.catalog(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: world.poolId,
+      installsOn: 'kubernetes',
+    });
+    expect(kubernetes.items.map((item: { slug: string }) => item.slug)).toEqual([
+      'fake-monitoring',
+    ]);
+    // The listing is a read with no transaction open while the provider answers.
+    expect(world.cloud.calls).toContain('catalog');
+  });
+
+  it('refuses a provider without a catalog, a pool the tenant cannot see, and a bad filter', async () => {
+    expect(
+      await codeOf(
+        world.api.cloudResources.catalog(world.acme, {
+          tenantId: world.acmeTenant,
+          poolId: world.plainPoolId,
+        }),
+      ),
+    ).toBe('UNSUPPORTED');
+    expect(
+      await codeOf(
+        world.api.cloudResources.catalog(world.other, {
+          tenantId: world.otherTenant,
+          poolId: world.acmePoolId,
+        }),
+      ),
+    ).toBe('NOT_FOUND');
+    expect(
+      await codeOf(
+        world.api.cloudResources.catalog(world.acme, {
+          tenantId: world.acmeTenant,
+          poolId: world.poolId,
+          installsOn: 'droplet',
+        }),
+      ),
+    ).toBe('INVALID_INPUT');
+  });
+
+  it('drops malformed entries a provider answers', async () => {
+    world.cloud.catalogExtra = [
+      { slug: 'Not A Slug', installsOn: 'instance' },
+      { slug: 'ok-but-nowhere', installsOn: 'mainframe' },
+      { slug: 'x'.repeat(200), installsOn: 'instance' },
+    ] as never;
+    try {
+      const { items } = await world.api.cloudResources.catalog(world.acme, {
+        tenantId: world.acmeTenant,
+        poolId: world.poolId,
+      });
+      expect(items.map((item: { slug: string }) => item.slug)).toEqual([
+        'fake-wordpress',
+        'fake-monitoring',
+      ]);
+    } finally {
+      delete world.cloud.catalogExtra;
+    }
+  });
+});

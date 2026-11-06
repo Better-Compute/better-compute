@@ -31,16 +31,16 @@ import {
   parseAdopt,
   parseCreate,
   parseDiscover,
+  parseCatalog,
   parseKinds,
   parseList,
   parseRef,
   parseUpdate,
 } from './parse.js';
 import { resourcesReconciler } from './reconciler.js';
+import { listCatalog } from './catalog.js';
 import { meterResources, resourceHoursMeter, usageSourceAccepted } from './usage.js';
 
-/** A meter key as better-iam takes it (core's meter catalog pattern). */
-const meterKeyPattern = /^[a-z][a-z0-9._-]{0,63}$/;
 import {
   clearStaged,
   createResource,
@@ -55,6 +55,8 @@ import {
 import { resourcesWork, type CloudResourcesDeps } from './store.js';
 import type {
   AdoptResourceInput,
+  CatalogEntryView,
+  CatalogInput,
   CloudResourceKindView,
   CloudResourceView,
   CreateResourceInput,
@@ -65,6 +67,9 @@ import type {
   ResourceRef,
   UpdateResourceInput,
 } from './types.js';
+
+/** A meter key as better-iam takes it (core's meter catalog pattern). */
+const meterKeyPattern = /^[a-z][a-z0-9._-]{0,63}$/;
 
 export interface CloudResourcesOptions {
   /**
@@ -98,6 +103,8 @@ export type CloudResourcesApi = {
   /** Managed data and platform services on a provider account: databases, apps, functions and the like. */
   cloudResources: {
     kinds: MethodDefinition<KindsInput, { items: CloudResourceKindView[] }>;
+    /** The installable applications (1-Click apps) the pool's provider lists; installed through other surfaces. */
+    catalog: MethodDefinition<CatalogInput, { items: CatalogEntryView[] }>;
     create: MethodDefinition<CreateResourceInput, CloudResourceView>;
     list: MethodDefinition<ListResourcesInput, { items: CloudResourceView[] }>;
     get: MethodDefinition<ResourceRef, CloudResourceView>;
@@ -219,6 +226,15 @@ export function cloudResources(
         resource: tenantResource,
         validate: describedBy(cloudResourcesSchemas.kinds, parseKinds),
         handler: (context, input) => listKinds(depsOf(context), context.sql, input),
+      }),
+      // The provider is listed with no transaction open.
+      catalog: defineMethod({
+        action: 'compute:cloud-resources:read',
+        kind: 'read',
+        resource: tenantResource,
+        transaction: 'manual',
+        validate: describedBy(cloudResourcesSchemas.catalog, parseCatalog),
+        handler: (context, input) => listCatalog(depsOf(context), context, input),
       }),
       create: defineMethod({
         action: 'compute:cloud-resources:create',

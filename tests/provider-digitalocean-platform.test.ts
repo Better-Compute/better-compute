@@ -924,3 +924,38 @@ describe('do.partner-attachment', () => {
     expect(mutations(emu, 'DELETE', /partner_network_connect/)).toHaveLength(1);
   });
 });
+
+describe('1-Click catalog', () => {
+  it('lists Droplet 1-Clicks as instance images and Kubernetes 1-Clicks as cluster add-ons, in one sweep call', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const entries = await resources.catalog!(call('catalog'));
+    expect(entries).toEqual([
+      { slug: 'wordpress-20-04', installsOn: 'instance' },
+      { slug: 'docker-20-04', installsOn: 'instance' },
+      { slug: 'monitoring', installsOn: 'kubernetes' },
+      { slug: 'ingress-nginx', installsOn: 'kubernetes' },
+    ]);
+    const reads = emu.requests.filter((request) => request.url.pathname.startsWith('/v2/1-clicks'));
+    expect(reads.map((request) => `${request.method} ${request.url.pathname}`)).toEqual([
+      'GET /v2/1-clicks',
+    ]);
+  });
+
+  it('drops an entry of a type it does not know, and a body without the list is empty', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    emu.failNext({ method: 'GET', path: /^\/1-clicks$/ }, 200, {
+      '1_clicks': [
+        { slug: 'wordpress-20-04', type: 'droplet' },
+        { slug: 'mystery', type: 'app-platform' },
+        { type: 'droplet' },
+      ],
+    });
+    expect(await resources.catalog!(call('catalog'))).toEqual([
+      { slug: 'wordpress-20-04', installsOn: 'instance' },
+    ]);
+    emu.failNext({ method: 'GET', path: /^\/1-clicks$/ }, 200, {});
+    expect(await resources.catalog!(call('catalog'))).toEqual([]);
+  });
+});

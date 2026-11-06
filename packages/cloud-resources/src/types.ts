@@ -101,6 +101,21 @@ export interface UpdateResourceInput extends ResourceRef {
   description?: string | null;
 }
 
+export interface CatalogInput {
+  tenantId: string;
+  poolId: string;
+  /** Only what installs there. */
+  installsOn?: 'instance' | 'kubernetes';
+}
+
+/** One installable application of the pool's provider (a 1-Click app): installed through another surface. */
+export interface CatalogEntryView {
+  slug: string;
+  /** `instance`: as the image of an instance create; `kubernetes`: as an add-on of a managed cluster. */
+  installsOn: 'instance' | 'kubernetes';
+  name?: string;
+}
+
 export interface DiscoverInput {
   tenantId: string;
   poolId: string;

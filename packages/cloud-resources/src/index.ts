@@ -26,3 +26,4 @@ export {
   meterResources,
   resourceHoursMeter,
 } from './usage.js';
+export { maxCatalogEntries } from './catalog.js';

@@ -1,6 +1,7 @@
 import {
   ComputeError,
   type CallContext,
+  type ProviderCatalogEntry,
   type ProviderDiscoveredResource,
   type ProviderResourceKind,
   type ProviderResourceRequest,
@@ -15,6 +16,7 @@ import { appKind } from './kinds/apps.js';
 import { databaseKinds } from './kinds/databases.js';
 import { functionsKinds } from './kinds/functions.js';
 import { partnerKind } from './kinds/partner.js';
+import { oneClickCatalog } from './one-clicks.js';
 import type { DoKind, DoKindEnv } from './kind.js';
 
 // The `ProviderResources` dispatcher: every long-tail DigitalOcean kind, by name. The cloud-resources module
@@ -113,5 +115,10 @@ export class DoResources implements ProviderResources {
         reason: 'release',
       });
     await found.release(this.#env, id, context);
+  }
+
+  /** The 1-Click applications: Droplet images and DOKS add-ons, installed through those surfaces. */
+  catalog(context: CallContext): Promise<ProviderCatalogEntry[]> {
+    return oneClickCatalog(this.#env.client, context);
   }
 }

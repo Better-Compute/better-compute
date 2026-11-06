@@ -3,6 +3,7 @@ import {
   field,
   manifest,
   type CallContext,
+  type ProviderCatalogEntry,
   type ProviderDefinition,
   type ProviderDiscoveredResource,
   type ProviderResourceKind,
@@ -50,6 +51,8 @@ export interface FakeResourcesCloud {
   resolved: Map<string, string>;
   /** The `accountScope` of the last ensure, by provider-side name. */
   scopes: Map<string, string | undefined>;
+  /** Extra entries the catalog answers (to check the module drops malformed ones). */
+  catalogExtra?: ProviderCatalogEntry[];
   /** Extra `usage` entries every fake.database reports (to check the module drops what it should). */
   usageExtra?: Record<string, number>;
   reset(): void;
@@ -81,6 +84,7 @@ export function fakeResourcesCloud(): FakeResourcesCloud {
       this.scopes.clear();
       this.resolved.clear();
       delete this.usageExtra;
+      delete this.catalogExtra;
     },
     seed(resource) {
       const id = `f-${++next}`;
@@ -243,6 +247,14 @@ export function fakeProviderResources(
   };
   return {
     kinds: () => fakeKinds,
+    async catalog() {
+      call('catalog');
+      return [
+        { slug: 'fake-wordpress', installsOn: 'instance', name: 'WordPress' },
+        { slug: 'fake-monitoring', installsOn: 'kubernetes' },
+        ...(cloud.catalogExtra ?? []),
+      ];
+    },
     async ensure(request: ProviderResourceRequest, context: CallContext) {
       call(`ensure ${request.kind} ${request.name}`);
       cloud.scopes.set(request.name, request.accountScope);

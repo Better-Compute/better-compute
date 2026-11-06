@@ -1,6 +1,7 @@
 import { registerAccount } from './account.js';
 import { registerActions } from './actions.js';
 import { registerAddons } from './addons.js';
+import { registerOneClicks } from './one-clicks.js';
 import { registerApps } from './apps.js';
 import { registerAutoscale } from './autoscale.js';
 import { registerCatalog } from './catalog.js';
@@ -292,5 +293,6 @@ export class DoEmulator {
     registerFunctions(this);
     registerAddons(this);
     registerPartner(this);
+    registerOneClicks(this);
   }
 }

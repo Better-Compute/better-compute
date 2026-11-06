@@ -707,6 +707,7 @@ group('kubernetesNodePools', 'kubernetes', [
 // Managed data and platform services (databases, apps, functions) on a provider account (cloud-resources module).
 group('cloudResources', 'cloud-resources', [
   ['kinds', 'read', 'cloud-resources:read', 'tenant', 'v1.0'],
+  ['catalog', 'read', 'cloud-resources:read', 'tenant', 'v1.0'],
   ['create', 'mutation', 'cloud-resources:create', 'cloud-resource', 'v1.0'],
   ['list', 'read', 'cloud-resources:read', 'tenant', 'v1.0', list],
   ['get', 'read', 'cloud-resources:read', 'cloud-resource', 'v1.0'],

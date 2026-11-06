@@ -43,9 +43,13 @@ betterCompute({
 });
 ```
 
-- **API:** `cloudResources.kinds`, `create`, `list`, `get`, `update`, `delete`, `discover`, `adopt` and
-  `release`, on a provider pool the tenant owns or is offered. Discover, adopt and release work only on the tenant's
-  own account.
+- **API:** `cloudResources.kinds`, `catalog`, `create`, `list`, `get`, `update`, `delete`, `discover`,
+  `adopt` and `release`, on a provider pool the tenant owns or is offered. Discover, adopt and release work only on
+  the tenant's own account.
+- **Catalog.** `cloudResources.catalog` lists the installable applications the pool's provider offers
+  (`ProviderResources.catalog`; DigitalOcean's 1-Click apps), optionally by `installsOn`: `instance` (the slug is
+  an instance create's image) or `kubernetes` (an add-on of a managed cluster). Read-only: they are installed
+  through those surfaces, never through `create`.
 - **IAM** on `cloud-resource/{id}` (`compute:cloud-resources:create|read|update|delete`) with the attributes `kind`,
   `family`, `provider`, `providerAccountId`, `poolId`, `region` and `projectId`: `resource.family == 'data'`
   allows databases without allowing apps.

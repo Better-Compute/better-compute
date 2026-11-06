@@ -3,6 +3,7 @@ import { bool, fail, id, key, object, tenant } from './input.js';
 import type {
   AdoptResourceInput,
   CreateResourceInput,
+  CatalogInput,
   DiscoverInput,
   KindsInput,
   ListResourcesInput,
@@ -153,6 +154,20 @@ export function parseUpdate(raw: unknown): UpdateResourceInput {
   };
 }
 
+export const installTargets = ['instance', 'kubernetes'] as const;
+
+export function parseCatalog(raw: unknown): CatalogInput {
+  const input = object(raw, ['tenantId', 'poolId', 'installsOn']);
+  const installsOn = input.installsOn;
+  if (installsOn !== undefined && !(installTargets as readonly unknown[]).includes(installsOn))
+    fail(`installsOn must be one of ${installTargets.join(', ')}`);
+  return {
+    tenantId: tenant(input.tenantId),
+    poolId: id(input.poolId, 'pool', 'poolId'),
+    ...(installsOn !== undefined ? { installsOn: installsOn as CatalogInput['installsOn'] } : {}),
+  };
+}
+
 export function parseDiscover(raw: unknown): DiscoverInput {
   const input = object(raw, ['tenantId', 'poolId', 'kind']);
   return {
@@ -234,6 +249,18 @@ const ref = strictObject(
 
 export const cloudResourcesSchemas = {
   kinds: strictObject({ tenantId: tenantIdSchema, poolId: poolSchema }, ['tenantId', 'poolId']),
+  catalog: strictObject(
+    {
+      tenantId: tenantIdSchema,
+      poolId: poolSchema,
+      installsOn: {
+        enum: [...installTargets],
+        description:
+          'Only what installs there: instance (an image) or kubernetes (a cluster add-on)',
+      },
+    },
+    ['tenantId', 'poolId'],
+  ),
   create: strictObject(
     {
       tenantId: tenantIdSchema,

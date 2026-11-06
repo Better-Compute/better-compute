@@ -95,6 +95,13 @@ describe('DigitalOcean Managed Databases through cloudResources', () => {
       poolId: w.poolId,
     });
     expect(kinds.items.map((kind: { kind: string }) => kind.kind)).toContain('do.database.pg');
+    // The 1-Click catalog: Droplet images and DOKS add-ons, installed through those surfaces.
+    const catalog = await w.api.cloudResources.catalog(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      installsOn: 'instance',
+    });
+    expect(catalog.items).toContainEqual({ slug: 'wordpress-20-04', installsOn: 'instance' });
 
     const database = await w.api.cloudResources.create(w.acme, {
       tenantId: w.acmeTenant,

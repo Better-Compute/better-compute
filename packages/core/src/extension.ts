@@ -907,6 +907,22 @@ export interface ProviderResources {
   ): Promise<ProviderResourceState>;
   /** Removes the ownership labels and leaves the resource running. */
   release?(kind: string, id: string, context: CallContext): Promise<void>;
+  /**
+   * The installable applications the provider lists (DigitalOcean 1-Click apps, a marketplace): read-only. Each is
+   * installed through another surface, not `ensure`: an `instance` one as the image of an instance create, a
+   * `kubernetes` one as an add-on of a managed cluster.
+   */
+  catalog?(context: CallContext): Promise<readonly ProviderCatalogEntry[]>;
+}
+
+/** (cloud-resources) One installable application of a provider's catalog (`ProviderResources.catalog`). */
+export interface ProviderCatalogEntry {
+  /** The provider's slug: `[a-z0-9][a-z0-9._-]`, at most 100 characters (`wordpress-20-04`). */
+  slug: string;
+  /** Where it installs: `instance` (an image for an instance create) or `kubernetes` (a managed cluster add-on). */
+  installsOn: 'instance' | 'kubernetes';
+  /** A display name, when the provider has one. */
+  name?: string;
 }
 
 /**
