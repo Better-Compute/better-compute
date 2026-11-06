@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { draftId } from '@better-compute/core';
 import { closeFixtures } from '@better-compute/testing';
 import {
   fleetCreateKey,
@@ -542,5 +543,116 @@ describe('pool substrates in the document', () => {
       },
       { prune: true },
     );
+  });
+});
+
+describe('fleet.apply of new clusters (composable admission)', () => {
+  const projected = (clusterId: string) =>
+    world.fixture.compute.authz.get('kubernetes-cluster', clusterId, world.rootTenant);
+  const draft = (identityId: string, name: string, incarnation = 0) =>
+    draftId(
+      'kcl',
+      world.rootTenant,
+      identityId,
+      fleetCreateKey(world.rootTenant, 'kubernetesCluster', name, incarnation),
+    );
+
+  it('creates a cluster through the envelope; the reconciler converges it; drift is reported and cleared', async () => {
+    const document = await withClusters([
+      { name: 'training', pool: world.poolId, location: 'us-central1', nodePools: [system, gpu] },
+    ]);
+    const planned = await plan(document);
+    const applied = await apply(document, { planHash: planned.planHash });
+    expect(applied.applied).toBe(1);
+    const rootIdentity = world.fixture.tenants.root.caller.identityId;
+    const clusterId = await draft(rootIdentity, 'training');
+    const cluster = await world.api.kubernetesClusters.get(world.root, {
+      tenantId: world.rootTenant,
+      clusterId,
+    });
+    expect(cluster).toMatchObject({ name: 'training', state: 'pending' });
+    expect(cluster.nodePools.map((pool: { name: string }) => pool.name).sort()).toEqual([
+      'gpu',
+      'system',
+    ]);
+    expect(await projected(clusterId)).toBeDefined();
+    // Again: nothing to do (the cluster exists under the plan's key).
+    expect((await apply(document)).applied).toBe(0);
+
+    await world.until(async () => {
+      const view = await world.api.kubernetesClusters.get(world.root, {
+        tenantId: world.rootTenant,
+        clusterId,
+      });
+      return view.state === 'ready';
+    });
+    expect((await plan(document)).calls).toEqual([]);
+
+    // Someone resizes a node pool outside fleet: drift, then convergence once fleet applies again.
+    const systemPool = cluster.nodePools.find((pool: { name: string }) => pool.name === 'system')!;
+    await world.api.kubernetesNodePools.update(world.root, {
+      tenantId: world.rootTenant,
+      clusterId,
+      nodePoolId: systemPool.id,
+      nodeCount: 5,
+    });
+    await world.tick('fleet.drift', 3, 16 * 60_000);
+    const status = await world.api.fleet.status(world.root, { tenantId: world.rootTenant });
+    expect(status.drift?.changes).toEqual([
+      {
+        kind: 'kubernetesNodePool',
+        name: 'training/system',
+        action: 'update',
+        fields: ['nodeCount'],
+      },
+    ]);
+    expect((await world.events('fleet.')).map((event) => event.type)).toContain('fleet.drifted');
+    await apply(document);
+    expect(
+      (await world.api.fleet.status(world.root, { tenantId: world.rootTenant })).drift,
+    ).toBeUndefined();
+  });
+
+  it('a refused create leaves no projection row; neither does a plan that fails in its transaction', async () => {
+    // A root administrator who may administer the fleet but not create clusters.
+    const token = 'token-fleet-no-k8s-0123456789';
+    const caller = world.fixture.iam.addCaller(token, {
+      tenantId: world.rootTenant,
+      identityId: 'usr_fleet_no_k8s',
+    });
+    world.fixture.iam.allow({ token });
+    world.fixture.iam.deny({ token, action: 'compute:kubernetes:create' });
+    const document = await withClusters([
+      { name: 'refused', pool: world.poolId, location: 'us-central1', nodePools: [system] },
+    ]);
+    await expect(
+      world.api.fleet.apply({ token }, { tenantId: world.rootTenant, config: document }),
+    ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    expect(await projected(await draft(caller.identityId, 'refused'))).toBeUndefined();
+
+    // Phase 2 fails after the create was checked (a node pool resized outside its autoscaling
+    // bounds is refused by its handler): nothing is applied, and the staged projection row goes.
+    const existing = await created('existing');
+    const next = await withClusters([
+      ...(await exported()).kubernetesClusters!,
+      { name: 'fresh', pool: world.poolId, location: 'us-central1', nodePools: [system] },
+    ]);
+    const wanted = next.kubernetesClusters!.find((cluster) => cluster.name === 'existing')!;
+    wanted.nodePools!.find((pool) => pool.name === 'gpu')!.nodeCount = 9;
+    await expect(apply(next)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    const rootIdentity = world.fixture.tenants.root.caller.identityId;
+    expect(await projected(await draft(rootIdentity, 'fresh'))).toBeUndefined();
+    const { rows } = await world.fixture.database.query(
+      `SELECT 1 FROM kubernetes_clusters WHERE name = 'fresh'`,
+    );
+    expect(rows).toEqual([]);
+    expect(
+      (
+        await world.api.kubernetesClusters.get(world.root, {
+          tenantId: world.rootTenant,
+          clusterId: existing.id,
+        })
+      ).nodePools.find((pool: { name: string }) => pool.name === 'gpu').nodeCount,
+    ).toBe(0);
   });
 });

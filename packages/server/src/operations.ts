@@ -639,14 +639,18 @@ export function createOperations(
             kind === 'public' ? { ...base, sql, credential } : contextFor(sql, admission),
         });
         let value: unknown;
+        let failure: { error: unknown } | undefined;
         try {
           value = await definition.handler(
             contextFor(outsideTransaction(database), admitted, composite),
             input,
           );
+        } catch (error) {
+          failure = { error };
+          throw error;
         } finally {
-          // Grants live only for this call.
-          composite.end();
+          // Grants live only for this call; what checked admissions staged and did not run is undone.
+          await composite.end(failure);
         }
         await database.transaction((tx) => recordAudit(tx, admitted));
         return value;

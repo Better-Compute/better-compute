@@ -256,6 +256,8 @@ export function kubernetes(
           // Transaction 2 threw (CONFLICT on the name, QUOTA_EXCEEDED): the staged projection row goes.
           abandoned: (context, input, tx) => clearStagedCluster(context, input, tx),
           check: (context, input) => clusterBudgetCheck(context, input),
+          // Both hooks only clear the staged projection row: fleet.apply may compose the create.
+          composable: true,
         },
         handler: (context, input) => createCluster(depsOf(context), context, input),
       }),
