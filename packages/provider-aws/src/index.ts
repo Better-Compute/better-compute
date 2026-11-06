@@ -6,3 +6,4 @@ export * from './compute.js';
 export * from './images.js';
 export * from './userdata.js';
 export * from './provider.js';
+export * from './cli.js';

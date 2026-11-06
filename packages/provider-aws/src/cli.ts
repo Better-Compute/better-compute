@@ -1,0 +1,284 @@
+import { writeFile } from 'node:fs/promises';
+import { ComputeError } from '@better-compute/core';
+import { assertRegion, parseArn, type AwsPartition } from '@better-compute/aws-core';
+import { tags } from './ids.js';
+
+// The CLI commands that onboard an AWS account (`aws iam-policy`, `aws trust-policy`). The CLI never
+// imports providers, so an application that uses this one adds the commands to its configuration:
+//
+//   import { awsIamPolicyCommand, awsTrustPolicyCommand } from '@better-compute/provider-aws';
+//   export const commands = [awsIamPolicyCommand(), awsTrustPolicyCommand()];
+
+export interface IamStatement {
+  Sid: string;
+  Effect: 'Allow' | 'Deny';
+  Action: string | readonly string[];
+  /** Absent in a trust policy, where IAM refuses it. */
+  Resource?: string | readonly string[];
+  Condition?: Readonly<Record<string, Readonly<Record<string, string | readonly string[]>>>>;
+  Principal?: unknown;
+}
+
+export interface IamPolicyDocument {
+  Version: '2012-10-17';
+  Statement: readonly IamStatement[];
+}
+
+const partitions: readonly AwsPartition[] = ['aws', 'aws-cn', 'aws-us-gov'];
+const usage = (message: string) => new ComputeError('INVALID_INPUT', message);
+
+/**
+ * The ABAC permissions policy provider-aws needs (AD6, program Appendix B, phase A1): reads are
+ * unconditioned, RunInstances must tag what it creates `better-compute:managed=true`, terminate
+ * needs that tag, power and reinstall need the `better-compute:instance` tag, and tag edits
+ * outside launch touch only the two ownership keys. AWS then refuses a destructive call on an
+ * instance better-compute does not own even if the control plane had a bug.
+ */
+export function iamPolicy(
+  options: { partition?: AwsPartition; region?: string; account?: string; instanceProfileArn?: string } = {},
+): IamPolicyDocument {
+  const partition = options.partition ?? 'aws';
+  if (!partitions.includes(partition)) throw usage(`--partition is one of ${partitions.join(', ')}`);
+  const region = options.region === undefined ? '*' : assertRegion(options.region);
+  if (options.account !== undefined && !/^\d{12}$/.test(options.account))
+    throw usage('--account is a 12-digit AWS account id');
+  const account = options.account ?? '*';
+  const ec2 = (resource: string, owned = true) =>
+    `arn:${partition}:ec2:${region}:${owned ? account : ''}:${resource}`;
+  const instances = ec2('instance/*');
+  const managed = { StringEquals: { [`ec2:ResourceTag/${tags.managed}`]: 'true' } };
+  const statements: IamStatement[] = [
+    {
+      Sid: 'Describe',
+      Effect: 'Allow',
+      Action: [
+        'ec2:DescribeInstances',
+        'ec2:DescribeInstanceTypes',
+        'ec2:DescribeInstanceTypeOfferings',
+        'ec2:DescribeAvailabilityZones',
+        'ec2:DescribeImages',
+      ],
+      Resource: '*',
+    },
+    {
+      Sid: 'RunTagged',
+      Effect: 'Allow',
+      Action: 'ec2:RunInstances',
+      Resource: [instances, ec2('volume/*')],
+      Condition: { StringEquals: { [`aws:RequestTag/${tags.managed}`]: 'true' } },
+    },
+    {
+      Sid: 'RunResources',
+      Effect: 'Allow',
+      Action: 'ec2:RunInstances',
+      Resource: [
+        ec2('image/*', false),
+        ec2('subnet/*'),
+        ec2('security-group/*'),
+        ec2('network-interface/*'),
+        ec2('key-pair/*'),
+      ],
+    },
+    {
+      Sid: 'TagOnCreate',
+      Effect: 'Allow',
+      Action: 'ec2:CreateTags',
+      Resource: [instances, ec2('volume/*')],
+      Condition: { StringEquals: { 'ec2:CreateAction': 'RunInstances' } },
+    },
+    {
+      Sid: 'ManageOwned',
+      Effect: 'Allow',
+      Action: 'ec2:TerminateInstances',
+      Resource: instances,
+      Condition: managed,
+    },
+    {
+      Sid: 'PowerClaimed',
+      Effect: 'Allow',
+      Action: [
+        'ec2:StartInstances',
+        'ec2:StopInstances',
+        'ec2:RebootInstances',
+        'ec2:SendDiagnosticInterrupt',
+        'ec2:CreateReplaceRootVolumeTask',
+      ],
+      Resource: instances,
+      Condition: { Null: { [`ec2:ResourceTag/${tags.instance}`]: 'false' } },
+    },
+    {
+      Sid: 'Attach',
+      Effect: 'Allow',
+      Action: ['ec2:CreateTags', 'ec2:DeleteTags'],
+      Resource: instances,
+      Condition: { 'ForAllValues:StringEquals': { 'aws:TagKeys': [tags.instance, tags.managed] } },
+    },
+    {
+      Sid: 'PublicImages',
+      Effect: 'Allow',
+      Action: 'ssm:GetParameters',
+      Resource: `arn:${partition}:ssm:${region}::parameter/aws/service/*`,
+    },
+    { Sid: 'Identity', Effect: 'Allow', Action: 'sts:GetCallerIdentity', Resource: '*' },
+  ];
+  if (options.instanceProfileArn !== undefined) {
+    const profile = parseArn(options.instanceProfileArn);
+    if (profile.service !== 'iam' || !profile.resource.startsWith('instance-profile/'))
+      throw usage('--instance-profile is an instance profile ARN (arn:…:iam::<account>:instance-profile/<name>)');
+    if (profile.partition !== partition)
+      throw usage(`--instance-profile is in partition ${profile.partition}, not ${partition}`);
+    // The role of the same path and name as the profile (the console's convention); edit it if yours differs.
+    statements.push({
+      Sid: 'PassProfile',
+      Effect: 'Allow',
+      Action: 'iam:PassRole',
+      Resource: `arn:${partition}:iam::${profile.account}:role/${profile.resource.slice('instance-profile/'.length)}`,
+      Condition: { StringEquals: { 'iam:PassedToService': 'ec2.amazonaws.com' } },
+    });
+  }
+  return { Version: '2012-10-17', Statement: statements };
+}
+
+/**
+ * The trust policy a tenant attaches to the role better-compute assumes: only the platform's
+ * principal, and only with the platform-assigned ExternalId (AD4).
+ */
+export function trustPolicy(options: { platformPrincipalArn: string; externalId: string }): IamPolicyDocument {
+  let principal;
+  try {
+    principal = parseArn(options.platformPrincipalArn);
+  } catch {
+    throw usage('--platform-principal is an IAM role or user ARN of the platform account');
+  }
+  if (
+    (principal.service !== 'iam' && principal.service !== 'sts') ||
+    !/^\d{12}$/.test(principal.account) ||
+    !/^(role|user|assumed-role)\//.test(principal.resource)
+  )
+    throw usage('--platform-principal is an IAM role or user ARN of the platform account');
+  if (!/^[\w+=,.@:/-]{2,1224}$/.test(options.externalId))
+    throw usage('--external-id is 2 to 1224 characters of [A-Za-z0-9+=,.@:/_-]');
+  return {
+    Version: '2012-10-17',
+    Statement: [
+      {
+        Sid: 'BetterComputeAssume',
+        Effect: 'Allow',
+        Principal: { AWS: options.platformPrincipalArn },
+        Action: 'sts:AssumeRole',
+        Condition: { StringEquals: { 'sts:ExternalId': options.externalId } },
+      },
+    ],
+  };
+}
+
+/** The part of the CLI's command context these commands use (better-compute/cli `CommandContext`). */
+export interface AwsCommandContext {
+  flags: Record<string, string | number | boolean | undefined>;
+  io: { out(message: string): void };
+  note(message: string): void;
+  path(value: string): string;
+}
+
+const text = (value: unknown) => (typeof value === 'string' && value !== '' ? value : undefined);
+
+async function emit(context: AwsCommandContext, document: IamPolicyDocument): Promise<void> {
+  const json = `${JSON.stringify(document, null, 2)}\n`;
+  const out = text(context.flags.out);
+  if (!out) {
+    context.io.out(json.trimEnd());
+    return;
+  }
+  const file = context.path(out);
+  try {
+    await writeFile(file, json, { flag: 'wx', mode: 0o644 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw usage(`--out ${out} exists; give a new file`);
+    throw error;
+  }
+  context.note(`wrote ${file}`);
+}
+
+const outFlag = {
+  type: 'string' as const,
+  value: 'PATH',
+  description: 'Write the policy to this new file instead of the output',
+};
+
+/** `better-compute aws iam-policy`: the ABAC permissions policy, as JSON (or --out <file>). */
+export function awsIamPolicyCommand() {
+  return {
+    name: 'aws iam-policy' as const,
+    group: 'Providers' as const,
+    summary: 'Print the IAM permissions policy an AWS provider account needs',
+    description:
+      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile.',
+    target: 'none' as const,
+    output: 'text' as const,
+    flags: {
+      partition: {
+        type: 'string' as const,
+        value: 'PARTITION',
+        choices: partitions,
+        description: 'aws (default), aws-cn or aws-us-gov',
+      },
+      region: { type: 'string' as const, value: 'REGION', description: 'Limit resource ARNs to this region' },
+      account: { type: 'string' as const, value: 'ID', description: 'Limit resource ARNs to this AWS account' },
+      'instance-profile': {
+        type: 'string' as const,
+        value: 'ARN',
+        description: 'The instance profile accounts pass to RunInstances (adds iam:PassRole)',
+      },
+      out: outFlag,
+    },
+    async run(context: AwsCommandContext): Promise<void> {
+      const partition = text(context.flags.partition) as AwsPartition | undefined;
+      await emit(
+        context,
+        iamPolicy({
+          ...(partition ? { partition } : {}),
+          ...(text(context.flags.region) ? { region: text(context.flags.region)! } : {}),
+          ...(text(context.flags.account) ? { account: text(context.flags.account)! } : {}),
+          ...(text(context.flags['instance-profile'])
+            ? { instanceProfileArn: text(context.flags['instance-profile'])! }
+            : {}),
+        }),
+      );
+    },
+  };
+}
+
+/** `better-compute aws trust-policy --platform-principal <arn> --external-id <id>`. */
+export function awsTrustPolicyCommand() {
+  return {
+    name: 'aws trust-policy' as const,
+    group: 'Providers' as const,
+    summary: 'Print the trust policy for the role a tenant AWS account lets better-compute assume',
+    description:
+      "aws trust-policy prints the trust policy a tenant attaches to the IAM role named in its provider account's assumeRoleArn: only --platform-principal (the control plane's own role) may assume it, and only with --external-id, the platform-assigned ExternalId <prefix>:<providerAccountId> (better-compute:<id> by default). A tenant never chooses the ExternalId, so a role trusted this way serves only its own provider account.",
+    target: 'none' as const,
+    output: 'text' as const,
+    flags: {
+      'platform-principal': {
+        type: 'string' as const,
+        value: 'ARN',
+        required: true,
+        description: "The control plane's IAM role ARN (the identity that calls AssumeRole)",
+      },
+      'external-id': {
+        type: 'string' as const,
+        value: 'ID',
+        required: true,
+        description: 'The ExternalId better-compute sends for this provider account',
+      },
+      out: outFlag,
+    },
+    async run(context: AwsCommandContext): Promise<void> {
+      const platformPrincipalArn = text(context.flags['platform-principal']);
+      const externalId = text(context.flags['external-id']);
+      if (!platformPrincipalArn) throw usage('--platform-principal is required');
+      if (!externalId) throw usage('--external-id is required');
+      await emit(context, trustPolicy({ platformPrincipalArn, externalId }));
+    },
+  };
+}
