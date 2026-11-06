@@ -91,6 +91,10 @@ export interface KubernetesClusterView {
   /** When the cluster was first `ready`. */
   readyAt?: number;
   deletedAt?: number;
+  /** A cluster that existed before (a pool substrate's `cluster: { adopt }`): never changed or deleted. */
+  adopted?: true;
+  /** The pool whose substrate (`policy.substrate`) this cluster is; it goes with the pool. */
+  substratePoolId?: string;
 }
 
 /** A node pool as `kubernetesClusters.create` (`nodePools`) and `kubernetesNodePools.create` take it. */

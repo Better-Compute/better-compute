@@ -12,7 +12,7 @@ import {
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
-import { readAccount } from '@better-compute/vps';
+import { readAccount, zoneRegion } from '@better-compute/vps';
 import { reopen } from './clusters.js';
 import { canonical, sha256Hex } from './input.js';
 import {
@@ -313,7 +313,8 @@ async function establishCluster(
   } catch (error) {
     throw new Refused(text(error));
   }
-  if (!('create' in substrate.cluster)) throw new Refused('Adopting a cluster is not supported yet');
+  if ('adopt' in substrate.cluster)
+    return establishAdopted(deps, tx, pool, substrate, account, provider, substrate.cluster.adopt);
   const create = substrate.cluster.create;
   let region: string;
   try {
@@ -380,6 +381,95 @@ async function establishCluster(
     substrate: true,
   });
   return { clusterId, createSpec: createSpecOf(create) };
+}
+
+/** A location in a provider cluster id (`…/locations/<l>/…`, GKE's `<l>/<name>`), else the account's first. */
+function adoptedLocation(adoptId: string, provider: { zones: string[]; regions: string[] }): string {
+  const found =
+    /\/locations\/([a-z][a-z0-9-]{1,62})\//.exec(adoptId)?.[1] ??
+    /^([a-z][a-z0-9-]{1,62})\/[^/]+$/.exec(adoptId)?.[1];
+  return found ?? provider.regions[0] ?? provider.zones[0] ?? 'unknown';
+}
+
+/**
+ * `cluster: { adopt }`: an `adopted` cluster row for the provider's cluster (the cluster reconciler reads it with
+ * `getCluster`, never creates, changes or deletes it) and a node pool row per flavor (created in it, and deleted
+ * with the substrate). One substrate per adopted cluster.
+ */
+async function establishAdopted(
+  deps: SubstrateDeps,
+  tx: SqlTx,
+  pool: PoolRow,
+  substrate: PoolSubstrate,
+  account: { id: string },
+  provider: { zones: string[]; regions: string[] },
+  adoptId: string,
+): Promise<{ clusterId: string; createSpec: null }> {
+  const { rows: taken } = await tx.query<{ substrate_pool_id: string | null }>(
+    `SELECT substrate_pool_id FROM kubernetes_clusters
+      WHERE provider_account_id = $1 AND provider_id = $2 AND state <> 'deleted' LIMIT 1`,
+    [account.id, adoptId],
+  );
+  if (taken[0])
+    throw new Refused(
+      taken[0].substrate_pool_id !== null
+        ? `Cluster ${adoptId} is already pool ${taken[0].substrate_pool_id}'s substrate`
+        : `Cluster ${adoptId} is managed by better-compute already (kubernetesClusters)`,
+    );
+  const name = substrateClusterName(pool.id);
+  const named = await tx.query(
+    `SELECT 1 FROM kubernetes_clusters WHERE tenant_id = $1 AND name = $2 AND state <> 'deleted'`,
+    [pool.owner_tenant_id, name],
+  );
+  if (named.rows.length > 0) throw new Refused(`A cluster named ${name} already exists in the pool owner's tenant`);
+  const clusterId = newId('kcl');
+  const location = adoptedLocation(adoptId, provider);
+  const region = /-[a-z]$/.test(location) ? zoneRegion(location) : location;
+  await tx.query(
+    `INSERT INTO kubernetes_clusters (id, tenant_id, project_id, pool_id, provider_account_id, network_id, subnet_id,
+                                      name, description, mode, location, region, release_channel, requested_version,
+                                      authorized_networks, private_nodes, provider_name, provider_id, state,
+                                      desired_state, created_by, idempotency_key, request_hash, version, adopted,
+                                      substrate_pool_id)
+     VALUES ($1, $2, NULL, $3, $4, NULL, NULL, $5, $6, 'standard', $7, $8, 'regular', NULL, '[]'::jsonb, false, $9,
+             $10, 'pending', 'present', $11, $12, decode($13, 'hex'), 1, true, $3)`,
+    [
+      clusterId,
+      pool.owner_tenant_id,
+      pool.id,
+      account.id,
+      name,
+      `Adopted by the substrate of pool ${pool.id}`,
+      location,
+      region,
+      (adoptId.split('/').pop() ?? adoptId).slice(0, 63),
+      adoptId,
+      substrateCreator,
+      `substrate:${clusterId}`,
+      await sha256Hex(substrateIdentity(substrate)),
+    ],
+  );
+  for (const flavor of substrate.flavors)
+    await insertFlavorPool(tx, { clusterId, tenantId: pool.owner_tenant_id, poolId: pool.id, flavor, initial: false });
+  await deps.authz.upsert(tx, {
+    type: 'kubernetes-cluster',
+    id: clusterId,
+    tenantId: pool.owner_tenant_id,
+    attributes: { providerAccountId: account.id, poolId: pool.id, mode: 'standard', location },
+    parentType: 'tenant',
+    parentId: pool.owner_tenant_id,
+  });
+  await deps.work.enqueue(tx, clustersWork, clusterId);
+  await publishCluster(deps, tx, { id: clusterId, tenant_id: pool.owner_tenant_id }, 'kubernetes.cluster.created', {
+    poolId: pool.id,
+    providerAccountId: account.id,
+    name,
+    mode: 'standard',
+    location,
+    substrate: true,
+    adopted: true,
+  });
+  return { clusterId, createSpec: null };
 }
 
 // --- converging the rows: flavors and create settings ----------------------------------------------------------------
@@ -745,7 +835,7 @@ export async function reconcileSubstrate(
     await setState(deps, sql, row, { state: 'error', message: `cluster: ${cluster.message ?? 'in error'}` });
     return undefined;
   }
-  if (cluster.provider_id === null || cluster.endpoint === null || !['ready', 'updating'].includes(cluster.state)) {
+  if (cluster.provider_id === null || !['ready', 'updating'].includes(cluster.state)) {
     await setState(deps, sql, row, { state: row.state === 'ready' ? 'updating' : 'provisioning' });
     return now() + substratePollMs;
   }

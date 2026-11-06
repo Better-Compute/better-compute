@@ -11,7 +11,12 @@ import {
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
-import { providerResourceName, readAccount, type ProviderAccount } from '@better-compute/vps';
+import {
+  providerResourceName,
+  readAccount,
+  zoneRegion,
+  type ProviderAccount,
+} from '@better-compute/vps';
 import {
   accountKubernetes,
   clustersWork,
@@ -350,10 +355,36 @@ class ClusterWorker {
     return this.#cluster.ready_at === null ? 'provisioning' : 'updating';
   }
 
+  /**
+   * An adopted cluster (a pool substrate's `cluster: { adopt }`) as the provider has it: read, never created or
+   * changed. Gone at the provider is an error (the substrate cannot fix it).
+   */
+  async #readAdopted(kubernetes: ProviderKubernetes): Promise<ProviderResourceState> {
+    const cluster = this.#cluster;
+    const found = await kubernetes.getCluster(cluster.provider_id!, this.#call(cluster.id));
+    if (!found)
+      throw new ComputeError(
+        'NOT_FOUND',
+        `The adopted cluster ${cluster.provider_id} does not exist at the provider`,
+      );
+    const location = found.outputs?.location;
+    if (location && location !== cluster.location)
+      await this.sql.transaction((tx) =>
+        tx.query(`UPDATE kubernetes_clusters SET location = $2, region = $3 WHERE id = $1`, [
+          cluster.id,
+          location,
+          zoneRegion(location),
+        ]),
+      );
+    return found;
+  }
+
   async converge(kubernetes: ProviderKubernetes): Promise<number | undefined> {
     const cluster = this.#cluster;
     const ensured = await this.#attempt(() =>
-      kubernetes.ensureCluster(clusterSpec(this.snapshot), this.#call(cluster.id)),
+      cluster.adopted
+        ? this.#readAdopted(kubernetes)
+        : kubernetes.ensureCluster(clusterSpec(this.snapshot), this.#call(cluster.id)),
     );
     if (!ensured) return this.#next();
     if (ensured.state === 'error') {
@@ -430,9 +461,48 @@ class ClusterWorker {
     return this.#next();
   }
 
+  /**
+   * An adopted cluster is never deleted: only the node pools better-compute created in it are, then the row is
+   * `deleted`.
+   */
+  async #releaseAdopted(kubernetes: ProviderKubernetes): Promise<number | undefined> {
+    const cluster = this.#cluster;
+    const problems: string[] = [];
+    let waiting = false;
+    for (const pool of this.snapshot.pools) {
+      if (pool.state === 'deleted') continue;
+      const gone = await this.#attempt(() =>
+        kubernetes.deleteNodePool(cluster.provider_id!, pool.name, this.#call(pool.id)),
+      );
+      if (!gone) {
+        waiting = true;
+        continue;
+      }
+      if (gone.state === 'deleted') await this.#setPool(pool, 'deleted');
+      else if (gone.state === 'error') {
+        await this.#setPool(pool, 'error', gone.message);
+        problems.push(`node pool ${pool.name}: ${gone.message ?? 'the provider refused it'}`);
+      } else {
+        this.#inFlight = true;
+        waiting = true;
+        await this.#setPool(pool, 'deleting');
+      }
+    }
+    if (problems.length > 0) {
+      await this.#setCluster({ state: 'error', message: problems.join('; ').slice(0, 500) });
+      return this.#next();
+    }
+    if (waiting || this.#backoff) {
+      await this.#setCluster({ state: 'deleting' });
+      return this.#next();
+    }
+    return this.finish();
+  }
+
   /** Deletes the cluster at the provider (its node pools go with it), then records it `deleted`. */
   async teardown(kubernetes: ProviderKubernetes): Promise<number | undefined> {
     const cluster = this.#cluster;
+    if (cluster.adopted) return this.#releaseAdopted(kubernetes);
     const gone = await this.#attempt(() =>
       kubernetes.deleteCluster(cluster.provider_id!, this.#call(cluster.id)),
     );

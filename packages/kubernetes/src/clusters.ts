@@ -448,6 +448,26 @@ export async function listClusters(
 }
 
 /** A cluster accepting changes: locked, and neither being deleted nor deleted. */
+/**
+ * A pool substrate's cluster is the pool's (`policy.substrate`): its node pools follow the pool's flavors and it goes
+ * with the pool. `what` names the refused change; `kubernetesClusters.update` is allowed on a created one (an
+ * operator upgrade), never on an adopted one, which better-compute does not change.
+ */
+function assertNotSubstrate(row: ClusterRow, what: 'update' | 'delete' | 'nodePools'): void {
+  if (row.adopted && what === 'update')
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Cluster ${row.id} was adopted by pool ${row.substrate_pool_id}'s substrate; better-compute does not change it`,
+    );
+  if (row.substrate_pool_id !== null && what !== 'update')
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Cluster ${row.id} is pool ${row.substrate_pool_id}'s substrate: change policy.substrate (flavors), or archive the pool to remove it`,
+      undefined,
+      { poolId: row.substrate_pool_id },
+    );
+}
+
 async function openCluster(tx: SqlTx, ref: ClusterRef): Promise<ClusterRow> {
   const row = await requireCluster(tx, ref, { lock: true });
   if (row.desired_state === 'deleted' || row.state === 'deleting' || row.state === 'deleted')
@@ -485,6 +505,7 @@ export async function updateCluster(
   input: UpdateClusterInput,
 ): Promise<KubernetesClusterView> {
   const row = await openCluster(tx, input);
+  assertNotSubstrate(row, 'update');
   const networks = json(row.authorized_networks);
   const providerChange =
     (input.version !== undefined && input.version !== row.requested_version) ||
@@ -522,6 +543,7 @@ export async function deleteCluster(
 ): Promise<KubernetesClusterView> {
   const row = await requireCluster(tx, ref, { lock: true });
   if (row.desired_state === 'deleted') return clusterViewOf(tx, row.id);
+  assertNotSubstrate(row, 'delete');
   await markDeleted(tx, row.id);
   await deps.work.enqueue(tx, clustersWork, row.id);
   await publish(deps, tx, row, 'kubernetes.cluster.deleting');
@@ -668,6 +690,7 @@ export async function createNodePool(
   const caller = context.caller;
   if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
   const cluster = await openCluster(tx, input);
+  assertNotSubstrate(cluster, 'nodePools');
   if (cluster.mode !== 'standard')
     throw new ComputeError(
       'INVALID_STATE',
@@ -756,6 +779,7 @@ export async function updateNodePool(
   input: UpdateNodePoolInput,
 ): Promise<KubernetesNodePoolView> {
   const cluster = await openCluster(tx, input);
+  assertNotSubstrate(cluster, 'nodePools');
   const row = await requireNodePool(tx, cluster.id, input.nodePoolId);
   if (row.desired_state === 'deleted')
     throw new ComputeError('INVALID_STATE', `Node pool ${row.id} is being deleted`);
@@ -796,6 +820,7 @@ export async function deleteNodePool(
   ref: NodePoolRef,
 ): Promise<KubernetesNodePoolView> {
   const cluster = await requireCluster(tx, ref, { lock: true });
+  assertNotSubstrate(cluster, 'nodePools');
   const row = await readNodePool(tx, cluster.id, ref.nodePoolId, { lock: true });
   if (!row) throw new ComputeError('NOT_FOUND', `Node pool ${ref.nodePoolId} not found`);
   if (row.desired_state === 'deleted') return nodePoolView(row);
