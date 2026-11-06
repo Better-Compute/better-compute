@@ -157,6 +157,27 @@ function assertKindAllowed(
     );
 }
 
+/**
+ * A spec that reaches account-wide objects (`ProviderResourceKind.accountWide`) is refused on an account that is not
+ * the tenant's own (a hosted pool), before anything is recorded.
+ */
+function assertAccountScope(
+  provider: ResourcesProvider,
+  tenantId: string,
+  kind: ProviderResourceKind,
+  spec: unknown,
+): void {
+  if (typeof kind.accountWide !== 'function' || provider.account.tenantId === tenantId) return;
+  const fields = [...kind.accountWide(spec)];
+  if (fields.length > 0)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${kind.kind}: spec.${fields[0]} reaches account-wide objects; only a resource on the tenant's own account may name it`,
+      undefined,
+      { reason: 'accountWide', fields, kind: kind.kind },
+    );
+}
+
 async function parentOf(
   tx: SqlTx,
   input: { tenantId: string; parentId?: string },
@@ -213,6 +234,7 @@ async function admit(
   const kind = kindOf(provider, input.kind);
   assertKindAllowed(deps, provider, kind);
   const spec = await validSpec(kind, input.spec);
+  assertAccountScope(provider, input.tenantId, kind, spec);
   const region = regionOf(provider, kind, spec);
   const parent = await parentOf(tx, input, kind, provider.account.id);
   return {
@@ -482,6 +504,7 @@ export async function updateResource(
     );
     const kind = kindOf(provider, row.kind);
     spec = await validSpec(kind, { ...stored, ...input.spec });
+    assertAccountScope(provider, row.tenant_id, kind, spec);
     const changed = [...new Set([...Object.keys(stored), ...Object.keys(spec)])].filter(
       (field) => !same(stored[field], spec[field]),
     );

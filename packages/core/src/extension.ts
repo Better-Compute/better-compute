@@ -836,6 +836,13 @@ export interface ProviderResourceKind {
   preview?: boolean;
   /** Another kind this one lives in (a database user in its cluster): its spec names the parent's provider id. */
   parent?: string;
+  /**
+   * (Pure, no I/O.) The spec's fields that reach account-wide objects of the provider account: a VPC, a registry,
+   * linked repositories, another resource by name. A spec naming any is refused unless the account is the tenant's
+   * own (`accountScope: 'tenant'`): the caller refuses it before it records the resource or the change, and
+   * `ensure` refuses it again. Absent: the kind reaches none.
+   */
+  accountWide?(spec: unknown): readonly string[];
 }
 
 /** (cloud-resources) What `ProviderResources.ensure` is asked for. */

@@ -73,7 +73,7 @@ describe('cloudResources.kinds', () => {
       outputs: ['host', 'port', 'uri'],
       secretOutputs: ['password'],
       regional: true,
-      updatable: ['size', 'nodes'],
+      updatable: ['size', 'nodes', 'network'],
       meters: [{ meter: 'fake.database.hours', unit: 'hour' }],
       preview: false,
       available: true,
@@ -320,7 +320,7 @@ describe('cloudResources.update', () => {
       details: {
         reason: 'replaceRequired',
         fields: ['region', 'version'],
-        updatable: ['size', 'nodes'],
+        updatable: ['size', 'nodes', 'network'],
       },
     });
     const invalid = await failure(
@@ -381,5 +381,48 @@ describe('cloudResources.delete', () => {
       'parent-deleted',
       'requested',
     ]);
+  });
+});
+
+describe('account-wide specs', () => {
+  it('refuses a spec reaching account-wide objects unless the account is the tenant’s own, before any row', async () => {
+    const before = await world.fixture.database.query(
+      `SELECT count(*)::int AS n FROM cloud_resources`,
+    );
+    const hosted = await failure(create({ name: 'wide', spec: dbSpec({ network: 'vpc-1' }) }));
+    expect(hosted).toMatchObject({
+      code: 'INVALID_INPUT',
+      details: { reason: 'accountWide', fields: ['network'], kind: 'fake.database' },
+    });
+    expect(hosted.message).toContain('network');
+    const after = await world.fixture.database.query(
+      `SELECT count(*)::int AS n FROM cloud_resources`,
+    );
+    expect(after.rows).toEqual(before.rows);
+    // On acme's own account it is accepted.
+    const own = await create({
+      name: 'wide-own',
+      poolId: world.acmePoolId,
+      spec: dbSpec({ network: 'vpc-1' }),
+    });
+    expect(own.spec).toMatchObject({ network: 'vpc-1' });
+    // A hosted resource cannot gain one through an update either.
+    const plain = await create({ name: 'wide-later' });
+    const update = await failure(
+      world.api.cloudResources.update(world.acme, {
+        tenantId: world.acmeTenant,
+        resourceId: plain.id,
+        spec: { network: 'vpc-1' },
+      }),
+    );
+    expect(update).toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'accountWide' } });
+    expect(
+      (
+        await world.api.cloudResources.get(world.acme, {
+          tenantId: world.acmeTenant,
+          resourceId: plain.id,
+        })
+      ).spec.network,
+    ).toBeUndefined();
   });
 });

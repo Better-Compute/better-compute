@@ -582,6 +582,8 @@ export function appKind(): DoKind {
       regional: false,
       updatable: updatableFields,
       meters: [{ meter: appInstanceHoursMeter, unit: 'hour' }],
+      // Linked repositories, DOCR, a database cluster by name, a VPC or a DNS zone: the tenant's own account only.
+      accountWide: (spec: unknown) => accountWide(spec as AppSpecInput),
     },
 
     async ensure(env, request, context) {

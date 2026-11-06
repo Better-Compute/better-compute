@@ -262,7 +262,14 @@ export function providerResourcesConformanceCases(): ConformanceCase<ProviderRes
             meters.add(entry.meter);
           }
         }
-        kindOf(resources, subject.kind);
+        const own = kindOf(resources, subject.kind);
+        if (typeof own.accountWide === 'function') {
+          const fields: unknown = own.accountWide(await validSpec(own, subject.spec));
+          check(
+            Array.isArray(fields) && fields.every((field) => typeof field === 'string'),
+            `${own.kind}: accountWide answers a list of field names`,
+          );
+        }
       },
     },
     {

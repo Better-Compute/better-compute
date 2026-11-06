@@ -346,6 +346,9 @@ function clusterKind(info: EngineInfo): DoKind {
       regional: true,
       updatable: ['size', 'nodes', 'storageMiB', ...(info.upgradable ? ['version'] : [])],
       meters: [{ meter: nodeHoursMeter(info.engine), unit: 'hour' }],
+      // A VPC of the account: the tenant's own account only.
+      accountWide: (spec: unknown) =>
+        (spec as Partial<ClusterSpec> | undefined)?.vpc !== undefined ? ['vpc'] : [],
     },
 
     async ensure(env, request: ProviderResourceRequest, context) {

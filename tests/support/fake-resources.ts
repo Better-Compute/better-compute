@@ -105,6 +105,10 @@ export const fakeDatabaseSpec = manifest({
   version: field.string({ pattern: /^[0-9]+$/ }).describe('Major version'),
   size: field.option(['small', 'medium', 'large']).describe('Node size'),
   nodes: field.int({ min: 1, max: 3 }).default(1).describe('Nodes'),
+  network: field
+    .string()
+    .optional()
+    .describe("A network of the provider account (account-wide: the tenant's own account only)"),
 });
 
 export const fakeKinds: readonly ProviderResourceKind[] = Object.freeze([
@@ -116,8 +120,10 @@ export const fakeKinds: readonly ProviderResourceKind[] = Object.freeze([
     outputs: ['host', 'port', 'uri'],
     secretOutputs: ['password'],
     regional: true,
-    updatable: ['size', 'nodes'],
+    updatable: ['size', 'nodes', 'network'],
     meters: [{ meter: 'fake.database.hours', unit: 'hour' }],
+    accountWide: (spec) =>
+      (spec as { network?: string }).network !== undefined ? ['network'] : [],
   },
   {
     kind: 'fake.database-user',

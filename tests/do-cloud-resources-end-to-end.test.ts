@@ -242,17 +242,26 @@ describe('DigitalOcean App Platform and Functions through cloudResources', () =>
       'sk_live_plaintext_4242',
     );
 
-    // A linked repository of the platform's account is out of reach on the hosted pool.
-    const linked = await w.api.cloudResources.create(w.acme, {
-      tenantId: w.acmeTenant,
-      poolId: w.poolId,
-      kind: 'do.app',
-      name: 'linked',
-      spec: { services: [{ name: 'web', github: { repo: 'platform/private', branch: 'main' } }] },
-      idempotencyKey: 'linked',
-    });
-    await w.until(linked.id, 'error');
-    expect((await w.get(linked.id)).message).toContain('account-wide');
+    // A linked repository of the platform's account is out of reach on the hosted pool: refused at the API,
+    // before anything is recorded or sent.
+    const linked = await w.api.cloudResources
+      .create(w.acme, {
+        tenantId: w.acmeTenant,
+        poolId: w.poolId,
+        kind: 'do.app',
+        name: 'linked',
+        spec: { services: [{ name: 'web', github: { repo: 'platform/private', branch: 'main' } }] },
+        idempotencyKey: 'linked',
+      })
+      .then(
+        () => undefined,
+        (error: { code?: string; details?: Record<string, unknown> }) => error,
+      );
+    expect(linked).toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'accountWide' } });
+    const named = await w.fixture.database.query(
+      `SELECT id FROM cloud_resources WHERE name = 'linked'`,
+    );
+    expect(named.rows).toEqual([]);
     expect([...w.emu.state.apps.values()].map((entry) => entry.spec.name)).toEqual([
       app.providerName,
     ]);

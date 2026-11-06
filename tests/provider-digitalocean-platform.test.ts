@@ -264,6 +264,27 @@ describe('do.app: lifecycle', () => {
     expect(ready.usage).toEqual({ 'do.app.instance.hours': 1 });
   });
 
+  it('declares what reaches account-wide objects, so the module refuses it on a hosted pool before any row', async () => {
+    const { resources } = await build(emulator());
+    const kind = (name: string) => resources.kinds().find((entry) => entry.kind === name)!;
+    expect(kind('do.app').accountWide!(web())).toEqual([]);
+    expect(
+      kind('do.app').accountWide!({
+        ...web(),
+        services: [{ name: 'web', github: { repo: 'acme/web', branch: 'main' } }],
+        vpc: { id: '5a4981aa-9653-4bd1-bef5-d6bff52042e4' },
+      }),
+    ).toEqual([
+      'services[0].github (a repository linked to the account)',
+      'vpc (a VPC of the account)',
+    ]);
+    expect(kind('do.partner-attachment').accountWide!({})).toEqual(['vpcs']);
+    expect(kind('do.database.pg').accountWide!({ region: 'nyc3' })).toEqual([]);
+    expect(
+      kind('do.database.pg').accountWide!({ vpc: '5a4981aa-9653-4bd1-bef5-d6bff52042e4' }),
+    ).toEqual(['vpc']);
+  });
+
   it('instance hours count the services and workers an app runs (an autoscaled one at its minimum)', () => {
     expect(appInstances(web(3) as any)).toBe(3);
     expect(

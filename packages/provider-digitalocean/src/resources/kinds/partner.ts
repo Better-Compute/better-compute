@@ -216,6 +216,8 @@ export function partnerKind(): DoKind {
       regional: true,
       updatable: ['vpcs'],
       meters: [{ meter: partnerHoursMeter, unit: 'hour' }],
+      // It joins account VPCs to an outside network: the tenant's own account only, whatever the spec.
+      accountWide: () => ['vpcs'],
     },
 
     async ensure(env, request, context) {
