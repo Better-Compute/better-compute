@@ -119,6 +119,8 @@ export class Ec2Emulator {
     clientToken?: string;
   }[] = [];
   readonly diagnosticInterrupts: string[] = [];
+  /** Subnets DescribeSubnets answers (by id): their VPC, zone and MapPublicIpOnLaunch. */
+  readonly subnets = new Map<string, { vpcId: string; zone: string; mapPublicIpOnLaunch: boolean }>();
   /** Page size cap for paged reads (small, so tests page). */
   pageSize = 2;
   /** Reads that miss a new instance: by `InstanceId` and by the `client-token` filter. */
@@ -476,6 +478,23 @@ export class Ec2Emulator {
         return ec2Response(
           action,
           `<replaceRootVolumeTask>${el('replaceRootVolumeTaskId', task.id)}${el('instanceId', instanceId)}${el('taskState', 'pending')}</replaceRootVolumeTask>`,
+        );
+      }
+      case 'DescribeSubnets': {
+        const ids = listOf(p, 'SubnetId');
+        const missing = ids.find((id) => !this.subnets.has(id));
+        if (missing)
+          return ec2Error('InvalidSubnetID.NotFound', `The subnet ID '${missing}' does not exist`);
+        const shown = ids.length ? ids : [...this.subnets.keys()];
+        return ec2Response(
+          action,
+          items(
+            'subnetSet',
+            shown.map((id) => {
+              const subnet = this.subnets.get(id)!;
+              return `${el('subnetId', id)}${el('vpcId', subnet.vpcId)}${el('availabilityZone', subnet.zone)}${el('mapPublicIpOnLaunch', subnet.mapPublicIpOnLaunch)}${el('state', 'available')}`;
+            }),
+          ),
         );
       }
       case 'CreateTags':

@@ -1,4 +1,5 @@
 import { ComputeError, field, manifest, type SecretRef } from '@better-compute/core';
+import type { KubeTransport } from './eks/transport.js';
 import {
   assertRegion,
   parseArn,
@@ -67,6 +68,20 @@ export const awsConfig = manifest({
     .string({ maxLength: 512 })
     .optional()
     .describe('"key=value": discovery yields only instances carrying this tag'),
+  eksClusterRoleArn: field
+    .string({ maxLength: 2048 })
+    .optional()
+    .describe('(kubernetes) The EKS cluster IAM role ARN new clusters run as'),
+  eksNodeRoleArn: field
+    .string({ maxLength: 2048 })
+    .optional()
+    .describe('(kubernetes) The node IAM role ARN of managed node groups and EKS Auto Mode nodes'),
+  eksSubnetIds: field
+    .list(field.string({ pattern: '^subnet-[0-9a-f]{8,17}$' }), { max: 16 })
+    .optional()
+    .describe(
+      '(kubernetes) Default subnets of new EKS clusters (at least two, in two Availability Zones); node groups use the cluster subnets',
+    ),
 });
 
 /** The validated account configuration. */
@@ -84,12 +99,20 @@ export interface AwsConfig {
   metadataHopLimit: number;
   associatePublicIp: boolean;
   discoverTag?: string;
+  eksClusterRoleArn?: string;
+  eksNodeRoleArn?: string;
+  eksSubnetIds?: string[];
 }
 
 export interface AwsProviderOptions {
   fetch?: typeof fetch;
   /** Tests and VPC endpoints; host options, never account config. */
-  endpoints?: Partial<Record<'ec2' | 'sts', string>>;
+  endpoints?: Partial<Record<'ec2' | 'sts' | 'eks', string>>;
+  /**
+   * (kubernetes) The transport to an EKS cluster's own Kubernetes API (`kubernetes.credentials`). Default:
+   * `node:https` trusting only the cluster's CA.
+   */
+  kubeTransport?: KubeTransport;
   /** Ambient identity for platform accounts (default `ambientCredentials()`). */
   credentials?: CredentialSource;
   /** ExternalId prefix: `${externalIdPrefix}:${providerAccountId}` (default 'better-compute'). */
@@ -168,6 +191,24 @@ export function validateAwsConfig(config: AwsConfig): void {
     }
     if (arn.service !== 'iam' || !arn.resource.startsWith('instance-profile/'))
       throw invalid('instanceProfile is not an instance profile ARN', 'instanceProfile');
+  }
+  for (const key of ['eksClusterRoleArn', 'eksNodeRoleArn'] as const) {
+    const value = config[key];
+    if (value === undefined) continue;
+    let arn;
+    try {
+      arn = parseArn(value);
+    } catch {
+      throw invalid(`${key} is not an IAM role ARN`, key);
+    }
+    if (
+      arn.service !== 'iam' ||
+      arn.region !== '' ||
+      !/^\d{12}$/.test(arn.account) ||
+      !/^role\/[\w+=,.@/-]{1,512}$/.test(arn.resource) ||
+      arn.partition !== partitionOf(config.region).partition
+    )
+      throw invalid(`${key} is not an IAM role ARN of this partition`, key);
   }
 }
 

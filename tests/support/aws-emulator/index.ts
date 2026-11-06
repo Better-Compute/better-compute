@@ -1,7 +1,7 @@
 import { manualClock, type Clock, type ManualClock } from '@better-compute/core';
 import type { CredentialSource } from '@better-compute/aws-core';
 import { StsEmulator } from './sts.js';
-import { ec2Error, jsonError, queryError } from './xml.js';
+import { ec2Error, jsonError, queryError, restJsonError } from './xml.js';
 
 /** The platform (control plane) AWS account and its ambient keys. */
 export const platformAccount = '111111111111';
@@ -14,7 +14,7 @@ export const platformKeys = {
 // for its hosts; the router checks the SigV4 shape and clock of every signed request, records it,
 // and answers queued failures (`failNext`) before the handler runs.
 
-export type Protocol = 'ec2' | 'query' | 'json' | 'rest' | 'plain';
+export type Protocol = 'ec2' | 'query' | 'json' | 'rest' | 'rest-json' | 'plain';
 
 export interface EmulatorRequest {
   service: string;
@@ -34,6 +34,8 @@ export interface ServiceHandler {
   protocol: Protocol;
   /** Operations that are sent unsigned (AssumeRoleWithWebIdentity, IMDS). */
   unsigned?: (operation: string, request: EmulatorRequest) => boolean;
+  /** REST services: the operation a method and path are (`CreateCluster`), for failNext and calls. */
+  operationOf?: (method: string, url: URL) => string;
   handle(request: EmulatorRequest): Response | Promise<Response>;
 }
 
@@ -137,11 +139,12 @@ export class AwsEmulator {
         : url.search.slice(1),
     );
     const operation =
-      handler.protocol === 'ec2' || handler.protocol === 'query'
+      handler.operationOf?.(request.method, url) ??
+      (handler.protocol === 'ec2' || handler.protocol === 'query'
         ? (params.get('Action') ?? '')
         : handler.protocol === 'json'
           ? (request.headers.get('x-amz-target')?.split('.').pop() ?? '')
-          : `${request.method} ${url.pathname}`;
+          : `${request.method} ${url.pathname}`);
     const emulated: EmulatorRequest = {
       service: handler.service,
       operation,
@@ -154,7 +157,9 @@ export class AwsEmulator {
     const error = (code: string, message: string, status: number) =>
       handler.protocol === 'json'
         ? jsonError(code, message, status)
-        : handler.protocol === 'query'
+        : handler.protocol === 'rest-json'
+          ? restJsonError(code, message, status)
+          : handler.protocol === 'query'
           ? queryError(code, message, 'Sender', status)
           : ec2Error(code, message, status);
 

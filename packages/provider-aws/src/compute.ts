@@ -10,6 +10,7 @@ import {
   type PowerAction,
   type ProviderContext,
   type ProviderImpl,
+  type ProviderKubernetes,
 } from '@better-compute/core';
 import type { QueryClient, QueryParams, XmlElement } from '@better-compute/aws-core';
 import type { AccountCredentials } from './account.js';
@@ -129,6 +130,8 @@ function labelKey(key: string): string | undefined {
 
 /** One AWS account's EC2 client (`ProviderImpl`). */
 export class AwsCompute implements ProviderImpl {
+  /** Managed Kubernetes (EKS clusters and node groups); the provider sets it. */
+  kubernetes?: ProviderKubernetes;
   #offerings: { pairs: [string, string][]; at: number } | undefined;
   readonly #created = new Map<string, number>();
   /** Instance id → when this client last claimed it with `managed` (tags lag behind writes). */

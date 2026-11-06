@@ -47,6 +47,13 @@ export function iamPolicy(
     discoverTag?: string;
     /** The customer-managed KMS key ARN of the accounts' `kmsKeyId`: adds EBS's grants on it. */
     kmsKeyArn?: string;
+    /**
+     * (kubernetes) The accounts' `eksClusterRoleArn` and `eksNodeRoleArn`: adds managed Kubernetes on EKS
+     * (clusters and node groups tagged `better-compute:managed=true`, the account principal's own
+     * access entry, and iam:PassRole of these roles to EKS).
+     */
+    eksClusterRoleArn?: string;
+    eksNodeRoleArn?: string;
   } = {},
 ): IamPolicyDocument {
   const partition = options.partition ?? 'aws';
@@ -198,6 +205,8 @@ export function iamPolicy(
       },
     );
   }
+  if (options.eksClusterRoleArn !== undefined || options.eksNodeRoleArn !== undefined)
+    statements.push(...eksStatements(partition, region, account, options));
   if (options.instanceProfileArn !== undefined) {
     const profile = parseArn(options.instanceProfileArn);
     if (profile.service !== 'iam' || !profile.resource.startsWith('instance-profile/'))
@@ -216,6 +225,129 @@ export function iamPolicy(
     });
   }
   return { Version: '2012-10-17', Statement: statements };
+}
+
+/**
+ * The EKS statements (AWS A9): reads; CreateCluster and CreateNodegroup only when they tag what they
+ * create `better-compute:managed=true`; updates and deletes only of resources tagged so; an access
+ * entry only for the caller's own principal (`eks:principalArn` = `aws:PrincipalArn`) and only the
+ * cluster-admin access policy at cluster scope; iam:PassRole of the cluster and node roles to EKS;
+ * and the EKS service-linked roles.
+ */
+function eksStatements(
+  partition: AwsPartition,
+  region: string,
+  account: string,
+  options: { eksClusterRoleArn?: string; eksNodeRoleArn?: string },
+): IamStatement[] {
+  const roles: string[] = [];
+  for (const [flag, value] of [
+    ['--eks-cluster-role', options.eksClusterRoleArn],
+    ['--eks-node-role', options.eksNodeRoleArn],
+  ] as const) {
+    if (value === undefined) continue;
+    let arn;
+    try {
+      arn = parseArn(value);
+    } catch {
+      arn = undefined;
+    }
+    if (!arn || arn.service !== 'iam' || !/^role\/[\w+=,.@/-]{1,512}$/.test(arn.resource))
+      throw usage(`${flag} is an IAM role ARN (arn:…:iam::<account>:role/<name>)`);
+    if (arn.partition !== partition)
+      throw usage(`${flag} is in partition ${arn.partition}, not ${partition}`);
+    roles.push(value);
+  }
+  const eks = (resource: string) => `arn:${partition}:eks:${region}:${account}:${resource}`;
+  const clusters = eks('cluster/*');
+  const nodegroups = eks('nodegroup/*/*/*');
+  const managed = { StringEquals: { [`aws:ResourceTag/${tags.managed}`]: 'true' } };
+  return [
+    {
+      Sid: 'EksRead',
+      Effect: 'Allow',
+      Action: [
+        'eks:ListClusters',
+        'eks:DescribeCluster',
+        'eks:DescribeClusterVersions',
+        'eks:ListNodegroups',
+        'eks:DescribeNodegroup',
+        'eks:DescribeUpdate',
+        'eks:DescribeAccessEntry',
+        'eks:ListAssociatedAccessPolicies',
+        'ec2:DescribeSubnets',
+      ],
+      Resource: '*',
+    },
+    {
+      Sid: 'EksCreateTagged',
+      Effect: 'Allow',
+      Action: ['eks:CreateCluster', 'eks:CreateNodegroup', 'eks:TagResource'],
+      Resource: [clusters, nodegroups],
+      Condition: { StringEquals: { [`aws:RequestTag/${tags.managed}`]: 'true' } },
+    },
+    {
+      Sid: 'EksManageOwned',
+      Effect: 'Allow',
+      Action: [
+        'eks:UpdateClusterVersion',
+        'eks:UpdateClusterConfig',
+        'eks:DeleteCluster',
+        'eks:UpdateNodegroupConfig',
+        'eks:DeleteNodegroup',
+      ],
+      Resource: [clusters, nodegroups],
+      Condition: managed,
+    },
+    {
+      Sid: 'EksOwnAccessEntry',
+      Effect: 'Allow',
+      Action: ['eks:CreateAccessEntry', 'eks:AssociateAccessPolicy'],
+      Resource: [clusters, eks('access-entry/*/*/*/*/*')],
+      Condition: { StringEquals: { 'eks:principalArn': '${aws:PrincipalArn}' } },
+    },
+    {
+      Sid: 'EksAdminPolicyOnly',
+      Effect: 'Deny',
+      Action: 'eks:AssociateAccessPolicy',
+      Resource: '*',
+      Condition: {
+        StringNotEquals: {
+          'eks:policyArn': `arn:${partition}:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy`,
+        },
+      },
+    },
+    {
+      // A separate statement: keys of one condition operator are ANDed, and either difference is refused.
+      Sid: 'EksClusterScopeOnly',
+      Effect: 'Deny',
+      Action: 'eks:AssociateAccessPolicy',
+      Resource: '*',
+      Condition: { StringNotEquals: { 'eks:accessScope': 'cluster' } },
+    },
+    ...(roles.length
+      ? [
+          {
+            Sid: 'PassEksRoles',
+            Effect: 'Allow' as const,
+            Action: 'iam:PassRole',
+            Resource: roles,
+            Condition: { StringEquals: { 'iam:PassedToService': 'eks.amazonaws.com' } },
+          },
+        ]
+      : []),
+    {
+      Sid: 'EksServiceLinkedRoles',
+      Effect: 'Allow',
+      Action: 'iam:CreateServiceLinkedRole',
+      Resource: '*',
+      Condition: {
+        StringEquals: {
+          'iam:AWSServiceName': ['eks.amazonaws.com', 'eks-nodegroup.amazonaws.com'],
+        },
+      },
+    },
+  ];
 }
 
 /**
@@ -295,7 +427,7 @@ export function awsIamPolicyCommand() {
     group: 'Providers' as const,
     summary: 'Print the IAM permissions policy an AWS provider account needs',
     description:
-      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId.',
+      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; --eks-cluster-role and --eks-node-role add managed Kubernetes on EKS (tagged clusters and node groups, the cluster-admin access entry of the account principal itself, iam:PassRole of the two roles to EKS).',
     target: 'none' as const,
     output: 'text' as const,
     flags: {
@@ -330,6 +462,16 @@ export function awsIamPolicyCommand() {
         value: 'KEY=VALUE',
         description: 'Attach may tag only instances carrying this tag (the account discoverTag)',
       },
+      'eks-cluster-role': {
+        type: 'string' as const,
+        value: 'ARN',
+        description: 'The accounts eksClusterRoleArn (adds managed Kubernetes on EKS)',
+      },
+      'eks-node-role': {
+        type: 'string' as const,
+        value: 'ARN',
+        description: 'The accounts eksNodeRoleArn (adds managed Kubernetes on EKS)',
+      },
       out: outFlag,
     },
     async run(context: AwsCommandContext): Promise<void> {
@@ -346,6 +488,12 @@ export function awsIamPolicyCommand() {
           ...(text(context.flags['kms-key']) ? { kmsKeyArn: text(context.flags['kms-key'])! } : {}),
           ...(text(context.flags['discover-tag'])
             ? { discoverTag: text(context.flags['discover-tag'])! }
+            : {}),
+          ...(text(context.flags['eks-cluster-role'])
+            ? { eksClusterRoleArn: text(context.flags['eks-cluster-role'])! }
+            : {}),
+          ...(text(context.flags['eks-node-role'])
+            ? { eksNodeRoleArn: text(context.flags['eks-node-role'])! }
             : {}),
         }),
       );
