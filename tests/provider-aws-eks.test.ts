@@ -11,6 +11,7 @@ import {
 import {
   awsProvider,
   iamPolicy,
+  principalArnOf,
   type AwsConfig,
   type AwsProviderOptions,
 } from '@better-compute/provider-aws';
@@ -666,5 +667,29 @@ describe('eks cluster discovery (providerAccounts.clusters)', () => {
       resolveHostConfig(poolHostConfig({ kubernetes: { eks: listed[0]!.eks } }), { labels: {} }),
     ).resolves.toMatchObject({ config: { 'k8s-join': { mode: 'eks' } } });
     expect(s.eks.calls('ListClusters').length).toBeGreaterThan(1);
+  });
+});
+
+describe('eks access entry principal', () => {
+  it('is the IAM role of an assumed-role session, with its path when the account names the role', () => {
+    const session = 'arn:aws:sts::111111111111:assumed-role/bc-control/bc-session';
+    // Without a known role ARN: the role without a path (STS session ARNs drop it).
+    expect(principalArnOf(session)).toBe('arn:aws:iam::111111111111:role/bc-control');
+    // Access entries take the role ARN with its path: the account's assumeRoleArn names it.
+    const pathed = 'arn:aws:iam::111111111111:role/platform/compute/bc-control';
+    expect(principalArnOf(session, [pathed])).toBe(pathed);
+    // Only a role of the same account, partition and name.
+    for (const other of [
+      'arn:aws:iam::222222222222:role/platform/bc-control',
+      'arn:aws-cn:iam::111111111111:role/platform/bc-control',
+      'arn:aws:iam::111111111111:role/platform/bc-control-2',
+      'arn:aws:iam::111111111111:user/platform/bc-control',
+      'not an arn',
+    ])
+      expect(principalArnOf(session, [other])).toBe('arn:aws:iam::111111111111:role/bc-control');
+    expect(principalArnOf('arn:aws:iam::111111111111:user/ops/alice', [pathed])).toBe(
+      'arn:aws:iam::111111111111:user/ops/alice',
+    );
+    expect(() => principalArnOf('arn:aws:sts::111111111111:federated-user/bob')).toThrow(/IAM role or user/);
   });
 });

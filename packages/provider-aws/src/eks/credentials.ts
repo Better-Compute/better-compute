@@ -67,9 +67,10 @@ export function checkCredentialRequest(request: KubernetesCredentialRequest): vo
 
 /**
  * The IAM principal an access entry names for a caller ARN: an assumed role's role (EKS matches
- * the role, not the session), or an IAM user. The account root is refused.
+ * the role, not the session), or an IAM user. The account root is refused. `knownRoles` are role ARNs
+ * the account names (its `assumeRoleArn`): one of the session's role gives the path the session drops.
  */
-export function principalArnOf(callerArn: string): string {
+export function principalArnOf(callerArn: string, knownRoles: readonly string[] = []): string {
   let arn;
   try {
     arn = parseArn(callerArn);
@@ -87,6 +88,25 @@ export function principalArnOf(callerArn: string): string {
   if (arn.service === 'sts') {
     const match = /^assumed-role\/([\w+=,.@-]{1,64})\/[\w+=,.@-]{2,64}$/.exec(arn.resource);
     if (!match) throw refuse();
+    // A session ARN drops the role's path, which an access entry needs: a role the account names
+    // (its assumeRoleArn) with the same partition, account and name is that role, path included.
+    // Role names are unique in an account whatever the path.
+    for (const role of knownRoles) {
+      let known;
+      try {
+        known = parseArn(role);
+      } catch {
+        continue;
+      }
+      if (
+        known.service === 'iam' &&
+        known.partition === arn.partition &&
+        known.account === arn.account &&
+        /^role\/(?:[\w+=,.@-]+\/)*[\w+=,.@-]{1,64}$/.test(known.resource) &&
+        known.resource.split('/').at(-1) === match[1]
+      )
+        return role;
+    }
     return `arn:${arn.partition}:iam::${arn.account}:role/${match[1]}`;
   }
   if (arn.service === 'iam' && /^(role|user)\/[\w+=,.@/-]{1,512}$/.test(arn.resource))

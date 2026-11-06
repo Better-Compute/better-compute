@@ -505,7 +505,10 @@ export class AwsKubernetes implements ProviderKubernetes {
     const key = found.arn ?? cluster;
     let fresh = false;
     if (!this.#admitted.has(key)) {
-      const principalArn = principalArnOf((await this.#identity(context)).arn);
+      const principalArn = principalArnOf(
+        (await this.#identity(context)).arn,
+        this.#config.assumeRoleArn !== undefined ? [this.#config.assumeRoleArn] : [],
+      );
       fresh = await ensureAdminAccess({
         client: this.#client,
         cluster: name,
