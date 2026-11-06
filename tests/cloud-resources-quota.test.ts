@@ -16,6 +16,7 @@ import {
   readQuotaBooking,
   releaseQuotaBooking,
   setQuotaBooking,
+  settleQuotaBooking,
   vps,
 } from '@better-compute/vps';
 
@@ -274,7 +275,7 @@ describe('external quota bookings of cloud resources', () => {
     expect(await used()).toBe(0);
   });
 
-  it('a spec change books the difference: more is refused over the quota, less is returned', async () => {
+  it('a spec change books the difference: more is refused over the quota, less is returned once applied', async () => {
     const endpoint = await create({ gpusPerReplica: 1, replicas: 1 });
     await until(endpoint.id, 'ready');
     expect(await used()).toBe(1);
@@ -299,15 +300,21 @@ describe('external quota bookings of cloud resources', () => {
       resourceId: endpoint.id,
       spec: { replicas: 2 },
     });
-    expect(await used()).toBe(2);
+    // The provider still runs three until it has scaled down: the shrink is returned once it reports it applied.
+    expect(await used()).toBe(3);
+    const booking = await fixture.database.transaction((tx) =>
+      readQuotaBooking(tx, { kind: 'cloud-resource', id: endpoint.id }),
+    );
+    expect(booking?.resources).toEqual({ gpu: 3 });
     // A description change books nothing.
     await api.cloudResources.update(acme, {
       tenantId: acmeTenant,
       resourceId: endpoint.id,
       description: 'chat model',
     });
-    expect(await used()).toBe(2);
+    expect(await used()).toBe(3);
     await until(endpoint.id, 'ready');
+    expect(await used()).toBe(2);
     await api.cloudResources.delete(acme, { tenantId: acmeTenant, resourceId: endpoint.id });
     await until(endpoint.id, 'deleted');
     expect(await used()).toBe(0);
@@ -372,6 +379,31 @@ describe('quota bookings (vps)', () => {
     await fixture.database.transaction((tx) =>
       releaseQuotaBooking(tx, { kind: 'test-owner', id: 'never' }),
     );
+  });
+
+  it('a booking that keeps a shrink is settled down to the demand, never up, and never once released', async () => {
+    const owner = { kind: 'test-owner', id: 'o-settle' };
+    const at = { tenantId: acmeTenant, poolId };
+    await fixture.database.transaction((tx) => setQuotaBooking(tx, owner, at, { gpu: 3 }));
+    // Kept while the provider has not applied the shrink: max(held, wanted).
+    await fixture.database.transaction((tx) =>
+      setQuotaBooking(tx, owner, at, { gpu: 1 }, { refund: false }),
+    );
+    expect(await used()).toBe(3);
+    // Settling never charges more than is held.
+    await fixture.database.transaction((tx) => settleQuotaBooking(tx, owner, { gpu: 4 }));
+    expect(await used()).toBe(3);
+    await fixture.database.transaction((tx) => settleQuotaBooking(tx, owner, { gpu: 1 }));
+    expect(await used()).toBe(1);
+    expect(
+      (await fixture.database.transaction((tx) => readQuotaBooking(tx, owner)))?.resources,
+    ).toEqual({ gpu: 1 });
+    await fixture.database.transaction((tx) => releaseQuotaBooking(tx, owner));
+    await fixture.database.transaction((tx) => settleQuotaBooking(tx, owner, { gpu: 0 }));
+    expect(await used()).toBe(0);
+    expect(
+      (await fixture.database.transaction((tx) => readQuotaBooking(tx, owner)))?.released,
+    ).toBe(true);
   });
 
   it('refuses an owner kind or a demand that is not well formed', async () => {

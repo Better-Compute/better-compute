@@ -85,7 +85,8 @@ betterCompute({
 - **Capacity quota bookings.** A kind may declare a pure `quota(spec)`: what the spec books against the tenant's
   quota on the pool (`{ gpu: 2 }` for a DigitalOcean Dedicated Inference endpoint), with no node to place it on.
   `create` books it in the transaction that records the resource and `update` re-books the difference (growth is
-  charged, `QUOTA_EXCEEDED` refuses and leaves nothing behind; a shrink is returned); the reconciler returns it
+  charged, `QUOTA_EXCEEDED` refuses and leaves nothing behind; a shrink is kept until the provider reports the new spec
+  `ready`, then the reconciler returns it, so what still runs stays booked). The whole booking is returned
   once, when the resource is deleted or released. The bookings live in vps (`vps/0108_quota_bookings`, over
   capacity's quota charges). A kind that books quota cannot be adopted (`UNSUPPORTED`, `reason 'quotaBooked'`).
 - **Events** `cloud.resource.*` (`created`, `ready`, `updating`, `updated`, `failed`, `deleting`, `deleted`,

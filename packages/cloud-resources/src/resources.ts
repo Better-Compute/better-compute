@@ -648,13 +648,16 @@ export async function updateResource(
     }
   }
   const providerChange = !same(stored, spec);
-  // The spec's booking follows it: growth is charged (QUOTA_EXCEEDED refuses the change), a shrink returned.
+  // The spec's booking follows it: growth is charged (QUOTA_EXCEEDED refuses the change). A shrink is kept until the
+  // provider reports the new spec applied (the reconciler settles it then): until it has scaled down, the old amount
+  // still runs, and returning it now would let another booking take what is still in use.
   if (providerChange && quota !== undefined)
     await setQuotaBooking(
       tx,
       quotaOwner(row.id),
       { tenantId: row.tenant_id, poolId: row.pool_id },
       quota,
+      { refund: false },
     );
   await tx.query(
     `UPDATE cloud_resources

@@ -80,7 +80,7 @@ await compute.api.cloudResources.create(acme, {
 - **Over the quota**, `create` is `QUOTA_EXCEEDED` and nothing is recorded. The quota is the pool offer's `gpu`
   figure (see [quotas](/docs/guides/capacity/quotas-and-usage#quotas)).
 - **Scaling** books the difference: growth is charged when `update` is called (`QUOTA_EXCEEDED` refuses the update),
-  a shrink is returned.
+  a shrink is returned once DigitalOcean has scaled the endpoint down (it is `ready` again).
 - **Deleting** returns the GPUs once DigitalOcean has let the endpoint go, and only once.
 - **Adopting** an endpoint made outside better-compute is refused (`UNSUPPORTED`, `quotaBooked`): it would run on
   GPUs nothing was charged for.

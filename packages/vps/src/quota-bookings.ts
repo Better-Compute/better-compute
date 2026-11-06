@@ -115,15 +115,19 @@ export async function readQuotaBooking(
  * Makes `owner` hold exactly `demand` of `(tenantId, poolId)`'s quota: the growth over what it holds is charged
  * (all-or-nothing: `QUOTA_EXCEEDED` changes nothing), the shrink refunded. Idempotent: booking the same demand again
  * charges nothing. A released booking is booked afresh. A live booking stays on the tenant and pool it was made on.
+ *
+ * With `refund: false` a shrink is kept (the booking holds the larger of what it holds and the demand, per resource):
+ * for an owner whose provider still runs the old amount until it has applied the change. `settleQuotaBooking`
+ * returns the shrink once it has.
  */
 export async function setQuotaBooking(
   tx: SqlTx,
   owner: QuotaBookingOwner,
   at: { tenantId: string; poolId: string },
   demand: Readonly<Record<string, number>>,
+  options: { refund?: boolean } = {},
 ): Promise<QuotaBooking> {
   checkOwner(owner);
-  const wanted = bookingDemand(demand);
   const current = await readQuotaBooking(tx, owner, { lock: true });
   const live = current !== undefined && !current.released;
   if (live && (current.tenantId !== at.tenantId || current.poolId !== at.poolId))
@@ -132,6 +136,10 @@ export async function setQuotaBooking(
       `${owner.kind} ${owner.id} holds quota on pool ${current.poolId}; release it before booking elsewhere`,
     );
   const held = live ? current.resources : {};
+  const wanted = bookingDemand(demand);
+  if (options.refund === false)
+    for (const [resource, amount] of Object.entries(held))
+      if (amount > (wanted[resource] ?? 0)) wanted[resource] = amount;
   const grow: Record<string, number> = {};
   const shrink: Record<string, number> = {};
   for (const resource of new Set([...Object.keys(held), ...Object.keys(wanted)])) {
@@ -149,6 +157,36 @@ export async function setQuotaBooking(
     [owner.kind, owner.id, at.tenantId, at.poolId, JSON.stringify(wanted)],
   );
   return { owner: { ...owner }, ...at, resources: wanted, released: false };
+}
+
+/**
+ * Returns what a live booking holds over `demand` (the shrink a `refund: false` booking kept), once the owner's
+ * provider has applied it. Never charges: a resource held below the demand stays as it is. A released or missing
+ * booking is left alone (nothing is booked afresh). Idempotent.
+ */
+export async function settleQuotaBooking(
+  tx: SqlTx,
+  owner: QuotaBookingOwner,
+  demand: Readonly<Record<string, number>>,
+): Promise<void> {
+  checkOwner(owner);
+  const wanted = bookingDemand(demand);
+  const current = await readQuotaBooking(tx, owner, { lock: true });
+  if (current === undefined || current.released) return;
+  const refund: Record<string, number> = {};
+  const next: Record<string, number> = {};
+  for (const [resource, amount] of Object.entries(current.resources)) {
+    const keep = Math.min(amount, wanted[resource] ?? 0);
+    if (amount > keep) refund[resource] = amount - keep;
+    if (keep > 0) next[resource] = keep;
+  }
+  if (Object.keys(refund).length === 0) return;
+  await refundQuota(tx, current.tenantId, current.poolId, refund);
+  await tx.query(
+    `UPDATE quota_bookings SET resources = $3::jsonb, updated_at = compute_now()
+      WHERE owner_kind = $1 AND owner_id = $2`,
+    [owner.kind, owner.id, JSON.stringify(next)],
+  );
 }
 
 /** Returns what `owner` holds and marks its booking released. Idempotent: a second release refunds nothing. */

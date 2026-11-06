@@ -10,7 +10,12 @@ import {
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
-import { readAccount, releaseQuotaBooking, type ProviderAccount } from '@better-compute/vps';
+import {
+  readAccount,
+  releaseQuotaBooking,
+  settleQuotaBooking,
+  type ProviderAccount,
+} from '@better-compute/vps';
 import {
   accountResources,
   json,
@@ -24,7 +29,7 @@ import {
   type ResourceRow,
   type ResourcesProvider,
 } from './store.js';
-import { markDeleted, quotaOwner } from './resources.js';
+import { kindQuota, markDeleted, quotaOwner } from './resources.js';
 import type { CloudResourceState } from './types.js';
 import { meterRates } from './usage.js';
 
@@ -272,6 +277,8 @@ class ResourceWorker {
     spec?: Readonly<Record<string, unknown>>;
     /** The rate of each of the kind's meters, when the provider reported its usage. */
     rates?: Readonly<Record<string, number>>;
+    /** What the spec books, once the provider reports it applied: a shrink kept since the change is returned. */
+    settle?: Readonly<Record<string, number>>;
   }): Promise<boolean> {
     const row = this.#row;
     const written = await this.sql.transaction(async (tx) => {
@@ -298,6 +305,8 @@ class ResourceWorker {
         ],
       );
       if (rows.length === 0) return false;
+      if (update.settle !== undefined && update.state === 'ready' && row.state !== 'ready')
+        await settleQuotaBooking(tx, quotaOwner(row.id), update.settle);
       if (update.state === 'ready') {
         if (row.ready_at === null)
           await publish(this.deps, tx, row, 'ready', {
@@ -426,6 +435,8 @@ class ResourceWorker {
       ...(adoptedSpec ? { spec: adoptedSpec } : {}),
       // What it bills per hour from here (usage.ts); undeclared meters and bad rates are dropped.
       ...(result.usage !== undefined ? { rates: meterRates(kind.meters, result.usage) } : {}),
+      // Ready on the spec this run ensured (the write is guarded by its version): a kept shrink is returned.
+      ...(ready && !observe ? settleOf(kind, row.spec) : {}),
     });
     await this.#destroy(written ? sealed.superseded : sealed.created);
     return this.#next();
@@ -620,4 +631,13 @@ export function resourcesReconciler(
       return 'DONE';
     },
   };
+}
+
+/** The booking to settle to once a kind that books quota is ready on `spec`; nothing for any other kind. */
+function settleOf(
+  kind: ProviderResourceKind,
+  spec: unknown,
+): { settle?: Readonly<Record<string, number>> } {
+  const quota = kindQuota(kind, json(spec));
+  return quota === undefined ? {} : { settle: quota };
 }
