@@ -59,6 +59,8 @@ sources:
     'packages/provider-aws/README.md',
     'packages/provider-aws/src/compute.ts',
     'packages/provider-aws/src/account.ts',
+    'packages/provider-aws/src/volumes.ts',
+    'tests/provider-aws-volumes.test.ts',
     'packages/provider-digitalocean/src/config.ts',
     'packages/provider-digitalocean/src/compute/droplets.ts',
     'packages/provider-digitalocean/src/networks/index.ts',
@@ -1134,8 +1136,16 @@ in one region: a fleet in several regions is several accounts.
   `ProvisionFailed`.
 - **Attach.** `discover` yields every instance that is not terminated; `claim` writes the ownership tag and re-reads
   it, turning a lost race into `CONFLICT`; deleting an attached instance detaches it and leaves it running.
+- **EBS volumes.** `volumes` serves the provider volumes contract with EBS: volumes and snapshots tagged
+  `better-compute:managed=true` plus their name, always encrypted (the account's `kmsKeyId` or default key), created
+  with a `ClientToken` from the name, in the zone the spec names (else the account's first zone). Types `gp3`
+  (default), `gp2`, `io2`, `io1`, `st1`, `sc1` and `standard`. Attach only to an instance of this deployment in
+  the volume's zone (`INVALID_INPUT`, reason `zone-mismatch`, otherwise), at the next free `/dev/sd[f-p]`; the guest
+  sees `/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_<volume id without the dash>`. Resize grows only, and inside
+  EBS's six-hour modification cooldown it is `RATE_LIMITED` with `retryAfterMs`. Restores use only this deployment's
+  completed snapshots. Every change refuses a volume or snapshot without the ownership tags.
 
 `tests/provider-aws.test.ts`, `tests/provider-aws-credentials.test.ts`, `tests/provider-aws-attach.test.ts` and
-`tests/provider-aws-cli.test.ts` run the conformance cases and the EC2 specifics against an in-process AWS emulator
+`tests/provider-aws-cli.test.ts` (and `tests/provider-aws-volumes.test.ts` for EBS) run the conformance cases and the EC2 specifics against an in-process AWS emulator
 passed as `fetch`, and `tests/aws-end-to-end.test.ts` runs the provider through vps. No live AWS suite has been run
 yet.
