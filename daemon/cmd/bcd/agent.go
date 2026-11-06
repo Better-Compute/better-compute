@@ -22,6 +22,7 @@ import (
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
 	"github.com/better-compute/better-compute/daemon/internal/agent"
+	"github.com/better-compute/better-compute/daemon/internal/cloud/aws"
 	"github.com/better-compute/better-compute/daemon/internal/config"
 	"github.com/better-compute/better-compute/daemon/internal/helper"
 	"github.com/better-compute/better-compute/daemon/internal/journal"
@@ -233,6 +234,20 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 		}
 		defer a.Close()
 		attest = a
+	case attestor == aws.AttestorID:
+		// The instance identity is the credential (AWS program A6): no token is read, and none is
+		// sent. Only EC2 (DMI sys_vendor) is supported; nothing probes the metadata service elsewhere.
+		if tokenFile != "" {
+			fmt.Fprintln(stderr, "bcd join: --attestor cloud-iid joins without a token; drop --token-file")
+			return exitUsage
+		}
+		_ = os.Unsetenv("BCD_JOIN_TOKEN")
+		imds := cloudIMDS()
+		if !aws.OnEC2(imds.Root) {
+			fmt.Fprintln(stderr, "bcd join: --attestor cloud-iid needs an Amazon EC2 instance (DMI sys_vendor \"Amazon EC2\"); this host is not one")
+			return exitFailure
+		}
+		attest = &aws.Attestor{Client: imds}
 	case tokenFile != "":
 		raw, err := readTokenFile(tokenFile)
 		if err != nil {
