@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { isComputeError, type CallContext, type ComputeError } from '@better-compute/core';
 import {
   providerResourcesConformanceCases,
+  providerResourcesSignalsConformanceCases,
   type ProviderResourcesConformanceSubject,
+  type ProviderResourcesSignalsConformanceSubject,
 } from '@better-compute/vps';
 import { deploymentTag, digitaloceanProvider } from '@better-compute/provider-digitalocean';
 import {
@@ -394,6 +396,27 @@ describe('do.action-gateway', () => {
         (await kind.spec['~standard'].validate({ ...gatewaySpec, upstreams })).issues,
       ).toBeDefined();
   });
+});
+
+describe('ProviderResources signals conformance: digitalocean', () => {
+  const subject = (): ProviderResourcesSignalsConformanceSubject => {
+    const emu = emulator();
+    const harness = seedHarness(emu.state);
+    seedSignal(emu.state, { uuid: 'sig-1', resource_uuid: harness.uuid, type: 'RUN_FAILED' });
+    seedSignal(emu.state, { uuid: 'sig-2', resource_type: 'ACTION_GATEWAY' });
+    return {
+      provider: digitaloceanProvider({ fetch: emu.fetch }),
+      config: previewAccount,
+      withoutPreviews: { ...previewAccount, previews: false },
+      context: { secrets, account: platformAccount },
+      requests: () => emu.requests,
+    };
+  };
+  for (const test of providerResourcesSignalsConformanceCases())
+    it(test.name, async () => {
+      freshBudgets();
+      await test.run(subject());
+    });
 });
 
 describe('Managed Agents signals (read-only)', () => {

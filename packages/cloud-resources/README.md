@@ -117,6 +117,11 @@ for (const test of providerResourcesConformanceCases())
   );
 ```
 
+A provider with `signals` also runs `providerResourcesSignalsConformanceCases()` (`@better-compute/vps`): listing
+sends only reads (given the emulator's `requests`), every signal is well formed and about a kind the provider lists,
+and with `withoutPreviews` a provider that holds signals behind previews refuses with `UNSUPPORTED` (`preview`) and
+sends nothing.
+
 ## License
 
 Apache-2.0
