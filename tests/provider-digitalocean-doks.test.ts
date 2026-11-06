@@ -946,6 +946,22 @@ describe('doks node pools', () => {
     expect([conflict.code, conflict.details?.reason]).toEqual(['CONFLICT', 'notOwned']);
     const refused = await failure(s.k8s.deleteNodePool(adopted.id, 'team', s.ctx()));
     expect([refused.code, refused.details?.reason]).toEqual(['INVALID_STATE', 'notOwned']);
+    // A pool with this deployment's tag but the managed tag instead of the kubernetes one.
+    const half = s.doks.seedCluster({
+      name: 'half-cluster',
+      region: 'nyc3',
+      nodePool: {
+        name: 'half',
+        size: 's-2vcpu-4gb',
+        count: 1,
+        tags: [deploymentTag('default'), 'better-compute-managed:true'],
+      },
+    });
+    const halfPool = { name: 'half', machineType: 's-2vcpu-4gb', nodeCount: 3 };
+    const unchanged = await failure(s.k8s.ensureNodePool(half.id, halfPool, s.ctx()));
+    expect([unchanged.code, unchanged.details?.reason]).toEqual(['CONFLICT', 'notOwned']);
+    const kept = await failure(s.k8s.deleteNodePool(half.id, 'half', s.ctx()));
+    expect([kept.code, kept.details?.reason]).toEqual(['INVALID_STATE', 'notOwned']);
     expect(mutations(s)).toEqual([]);
     const mine = { name: 'bc-extra', machineType: 's-2vcpu-4gb', nodeCount: 1 };
     await settle(() => s.k8s.ensureNodePool(adopted.id, mine, s.ctx()), 'ready');
@@ -1331,12 +1347,23 @@ describe('doks upgrades and deletes', () => {
       region: 'nyc3',
       tags: [tagFor('better-compute-kubernetes', 'true'), deploymentTag('another')],
     });
-    for (const cluster of [adopted, other]) {
-      const error = await failure(s.k8s.deleteCluster(cluster.id, s.ctx()));
+    // This deployment's tag without the kubernetes tag (the managed one instead) is not ours.
+    const managedOnly = s.doks.seedCluster({
+      name: 'bc-k-managed',
+      region: 'nyc3',
+      tags: [deploymentTag('test'), 'better-compute-managed:true'],
+    });
+    const half = await setup(undefined, { deployment: 'test' }, s.doks);
+    for (const [k8s, cluster] of [
+      [s, adopted],
+      [s, other],
+      [half, managedOnly],
+    ] as const) {
+      const error = await failure(k8s.k8s.deleteCluster(cluster.id, k8s.ctx()));
       expect([error.code, error.details?.reason]).toEqual(['INVALID_STATE', 'notOwned']);
     }
     expect(mutations(s)).toEqual([]);
-    expect(s.doks.clusters.size).toBe(2);
+    expect(s.doks.clusters.size).toBe(3);
   });
 });
 
