@@ -99,10 +99,13 @@ The operator who runs `kms-sealing-key` needs `kms:GenerateDataKeyWithoutPlainte
 `get` streams (a missing key is `undefined`); `put` sends one signed PUT up to `singlePutBytes` (64 MiB) and otherwise a multipart upload in `partBytes` parts (16 MiB, at least 5 MiB), aborted on any failure so no parts are orphaned; `delete` treats a missing key as success; `presign` lasts at most 7 days. Keys with `..`, `.` or empty segments, a leading `/` or control characters are refused. `sse` adds SSE-KMS or SSE-S3 headers. Virtual-hosted URLs unless the bucket has a dot or `pathStyle` is set. `timeoutMs` (default 20 s, every factory takes it) bounds only the time to response headers: a download streams for as long as it takes. Requests that send a body get `timeoutMs` plus the body at 256 KiB/s. A presigned PUT carries no SSE headers, so the bucket's default encryption applies to support bundle uploads.
 
 ```json
-{ "Effect": "Allow",
-  "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"],
-  "Resource": "arn:aws:s3:::<bucket>/<prefix>/*" }
+[{ "Effect": "Allow",
+   "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"],
+   "Resource": "arn:aws:s3:::<bucket>/<prefix>/*" },
+ { "Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::<bucket>" }]
 ```
+
+`s3:ListBucket` is what makes a missing key a 404: without it S3 answers 403 AccessDenied, which `get` reports as an error rather than `undefined`.
 
 ### `s3SnapshotStore(options)`
 

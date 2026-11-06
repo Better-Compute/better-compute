@@ -94,6 +94,9 @@ The gateway reads tenant secrets because `serve --roles gateway` runs the secret
 `SecretRequest` is answered there, and the broker releases a ref only when it is bound to work the asking node is
 doing right now, sealed to that node. It never writes secrets, objects or events, and never encrypts.
 
+Every role that reads a bucket also has `s3:ListBucket` on it. Without it S3 answers a read of a missing key with
+403 AccessDenied instead of 404, so a download that was never published would be an error rather than not found.
+
 No statement uses a wildcard resource or a service-wide action. The migrate task runs with the worker role.
 
 ### Buckets

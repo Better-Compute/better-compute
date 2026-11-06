@@ -175,6 +175,35 @@ describe('control-plane template', () => {
     expect(JSON.stringify(connect.Resource)).toContain(':dbuser:${ResourceId}/${DatabaseUser}');
   });
 
+  it('lets every role that reads a bucket list it, so a missing key is 404 rather than 403', () => {
+    // Without s3:ListBucket, S3 answers GetObject/HeadObject on a missing key with 403 AccessDenied,
+    // and s3BlobStore.get only treats 404 as absent: a download never published would be a 5xx.
+    const objectPath = /^\$\{(\w+)\.Arn\}\/\*$/;
+    const readBuckets = (role: string) =>
+      new Set(
+        statementsOf(role)
+          .filter((statement) => [statement.Action].flat().includes('s3:GetObject'))
+          .flatMap((statement) => [statement.Resource].flat())
+          .map((resource) => objectPath.exec((resource as { 'Fn::Sub'?: string })['Fn::Sub'] ?? '')?.[1])
+          .filter((bucket): bucket is string => bucket !== undefined),
+      );
+    const listedBuckets = (role: string) =>
+      new Set(
+        statementsOf(role)
+          .filter((statement) => [statement.Action].flat().includes('s3:ListBucket'))
+          .flatMap((statement) => [statement.Resource].flat())
+          .map((resource) => /^\$\{(\w+)\.Arn\}$/.exec((resource as { 'Fn::Sub'?: string })['Fn::Sub'] ?? '')?.[1]),
+      );
+    expect([...readBuckets('ApiTaskRole')].sort()).toEqual(['BlobsBucket', 'DownloadsBucket', 'SnapshotsBucket']);
+    expect([...readBuckets('WorkerTaskRole')].sort()).toEqual(['BlobsBucket', 'SnapshotsBucket']);
+    expect([...readBuckets('GatewayTaskRole')]).toEqual(['SnapshotsBucket']);
+    for (const role of ['ApiTaskRole', 'WorkerTaskRole', 'GatewayTaskRole'])
+      for (const bucket of readBuckets(role)) expect(listedBuckets(role).has(bucket), `${role} lists ${bucket}`).toBe(true);
+    // Listing stays on the bucket ARN itself; nobody lists the audit archive.
+    for (const role of ['ApiTaskRole', 'WorkerTaskRole', 'GatewayTaskRole']) expect(listedBuckets(role).has('AuditBucket'), role).toBe(false);
+    expect(listedBuckets('GatewayTaskRole').has('BlobsBucket')).toBe(false);
+  });
+
   it('sends ALB and S3 server access logs to an operator-prepared bucket, when one is named', () => {
     const parameter = template.Parameters!.AccessLogsBucket!;
     expect(parameter.Default).toBe('');

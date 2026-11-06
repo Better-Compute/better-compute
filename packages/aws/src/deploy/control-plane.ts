@@ -329,6 +329,15 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
   // account and region (staging beside production) can neither read nor overwrite them.
   const secretPrefix = arn(`secretsmanager:\${AWS::Region}:\${AWS::AccountId}:secret:${secretNamePrefix}/*`);
   const objects = (bucket: string) => bucketArn(bucket, '/*');
+  // A reader also needs s3:ListBucket on the bucket itself: without it S3 answers GetObject or
+  // HeadObject on a missing key with 403 AccessDenied rather than 404, and s3BlobStore.get treats
+  // only 404 as absent. Listing reveals key names only, never object bodies.
+  const listBuckets = (sid: string, ...buckets: string[]): PolicyStatement => ({
+    Sid: sid,
+    Effect: 'Allow',
+    Action: 's3:ListBucket',
+    Resource: buckets.map((bucket) => bucketArn(bucket)),
+  });
   const base: PolicyStatement[] = [
     {
       Sid: 'ConnectAsTheDatabaseUser',
@@ -345,6 +354,7 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
     { Sid: 'DecryptWithPlatformKey', Effect: 'Allow', Action: 'kms:Decrypt', Resource: keyArn },
     // NodeSpec signs snapshot download URLs wherever it renders.
     { Sid: 'ReadSnapshots', Effect: 'Allow', Action: 's3:GetObject', Resource: objects('SnapshotsBucket') },
+    listBuckets('ListSnapshots', 'SnapshotsBucket'),
   ];
   // Writing secrets and KMS-encrypted objects asks KMS for data keys as the caller; only api and worker write.
   const encrypt: PolicyStatement = { Sid: 'EncryptWithPlatformKey', Effect: 'Allow', Action: ['kms:GenerateDataKey', 'kms:Encrypt'], Resource: keyArn };
@@ -367,6 +377,7 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
       { Sid: 'ServeDownloads', Effect: 'Allow', Action: 's3:GetObject', Resource: objects('DownloadsBucket') },
       writeObjects('Blobs', 'BlobsBucket'),
       writeObjects('Snapshots', 'SnapshotsBucket'),
+      listBuckets('ListBuckets', 'DownloadsBucket', 'BlobsBucket'),
       { Sid: 'PublishEvents', Effect: 'Allow', Action: 'events:PutEvents', Resource: cfnGetAtt('EventBus', 'Arn') },
     ],
     worker: [
@@ -374,6 +385,7 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
       writeSecrets,
       writeObjects('Blobs', 'BlobsBucket'),
       writeObjects('Snapshots', 'SnapshotsBucket'),
+      listBuckets('ListBuckets', 'BlobsBucket'),
       { Sid: 'AppendAudit', Effect: 'Allow', Action: ['s3:PutObject', 's3:PutObjectRetention'], Resource: objects('AuditBucket') },
       { Sid: 'PublishEvents', Effect: 'Allow', Action: 'events:PutEvents', Resource: cfnGetAtt('EventBus', 'Arn') },
     ],
