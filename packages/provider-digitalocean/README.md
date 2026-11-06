@@ -113,9 +113,9 @@ How an import works:
 
 - **The image is its own record.** An import carries `better-compute-managed:true`, the deployment tag and `better-compute-image:<24 hex of the digest>`, is named `bc-img-<ref>-<12 hex>`, and is found by that tag. Like a Droplet create, two racing imports converge on the oldest; the others are deleted one by one. An image with the tag but without the managed and deployment tags is never used or deleted.
 - **Nothing blocks.** While the import (or a copy into another region, a `transfer` image action) runs, `create` and `reinstall` throw `UNAVAILABLE` (`imageImporting` / `imageTransferring`, `retryAfterMs` 30 s), and vps calls the create again. A retry never starts a second import or a second transfer to the same region.
-- **A failed import** (DO reports it `deleted` with an `error_message`) is deleted and fails the create `INVALID_STATE` (`imageImportFailed`); the next create imports afresh.
+- **A failed import** (DO reports it `deleted` with an `error_message`) is deleted and fails the create `INVALID_STATE` (`imageImportFailed`), and so is one still not available a day after it started (its URL expired long ago); the next create imports afresh. A copy into a region that errors three times fails the create `INVALID_STATE` (`imageTransferFailed`) instead of retrying forever.
 - **What DigitalOcean can't import is refused before any request:** `iso` images, `zstd` compression (`UNSUPPORTED`, `imageFormat`), an unknown ref, a digest that is not SHA-256 and a URL that is not HTTPS (`INVALID_CONFIG`).
-- **The presigned URL is a credential.** It goes into the import body only; it never reaches a log line or an error, even when DigitalOcean quotes it back in a 422.
+- **The presigned URL is a credential.** It goes into the import body only; it never reaches a log line or an error: a refused import is rethrown with the provider's own message (code and details kept), whatever DigitalOcean's message quotes.
 
 **GPU images.** An AI/ML image (`gpu-…`) on a size without GPUs, or one built for the other vendor (an NVIDIA image on an MI300X size), is `INVALID_INPUT` (`gpuImage`) before any request, in `create` and `reinstall`. Plain OS images boot GPU sizes: DigitalOcean's docs say GPU Droplets work with them once drivers are installed.
 

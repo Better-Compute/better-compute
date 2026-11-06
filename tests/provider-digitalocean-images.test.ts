@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { isComputeError, type ComputeError } from '@better-compute/core';
+import { isComputeError, manualClock, type ComputeError } from '@better-compute/core';
 import {
   catalogImageName,
   classifyImage,
@@ -309,6 +309,41 @@ describe('catalog image import', () => {
     for (const line of lines) expect(line).not.toContain('SECRETSIGNATURE');
   });
 
+  it("a refusal quoting only the URL's query string still never carries the signature", async () => {
+    const emu = new DoEmulator({ now: () => t0 });
+    const { source } = catalogSource();
+    const compute = await build(emu, doAccount, { catalogImages: source });
+    const query = presigned.slice(presigned.indexOf('?') + 1);
+    emu.failNext({ method: 'POST', path: /^\/images$/ }, 422, {
+      id: 'unprocessable_entity',
+      message: `url query ${encodeURIComponent(query).slice(0, 60)} rejected (${query})`,
+    });
+    const error = await failure(
+      compute.create(request({ image: catalogRef, catalogImage: pinned }), ctx('k')),
+    );
+    expect(error.code).toBe('INVALID_INPUT');
+    expect(JSON.stringify({ message: error.message, details: error.details })).not.toContain(
+      'SECRETSIGNATURE',
+    );
+  });
+
+  it('an import still pending a day after it started is deleted and fails the create', async () => {
+    const emu = new DoEmulator({ now: () => t0 });
+    const stuck = seedImage(emu.state, {
+      tags: ourImageTags,
+      status: 'pending',
+      created_at: new Date(t0 - 25 * 3600_000).toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    });
+    const { source } = catalogSource();
+    const compute = await build(emu, doAccount, { catalogImages: source }, { clock: manualClock(t0) });
+    const error = await failure(
+      compute.create(request({ image: catalogRef, catalogImage: pinned }), ctx('k')),
+    );
+    expect([error.code, error.details?.reason]).toEqual(['INVALID_STATE', 'imageImportFailed']);
+    expect(emu.state.images.has(stuck.id)).toBe(false);
+    expect(dropletPosts(emu)).toHaveLength(0);
+  });
+
   it('reinstall rebuilds from the imported image', async () => {
     const emu = new DoEmulator({ now: () => t0 });
     const { source } = catalogSource();
@@ -390,6 +425,39 @@ describe('catalog image region transfer', () => {
       (r) => r.method === 'POST' && r.url.pathname === `/v2/images/${imported.id}/actions`,
     );
     expect(posts).toHaveLength(2);
+  });
+});
+
+describe('catalog image region transfer, failing', () => {
+  it('a transfer that keeps erroring fails the create after three attempts', async () => {
+    const emu = new DoEmulator({ now: () => t0 });
+    emu.transferReads = 100;
+    const imported = seedImage(emu.state, { tags: ourImageTags, regions: ['nyc3'] });
+    const { source } = catalogSource();
+    const compute = await build(
+      emu,
+      { ...doAccount, regions: ['nyc3', 'sfo3'] },
+      { catalogImages: source },
+    );
+    const sfo = request({ offerId: 'sfo3/s-1vcpu-1gb', image: catalogRef, catalogImage: pinned });
+    const transfers = () =>
+      emu.requests.filter(
+        (r) => r.method === 'POST' && r.url.pathname === `/v2/images/${imported.id}/actions`,
+      );
+    const erroring = () => {
+      for (const action of emu.state.actions.values())
+        if (action.resource_id === imported.id) action.status = 'errored';
+    };
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const waiting = await failure(compute.create(sfo, ctx('k')));
+      expect(waiting.details?.reason).toBe('imageTransferring');
+      expect(transfers()).toHaveLength(attempt);
+      erroring();
+    }
+    const failed = await failure(compute.create(sfo, ctx('k')));
+    expect([failed.code, failed.details?.reason]).toEqual(['INVALID_STATE', 'imageTransferFailed']);
+    expect(transfers()).toHaveLength(3);
+    expect(dropletPosts(emu)).toHaveLength(0);
   });
 });
 

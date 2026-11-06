@@ -53,6 +53,10 @@ export interface CatalogImageSource {
 export const importUrlTtlSeconds = 6 * 3600;
 /** How soon vps should call a create again while an image imports or transfers. */
 export const imageRetryAfterMs = 30_000;
+/** Errored transfers of one import to one region after which the create fails instead of retrying. */
+export const maxImageTransferAttempts = 3;
+/** An import still not available this long after it started never will be: it goes, the create fails. */
+export const importStuckMs = 24 * 3600_000;
 
 const formats = new Set(['raw', 'qcow2', 'vhdx', 'vdi', 'vmdk']);
 const compressions = new Set(['none', 'gzip', 'bzip2']);
@@ -249,8 +253,8 @@ export class DoCatalogImages {
       });
     } catch (error) {
       if (!isComputeError(error)) throw error;
-      // DO's message may quote the body it refused; the URL in it is a credential.
-      if (!error.message.includes(location.url)) throw error;
+      // DO's message may quote the body it refused, whole or in part (a truncated or re-escaped
+      // query string still holds the signature): it is never passed on, whatever it says.
       throw new ComputeError(
         error.code,
         `DigitalOcean refused the import of catalog image ${ref}`,
@@ -308,7 +312,20 @@ export class DoCatalogImages {
         'imageImportFailed',
       );
     }
-    if (status !== 'available') throw importing(ref, 'imageImporting');
+    if (status !== 'available') {
+      const startedAt = Date.parse(image.created_at);
+      if (Number.isFinite(startedAt) && this.#client.clock.now() - startedAt > importStuckMs) {
+        // Its URL expired long ago: it can't finish. It goes, so a later create imports afresh.
+        this.#log.warn('digitalocean.imageImportStuck', { ref, image: image.id });
+        await this.destroy(image.id, signal);
+        throw fail(
+          'INVALID_STATE',
+          `the import of catalog image ${ref} into DigitalOcean did not finish`,
+          'imageImportFailed',
+        );
+      }
+      throw importing(ref, 'imageImporting');
+    }
     if (image.regions.includes(region)) return image.id;
     await this.transfer(image, ref, region, signal);
     throw importing(ref, 'imageTransferring');
@@ -317,7 +334,9 @@ export class DoCatalogImages {
   /**
    * Copies an import into another region, unless a copy there is already running (a retried
    * create finds the transfer its first attempt started). A transfer that errored is started
-   * again. Only an image of ours is ever transferred (`byTag` returns no other).
+   * again, up to `maxImageTransferAttempts`; then the create fails (`INVALID_STATE`,
+   * `imageTransferFailed`) rather than retrying forever into a region that can't take the image.
+   * Only an image of ours is ever transferred (`byTag` returns no other).
    */
   protected async transfer(
     image: DoImage,
@@ -325,17 +344,22 @@ export class DoCatalogImages {
     region: string,
     signal: AbortSignal,
   ): Promise<void> {
+    let errored = 0;
     for await (const action of this.#client.pages<DoAction>(
       `/images/${image.id}/actions`,
       'actions',
       { signal, budget: 'observe' },
-    ))
-      if (
-        action.type === 'transfer' &&
-        action.status === 'in-progress' &&
-        action.region_slug === region
-      )
-        return;
+    )) {
+      if (action.type !== 'transfer' || action.region_slug !== region) continue;
+      if (action.status === 'in-progress') return;
+      if (action.status === 'errored') errored++;
+    }
+    if (errored >= maxImageTransferAttempts)
+      throw fail(
+        'INVALID_STATE',
+        `catalog image ${ref} could not be copied to ${region} (${errored} attempts)`,
+        'imageTransferFailed',
+      );
     await this.#client.request('POST', `/images/${image.id}/actions`, {
       body: { type: 'transfer', region },
       signal,
