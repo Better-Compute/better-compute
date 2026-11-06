@@ -11,6 +11,11 @@ import { vpsVolumeStorageMigration } from './volume-storage.js';
 import { providerReservationsMigration } from './provider-reservations.js';
 import { vpsNetworkAdoptMigration, vpsNetworksMigration } from './networks.js';
 import {
+  providerAddressesMigration,
+  providerSnapshotsMigration,
+  providerVolumesMigration,
+} from './provider-resources.js';
+import {
   vpsIdentityRebindMigration,
   vpsSandboxExpiringMigration,
   vpsSandboxExtendingMigration,
@@ -206,4 +211,7 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   poolMachinesMigration,
   vpsInstanceLabelsMigration,
   vpsNetworkAdoptMigration,
+  providerVolumesMigration,
+  providerSnapshotsMigration,
+  providerAddressesMigration,
 ]);

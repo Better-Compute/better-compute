@@ -200,6 +200,9 @@ export function meterCatalog(options: MeterCatalogOptions): MeterSpec[] {
   add('ip.public.hours', 'Public IP hours', 'hour');
   for (const type of diskTypes) add(`disk.${type}.gib.hours`, `${type} disk GiB hours`, 'gib-hour');
   add('snapshot.gib.hours', 'Snapshot GiB hours', 'gib-hour');
+  // (DO P2) Reserved provider addresses and provider volume snapshots.
+  add('vps.address.hours', 'Reserved address hours', 'hour');
+  add('vps.snapshot.gib.hours', 'Provider volume snapshot GiB hours', 'gib-hour');
 
   for (const key of options.flavorMeters ?? []) {
     if (!key.startsWith('flavor.'))

@@ -41,6 +41,9 @@ export const computeResourceKinds = [
   'sandbox-volume',
   'network',
   'kubernetes-cluster',
+  'provider-volume',
+  'provider-snapshot',
+  'provider-address',
 ] as const;
 export type ComputeResourceKind = (typeof computeResourceKinds)[number];
 
@@ -101,6 +104,9 @@ const definitions = {
       ...a('networks', 'read'),
       // Managed Kubernetes: `kubernetesClusters.list` and `versions` are gated on the tenant.
       ...a('kubernetes', 'read'),
+      // (DO P2) Provider volumes, snapshots and addresses: their `list` methods are gated on the tenant.
+      ...a('volumes', 'read'),
+      ...a('addresses', 'read'),
       // v1.0 destructive-batch quorum (§13): on top of the approvers' signatures, never instead.
       ...a('batches', 'read', 'create', 'approve'),
     ],
@@ -253,6 +259,44 @@ const definitions = {
       projectId: 'string',
       mode: 'string',
       location: 'string',
+    },
+  },
+  'provider-volume': {
+    description:
+      "A tenant's block volume on a provider account (DigitalOcean Block Storage, a GCE disk, an EBS volume), attached to one instance at a time",
+    parent: 'tenant',
+    actions: a('volumes', 'read', 'manage'),
+    attributes: {
+      providerAccountId: 'string',
+      poolId: 'string',
+      projectId: 'string',
+      region: 'string',
+    },
+  },
+  'provider-snapshot': {
+    description:
+      "A snapshot of a tenant's provider volume (may outlive its volume; restores into a new one)",
+    parent: 'tenant',
+    actions: a('volumes', 'read', 'manage'),
+    attributes: {
+      providerAccountId: 'string',
+      poolId: 'string',
+      projectId: 'string',
+      region: 'string',
+      volumeId: 'string',
+    },
+  },
+  'provider-address': {
+    description:
+      "A tenant's reserved public address on a provider account (a DigitalOcean Reserved IP, a GCE static address, an Elastic IP), assigned to one instance at a time",
+    parent: 'tenant',
+    actions: a('addresses', 'read', 'manage'),
+    attributes: {
+      providerAccountId: 'string',
+      poolId: 'string',
+      projectId: 'string',
+      region: 'string',
+      family: 'string',
     },
   },
 } as const satisfies Record<ComputeResourceKind, KindDefinition>;
@@ -666,6 +710,32 @@ group('firewallRules', 'vps', [
   ['list', 'read', 'networks:read', 'network', 'v1.0'],
   ['update', 'mutation', 'networks:update', 'network', 'v1.0'],
   ['delete', 'mutation', 'networks:update', 'network', 'v1.0'],
+]);
+// (DO P2) Typed provider resources next to instances: block volumes, their snapshots and reserved addresses.
+group('providerVolumes', 'vps', [
+  ['create', 'mutation', 'volumes:manage', 'provider-volume', 'v1.0'],
+  ['list', 'read', 'volumes:read', 'tenant', 'v1.0', list],
+  ['get', 'read', 'volumes:read', 'provider-volume', 'v1.0'],
+  ['attach', 'mutation', 'volumes:manage', 'provider-volume', 'v1.0'],
+  ['detach', 'mutation', 'volumes:manage', 'provider-volume', 'v1.0'],
+  ['resize', 'mutation', 'volumes:manage', 'provider-volume', 'v1.0'],
+  ['snapshot', 'mutation', 'volumes:manage', 'provider-volume', 'v1.0'],
+  ['delete', 'mutation', 'volumes:manage', 'provider-volume', 'v1.0'],
+]);
+group('providerSnapshots', 'vps', [
+  ['list', 'read', 'volumes:read', 'tenant', 'v1.0', list],
+  // The list recipe's item kind is what the group's `get` decides on.
+  ['get', 'read', 'volumes:read', 'provider-snapshot', 'v1.0'],
+  ['delete', 'mutation', 'volumes:manage', 'provider-snapshot', 'v1.0'],
+  ['restore', 'mutation', 'volumes:manage', 'provider-snapshot', 'v1.0'],
+]);
+group('providerAddresses', 'vps', [
+  ['create', 'mutation', 'addresses:manage', 'provider-address', 'v1.0'],
+  ['list', 'read', 'addresses:read', 'tenant', 'v1.0', list],
+  ['get', 'read', 'addresses:read', 'provider-address', 'v1.0'],
+  ['assign', 'mutation', 'addresses:manage', 'provider-address', 'v1.0'],
+  ['unassign', 'mutation', 'addresses:manage', 'provider-address', 'v1.0'],
+  ['delete', 'mutation', 'addresses:manage', 'provider-address', 'v1.0'],
 ]);
 // Managed Kubernetes (GKE, …) on a provider account; the provider runs the control plane (kubernetes module).
 group('kubernetesClusters', 'kubernetes', [

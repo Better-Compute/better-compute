@@ -650,7 +650,8 @@ describe('catalog', () => {
 
   it('meterCatalog stays under 90 meters for the default models', () => {
     const catalog = meterCatalog({ gpuModels: defaultMeterGpuModels });
-    expect(catalog.length).toBe(81);
+    // 81, plus the DO P2 provider resource meters vps.address.hours and vps.snapshot.gib.hours.
+    expect(catalog.length).toBe(83);
     expect(catalog.length).toBeLessThanOrEqual(90);
     expect(defaultMeterGpuModels).toEqual(['H100', 'H200', 'B200', 'A100', 'L4', 'L40S', 'other']);
   });
