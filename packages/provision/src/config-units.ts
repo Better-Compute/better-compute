@@ -303,7 +303,7 @@ function validateK8sJoin(settings: Record<string, Json>): Record<string, Json> {
   };
   joinGpu(settings, out, bad);
   if (kubernetesVersion !== undefined) {
-    if (typeof kubernetesVersion !== 'string' || !/^1.[0-9]{2}.[0-9]{1,3}$/.test(kubernetesVersion)) bad('kubernetesVersion must be a release such as 1.34.1');
+    if (typeof kubernetesVersion !== 'string' || !/^1\.[0-9]{2}\.[0-9]{1,3}$/.test(kubernetesVersion)) bad('kubernetesVersion must be a release such as 1.34.1');
     out.kubernetesVersion = kubernetesVersion as string;
   }
   return joinLabels(settings, out, bad);

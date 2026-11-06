@@ -54,6 +54,12 @@ describe('provision k8s-join mode eks', () => {
     expect(kubeadm.config!['k8s-join']).not.toHaveProperty('mode');
     await expect(
       resolveHostConfig(
+        { 'k8s-join': { server: 'https://k8s.example:6443', caCertSha256: 'ab'.repeat(32), tokenRef: 'secret://acme/k8s', kubernetesVersion: '1x34y1' } },
+        { labels: {} },
+      ),
+    ).rejects.toThrow(/kubernetesVersion/);
+    await expect(
+      resolveHostConfig(
         { 'k8s-join': { mode: 'kubeadm', server: 'https://k8s.example:6443', caCertSha256: 'ab'.repeat(32), tokenRef: 'secret://acme/k8s' } },
         { labels: {} },
       ),
