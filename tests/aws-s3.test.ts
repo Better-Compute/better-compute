@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto';
+import { gunzipSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
-import { ComputeError, manualClock } from '@better-compute/core';
-import { s3BlobStore, s3SnapshotStore, type S3StoreOptions } from '@better-compute/aws';
+import { ComputeError, manualClock, type AuditRecord } from '@better-compute/core';
+import { s3AuditSink, s3BlobStore, s3SnapshotStore, type S3StoreOptions } from '@better-compute/aws';
 import { AwsEmulator, recordingLogger } from './support/aws-platform-emulator/index.js';
 import { s3Fake } from './support/aws-platform-emulator/s3.js';
 
@@ -199,5 +201,64 @@ describe('S3 SnapshotStore', () => {
     expect(await snapshots.downloadUrl!({ tenantId: 'acme', snapshotId: 'snap_1', url: presigned.url })).toBe(fresh);
     await snapshots.delete!({ tenantId: 'acme', snapshotId: 'snap_1', url: presigned.url });
     expect((await emu.fetch(fresh)).status).toBe(404);
+  });
+});
+
+describe('S3 audit sink', () => {
+  const records = (n: number, time = Date.UTC(2026, 9, 3, 23, 59)): AuditRecord[] =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `aud_${String(i).padStart(4, '0')}`,
+      tenantId: 'acme',
+      time: time + i * 1000,
+      action: 'instances.create',
+      resource: { type: 'instance', id: `ins_${i}` },
+    }));
+
+  it('writes one gzipped JSONL object per batch under a date partition', async () => {
+    const { base, s3, emu } = s3World();
+    const sink = s3AuditSink({ ...base, bucket: 'bc-blobs', prefix: 'audit' });
+    expect(sink).toMatchObject({ extension: 'sink', kind: 'audit', id: 's3-audit' });
+    const batch = records(3);
+    await sink.write(batch);
+    const object = s3.object('bc-blobs', 'audit/year=2026/month=10/day=03/aud_0000_aud_0002_3.jsonl.gz')!;
+    expect(object).toBeDefined();
+    const lines = gunzipSync(object.body).toString('utf8').trimEnd().split('\n');
+    expect(lines.map((line) => JSON.parse(line))).toEqual(batch);
+    expect(object.headers['x-amz-checksum-sha256']).toBe(createHash('sha256').update(object.body).digest('base64'));
+    expect(emu.calls('PutObject')).toHaveLength(1);
+  });
+
+  it('the same batch writes the same key', async () => {
+    const { base, s3 } = s3World();
+    const sink = s3AuditSink({ ...base, bucket: 'bc-blobs', prefix: 'audit' });
+    await sink.write(records(2));
+    await sink.write(records(2));
+    expect([...s3.buckets.get('bc-blobs')!.keys()]).toEqual(['audit/year=2026/month=10/day=03/aud_0000_aud_0001_2.jsonl.gz']);
+    const odd = records(1).map((record) => ({ ...record, id: 'weird/../id' }));
+    await sink.write(odd);
+    await sink.write(odd);
+    expect(s3.buckets.get('bc-blobs')!.size).toBe(2);
+  });
+
+  it('object lock headers are set', async () => {
+    const { base, s3, emu } = s3World();
+    const sink = s3AuditSink({ ...base, bucket: 'bc-blobs', objectLock: { mode: 'COMPLIANCE', retainDays: 400 }, sse: { kind: 'aws:kms' } });
+    await sink.write(records(1));
+    const [object] = [...s3.buckets.get('bc-blobs')!.values()];
+    expect(object!.headers).toMatchObject({
+      'x-amz-object-lock-mode': 'COMPLIANCE',
+      'x-amz-object-lock-retain-until-date': new Date(emu.clock.now() + 400 * 24 * 3600_000).toISOString(),
+      'x-amz-server-side-encryption': 'aws:kms',
+    });
+    expect(() => s3AuditSink({ ...base, bucket: 'bc-blobs', objectLock: { mode: 'COMPLIANCE', retainDays: 0 } })).toThrow(ComputeError);
+  });
+
+  it('empty batches write nothing and S3 errors throw', async () => {
+    const { base, emu } = s3World();
+    const sink = s3AuditSink({ ...base, bucket: 'bc-blobs' });
+    await sink.write([]);
+    expect(emu.requests).toHaveLength(0);
+    emu.failNext('PutObject', 'SlowDown', 503);
+    await expect(sink.write(records(1))).rejects.toMatchObject({ code: 'RATE_LIMITED' });
   });
 });
