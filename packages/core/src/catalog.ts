@@ -595,6 +595,7 @@ group('providerAccounts', 'vps', [
   ['federationSetup', 'read', 'providers:read', 'tenant', 'v1.0'],
   ['get', 'read', 'providers:read', 'provider-account', 'v0.3'],
   ['offers', 'read', 'providers:read', 'provider-account', 'v0.3'],
+  ['check', 'read', 'providers:read', 'provider-account', 'v1.0'],
   ['update', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
   ['delete', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
   ['bootstrap', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],

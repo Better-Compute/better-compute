@@ -7,6 +7,7 @@ import {
   type Clock,
   type Json,
   type Logger,
+  type ProviderAccountProbe,
   type ProviderContext,
   type ProviderDefinition,
   type ProviderImpl,
@@ -948,6 +949,55 @@ export async function checkAccountConfig(
     ...providerContext(provider, account, deps, deps),
     signal,
   });
+}
+
+/** What `providerAccounts.check` answers: the provider's probe of a stored account (never a secret). */
+export interface ProviderAccountCheck extends ProviderAccountProbe {
+  accountId: string;
+  provider: string;
+  /** Epoch ms. */
+  checkedAt: number;
+}
+
+/**
+ * `providerAccounts.check` (P9): asks the provider what a stored account's credential may do
+ * (`ProviderInput.probeAccount`), with no transaction open. The stored config is validated and its refs
+ * checked again, and its secrets are scoped to the account exactly as a client's. A provider with only
+ * `checkAccount` answers `ok` when it passes; one with neither is `UNSUPPORTED`. Errors propagate.
+ */
+export async function probeStoredAccount(
+  providers: ReadonlyMap<string, ProviderDefinition>,
+  account: ProviderAccount,
+  deps: ClientDeps,
+  signal: AbortSignal,
+): Promise<ProviderAccountCheck> {
+  const provider = providerOf(providers, account.provider);
+  if (!provider.probeAccount && !provider.checkAccount)
+    throw new ComputeError(
+      'UNSUPPORTED',
+      `Provider ${account.provider} cannot check an account`,
+      undefined,
+      { provider: account.provider },
+    );
+  const config = await validateConfig(provider, account.config);
+  assertNoInlineSecrets(config);
+  assertAccountSecretRefs(config, account, deps);
+  const context = { ...providerContext(provider, account, deps, deps), signal };
+  let probe: ProviderAccountProbe;
+  if (provider.probeAccount) probe = await provider.probeAccount(config, context);
+  else {
+    await provider.checkAccount!(config, context);
+    probe = { ok: true, missing: [] };
+  }
+  return {
+    accountId: account.id,
+    provider: account.provider,
+    checkedAt: deps.clock.now(),
+    ok: probe.ok === true,
+    missing: [...(probe.missing ?? [])],
+    ...(probe.optional !== undefined ? { optional: [...probe.optional] } : {}),
+    ...(probe.details !== undefined ? { details: probe.details } : {}),
+  };
 }
 
 /** Builds provider clients from accounts, cached per (account id, version). */

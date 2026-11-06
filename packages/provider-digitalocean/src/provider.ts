@@ -6,6 +6,7 @@ import { doConfig, type DoConfig, type DoProviderOptions } from './config.js';
 import { deploymentTag } from './ids.js';
 import { doBilling, readInvoiceCosts } from './ops/costs.js';
 import { withTenantProjects } from './ops/projects.js';
+import { checkReport, probeAccount } from './probe.js';
 
 const maxInCallWaitMs = 20_000;
 const discoverTagPattern = /^[a-z0-9:_-]{1,255}$/;
@@ -35,6 +36,9 @@ export function digitaloceanProvider(
     config: doConfig as unknown as ProviderDefinition<DoConfig>['config'],
     capabilities: ['power', 'reinstall', 'list', 'discover', 'claim', 'networks'],
     billing: doBilling,
+    // providerAccounts.check (P9): the read scopes, the operations ones as optional.
+    probeAccount: async (config: DoConfig, context) =>
+      checkReport(await probeAccount(config, context, options, { operations: true })),
     create: (config: DoConfig, context: ProviderContext) => {
       if (config.regions.length === 0)
         throw invalidConfig('A DigitalOcean account lists at least one region', 'regions');

@@ -8,6 +8,7 @@ const providerKeys = [
   'capabilities',
   'create',
   'checkAccount',
+  'probeAccount',
   'accountKey',
   'billing',
 ];
@@ -72,7 +73,7 @@ export function defineProvider<C>(provider: ProviderInput<C>): ProviderDefinitio
   )
     fail('capabilities', 'must be a list of non-empty strings');
   if (typeof candidate.create !== 'function') fail('create', 'must be a function');
-  for (const hook of ['checkAccount', 'accountKey'])
+  for (const hook of ['checkAccount', 'probeAccount', 'accountKey'])
     if (candidate[hook] !== undefined && typeof candidate[hook] !== 'function')
       fail(hook, 'must be a function');
   const billing = candidate.billing as Record<string, unknown> | undefined;

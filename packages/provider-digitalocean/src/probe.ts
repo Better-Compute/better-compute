@@ -1,4 +1,9 @@
-import { ComputeError, isComputeError, type ProviderContext } from '@better-compute/core';
+import {
+  ComputeError,
+  isComputeError,
+  type ProviderAccountProbe,
+  type ProviderContext,
+} from '@better-compute/core';
 import { clientFor } from './client/build.js';
 import type { DoClient } from './client/http.js';
 import type { DoConfig, DoProviderOptions } from './config.js';
@@ -154,5 +159,26 @@ async function probe(
     },
     families,
     missing,
+  };
+}
+
+/**
+ * A probe report as `providerAccounts.check` answers it (`ProviderAccountProbe`): the scopes Droplets need are
+ * `missing`, the operations scopes `optional`, and the account is ok only when it is `active` with nothing missing
+ * (a locked or warned account cannot create Droplets).
+ */
+export function checkReport(report: DoAccountReport): ProviderAccountProbe {
+  const operationsScopes = new Set(operationsProbes.map(({ scope }) => scope));
+  const missing = report.missing.filter((scope) => !operationsScopes.has(scope));
+  const optional = report.missing.filter((scope) => operationsScopes.has(scope));
+  return {
+    ok: missing.length === 0 && report.account.status === 'active',
+    missing,
+    optional,
+    details: {
+      account: { ...report.account },
+      families: { ...report.families },
+      ...(report.operations ? { operations: { ...report.operations } } : {}),
+    },
   };
 }

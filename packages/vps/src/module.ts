@@ -30,6 +30,7 @@ import {
   parseCreateAccount,
   passThroughMeterCheck,
   parseFederationSetup,
+  probeStoredAccount,
   parseTenantVaultPaths,
   providerOf,
   ProviderClients,
@@ -42,6 +43,7 @@ import {
   type FederationSetup,
   type FederationSetupInput,
   type ProviderAccount,
+  type ProviderAccountCheck,
   type TenantVaultPaths,
 } from './accounts.js';
 import {
@@ -438,6 +440,8 @@ export type VpsApi = {
     federationSetup: MethodDefinition<FederationSetupInput, FederationSetup>;
     get: MethodDefinition<AccountRef, ProviderAccountView>;
     offers: MethodDefinition<AccountRef & { query: OfferQuery }, { items: Offer[] }>;
+    /** (P9) What the account's credential may do, as its provider probes it (read-only). */
+    check: MethodDefinition<AccountRef, ProviderAccountCheck>;
     update: MethodDefinition<
       AccountRef & { config: unknown; billing?: AccountBilling },
       ProviderAccountView
@@ -1403,6 +1407,24 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             throw new ComputeError('NOT_FOUND', `Provider account ${input.accountId} not found`);
           const client = await clients.client(account, depsOf(context));
           return { items: await client.listOffers(input.query) };
+        },
+      }),
+      // A read-only look at what the stored credential may do (P9): the provider's probe, no transaction open.
+      check: defineMethod({
+        action: 'compute:providers:read',
+        kind: 'read',
+        resource: accountResource,
+        validate: describedBy(schemas.account, (raw) => parseAccountRef(raw) as AccountRef),
+        handler: async (context, input) => {
+          const account = await readAccount(context.sql, input.accountId, input.tenantId);
+          if (!account)
+            throw new ComputeError('NOT_FOUND', `Provider account ${input.accountId} not found`);
+          return probeStoredAccount(
+            providers,
+            account,
+            accountCheck(context),
+            context.signal ?? AbortSignal.timeout(55_000),
+          );
         },
       }),
       update: defineMethod({

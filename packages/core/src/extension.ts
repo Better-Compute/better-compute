@@ -1100,6 +1100,18 @@ export interface ProviderContext {
   };
 }
 
+/** (P9) What `ProviderInput.probeAccount` found. Never a secret: no token, key or credential value. */
+export interface ProviderAccountProbe {
+  /** Whether the credential may do everything instances need (`missing` is empty, the account is usable). */
+  ok: boolean;
+  /** Permissions instances need that the credential lacks, in the provider's own names (`droplet:read`). */
+  missing: string[];
+  /** Permissions only optional features need (costs, metrics, security findings) that it lacks. */
+  optional?: string[];
+  /** The provider's own detail (its account id and state, per-family results). JSON, never a secret. */
+  details?: { [key: string]: Json };
+}
+
 /** A provider as written for `defineProvider` (vps). Accounts are data validated by `config`. */
 export interface ProviderInput<C> {
   id: string;
@@ -1115,6 +1127,15 @@ export interface ProviderInput<C> {
    * store nothing, so a retry with the same idempotency key runs the check again.
    */
   checkAccount?(config: C, context: ProviderContext & { signal: AbortSignal }): Promise<void>;
+  /**
+   * (P9) A read-only look at what a stored account's credential may do, for `providerAccounts.check`: the
+   * account's identity at the provider and the permissions it lacks. Runs with no transaction open. Throws
+   * when the credential is refused outright (`INVALID_CONFIG`) or the provider cannot be asked.
+   */
+  probeAccount?(
+    config: C,
+    context: ProviderContext & { signal: AbortSignal },
+  ): Promise<ProviderAccountProbe>;
   /** A key no two accounts of this provider may share (e.g. a federation audience). Pure; no I/O. */
   accountKey?(config: C): string | undefined;
   /**

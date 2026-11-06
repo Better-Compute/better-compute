@@ -210,7 +210,7 @@ function planView(plan: unknown): unknown {
  * applies a reviewed plan (`better-compute fleet apply --plan-hash`).
  */
 export function computeTools(
-  options: { execCommand?: boolean; fleet?: boolean } = {},
+  options: { execCommand?: boolean; fleet?: boolean; providers?: boolean } = {},
 ): ComputeTool[] {
   const tools: ComputeTool[] = [
     {
@@ -1035,6 +1035,39 @@ export function computeTools(
               prune: args.prune === true,
             }),
           ),
+      },
+    );
+  // Provider accounts (P9), read-only and opt-in: what an operator's agent needs to tell why an account cannot
+  // create (a missing scope, a locked account). Nothing here changes an account or reads a secret.
+  if (options.providers)
+    tools.push(
+      {
+        name: 'list_provider_accounts',
+        title: 'List provider accounts',
+        description:
+          "Lists the tenant's cloud provider accounts (DigitalOcean, Hetzner, GCP, …): id, provider, name and config. Credentials appear only as secret references. Start here to find an accountId.",
+        inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+        annotations: { readOnlyHint: true, openWorldHint: false },
+        run: (_args, context) =>
+          context.api.$request('providerAccounts/list', { tenantId: context.tenantId }),
+      },
+      {
+        name: 'check_provider_account',
+        title: 'Check a provider account',
+        description:
+          "Asks the provider what the account's credential may do, without changing anything: the account's state there, the permissions instances need that it lacks (missing) and the ones only optional features need (optional). ok is false when instances cannot be created.",
+        inputSchema: {
+          type: 'object',
+          required: ['accountId'],
+          properties: { accountId: id('pacct', 'The provider account') },
+          additionalProperties: false,
+        },
+        annotations: { readOnlyHint: true, openWorldHint: true },
+        run: (args, context) =>
+          context.api.$request('providerAccounts/check', {
+            tenantId: context.tenantId,
+            accountId: args.accountId,
+          }),
       },
     );
   return tools;
