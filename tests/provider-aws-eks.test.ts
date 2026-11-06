@@ -415,6 +415,20 @@ describe('eks node groups', () => {
       amiType: 'AL2023_x86_64_NVIDIA',
       scalingConfig: { minSize: 0, maxSize: 1, desiredSize: 0 },
     });
+    // Inferentia and Trainium: the Neuron AMI and their own taint, as GPU groups have theirs.
+    await settle(
+      () =>
+        s.k8s.ensureNodePool(
+          id,
+          { name: 'neuron', machineType: 'inf2.xlarge', nodeCount: 1, accelerators: { type: 'aws-neuron', count: 1 } },
+          s.ctx(),
+        ),
+      'ready',
+    );
+    expect(bodyOf(s, 'CreateNodegroup')).toMatchObject({
+      amiType: 'AL2023_x86_64_NEURON',
+      taints: [{ key: 'aws.amazon.com/neuron', effect: 'NO_SCHEDULE' }],
+    });
     await settle(() => s.k8s.ensureNodePool(id, { name: 'arm', machineType: 'm7g.large', nodeCount: 1 }, s.ctx()), 'ready');
     expect(bodyOf(s, 'CreateNodegroup').amiType).toBe('AL2023_ARM_64_STANDARD');
     // EKS cannot attach accelerators: the type decides.
@@ -452,6 +466,12 @@ describe('eks node groups', () => {
     const failed = await rejection(s.k8s.ensureNodePool(id, gpu, s.ctx()));
     expect(isComputeError(failed)).toBe(true);
     expect(isComputeError(failed, 'INVALID_STATE')).toBe(false);
+    const g = await setup();
+    const gid = await readyCluster(g);
+    g.emu.failNext('DescribeInstanceTypes', 'OddFailure', 400);
+    const odd = await rejection(g.k8s.ensureNodePool(gid, gpu, g.ctx()));
+    expect(isComputeError(odd, 'PROVIDER_ERROR'), String(odd)).toBe(true);
+    expect(g.eks.calls('CreateNodegroup')).toHaveLength(0);
     expect(s.eks.calls('CreateNodegroup')).toHaveLength(0);
     // A CPU pool without the read: EKS decides.
     const c = await setup();
@@ -505,6 +525,26 @@ describe('eks node groups', () => {
     const tokens = s.eks.calls('UpdateNodegroupConfig').map((call) => JSON.parse(call.body).clientRequestToken);
     expect(tokens).toHaveLength(3);
     expect(new Set(tokens).size).toBe(3);
+  });
+
+  it('upgrades a node group after the control plane, one minor at a time', async () => {
+    const s = await setup();
+    const spec = { ...standard, version: '1.32', initialNodePools: [] };
+    const id = await readyCluster(s, spec);
+    await settle(() => s.k8s.ensureNodePool(id, pool, s.ctx()), 'ready');
+    expect(s.eks.nodegroups.get('bc-k-one/general')!.version).toBe('1.32');
+    // Nothing to do while the control plane runs the group's minor.
+    await s.k8s.ensureNodePool(id, pool, s.ctx());
+    expect(s.eks.calls('UpdateNodegroupVersion')).toHaveLength(0);
+    await settle(() => s.k8s.ensureCluster({ ...spec, version: '1.34' }, s.ctx()), 'ready', 20);
+    const { states } = await settle(() => s.k8s.ensureNodePool(id, pool, s.ctx()), 'ready', 20);
+    expect(states[0]).toBe('updating');
+    const group = s.eks.nodegroups.get('bc-k-one/general')!;
+    expect(group.version).toBe('1.34');
+    expect(s.eks.calls('UpdateNodegroupVersion').map((call) => JSON.parse(call.body).version)).toEqual(['1.33', '1.34']);
+    // Up to date: no further upgrade.
+    await s.k8s.ensureNodePool(id, pool, s.ctx());
+    expect(s.eks.calls('UpdateNodegroupVersion')).toHaveLength(2);
   });
 
   it("forgets a deleted cluster's node pool updates", async () => {

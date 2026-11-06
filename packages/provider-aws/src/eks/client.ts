@@ -302,11 +302,6 @@ export class Updates {
       if (key === memory || (memory.endsWith('/') && key.startsWith(memory))) this.#running.delete(key);
   }
 
-  /** Whether an update of `memory` is remembered. */
-  has(memory: string): boolean {
-    return this.#running.has(memory);
-  }
-
   async poll(memory: string, signal: AbortSignal): Promise<Polled | undefined> {
     const remembered = this.#running.get(memory);
     if (!remembered) return undefined;

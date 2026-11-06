@@ -104,6 +104,7 @@ export function eksOperation(method: string, url: URL): string {
     if (p.length === 4)
       return method === 'GET' ? 'DescribeNodegroup' : method === 'DELETE' ? 'DeleteNodegroup' : '?';
     if (p[4] === 'update-config') return 'UpdateNodegroupConfig';
+    if (p[4] === 'update-version') return 'UpdateNodegroupVersion';
   }
   if (p[2] === 'access-entries') {
     if (p.length === 3) return method === 'POST' ? 'CreateAccessEntry' : 'ListAccessEntries';
@@ -419,6 +420,29 @@ export class EksEmulator {
           .sort();
         const { page, nextToken } = this.#page(names, url);
         return json(200, { nodegroups: page, ...(nextToken ? { nextToken } : {}) });
+      }
+      case 'UpdateNodegroupVersion': {
+        if (!cluster) return noCluster();
+        const group = this.nodegroups.get(`${cluster.name}/${p[3]}`);
+        if (!group) return this.#error('ResourceNotFoundException', `No node group found for name: ${p[3]}.`, 404);
+        if (group.status !== 'ACTIVE' || cluster.status !== 'ACTIVE')
+          return this.#error('ResourceInUseException', `Nodegroup ${group.nodegroupName} or its cluster is busy`, 409);
+        const version = body.version ?? cluster.version;
+        const [cMajor, cMinor] = cluster.version.split('.').map(Number);
+        const [gMajor, gMinor] = group.version.split('.').map(Number);
+        const [vMajor, vMinor] = String(version).split('.').map(Number);
+        if (vMajor !== cMajor || vMinor! > cMinor! || vMajor !== gMajor || vMinor! < gMinor! || vMinor! > gMinor! + 1)
+          return this.#error('InvalidParameterException', `Cannot update node group ${group.nodegroupName} from ${group.version} to ${version}`);
+        const update = this.#newUpdate(cluster.name, 'VersionUpdate', [{ type: 'Version', value: version }], group.nodegroupName);
+        group.status = 'UPDATING';
+        group.remaining = this.delayTicks;
+        group.settle = () => {
+          group.status = 'ACTIVE';
+          group.version = version;
+          group.releaseVersion = `${version}.0-20261101`;
+          update.status = 'Successful';
+        };
+        return json(200, { update: this.#updateJson(update) });
       }
       case 'DescribeNodegroup':
       case 'DeleteNodegroup':

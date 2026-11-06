@@ -36,6 +36,8 @@ import {
 import {
   checkClusterSpec,
   checkImmutable,
+  compareMinor,
+  minorOf,
   clusterBody,
   clusterState,
   clusterTags,
@@ -79,7 +81,7 @@ export {
   guardedNamespaces,
   principalArnOf,
 } from './credentials.js';
-export { amiTypeOf, gpuTaint, scalingOf } from './node-groups.js';
+export { amiTypeOf, gpuTaint, neuronTaint, scalingOf } from './node-groups.js';
 export {
   httpsKubeTransport,
   type KubeRequest,
@@ -397,9 +399,14 @@ export class AwsKubernetes implements ProviderKubernetes {
     try {
       return (await this.#types.get([machineType], signal)).get(machineType);
     } catch (error) {
-      // Without ec2:DescribeInstanceTypes (or for a type EC2 does not know) EKS decides, except for
-      // accelerators (checkAccelerators). EC2 failing is a failure.
-      if (isComputeError(error, 'ACCESS_DENIED') || isComputeError(error, 'INVALID_INPUT'))
+      // Without ec2:DescribeInstanceTypes, or for a type EC2 does not know (InvalidInstanceType), EKS
+      // decides, except for accelerators (checkAccelerators). EC2 failing otherwise is a failure.
+      const code = isComputeError(error) ? (error.details as { code?: unknown } | undefined)?.code : undefined;
+      if (
+        isComputeError(error, 'ACCESS_DENIED') ||
+        isComputeError(error, 'INVALID_INPUT') ||
+        (isComputeError(error, 'PROVIDER_ERROR') && code === 'InvalidInstanceType')
+      )
         return undefined;
       throw error;
     }
@@ -476,7 +483,35 @@ export class AwsKubernetes implements ProviderKubernetes {
     checkNodegroupImmutable(id, spec, group, zonesSubnets);
     if (group.status !== 'ACTIVE' && group.status !== 'DEGRADED') return nodegroupState(id, group);
     const scaling = scalingChange(spec, group);
-    if (!scaling) return nodegroupState(id, group);
+    if (!scaling) {
+      // The control plane moved on (ensureCluster upgrades it one minor at a time): the group follows,
+      // one minor per update, as GKE upgrades node pools after the control plane. Only once the
+      // cluster is ACTIVE (EKS refuses while it updates).
+      const cluster = parent.version !== undefined ? minorOf(parent.version) : undefined;
+      const current = group.version !== undefined ? minorOf(group.version) : undefined;
+      if (
+        parent.status !== 'ACTIVE' ||
+        !cluster ||
+        !current ||
+        compareMinor(parent.version!, group.version!) <= 0
+      )
+        return nodegroupState(id, group);
+      // One minor per update: the next minor of the group's major, at most the cluster's.
+      const target = cluster[0] === current[0] ? `${current[0]}.${Math.min(current[1] + 1, cluster[1])}` : `${cluster[0]}.${cluster[1]}`;
+      context.log.info('eks.nodegroup.upgrade', { nodePool: id, from: group.version, to: target });
+      return this.#update(
+        memory,
+        id,
+        { cluster: clusterName, nodegroup: spec.name },
+        {
+          path: `/clusters/${segment(clusterName)}/node-groups/${segment(spec.name)}/update-version`,
+          body: { version: target },
+          what: `Upgrading EKS node group ${id} to ${target}`,
+          from: { version: group.version, releaseVersion: group.releaseVersion },
+        },
+        context,
+      );
+    }
     context.log.info('eks.nodegroup.scale', { nodePool: id, ...scaling });
     return this.#update(
       memory,

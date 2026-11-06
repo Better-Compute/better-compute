@@ -837,8 +837,9 @@ export interface KubernetesNodePoolSpec {
 
 /**
  * (kubernetes) A credential for one principal: the module never stores one, and never holds a cluster-admin kubeconfig.
- * The provider creates (or reuses) a Kubernetes service account named `subject`, binds it to the built-in role for
- * `role` (`view`, `edit`, `cluster-admin`) and mints a bound token through the TokenRequest API.
+ * The provider creates (or reuses) a Kubernetes service account named `subject`, binds it to a ClusterRole for
+ * `role` (`view`, an edit role, `cluster-admin`) and mints a bound token through the TokenRequest API. An edit
+ * subject must not be able to act as another subject's service account (EKS: `better-compute:edit` and an admission guard).
  */
 export interface KubernetesCredentialRequest {
   /** A DNS-1123 label the module derives from the IAM identity (`bc-u-…`). */

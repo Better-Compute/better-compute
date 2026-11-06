@@ -39,6 +39,8 @@ export const nodegroupTags = {
 
 /** The taint EKS GPU node groups carry, as GKE's GPU node pools do. */
 export const gpuTaint = { key: 'nvidia.com/gpu', effect: 'NoSchedule' } as const;
+/** The taint Neuron (Inferentia, Trainium) node groups carry, so only Neuron workloads land there. */
+export const neuronTaint = { key: 'aws.amazon.com/neuron', effect: 'NoSchedule' } as const;
 
 const taintEffects = {
   NoSchedule: 'NO_SCHEDULE',
@@ -150,14 +152,14 @@ export function scalingOf(
   return { minSize, maxSize, desiredSize: Math.min(Math.max(desired, minSize), maxSize) };
 }
 
-function taintsOf(spec: KubernetesNodePoolSpec, gpu: boolean) {
+function taintsOf(spec: KubernetesNodePoolSpec, accelerator: typeof gpuTaint | typeof neuronTaint | undefined) {
   const taints = (spec.taints ?? []).map((taint) => ({
     key: taint.key,
     ...(taint.value !== undefined ? { value: taint.value } : {}),
     effect: taintEffects[taint.effect],
   }));
-  if (gpu && !taints.some((taint) => taint.key === gpuTaint.key))
-    taints.push({ key: gpuTaint.key, effect: taintEffects[gpuTaint.effect] });
+  if (accelerator && !taints.some((taint) => taint.key === accelerator.key))
+    taints.push({ key: accelerator.key, effect: taintEffects[accelerator.effect] });
   return taints;
 }
 
@@ -173,8 +175,10 @@ export function nodegroupBody(
   },
 ): Record<string, unknown> {
   const amiType = amiTypeOf(spec.machineType, options.info);
-  const gpu = amiType.endsWith('_NVIDIA');
-  const taints = taintsOf(spec, gpu);
+  const taints = taintsOf(
+    spec,
+    amiType.endsWith('_NVIDIA') ? gpuTaint : amiType.endsWith('_NEURON') ? neuronTaint : undefined,
+  );
   const tags: Record<string, string> = {
     [nodegroupTags.managed]: 'true',
     [nodegroupTags.zones]: String(options.zones),
