@@ -529,10 +529,16 @@ export async function planFleet(
   }
 
   // Kubernetes clusters (D25): after the pools they live on; their deletes before pools are archived.
+  const archivedPools = new Map(
+    options.prune
+      ? state.pools.filter((pool) => !wantedPools.has(pool.name)).map((pool) => [pool.id, pool.name])
+      : [],
+  );
   const kubernetes = planKubernetes(desired, state, {
     prune: options.prune,
     poolIds,
     createdPools,
+    archivedPools,
     add,
   });
 
@@ -562,6 +568,12 @@ export async function planFleet(
       }
     for (const pool of state.pools)
       if (!wantedPools.has(pool.name)) {
+        // A cluster the document keeps on it blocks the archive (planKubernetes blocks the cluster).
+        const inUse = kubernetes.poolsInUse.get(pool.name);
+        if (inUse !== undefined) {
+          add({ kind: 'pool', name: pool.name, action: 'delete', blocked: inUse });
+          continue;
+        }
         add({
           kind: 'pool',
           name: pool.name,

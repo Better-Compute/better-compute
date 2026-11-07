@@ -91,6 +91,11 @@ export interface KubernetesCalls {
   writes: FleetCall[];
   /** `kubernetesNodePools/delete` then `kubernetesClusters/delete` (prune): before pools are archived. */
   deletes: FleetCall[];
+  /**
+   * Pools the plan archives (`archivedPools`) that a cluster the document keeps runs on, by pool
+   * name, with the block both the cluster and the archive carry.
+   */
+  poolsInUse: Map<string, string>;
 }
 
 /** A document node pool as `kubernetesClusters.create` and `kubernetesNodePools.create` take it. */
@@ -172,7 +177,9 @@ function clusterDiff(current: FleetStateCluster, wanted: FleetKubernetesCluster,
  * in-place updates, node pools added, resized or (with `prune`) deleted, and clusters deleted (with
  * `prune`). `poolIds` maps the document's pool names to ids; `createdPools` are the pools this same
  * plan creates: a cluster on one waits for the next apply (`deferred`), since the kubernetes module
- * admits a cluster only on a pool that exists.
+ * admits a cluster only on a pool that exists. `archivedPools` (pool id to name) are the pools this
+ * plan archives (prune): a document cluster on one blocks both, or it would run on an archived pool
+ * that no later plan of the same document could resolve.
  */
 export function planKubernetes(
   desired: FleetConfig,
@@ -181,6 +188,7 @@ export function planKubernetes(
     prune: boolean;
     poolIds: ReadonlyMap<string, string>;
     createdPools: ReadonlySet<string>;
+    archivedPools: ReadonlyMap<string, string>;
     add(change: FleetChange): void;
   },
 ): KubernetesCalls {
@@ -191,6 +199,7 @@ export function planKubernetes(
   const clusterDeletes: FleetCall[] = [];
   const missing = state.missing.includes('kubernetes_clusters');
   const wanted = new Set<string>();
+  const poolsInUse = new Map<string, string>();
 
   for (const cluster of desired.kubernetesClusters ?? []) {
     wanted.add(cluster.name);
@@ -219,6 +228,13 @@ export function planKubernetes(
     const substrate = state.substrateClusters.find((item) => item.name === cluster.name);
     if (substrate) {
       block(`the name is taken by the substrate cluster of pool ${substrate.poolId}`);
+      continue;
+    }
+    const archived = options.archivedPools.get(poolId);
+    if (archived !== undefined) {
+      const blocked = `pool ${archived} is archived by this plan while cluster ${cluster.name} stays on it: drop the cluster or keep the pool`;
+      if (!poolsInUse.has(archived)) poolsInUse.set(archived, blocked);
+      block(blocked);
       continue;
     }
     if (!current) {
@@ -381,5 +397,5 @@ export function planKubernetes(
         });
       }
 
-  return { writes, deletes: [...nodePoolDeletes, ...clusterDeletes] };
+  return { writes, deletes: [...nodePoolDeletes, ...clusterDeletes], poolsInUse };
 }
