@@ -1517,6 +1517,8 @@ export async function removeSubnet(
   tx: SqlTx,
   input: RemoveSubnetInput,
 ): Promise<NetworkView> {
+  // The networks its peerings reach are reopened below: lock them with this one first, in id order (peerNetwork's).
+  await lockWithPeers(tx, input, 'subnet', input.subnetId);
   const network = await openNetwork(tx, input);
   const { rows } = await tx.query<SubnetRow>(
     `SELECT ${subnetColumns} FROM network_subnets WHERE id = $1 AND network_id = $2 FOR UPDATE`,
@@ -1568,6 +1570,44 @@ async function loadBalancersOn(
     [value],
   );
   return rows.map((row) => row.id);
+}
+
+/**
+ * Locks a network and every network its live peerings on `scope` (a subnet of it, or the whole network) reach, all
+ * FOR UPDATE in id order, as peerNetwork locks a pair. releaseEdges then updates edge rows and reopens those other
+ * networks; taking their locks first means no transaction holds an edge while it waits for a network another one
+ * holds (peer(enabled: false) against delete, or two deletes of a peered pair, were 40P01). The peer ids are read
+ * without a lock; a peering made between that read and the lock is CONFLICT (retry), never locked out of order.
+ */
+async function lockWithPeers(
+  tx: SqlTx,
+  ref: NetworkRef,
+  scope: 'subnet' | 'network',
+  scopeId: string,
+): Promise<void> {
+  const own = await requireNetwork(tx, ref);
+  const where =
+    scope === 'subnet'
+      ? `(subnet_id = $1 OR peer_subnet_id = $1)`
+      : `(network_id = $1 OR peer_network_id = $1)`;
+  const peers = async () => {
+    const { rows } = await tx.query<{ network_id: string; peer_network_id: string | null }>(
+      `SELECT DISTINCT network_id, peer_network_id FROM network_edges
+        WHERE ${where} AND (network_id = $2 OR peer_network_id = $2) AND desired_state = 'present'`,
+      [scopeId, own.id],
+    );
+    return new Set(rows.flatMap((row) => [row.network_id, row.peer_network_id ?? row.network_id]));
+  };
+  const ids = [...new Set([own.id, ...(await peers())])].sort();
+  await tx.query(`SELECT id FROM networks WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE`, [ids]);
+  for (const id of await peers())
+    if (!ids.includes(id))
+      throw new ComputeError(
+        'CONFLICT',
+        `Network ${own.id} was peered with ${id} while this request ran; retry it`,
+        undefined,
+        { reason: 'peeringChanged' },
+      );
 }
 
 /**
@@ -1873,6 +1913,8 @@ export async function deleteNetwork(
   tx: SqlTx,
   ref: NetworkRef,
 ): Promise<NetworkView> {
+  // The networks its peerings reach are reopened below: lock them with this one first, in id order (peerNetwork's).
+  await lockWithPeers(tx, ref, 'network', ref.networkId);
   const row = await requireNetwork(tx, ref, { lock: true });
   if (row.desired_state === 'deleted') return viewOf(tx, row.id);
   const instanceIds = await instancesOn(tx, 'network_id', row.id);

@@ -2672,6 +2672,89 @@ describe('network edge (networks.natGateway, networks.peer, networks.routes)', (
     expect(rows).toEqual([{ state: 'deleted' }]);
   });
 
+  it('locks a peered pair in id order before releasing its edges, so unpeering and deletes never deadlock', async () => {
+    /** Runs `fn` with every statement of its transactions recorded, in order. */
+    const recorded = async (fn: () => Promise<unknown>) => {
+      const statements: { text: string; params: unknown[] }[] = [];
+      const real = db;
+      db = {
+        ...real,
+        transaction: (body, options) =>
+          real.transaction(
+            (tx) =>
+              body(
+                new Proxy(tx, {
+                  get(target, key) {
+                    if (key === 'query')
+                      return (text: string, params: unknown[] = []) => {
+                        statements.push({ text, params });
+                        return target.query(text, params);
+                      };
+                    const value = (target as unknown as Record<string | symbol, unknown>)[key];
+                    return typeof value === 'function' ? value.bind(target) : value;
+                  },
+                }),
+              ),
+            options,
+          ),
+      } as SqlExecutor;
+      try {
+        await fn();
+      } finally {
+        db = real;
+      }
+      return statements;
+    };
+    const networkLocks = (statements: { text: string }[]) =>
+      statements.flatMap((statement, index) =>
+        /\bnetworks\b[\s\S]*FOR UPDATE|UPDATE networks\b/.test(statement.text) ? [index] : [],
+      );
+    const pair = async (a: string, b: string) => {
+      const left = (await readyNetwork([a, '10.9.0.0/20'], 0)).network;
+      const right = (await readyNetwork([b], 0)).network;
+      await peer(left.id, left.subnets[0]!.id, right.id, right.subnets[0]!.id);
+      return { left, right };
+    };
+
+    // networks.delete of the network that does not hold the row: both networks are locked together, in id order,
+    // before any edge row is written or the other network is reopened.
+    const { left, right } = await pair('10.0.0.0/20', '10.1.0.0/20');
+    const deleted = await recorded(() => call('networks', 'delete', { tenantId: 'root', networkId: right.id }));
+    const ordered = deleted.findIndex((statement) => /WHERE id = ANY\(\$1::text\[\]\) ORDER BY id FOR UPDATE/.test(statement.text));
+    expect(ordered).toBeGreaterThanOrEqual(0);
+    expect(deleted[ordered]!.params[0]).toEqual([left.id, right.id].sort());
+    expect(networkLocks(deleted)[0]).toBe(ordered);
+    expect(ordered).toBeLessThan(deleted.findIndex((statement) => /UPDATE network_edges/.test(statement.text)));
+
+    // removeSubnet of the peered subnet: the same.
+    const second = await pair('10.2.0.0/20', '10.3.0.0/20');
+    const removed = await recorded(() =>
+      call('networks', 'removeSubnet', {
+        tenantId: 'root',
+        networkId: second.left.id,
+        subnetId: second.left.subnets.find((subnet: { cidr: string }) => subnet.cidr === '10.2.0.0/20')!.id,
+      }),
+    );
+    const removedLock = removed.findIndex((statement) => /ORDER BY id FOR UPDATE/.test(statement.text));
+    expect(removed[removedLock]!.params[0]).toEqual([second.left.id, second.right.id].sort());
+    expect(networkLocks(removed)[0]).toBe(removedLock);
+
+    // Run side by side, each pair settles without an error: unpeer against delete, and two deletes of one pair.
+    const third = await pair('10.4.0.0/20', '10.5.0.0/20');
+    await Promise.all([
+      peer(third.left.id, third.left.subnets[0]!.id, third.right.id, third.right.subnets[0]!.id, false),
+      call('networks', 'delete', { tenantId: 'root', networkId: third.right.id }),
+    ]);
+    const fourth = await pair('10.6.0.0/20', '10.7.0.0/20');
+    await Promise.all([
+      call('networks', 'delete', { tenantId: 'root', networkId: fourth.left.id }),
+      call('networks', 'delete', { tenantId: 'root', networkId: fourth.right.id }),
+    ]);
+    for (const id of [third.right.id, fourth.left.id, fourth.right.id])
+      expect(['deleting', 'deleted']).toContain((await getNetwork(id)).state);
+    expect((await getNetwork(third.left.id)).peerings?.every((edge: { state: string }) => edge.state === 'deleting') ?? true).toBe(true);
+  });
+
   it('removing a subnet removes its gateway first; deleting the peer network removes the peering first', async () => {
     const left = (await readyNetwork(['10.0.0.0/20', '10.2.0.0/20'], 0)).network;
     const right = (await readyNetwork(['10.1.0.0/20'], 0)).network;
