@@ -202,7 +202,9 @@ export function iamPolicy(
     );
   }
   if (options.networks === true)
-    statements.push(...networksIamStatements((resource) => ec2(resource)));
+    statements.push(
+      ...networksIamStatements((resource) => ec2(resource), discover ? { discover } : {}),
+    );
   if (options.instanceProfileArn !== undefined) {
     const profile = parseArn(options.instanceProfileArn);
     if (profile.service !== 'iam' || !profile.resource.startsWith('instance-profile/'))

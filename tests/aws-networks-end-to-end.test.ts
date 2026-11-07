@@ -244,7 +244,7 @@ describe('tenant networks on AWS through vps', () => {
       if (rules.items.find((item: { id: string }) => item.id === rule.id)?.state === 'ready') break;
     }
     const made = w.vpc.vpcByName(providerResourceName(network.id))!;
-    const acl = w.vpc.defaultNacl(made.id);
+    const acl = w.vpc.networkNacl(made.id)!;
     expect(acl.entries).toContainEqual(
       expect.objectContaining({
         number: 200,

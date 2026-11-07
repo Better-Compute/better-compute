@@ -16,12 +16,14 @@ import type { AwsConfig } from './config.js';
 import { clientToken, parseInstanceId, tags, tagValue } from './ids.js';
 
 // Tenant networking on Amazon VPC (AWS A2). A better-compute network is a VPC with an internet
-// gateway and a default route; its subnets are zone-scoped; firewall rules are security group
-// rules (allows) and network ACL entries (network-wide denies); a machine's network tags are
-// security groups on its primary network interface.
+// gateway, its own route table (the default route) and its own network ACL, which every subnet it
+// makes is associated with (AWS's main table and default ACL are never edited); its subnets are
+// zone-scoped; firewall rules are security group rules (allows) and entries of the network's ACL
+// (network-wide denies); a machine's network tags are security groups on its primary interface.
 //
 // Everything better-compute makes is found again by tag, never by remembered id, so a restart
-// re-reads the account: VPCs, gateways and subnets carry `better-compute:network` (and
+// re-reads the account: VPCs, gateways, route tables, ACLs and subnets carry
+// `better-compute:network` (and
 // `better-compute:subnet`), security group rules carry one `better-compute:firewall:<name>` key per
 // firewall that wants them, and a network ACL entry's owner is the ACL tag
 // `better-compute:deny:<ingress|egress>:<rule number>`. Every ensure*/delete* call is idempotent and
@@ -189,6 +191,12 @@ const tagMap = (element: XmlElement) =>
   new Map(
     element.items('tagSet').map((item) => [item.textOf('key') ?? '', item.textOf('value') ?? '']),
   );
+
+/** Made by better-compute for `network`: it carries the network tag and `better-compute:managed`. */
+const madeFor = (item: XmlElement, network: string) => {
+  const tagged = tagMap(item);
+  return tagged.get(networkTags.network) === network && tagged.get(tags.managed) === 'true';
+};
 
 function parseVpc(item: XmlElement): Vpc {
   const tagged = tagMap(item);
@@ -450,8 +458,9 @@ export class AwsNetworks implements ProviderNetworks {
     }
 
     const igw = await this.#ensureGateway(spec.name, vpc.id, signal);
-    await this.#ensureDefaultRoute(spec.name, vpc.id, igw, signal);
-    await this.#ensureAclBaseline(spec.name, vpc.id, signal);
+    const table = await this.#ensureRouteTable(spec.name, vpc.id, signal);
+    await this.#ensureDefaultRoute(table, igw, signal);
+    await this.#ensureAcl(spec.name, vpc.id, signal);
     await this.#sweepTagGroups(vpc.id, signal);
     return state(vpc.id, 'ready');
   }
@@ -496,45 +505,62 @@ export class AwsNetworks implements ProviderNetworks {
     return gateway;
   }
 
-  async #mainRouteTable(vpcId: string, signal: AbortSignal): Promise<XmlElement | undefined> {
+  /** The route table better-compute made for `network` in a VPC (never the VPC's main table). */
+  async #networkRouteTable(
+    network: string,
+    vpcId: string,
+    signal: AbortSignal,
+  ): Promise<XmlElement | undefined> {
     const doc = await this.#call(
       'DescribeRouteTables',
+      { Filter: [{ Name: 'vpc-id', Value: [vpcId] }] },
+      signal,
+    );
+    return doc
+      .items('routeTableSet')
+      .filter(
+        (table) =>
+          madeFor(table, network) &&
+          !table.items('associationSet').some((a) => a.textOf('main') === 'true'),
+      )
+      .sort((a, b) =>
+        (a.textOf('routeTableId') ?? '') < (b.textOf('routeTableId') ?? '') ? -1 : 1,
+      )[0];
+  }
+
+  /**
+   * The network's own route table, created tagged when missing. AWS's main table (untagged, made
+   * by AWS) is never edited: the IAM policy lets routes change only on tables created with
+   * `better-compute:managed`, which no statement may write on an existing table.
+   */
+  async #ensureRouteTable(
+    network: string,
+    vpcId: string,
+    signal: AbortSignal,
+  ): Promise<XmlElement> {
+    const found = await this.#networkRouteTable(network, vpcId, signal);
+    if (found) return found;
+    // The token makes a retry (a lost answer, a read that does not show the table yet) return
+    // the same table.
+    const doc = await this.#call(
+      'CreateRouteTable',
       {
-        Filter: [
-          { Name: 'vpc-id', Value: [vpcId] },
-          { Name: 'association.main', Value: ['true'] },
-        ],
+        VpcId: vpcId,
+        ClientToken: clientToken(`rtb:${vpcId}`),
+        TagSpecification: this.#ownTags('route-table', network),
       },
       signal,
     );
-    return doc.items('routeTableSet')[0];
+    const table = doc.child('routeTable');
+    if (!table?.textOf('routeTableId'))
+      throw new ComputeError('PROVIDER_ERROR', 'CreateRouteTable returned no table', undefined, {
+        provider: 'aws',
+      });
+    return table;
   }
 
-  async #ensureDefaultRoute(
-    network: string,
-    vpcId: string,
-    igw: string,
-    signal: AbortSignal,
-  ): Promise<void> {
-    const table = await this.#mainRouteTable(vpcId, signal);
-    const tableId = table?.textOf('routeTableId');
-    if (!table || !tableId)
-      throw new ComputeError(
-        'UNAVAILABLE',
-        `VPC ${vpcId} shows no main route table yet`,
-        undefined,
-        {
-          provider: 'aws',
-          reason: 'route-table',
-        },
-      );
-    // Tagged before any route edit: the IAM policy lets routes change only on a network's table.
-    if (tagMap(table).get(networkTags.network) !== network)
-      await this.#call(
-        'CreateTags',
-        { ResourceId: [tableId], Tag: [{ Key: networkTags.network, Value: network }] },
-        signal,
-      );
+  async #ensureDefaultRoute(table: XmlElement, igw: string, signal: AbortSignal): Promise<void> {
+    const tableId = table.textOf('routeTableId')!;
     const route = table
       .items('routeSet')
       .find((item) => item.textOf('destinationCidrBlock') === '0.0.0.0/0');
@@ -545,47 +571,56 @@ export class AwsNetworks implements ProviderNetworks {
       await this.#tolerate(['RouteAlreadyExists'], () => this.#call('CreateRoute', params, signal));
   }
 
-  async #defaultAcl(vpcId: string, signal: AbortSignal): Promise<XmlElement | undefined> {
+  /** The network ACL better-compute made for `network` in a VPC (never the VPC's default ACL). */
+  async #networkAcl(
+    network: string,
+    vpcId: string,
+    signal: AbortSignal,
+  ): Promise<XmlElement | undefined> {
     const doc = await this.#call(
       'DescribeNetworkAcls',
       {
         Filter: [
           { Name: 'vpc-id', Value: [vpcId] },
-          { Name: 'default', Value: ['true'] },
+          { Name: 'default', Value: ['false'] },
         ],
       },
       signal,
     );
-    return doc.items('networkAclSet')[0];
+    return doc
+      .items('networkAclSet')
+      .filter((acl) => madeFor(acl, network))
+      .sort((a, b) =>
+        (a.textOf('networkAclId') ?? '') < (b.textOf('networkAclId') ?? '') ? -1 : 1,
+      )[0];
   }
 
   /**
-   * The network's ACL (the VPC's default, which every subnet uses): tagged, with its allow-all
-   * entries at rule 32766 instead of 100, so a deny entry (100 and up) is evaluated first.
+   * The network's own ACL, created tagged when missing, with allow-all entries at rule 32766 so a
+   * deny entry (100 and up) is evaluated first. The VPC's default ACL is never edited.
    */
-  async #ensureAclBaseline(network: string, vpcId: string, signal: AbortSignal): Promise<void> {
-    const acl = await this.#defaultAcl(vpcId, signal);
-    const aclId = acl?.textOf('networkAclId');
-    if (!acl || !aclId)
-      throw new ComputeError('UNAVAILABLE', `VPC ${vpcId} shows no network ACL yet`, undefined, {
-        provider: 'aws',
-        reason: 'network-acl',
-      });
-    if (tagMap(acl).get(networkTags.network) !== network)
-      await this.#call(
-        'CreateTags',
-        { ResourceId: [aclId], Tag: [{ Key: networkTags.network, Value: network }] },
+  async #ensureAcl(network: string, vpcId: string, signal: AbortSignal): Promise<XmlElement> {
+    let acl = await this.#networkAcl(network, vpcId, signal);
+    if (!acl) {
+      const doc = await this.#call(
+        'CreateNetworkAcl',
+        {
+          VpcId: vpcId,
+          ClientToken: clientToken(`acl:${vpcId}`),
+          TagSpecification: this.#ownTags('network-acl', network),
+        },
         signal,
       );
-    const entries = acl.items('entrySet');
-    const allowAll = (item: XmlElement) =>
-      item.textOf('protocol') === '-1' &&
-      item.textOf('ruleAction') === 'allow' &&
-      item.textOf('cidrBlock') === '0.0.0.0/0';
-    for (const egress of [false, true]) {
-      const mine = entries.filter((item) => (item.textOf('egress') === 'true') === egress);
-      // Add the new allow-all before removing the old one: never a moment of deny-all.
-      if (!mine.some((item) => Number(item.textOf('ruleNumber')) === naclAllowAllRule))
+      acl = doc.child('networkAcl');
+      if (!acl?.textOf('networkAclId'))
+        throw new ComputeError('PROVIDER_ERROR', 'CreateNetworkAcl returned no ACL', undefined, {
+          provider: 'aws',
+        });
+    }
+    const aclId = acl.textOf('networkAclId')!;
+    const entries = parseAclEntries(acl);
+    for (const egress of [false, true])
+      if (!entries.some((entry) => entry.number === naclAllowAllRule && entry.egress === egress))
         await this.#tolerate(['NetworkAclEntryAlreadyExists'], () =>
           this.#call(
             'CreateNetworkAclEntry',
@@ -600,16 +635,71 @@ export class AwsNetworks implements ProviderNetworks {
             signal,
           ),
         );
-      const old = mine.find((item) => Number(item.textOf('ruleNumber')) === 100 && allowAll(item));
-      if (old)
-        await this.#tolerate(['*NotFound'], () =>
-          this.#call(
-            'DeleteNetworkAclEntry',
-            { NetworkAclId: aclId, RuleNumber: 100, Egress: egress },
-            signal,
-          ),
+    return acl;
+  }
+
+  /**
+   * Puts a subnet of a network better-compute made on the network's route table and ACL; the
+   * state to answer while that cannot be done yet, or undefined once it is.
+   */
+  async #associate(
+    network: string,
+    vpcId: string,
+    subnetId: string,
+    signal: AbortSignal,
+  ): Promise<ProviderNetworkState | undefined> {
+    const table = await this.#networkRouteTable(network, vpcId, signal);
+    const acl = await this.#networkAcl(network, vpcId, signal);
+    if (!table || !acl)
+      return state(
+        subnetId,
+        'pending',
+        `Waiting for the route table and network ACL of network ${network}`,
+      );
+    const tableId = table.textOf('routeTableId')!;
+    if (!table.items('associationSet').some((a) => a.textOf('subnetId') === subnetId))
+      try {
+        await this.#call(
+          'AssociateRouteTable',
+          { RouteTableId: tableId, SubnetId: subnetId },
+          signal,
         );
+      } catch (error) {
+        if (awsCode(error) !== 'Resource.AlreadyAssociated') throw error;
+        const doc = await this.#call(
+          'DescribeRouteTables',
+          { Filter: [{ Name: 'association.subnet-id', Value: [subnetId] }] },
+          signal,
+        );
+        const other = doc.items('routeTableSet')[0]?.textOf('routeTableId');
+        if (other !== tableId)
+          return state(
+            subnetId,
+            'error',
+            `Subnet ${subnetId} uses route table ${other ?? 'unknown'}, not network ${network}'s ${tableId}`,
+          );
+      }
+    const aclId = acl.textOf('networkAclId')!;
+    if (!acl.items('associationSet').some((a) => a.textOf('subnetId') === subnetId)) {
+      const doc = await this.#call(
+        'DescribeNetworkAcls',
+        { Filter: [{ Name: 'association.subnet-id', Value: [subnetId] }] },
+        signal,
+      );
+      const association = doc
+        .items('networkAclSet')
+        .flatMap((item) => item.items('associationSet'))
+        .find((a) => a.textOf('subnetId') === subnetId)
+        ?.textOf('networkAclAssociationId');
+      if (!association)
+        return state(subnetId, 'pending', `Waiting for the network ACL association of ${subnetId}`);
+      await this.#call(
+        'ReplaceNetworkAclAssociation',
+        { AssociationId: association, NetworkAclId: aclId },
+        signal,
+      );
     }
+    return undefined;
   }
 
   async deleteNetwork(name: string, context: CallContext): Promise<ProviderNetworkState> {
@@ -671,9 +761,17 @@ export class AwsNetworks implements ProviderNetworks {
       .map((item) => item.textOf('vpcEndpointId') ?? '')
       .filter(Boolean);
     if (endpointIds.length)
-      await attempt('a gateway endpoint', () =>
-        this.#call('DeleteVpcEndpoints', { VpcEndpointId: endpointIds }, signal),
-      );
+      await attempt('a gateway endpoint', async () => {
+        // A 200 answer lists the endpoints it could not delete.
+        const doc = await this.#call('DeleteVpcEndpoints', { VpcEndpointId: endpointIds }, signal);
+        for (const item of doc.items('unsuccessful')) {
+          const code = item.child('error')?.textOf('code') ?? 'unknown';
+          if (code.endsWith('.NotFound')) continue;
+          reasons.push(
+            `gateway endpoint ${item.textOf('resourceId') ?? ''} was not deleted (${code})`,
+          );
+        }
+      });
 
     const subnets = await this.#call('DescribeSubnets', byVpc, signal);
     for (const subnet of subnets.items('subnetSet').map(parseSubnet))
@@ -724,6 +822,27 @@ export class AwsNetworks implements ProviderNetworks {
         const id = item.textOf('internetGatewayId') ?? '';
         await attempt(`internet gateway ${id}`, () =>
           this.#call('DeleteInternetGateway', { InternetGatewayId: id }, signal),
+        );
+      }
+
+    // The network's own route table and ACL (its subnets, and so their associations, are gone).
+    const tables = await this.#call('DescribeRouteTables', byVpc, signal);
+    for (const item of tables.items('routeTableSet'))
+      if (
+        madeFor(item, network) &&
+        !item.items('associationSet').some((a) => a.textOf('main') === 'true')
+      ) {
+        const id = item.textOf('routeTableId') ?? '';
+        await attempt(`route table ${id}`, () =>
+          this.#call('DeleteRouteTable', { RouteTableId: id }, signal),
+        );
+      }
+    const acls = await this.#call('DescribeNetworkAcls', byVpc, signal);
+    for (const item of acls.items('networkAclSet'))
+      if (madeFor(item, network) && item.textOf('default') !== 'true') {
+        const id = item.textOf('networkAclId') ?? '';
+        await attempt(`network ACL ${id}`, () =>
+          this.#call('DeleteNetworkAcl', { NetworkAclId: id }, signal),
         );
       }
 
@@ -920,7 +1039,10 @@ export class AwsNetworks implements ProviderNetworks {
     }
   }
 
-  /** Public IPs on launch from config, and private service access (gateway endpoints). */
+  /**
+   * Public IPs on launch from config, the network's route table and ACL (a network better-compute
+   * made), and private service access (gateway endpoints).
+   */
   async #finishSubnet(
     spec: ProviderSubnetSpec,
     vpc: Vpc,
@@ -928,33 +1050,54 @@ export class AwsNetworks implements ProviderNetworks {
     signal: AbortSignal,
   ): Promise<ProviderNetworkState> {
     if (subnet.state !== '' && subnet.state !== 'available') return state(subnet.id, 'pending');
+    if (vpc.ours) {
+      const waiting = await this.#associate(
+        vpc.tags.get(networkTags.network) ?? spec.network,
+        vpc.id,
+        subnet.id,
+        signal,
+      );
+      if (waiting) return waiting;
+    }
     if (subnet.mapPublicIp !== this.#config.associatePublicIp)
       await this.#call(
         'ModifySubnetAttribute',
         { SubnetId: subnet.id, MapPublicIpOnLaunch: { Value: this.#config.associatePublicIp } },
         signal,
       );
-    if (spec.privateGoogleAccess === true && vpc.ours)
-      await this.#ensureServiceAccess(spec.network, vpc.id, signal);
+    if (spec.privateGoogleAccess === true && vpc.ours) {
+      const network = vpc.tags.get(networkTags.network) ?? spec.network;
+      const table = await this.#networkRouteTable(network, vpc.id, signal);
+      if (!table)
+        return state(subnet.id, 'pending', `Waiting for the route table of network ${network}`);
+      await this.#ensureServiceAccess(network, vpc.id, table.textOf('routeTableId')!, signal);
+    }
     return state(subnet.id, 'ready');
   }
 
-  /** "Private service access": S3 and DynamoDB gateway endpoints on the VPC's main route table. */
-  async #ensureServiceAccess(network: string, vpcId: string, signal: AbortSignal): Promise<void> {
-    const prefix =
-      partitionOf(this.#config.region).partition === 'aws-cn'
-        ? 'cn.com.amazonaws'
-        : 'com.amazonaws';
-    const table = (await this.#mainRouteTable(vpcId, signal))?.textOf('routeTableId');
-    if (!table) return;
+  /**
+   * "Private service access": S3 and DynamoDB gateway endpoints on the network's route table. No
+   * ClientToken: a token would hand back an endpoint deleted by hand instead of a new one; a
+   * second endpoint for a service on the same table is refused by AWS (RouteAlreadyExists).
+   */
+  async #ensureServiceAccess(
+    network: string,
+    vpcId: string,
+    tableId: string,
+    signal: AbortSignal,
+  ): Promise<void> {
     const doc = await this.#call(
       'DescribeVpcEndpoints',
       { Filter: [{ Name: 'vpc-id', Value: [vpcId] }] },
       signal,
     );
-    const have = new Set(doc.items('vpcEndpointSet').map((item) => item.textOf('serviceName')));
-    for (const service of ['s3', 'dynamodb']) {
-      const name = `${prefix}.${this.#config.region}.${service}`;
+    const have = new Set(
+      doc
+        .items('vpcEndpointSet')
+        .filter((item) => item.items('routeTableIdSet').some((id) => id.text === tableId))
+        .map((item) => item.textOf('serviceName')),
+    );
+    for (const name of this.#endpointServices()) {
       if (have.has(name)) continue;
       await this.#tolerate(['RouteAlreadyExists'], () =>
         this.#call(
@@ -963,14 +1106,22 @@ export class AwsNetworks implements ProviderNetworks {
             VpcId: vpcId,
             ServiceName: name,
             VpcEndpointType: 'Gateway',
-            RouteTableId: [table],
-            ClientToken: clientToken(`vpce:${vpcId}:${service}`),
+            RouteTableId: [tableId],
             TagSpecification: this.#ownTags('vpc-endpoint', network),
           },
           signal,
         ),
       );
     }
+  }
+
+  /** The gateway endpoint services of private service access in this region. */
+  #endpointServices(): string[] {
+    const prefix =
+      partitionOf(this.#config.region).partition === 'aws-cn'
+        ? 'cn.com.amazonaws'
+        : 'com.amazonaws';
+    return ['s3', 'dynamodb'].map((service) => `${prefix}.${this.#config.region}.${service}`);
   }
 
   async deleteSubnet(
@@ -1171,10 +1322,10 @@ export class AwsNetworks implements ProviderNetworks {
         );
       // A rule that was an allow before keeps no security group rules.
       await this.#applyRules(spec.name, network, [], signal);
-      return this.#ensureDeny(spec, vpc.id, signal);
+      return this.#ensureDeny(spec, network, vpc.id, signal);
     }
     // A rule that was a deny before keeps no ACL entries.
-    if (network) await this.#releaseDenyEntries(spec.name, vpc.id, signal);
+    if (network) await this.#releaseDenyEntries(spec.name, network, vpc.id, signal);
     if (!targeted && !network)
       return state(
         spec.name,
@@ -1325,7 +1476,12 @@ export class AwsNetworks implements ProviderNetworks {
       await this.#releaseRule(rule, key, signal);
     const acls = await this.#call(
       'DescribeNetworkAcls',
-      { Filter: [{ Name: 'tag-key', Value: [networkTags.network] }] },
+      {
+        Filter: [
+          { Name: 'tag-key', Value: [networkTags.network] },
+          { Name: `tag:${tags.managed}`, Value: ['true'] },
+        ],
+      },
       signal,
     );
     for (const acl of acls.items('networkAclSet')) {
@@ -1340,10 +1496,11 @@ export class AwsNetworks implements ProviderNetworks {
 
   async #ensureDeny(
     spec: ProviderFirewallSpec,
+    network: string,
     vpcId: string,
     signal: AbortSignal,
   ): Promise<ProviderNetworkState> {
-    const acl = await this.#defaultAcl(vpcId, signal);
+    const acl = await this.#networkAcl(network, vpcId, signal);
     const aclId = acl?.textOf('networkAclId');
     if (!acl || !aclId)
       return state(spec.name, 'pending', `Waiting for the network ACL of ${vpcId}`);
@@ -1440,8 +1597,13 @@ export class AwsNetworks implements ProviderNetworks {
   }
 
   /** Removes every ACL entry of the VPC's network ACL that `firewall` owns. */
-  async #releaseDenyEntries(firewall: string, vpcId: string, signal: AbortSignal): Promise<void> {
-    const acl = await this.#defaultAcl(vpcId, signal);
+  async #releaseDenyEntries(
+    firewall: string,
+    network: string,
+    vpcId: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const acl = await this.#networkAcl(network, vpcId, signal);
     const aclId = acl?.textOf('networkAclId');
     if (!acl || !aclId) return;
     const entries = parseAclEntries(acl);
@@ -1830,30 +1992,41 @@ function ownedEntries(acl: XmlElement): { number: number; egress: boolean; firew
 
 /**
  * The IAM statements tenant networks need (program Appendix B, phase A2), for `iamPolicy({ networks:
- * true })`. `ec2(resource)` is an EC2 resource ARN in the policy's partition, region and account.
+ * true })`. `ec2(resource)` is an EC2 resource ARN in the policy's partition, region and account;
+ * `discover` is the account's discoverTag as [key, value].
  *
  * - Creates must tag what they create `better-compute:managed=true` (every VPC, gateway, subnet,
- *   security group and endpoint better-compute makes carries it), and the tags may only be written
- *   by those creates (and the security group rule authorizations).
- * - Changes and deletes of VPCs, gateways, subnets, security groups and endpoints need that tag on
- *   the resource.
- * - AWS makes a VPC's main route table and default network ACL itself, untagged: ensureNetwork tags
- *   both with `better-compute:network` before it edits them, and routes and ACL entries change only
- *   where that tag is (the tags these may get are limited to the network and deny-owner keys). A
- *   route may only point at a managed internet gateway.
+ *   security group, route table, network ACL and endpoint better-compute makes carries it), and
+ *   that tag may only be written by those creates: no statement grants it (or the network tag) on
+ *   an existing resource, so a resource-tag condition below cannot be met by tagging.
+ * - Changes and deletes of VPCs, gateways, subnets, security groups, route tables, network ACLs and
+ *   endpoints need that tag on the resource. A network has its own route table and network ACL,
+ *   created tagged; AWS's untagged main table and default ACL are never edited. Routes, ACL entries
+ *   and subnet associations change only on managed tables, ACLs and subnets, and a route may only
+ *   point at a managed internet gateway.
+ * - Route tables, network ACLs and gateway endpoints go only into a managed VPC, and an endpoint
+ *   only onto a managed route table (an adopted VPC is never changed).
+ * - The deny-owner tags (`better-compute:deny:*`) may be written only on a managed network ACL.
  * - A machine's groups change only on instances carrying `better-compute:instance` (claimed ones),
- *   and on network interfaces carrying it (RunInstances tags the interface; setTags tags a claimed
- *   multi-interface machine's primary interface, a write limited to that key).
+ *   and on network interfaces carrying it (RunInstances tags the interface of a machine on a tenant
+ *   network; setTags tags a claimed multi-interface machine's primary interface). That interface
+ *   tag is the one self-grant left, like A1's attach: the role may put `better-compute:instance` on
+ *   any interface it may tag, which `discover` narrows to interfaces carrying the discovery tag.
  */
-export function networksIamStatements(ec2: (resource: string) => string): IamStatement[] {
+export function networksIamStatements(
+  ec2: (resource: string) => string,
+  options: { discover?: readonly [string, string] } = {},
+): IamStatement[] {
   const managed = { StringEquals: { [`ec2:ResourceTag/${tags.managed}`]: 'true' } };
-  const networkTagged = { Null: { [`ec2:ResourceTag/${networkTags.network}`]: 'false' } };
+  const requestTagged = { StringEquals: { [`aws:RequestTag/${tags.managed}`]: 'true' } };
   const made = [
     ec2('vpc/*'),
     ec2('internet-gateway/*'),
     ec2('subnet/*'),
     ec2('security-group/*'),
     ec2('vpc-endpoint/*'),
+    ec2('route-table/*'),
+    ec2('network-acl/*'),
   ];
   return [
     {
@@ -1875,15 +2048,50 @@ export function networksIamStatements(ec2: (resource: string) => string): IamSta
     {
       Sid: 'NetworkCreateTagged',
       Effect: 'Allow',
-      Action: [
-        'ec2:CreateVpc',
-        'ec2:CreateInternetGateway',
-        'ec2:CreateSubnet',
-        'ec2:CreateSecurityGroup',
-        'ec2:CreateVpcEndpoint',
-      ],
-      Resource: [...made, ec2('ipam-pool/*'), ec2('route-table/*')],
-      Condition: { StringEquals: { [`aws:RequestTag/${tags.managed}`]: 'true' } },
+      Action: ['ec2:CreateVpc', 'ec2:CreateInternetGateway'],
+      Resource: [ec2('vpc/*'), ec2('internet-gateway/*'), ec2('ipam-pool/*')],
+      Condition: requestTagged,
+    },
+    {
+      // Subnets and security groups also go into adopted VPCs (a subnet inside its ranges, the
+      // groups of network tags): the VPC is a resource of the call under the same condition.
+      Sid: 'NetworkCreateInVpc',
+      Effect: 'Allow',
+      Action: ['ec2:CreateSubnet', 'ec2:CreateSecurityGroup'],
+      Resource: [ec2('subnet/*'), ec2('security-group/*'), ec2('vpc/*')],
+      Condition: requestTagged,
+    },
+    {
+      Sid: 'NetworkCreateOwnedParts',
+      Effect: 'Allow',
+      Action: ['ec2:CreateRouteTable', 'ec2:CreateNetworkAcl'],
+      Resource: [ec2('route-table/*'), ec2('network-acl/*')],
+      Condition: requestTagged,
+    },
+    {
+      // Only the endpoint itself under the request tag: on route-table/* that condition would let
+      // an endpoint onto any table.
+      Sid: 'NetworkCreateEndpoint',
+      Effect: 'Allow',
+      Action: 'ec2:CreateVpcEndpoint',
+      Resource: ec2('vpc-endpoint/*'),
+      Condition: requestTagged,
+    },
+    {
+      // The existing resources those creates name: a managed VPC, and for an endpoint a managed
+      // route table.
+      Sid: 'NetworkOwnedPartsParents',
+      Effect: 'Allow',
+      Action: ['ec2:CreateRouteTable', 'ec2:CreateNetworkAcl', 'ec2:CreateVpcEndpoint'],
+      Resource: ec2('vpc/*'),
+      Condition: managed,
+    },
+    {
+      Sid: 'NetworkEndpointRouteTables',
+      Effect: 'Allow',
+      Action: 'ec2:CreateVpcEndpoint',
+      Resource: ec2('route-table/*'),
+      Condition: managed,
     },
     {
       Sid: 'NetworkTagOnCreate',
@@ -1898,6 +2106,8 @@ export function networksIamStatements(ec2: (resource: string) => string): IamSta
             'CreateSubnet',
             'CreateSecurityGroup',
             'CreateVpcEndpoint',
+            'CreateRouteTable',
+            'CreateNetworkAcl',
             'AuthorizeSecurityGroupIngress',
             'AuthorizeSecurityGroupEgress',
           ],
@@ -1922,6 +2132,8 @@ export function networksIamStatements(ec2: (resource: string) => string): IamSta
         'ec2:RevokeSecurityGroupIngress',
         'ec2:RevokeSecurityGroupEgress',
         'ec2:DeleteVpcEndpoints',
+        'ec2:DeleteRouteTable',
+        'ec2:DeleteNetworkAcl',
       ],
       Resource: made,
       Condition: managed,
@@ -1954,7 +2166,7 @@ export function networksIamStatements(ec2: (resource: string) => string): IamSta
       Effect: 'Allow',
       Action: ['ec2:CreateRoute', 'ec2:ReplaceRoute'],
       Resource: ec2('route-table/*'),
-      Condition: networkTagged,
+      Condition: managed,
     },
     {
       // The gateway a route names is a resource of the call too: only a managed one.
@@ -1969,28 +2181,26 @@ export function networksIamStatements(ec2: (resource: string) => string): IamSta
       Effect: 'Allow',
       Action: ['ec2:CreateNetworkAclEntry', 'ec2:DeleteNetworkAclEntry'],
       Resource: ec2('network-acl/*'),
-      Condition: networkTagged,
+      Condition: managed,
     },
     {
-      Sid: 'NetworkRouteTableTags',
+      // A managed subnet onto the network's managed route table and ACL.
+      Sid: 'NetworkSubnetAssociations',
       Effect: 'Allow',
-      Action: 'ec2:CreateTags',
-      Resource: ec2('route-table/*'),
-      Condition: {
-        'ForAllValues:StringEquals': { 'aws:TagKeys': [networkTags.network] },
-        Null: { 'aws:TagKeys': 'false' },
-      },
+      Action: ['ec2:AssociateRouteTable', 'ec2:ReplaceNetworkAclAssociation'],
+      Resource: [ec2('subnet/*'), ec2('route-table/*'), ec2('network-acl/*')],
+      Condition: managed,
     },
     {
+      // The deny-owner keys only, and only on a network ACL better-compute created.
       Sid: 'NetworkAclTags',
       Effect: 'Allow',
       Action: ['ec2:CreateTags', 'ec2:DeleteTags'],
       Resource: ec2('network-acl/*'),
       Condition: {
-        'ForAllValues:StringLike': {
-          'aws:TagKeys': [networkTags.network, `${networkTags.denyPrefix}*`],
-        },
+        'ForAllValues:StringLike': { 'aws:TagKeys': [`${networkTags.denyPrefix}*`] },
         Null: { 'aws:TagKeys': 'false' },
+        ...managed,
       },
     },
     {
@@ -2010,7 +2220,8 @@ export function networksIamStatements(ec2: (resource: string) => string): IamSta
       Condition: { Null: { [`ec2:ResourceTag/${tags.instance}`]: 'false' } },
     },
     {
-      // A claimed multi-interface machine's primary interface gets the ownership tag (only that key).
+      // A claimed multi-interface machine's primary interface gets the ownership tag (only that
+      // key). The documented self-grant: narrowed by the account's discoverTag when it has one.
       Sid: 'NetworkInterfaceOwnerTag',
       Effect: 'Allow',
       Action: 'ec2:CreateTags',
@@ -2018,6 +2229,13 @@ export function networksIamStatements(ec2: (resource: string) => string): IamSta
       Condition: {
         'ForAllValues:StringEquals': { 'aws:TagKeys': [tags.instance] },
         Null: { 'aws:TagKeys': 'false' },
+        ...(options.discover
+          ? {
+              StringEquals: {
+                [`ec2:ResourceTag/${options.discover[0]}`]: options.discover[1],
+              },
+            }
+          : {}),
       },
     },
     {
