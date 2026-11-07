@@ -411,15 +411,16 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
     Action: 's3:ListBucket',
     Resource: buckets.map((bucket) => bucketArn(bucket)),
   });
+  const connect: PolicyStatement = {
+    Sid: 'ConnectAsTheDatabaseUser',
+    Effect: 'Allow',
+    Action: 'rds-db:connect',
+    Resource: cfnSub('arn:${AWS::Partition}:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser:${ResourceId}/${DatabaseUser}', {
+      ResourceId: cfnImport('ClusterResourceId', 'DataStack'),
+    }),
+  };
   const base: PolicyStatement[] = [
-    {
-      Sid: 'ConnectAsTheDatabaseUser',
-      Effect: 'Allow',
-      Action: 'rds-db:connect',
-      Resource: cfnSub('arn:${AWS::Partition}:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser:${ResourceId}/${DatabaseUser}', {
-        ResourceId: cfnImport('ClusterResourceId', 'DataStack'),
-      }),
-    },
+    connect,
     // Every role resolves: the gateway too, because `serve --roles gateway` runs the secret broker in process
     // (gatewayServices.secret). The broker only releases a ref bound to the asking node's current work, sealed
     // to the node (JWE); the store calls GetSecretValue and nothing else.
@@ -480,6 +481,17 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
         Tags: tags(role),
       },
     };
+  // An upgrade runs the next image's migrate step before that image serves anything: it only connects to the
+  // database (BETTER_COMPUTE_SECRET and the PKI bundle are injected by the execution role, not read by the task).
+  resources.MigrateTaskRole = {
+    Type: 'AWS::IAM::Role',
+    Properties: {
+      Description: `${name}: the migrate task (database only)`,
+      AssumeRolePolicyDocument: serviceTrust('ecs-tasks.amazonaws.com'),
+      Policies: [{ PolicyName: 'migrate', PolicyDocument: policyDocument([connect]) }],
+      Tags: tags('migrate'),
+    },
+  };
   resources.ExecutionRole = {
     Type: 'AWS::IAM::Role',
     Properties: {
@@ -691,7 +703,7 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
     { Name: 'BC_AUDIT_RETENTION_DAYS', Value: cfnSub('${AuditRetentionDays}') },
     { Name: 'BC_KMS_KEY_ARN', Value: keyArn },
   ];
-  const taskRole: Record<Role, string> = { api: 'ApiTaskRole', worker: 'WorkerTaskRole', gateway: 'GatewayTaskRole', migrate: 'WorkerTaskRole' };
+  const taskRole: Record<Role, string> = { api: 'ApiTaskRole', worker: 'WorkerTaskRole', gateway: 'GatewayTaskRole', migrate: 'MigrateTaskRole' };
   for (const role of ['api', 'worker', 'gateway', 'migrate'] as const) {
     const port = role === 'api' ? apiPort : role === 'gateway' ? gatewayPort : undefined;
     resources[`${title(role)}Task`] = {

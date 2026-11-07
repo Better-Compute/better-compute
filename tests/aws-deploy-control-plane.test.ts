@@ -199,7 +199,7 @@ describe('control-plane template', () => {
   });
 
   it('gives task roles scoped statements only: no wildcard resources or service-wide actions', () => {
-    for (const role of ['ApiTaskRole', 'WorkerTaskRole', 'GatewayTaskRole', 'ExecutionRole']) {
+    for (const role of ['ApiTaskRole', 'WorkerTaskRole', 'GatewayTaskRole', 'MigrateTaskRole', 'ExecutionRole']) {
       const trust = props(role).AssumeRolePolicyDocument as { Statement: Statement[] };
       expect(trust.Statement[0]).toMatchObject({
         Principal: { Service: 'ecs-tasks.amazonaws.com' },
@@ -230,6 +230,22 @@ describe('control-plane template', () => {
     expect(actionsOf('ApiTaskRole')).not.toContain('s3:PutObjectRetention');
     const connect = statementsOf('GatewayTaskRole').find((statement) => statement.Action === 'rds-db:connect' || [statement.Action].flat().includes('rds-db:connect'))!;
     expect(JSON.stringify(connect.Resource)).toContain(':dbuser:${ResourceId}/${DatabaseUser}');
+  });
+
+  it('runs the migrate task with a role that can only connect to the database', () => {
+    // An upgrade runs the next image's migrate step before anyone has reviewed that image in production:
+    // it gets no secret, bucket, bus or KMS permission, only rds-db:connect as the database user.
+    expect(props('MigrateTask').TaskRoleArn).toEqual({ 'Fn::GetAtt': ['MigrateTaskRole', 'Arn'] });
+    expect(props('MigrateTaskRole').ManagedPolicyArns).toBeUndefined();
+    expect(actionsOf('MigrateTaskRole')).toEqual(['rds-db:connect']);
+    const connect = statementsOf('MigrateTaskRole')[0]!;
+    expect(JSON.stringify(connect.Resource)).toContain(':dbuser:${ResourceId}/${DatabaseUser}');
+    expect((props('MigrateTaskRole').AssumeRolePolicyDocument as { Statement: Statement[] }).Statement[0]).toMatchObject({
+      Principal: { Service: 'ecs-tasks.amazonaws.com' },
+      Condition: { StringEquals: { 'aws:SourceAccount': { Ref: 'AWS::AccountId' } } },
+    });
+    for (const task of ['ApiTask', 'WorkerTask', 'GatewayTask'])
+      expect(props(task).TaskRoleArn, task).not.toEqual({ 'Fn::GetAtt': ['MigrateTaskRole', 'Arn'] });
   });
 
   it('lets every role that reads a bucket list it, so a missing key is 404 rather than 403', () => {

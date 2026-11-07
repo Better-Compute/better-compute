@@ -109,7 +109,7 @@ doing right now, sealed to that node. It never writes secrets, objects or events
 Every role that reads a bucket also has `s3:ListBucket` on it. Without it S3 answers a read of a missing key with
 403 AccessDenied instead of 404, so a download that was never published would be an error rather than not found.
 
-No statement uses a wildcard resource or a service-wide action. The migrate task runs with the worker role.
+No statement uses a wildcard resource or a service-wide action. The migrate task has a role of its own that allows only `rds-db:connect`: an upgrade runs the next image's migrate step before that image serves anything, so it gets no secret, bucket, bus or KMS permission. A configuration whose loading calls AWS under `migrate` needs those permissions added.
 
 ### Buckets
 
