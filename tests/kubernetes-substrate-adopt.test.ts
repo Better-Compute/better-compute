@@ -61,6 +61,22 @@ describe('substrate: adopt', () => {
     expect(rows[0].uses_left).toBe(2);
   });
 
+  it('keeps the region of a location the provider reports in its own zone naming', async () => {
+    world = await substrateWorld();
+    const id = 'projects/fake/locations/us-east-1/clusters/east';
+    existingCluster(world, id, 'https://34.118.9.7');
+    // The provider reports an AWS-style zone (us-east-1b): the region is us-east-1, not the zone.
+    world.cloud.clusters.get(id)!.spec.location = 'us-east-1b';
+    const pool = await world.createPool({ kind: 'kubernetes', cluster: { adopt: id }, flavors: [] });
+    await world.converge(pool.id, 6);
+    const row = await world.substrate(pool.id);
+    const { rows } = await world.fixture.database.query<{ location: string; region: string }>(
+      `SELECT location, region FROM kubernetes_clusters WHERE id = $1`,
+      [row.cluster_id],
+    );
+    expect(rows[0]).toEqual({ location: 'us-east-1b', region: 'us-east-1' });
+  });
+
   it('lists a large cluster page by page (no answer holds every Node)', async () => {
     world = await substrateWorld();
     existingCluster(world);

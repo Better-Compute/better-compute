@@ -186,6 +186,13 @@ describe('Kubernetes pool substrate, join and book (end to end)', () => {
     ]);
     expect(rows[0]).toMatchObject({ hosted: 'kubernetes', uses_left: 0 });
     expect(rows[0].revoked_at).not.toBeNull();
+    // The substrate owns them: JoinService recorded the hosted token that admitted each.
+    const owned = await dev.database.query<{ node_id: string; owned: boolean; join_token_id: string }>(
+      `SELECT node_id, owned, join_token_id FROM kubernetes_substrate_nodes WHERE node_id = ANY($1)`,
+      [[...kubelets.values()]],
+    );
+    expect(owned.rows).toHaveLength(2);
+    for (const row of owned.rows) expect(row).toMatchObject({ owned: true, join_token_id: joinTokenId });
   }, 60_000);
 
   it("books the nodes' GPUs for a kubernetes-bound reservation, through bcd's device plugin", async () => {

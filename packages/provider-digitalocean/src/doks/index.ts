@@ -47,7 +47,7 @@ import {
   nodePoolState,
   nodePoolUpdate,
 } from './node-pools.js';
-import { checkCredentialRequest, forgetCredentials, mintCredentials } from './credentials.js';
+import { checkCredentialRequest, revokeCredentials, mintCredentials } from './credentials.js';
 import { httpsKubeTransport, type KubeTransport } from './transport.js';
 import type { DoksAssociatedResources, DoksCluster, DoksNodePool, DoksVersion } from './types.js';
 import {
@@ -766,11 +766,11 @@ export class DoKubernetes implements ProviderKubernetes {
    * Removes the service accounts and bindings `credentials` made for `subject` (and `bc-access`
    * once empty). A cluster that is gone has nothing left to remove.
    */
-  async forgetCredentials(cluster: string, subject: string, context: CallContext): Promise<void> {
+  async revokeCredentials(cluster: string, subject: string, context: CallContext): Promise<void> {
     const id = parseClusterId(cluster);
     const found = await this.#read(id, context.signal);
     if (!found) return;
-    await forgetCredentials({
+    await revokeCredentials({
       id,
       cluster: found,
       subject,
@@ -778,7 +778,7 @@ export class DoKubernetes implements ProviderKubernetes {
       transport: this.#transport,
       signal: context.signal,
     });
-    context.log.info('doks.credentials.forget', { cluster: id, subject });
+    context.log.info('doks.credentials.revoked', { cluster: id, subject });
   }
 
   // --------------------------------------------------------------------------------- versions

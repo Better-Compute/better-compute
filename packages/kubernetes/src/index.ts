@@ -36,6 +36,7 @@ export {
   substrateSubject,
   substrateCredentialTtlSeconds,
   substrateCreator,
+  substrateFirstConnectGraceSeconds,
   substrateNodeRemovedReason,
   substrateTeardownReason,
   substrateUpgradeReason,

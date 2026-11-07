@@ -35,7 +35,7 @@ import {
   clusterState,
   nextClusterUpdate,
 } from './clusters.js';
-import { checkCredentialRequest, forgetCredentials, mintCredentials } from './credentials.js';
+import { checkCredentialRequest, revokeCredentials, mintCredentials } from './credentials.js';
 import {
   autoscalingChange,
   checkNodePoolImmutable,
@@ -512,12 +512,12 @@ export class GcpKubernetes implements ProviderKubernetes {
    * Removes the service account and binding `credentials` made for `subject` (and `bc-access` once
    * empty). A cluster that is gone has nothing left to remove.
    */
-  async forgetCredentials(cluster: string, subject: string, context: CallContext): Promise<void> {
+  async revokeCredentials(cluster: string, subject: string, context: CallContext): Promise<void> {
     const { location, name } = parseClusterId(cluster);
     const found = await this.#findCluster(location, name, context.signal);
     if (!found) return;
     const googleToken = await this.#tokens.token({ signal: context.signal, clock: this.#clock });
-    await forgetCredentials({
+    await revokeCredentials({
       id: cluster,
       cluster: found,
       subject,
@@ -525,7 +525,7 @@ export class GcpKubernetes implements ProviderKubernetes {
       transport: this.#transport,
       signal: context.signal,
     });
-    context.log.info('gke.credentials.forget', { cluster, subject });
+    context.log.info('gke.credentials.revoked', { cluster, subject });
   }
 
   // --------------------------------------------------------------------------------- versions

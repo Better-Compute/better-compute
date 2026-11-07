@@ -14,7 +14,6 @@ import {
 import {
   providerResourceName,
   readAccount,
-  zoneRegion,
   type ProviderAccount,
 } from '@better-compute/vps';
 import {
@@ -28,7 +27,7 @@ import {
   type KubernetesDeps,
   type NodePoolRow,
 } from './store.js';
-import { substratesWork } from './substrates.js';
+import { adoptedRegion, substratesWork } from './substrates.js';
 import type { KubernetesClusterState, KubernetesNodePoolState } from './types.js';
 
 // The `kubernetes.clusters` reconciler: converges each cluster at the provider through `ProviderImpl.kubernetes`.
@@ -377,14 +376,20 @@ class ClusterWorker {
         `The adopted cluster ${cluster.provider_id} does not exist at the provider`,
       );
     const location = found.outputs?.location;
-    if (location && location !== cluster.location)
+    if (location && location !== cluster.location) {
+      // The region in the provider's own zone naming (us-central1-a, us-east-1b, nyc1), as the substrate recorded it.
+      const regions = this.snapshot.account?.config.regions;
+      const region = adoptedRegion(location, {
+        regions: Array.isArray(regions) ? regions.filter((entry): entry is string => typeof entry === 'string') : [],
+      });
       await this.sql.transaction((tx) =>
         tx.query(`UPDATE kubernetes_clusters SET location = $2, region = $3 WHERE id = $1`, [
           cluster.id,
           location,
-          zoneRegion(location),
+          region,
         ]),
       );
+    }
     return found;
   }
 

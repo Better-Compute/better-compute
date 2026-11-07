@@ -1840,7 +1840,8 @@ export interface NodeReservationsEnded {
  * The gone node's bookings are released at once (no pod is left there to hold the devices); a
  * released reservation's bookings on other nodes follow `deferRelease` as usual. Bookings a
  * reservation that already ended left on the node are released too. Idempotent: a node with no
- * live booking changes nothing. The caller holds no reservation lock; rows are locked in id order.
+ * live booking changes nothing. The caller holds no reservation lock; rows are locked in id order,
+ * and capacity's lock order holds across all of them (see the phases below).
  */
 export async function endNodeReservations(
   deps: Pick<ReservationDeps, 'clock' | 'events' | 'work' | 'desired'>,
@@ -1858,42 +1859,57 @@ export async function endNodeReservations(
   const now = deps.clock.now();
   const message = `node ${nodeId} was removed`;
   const pools = new Set<string>();
+  // Capacity's lock order (quota_usage → pools → nodes → devices) holds across every reservation on the node, in
+  // phases: 1. every reservation row, in id order; 2. every quota refund, by tenant, pool and resource; 3. the
+  // bookings and node specs; 4. the state moves and their events. Ending them one after the other would take a
+  // second reservation's quota rows after the first one's nodes and devices: a cycle with a concurrent reserve.
+  type Ending = { row: ReservationRow; allocations: Awaited<ReturnType<typeof readOwnerAllocations>> };
+  const leftovers: Ending[] = [];
+  const unbound: Ending[] = [];
+  const bound: Ending[] = [];
   for (const { owner_id: id } of owners) {
     const row = await readReservationById(tx, id, true);
     if (!row) continue;
     const allocations = await readOwnerAllocations(tx, { kind: 'reservation', id: row.id });
-    if (reservationStateTable.terminal.includes(row.state) || row.state === 'pending') {
-      for (const allocation of allocations.filter((entry) => entry.nodeId === nodeId)) {
-        await releaseAllocation(tx, allocation.id);
-        await deps.desired.invalidate(tx, nodeId);
-      }
-      pools.add(row.poolId);
-      continue;
-    }
-    if (row.state === 'draft' || row.state === 'awaiting-confirmation') continue;
-    pools.add(row.poolId);
-    if (row.state === 'placed' || row.state === 'binding') {
-      for (const allocation of allocations) {
-        await releaseAllocation(tx, allocation.id);
-        await deps.desired.invalidate(tx, allocation.nodeId);
-      }
-      if (isNodeBinding(row)) await wakeMetal(deps, tx, allocations);
-      const pending = await move(tx, row, 'defer', {
-        during: null,
-        conditions: withCondition(
-          row.conditions,
-          { type: 'Unschedulable', status: 'true', reason: 'NodeRemoved', message },
-          now,
-        ),
-      });
-      await deps.work.enqueue(tx, reservationWork, row.id, { notBefore: now + pendingRetryMs });
-      await publish(deps, tx, pending, 'reservation.pending', { reason: 'NodeRemoved', nodeId });
-      ended.requeued.push(row.id);
-      continue;
-    }
+    if (reservationStateTable.terminal.includes(row.state) || row.state === 'pending')
+      leftovers.push({ row, allocations });
+    else if (row.state === 'draft' || row.state === 'awaiting-confirmation') continue;
+    else if (row.state === 'placed' || row.state === 'binding') unbound.push({ row, allocations });
     // Bound (`active`, or a `releasing` left mid-way): released like `endReservation`.
-    const why = row.request.spot === true ? 'preempted' : reason;
-    await refundQuota(tx, row.tenantId, row.poolId, reservationDemand(row.request));
+    else bound.push({ row, allocations });
+    pools.add(row.poolId);
+  }
+  const refunds = bound
+    .flatMap(({ row }) =>
+      Object.entries(reservationDemand(row.request)).map(([resource, amount]) => ({
+        tenantId: row.tenantId,
+        poolId: row.poolId,
+        resource,
+        amount,
+      })),
+    )
+    .sort(
+      (a, b) =>
+        a.tenantId.localeCompare(b.tenantId) ||
+        a.poolId.localeCompare(b.poolId) ||
+        a.resource.localeCompare(b.resource),
+    );
+  for (const refund of refunds)
+    await refundQuota(tx, refund.tenantId, refund.poolId, { [refund.resource]: refund.amount });
+
+  for (const { allocations } of leftovers)
+    for (const allocation of allocations.filter((entry) => entry.nodeId === nodeId)) {
+      await releaseAllocation(tx, allocation.id);
+      await deps.desired.invalidate(tx, nodeId);
+    }
+  for (const { row, allocations } of unbound) {
+    for (const allocation of allocations) {
+      await releaseAllocation(tx, allocation.id);
+      await deps.desired.invalidate(tx, allocation.nodeId);
+    }
+    if (isNodeBinding(row)) await wakeMetal(deps, tx, allocations);
+  }
+  for (const { row, allocations } of bound) {
     const kubernetes = row.request.binding === 'kubernetes';
     for (const allocation of allocations) {
       if (
@@ -1904,6 +1920,23 @@ export async function endNodeReservations(
       await deps.desired.invalidate(tx, allocation.nodeId);
     }
     if (isNodeBinding(row)) await wakeMetal(deps, tx, allocations);
+  }
+
+  for (const { row } of unbound) {
+    const pending = await move(tx, row, 'defer', {
+      during: null,
+      conditions: withCondition(
+        row.conditions,
+        { type: 'Unschedulable', status: 'true', reason: 'NodeRemoved', message },
+        now,
+      ),
+    });
+    await deps.work.enqueue(tx, reservationWork, row.id, { notBefore: now + pendingRetryMs });
+    await publish(deps, tx, pending, 'reservation.pending', { reason: 'NodeRemoved', nodeId });
+    ended.requeued.push(row.id);
+  }
+  for (const { row } of bound) {
+    const why = row.request.spot === true ? 'preempted' : reason;
     const conditions = withCondition(
       row.conditions,
       { type: 'NodeRemoved', status: 'true', reason: 'NodeRemoved', message },
@@ -1916,6 +1949,8 @@ export async function endNodeReservations(
     await publish(deps, tx, next, `reservation.${next.state}`, { reason: why, nodeId });
     ended.released.push(row.id);
   }
+  ended.requeued.sort();
+  ended.released.sort();
   for (const poolId of [...pools].sort()) await wakePendingReservations(tx, deps.work, poolId);
   return ended;
 }

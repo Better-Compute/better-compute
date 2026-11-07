@@ -485,7 +485,7 @@ export async function mintCredentials(options: {
  * (they grant nothing on their own). Idempotent: what is gone already counts as removed; any other
  * failure throws, so a caller that must not leave access behind tries again.
  */
-export async function forgetCredentials(options: {
+export async function revokeCredentials(options: {
   id: string;
   cluster: GkeCluster;
   subject: string;

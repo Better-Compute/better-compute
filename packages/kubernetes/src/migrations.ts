@@ -194,8 +194,43 @@ CREATE INDEX kubernetes_substrate_nodes_pool ON kubernetes_substrate_nodes (pool
 `,
 };
 
+/**
+ * Which pool nodes a substrate owns. A substrate pool may also hold machines joined some other way (a join token
+ * the tenant made, another attestor, a pool that gained `policy.substrate` later): those are never counted as the
+ * cluster's joined Nodes, cordoned, drained for or retired by the substrate.
+ *
+ * - `kubernetes_substrate_tokens`: every hosted join token a substrate minted for its pool (the id, never the secret).
+ * - `kubernetes_substrate_nodes` gains a row for every pool node the substrate has looked at: `owned` when the join
+ *   that admitted it (JoinService's `node.joined` / `node.reclaimed` audit row) used one of those tokens, with that
+ *   token and when it joined (`joined_at`: a node that never connects counts as joined only for a grace window, then
+ *   is retired). `learned_at` is NULL until its Kubernetes Node was looked for. Rows made before this migration
+ *   (connected nodes of the old pool-wide model) stay owned; the substrates' live tokens are recorded.
+ */
+export const kubernetesSubstrateOwnershipMigration: Migration = {
+  name: 'kubernetes/0004_substrate_ownership',
+  sql: `
+CREATE TABLE kubernetes_substrate_tokens (
+  token_id text PRIMARY KEY,
+  pool_id text NOT NULL,
+  issued_at timestamptz NOT NULL DEFAULT compute_now()
+);
+CREATE INDEX kubernetes_substrate_tokens_pool ON kubernetes_substrate_tokens (pool_id);
+INSERT INTO kubernetes_substrate_tokens (token_id, pool_id)
+  SELECT join_token_id, pool_id FROM kubernetes_pool_substrates WHERE join_token_id IS NOT NULL
+  ON CONFLICT DO NOTHING;
+
+ALTER TABLE kubernetes_substrate_nodes ADD COLUMN owned bool NOT NULL DEFAULT true;
+ALTER TABLE kubernetes_substrate_nodes ADD COLUMN join_token_id text;
+ALTER TABLE kubernetes_substrate_nodes ADD COLUMN joined_at timestamptz;
+ALTER TABLE kubernetes_substrate_nodes ALTER COLUMN learned_at DROP NOT NULL;
+ALTER TABLE kubernetes_substrate_nodes ALTER COLUMN learned_at DROP DEFAULT;
+CREATE INDEX kubernetes_substrate_nodes_owned ON kubernetes_substrate_nodes (pool_id) WHERE owned;
+`,
+};
+
 export const kubernetesMigrations: readonly Migration[] = Object.freeze([
   kubernetesClustersMigration,
   kubernetesSubstratesMigration,
   kubernetesSubstrateNodesMigration,
+  kubernetesSubstrateOwnershipMigration,
 ]);

@@ -507,6 +507,31 @@ describe('JoinService.join', () => {
     const fourth = await join(s, vouched.token, machine(4));
     expect(await nodeRow(s, fourth.body.nodeId)).toMatchObject({ trust: 'tenant-controlled' });
 
+    // A tenant's pool substrate (policy.substrate: the kubernetes module runs bcd on the tenant's managed cluster
+    // and mints the hosted token itself) is the same: its nodes are tenant-controlled, whatever the policy says.
+    await s.fixture.database.query(
+      `INSERT INTO pools (id, owner_tenant_id, site_id, class, gpu_model, sharing, agent, policy, version)
+       VALUES ('pool_acme_substrate', $1, $2, 'metal-host', 'L4', 'exclusive', 'bcd', $3, 1)`,
+      [
+        s.fixture.tenants.acme.id,
+        SITE,
+        JSON.stringify({
+          kubernetes: { platformOperated: true },
+          substrate: {
+            kind: 'kubernetes',
+            account: 'pacct_01jz00000000000000000000aa',
+            cluster: { create: { location: 'us-central1' } },
+            flavors: [{ name: 'gpu', machineType: 'g2-standard-8', nodes: 1, gpus: { type: 'nvidia-l4', count: 1 } }],
+          },
+        }),
+      ],
+    );
+    const substrate = await mintToken(s, { tenantId: s.fixture.tenants.acme.id, poolId: 'pool_acme_substrate' });
+    await s.fixture.database.query(`UPDATE join_tokens SET hosted = 'kubernetes' WHERE id = $1`, [substrate.id]);
+    const fifth = await join(s, substrate.token, machine(5));
+    expect(await nodeRow(s, fifth.body.nodeId)).toMatchObject({ trust: 'tenant-controlled' });
+    expect(parseCertificate(fifth.body.certChain[0]!).role).toBe('node-tenant');
+
     // Never raises: a tenant's own site stays tenant-owned.
     const byo = await mintToken(s, { tenantId: s.fixture.tenants.acme.id, poolId: 'pool_byo' });
     await s.fixture.database.query(`UPDATE join_tokens SET hosted = 'kubernetes' WHERE id = $1`, [byo.id]);

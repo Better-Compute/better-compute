@@ -48,7 +48,7 @@ import {
   checkCredentialRequest,
   endpointOf,
   ensureAdminAccess,
-  forgetCredentials,
+  revokeCredentials,
   mintCredentials,
   principalArnOf,
 } from './credentials.js';
@@ -644,7 +644,7 @@ export class AwsKubernetes implements ProviderKubernetes {
    * Removes the service account and binding `credentials` made for `subject` (and `bc-access` once
    * empty). A cluster that is gone has nothing left to remove; the principal's access entry stays.
    */
-  async forgetCredentials(cluster: string, subject: string, context: CallContext): Promise<void> {
+  async revokeCredentials(cluster: string, subject: string, context: CallContext): Promise<void> {
     const { name } = parseClusterId(cluster, this.#region);
     const { signal } = context;
     const found = await this.#client.cluster(name, signal);
@@ -652,7 +652,7 @@ export class AwsKubernetes implements ProviderKubernetes {
     const key = found.arn ?? cluster;
     const { token, fresh } = await this.#clusterToken(name, key, context);
     try {
-      await forgetCredentials({
+      await revokeCredentials({
         id: cluster,
         cluster: found,
         subject,
@@ -666,7 +666,7 @@ export class AwsKubernetes implements ProviderKubernetes {
         this.#admitted.delete(key);
       throw error;
     }
-    context.log.info('eks.credentials.forget', { cluster, subject });
+    context.log.info('eks.credentials.revoked', { cluster, subject });
   }
 
   // -------------------------------------------------------------------------------- discovery

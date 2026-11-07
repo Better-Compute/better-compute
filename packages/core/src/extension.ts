@@ -899,15 +899,16 @@ export interface ProviderKubernetes {
     request: KubernetesCredentialRequest,
     context: CallContext,
   ): Promise<KubernetesCredentials>;
-  versions(location: string, context: CallContext): Promise<KubernetesVersions>;
   /**
-   * Removes what `credentials` left in the cluster for `subject` (its service account and binding, and
-   * the driver's access namespace once no subject is left in it), so a cluster better-compute stops
-   * using (an adopted one, which stays) keeps no standing access of better-compute's. Idempotent; a
-   * cluster that no longer exists has nothing to remove. Any other failure throws: callers that
-   * must not leave access behind try again. Absent: `credentials` leaves nothing standing.
+   * Optional: removes what `credentials` created on the cluster for `subject` (its service account and role
+   * binding, and the driver's access namespace once no subject is left in it, only a namespace better-compute
+   * made), so no identity better-compute minted for stays on a cluster it no longer manages (an adopted cluster
+   * after its pool substrate is torn down). Idempotent: a subject or a cluster that is gone resolves. Any other
+   * failure throws, so a caller that must not leave access behind tries again. A driver without it leaves the
+   * subject in place (the kubernetes module reports that).
    */
-  forgetCredentials?(cluster: string, subject: string, context: CallContext): Promise<void>;
+  revokeCredentials?(cluster: string, subject: string, context: CallContext): Promise<void>;
+  versions(location: string, context: CallContext): Promise<KubernetesVersions>;
   /**
    * (AWS A9) The clusters on the account, whoever created them, with what machines need to join one
    * (`policy.kubernetes`): for EKS, nodeadm's cluster (`eks`). Plain values only, never credentials.

@@ -196,8 +196,8 @@ describe('kubernetesProviderConformanceCases', () => {
         'ConformanceFailure: a view credential cannot create pods',
       ],
       [
-        'forgetCredentials removes the access of a subject, and is idempotent',
-        'ConformanceFailure: the credential stops working once its subject is forgotten',
+        'revokeCredentials removes the access of a subject, and is idempotent',
+        'ConformanceFailure: the credential stops working once its subject is revoked',
       ],
     ]);
   });

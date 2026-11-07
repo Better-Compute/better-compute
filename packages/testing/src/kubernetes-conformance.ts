@@ -510,22 +510,22 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
       },
     },
     {
-      name: 'forgetCredentials removes the access of a subject, and is idempotent',
+      name: 'revokeCredentials removes the access of a subject, and is idempotent',
       async run(subject) {
         const c = await client(subject);
-        if (!c.k8s.forgetCredentials || !subject.can) return;
+        if (!c.k8s.revokeCredentials || !subject.can) return;
         const { spec } = names(subject, 'forget');
         let id: string | undefined;
         try {
           id = (await readyCluster(subject, c, spec())).id;
           const minted = await c.k8s.credentials(id, { subject: 'bc-conf-forget', role: 'admin', ttlSeconds: 600 }, c.call('forget'));
           const reads = () => subject.can!(minted, { verb: 'get', resource: 'pods', namespace: 'default' });
-          check(await reads(), 'the credential works before forgetCredentials');
-          await c.k8s.forgetCredentials(id, 'bc-conf-forget', c.call('forget-1'));
-          check(!(await reads()), 'the credential stops working once its subject is forgotten');
-          await c.k8s.forgetCredentials(id, 'bc-conf-forget', c.call('forget-2'));
+          check(await reads(), 'the credential works before revokeCredentials');
+          await c.k8s.revokeCredentials(id, 'bc-conf-forget', c.call('forget-1'));
+          check(!(await reads()), 'the credential stops working once its subject is revoked');
+          await c.k8s.revokeCredentials(id, 'bc-conf-forget', c.call('forget-2'));
           if (subject.missingCluster !== undefined)
-            await c.k8s.forgetCredentials(subject.missingCluster, 'bc-conf-forget', c.call('forget-missing'));
+            await c.k8s.revokeCredentials(subject.missingCluster, 'bc-conf-forget', c.call('forget-missing'));
         } finally {
           await cleanUp(subject, c, id);
         }

@@ -680,27 +680,27 @@ describe('eks credentials', () => {
     expect(t.kube.admissionPolicies.get('better-compute-access-guard')!.spec.failurePolicy).toBe('Fail');
   });
 
-  it('forgetCredentials removes the subject, and bc-access once no subject is left', async () => {
+  it('revokeCredentials removes the subject, and bc-access once no subject is left', async () => {
     const s = await setup();
     const id = await readyCluster(s);
     const root = await s.k8s.credentials(id, { subject: 'bc-u-root', role: 'admin', ttlSeconds: 600 }, s.ctx());
     await s.k8s.credentials(id, { subject: 'bc-u-bob', role: 'view', ttlSeconds: 600 }, s.ctx());
     const store = s.kube.clusters.current;
-    await s.k8s.forgetCredentials!(id, 'bc-u-root', s.ctx());
+    await s.k8s.revokeCredentials!(id, 'bc-u-root', s.ctx());
     expect(store.subjectObjects()).toEqual([
       'ClusterRoleBinding/bc-access:bc-u-bob',
       'Namespace/bc-access',
       'ServiceAccount/bc-access/bc-u-bob',
     ]);
     expect(store.can(root.token, { verb: 'get', resource: 'pods', namespace: 'default' })).toBe(false);
-    await s.k8s.forgetCredentials!(id, 'bc-u-bob', s.ctx());
+    await s.k8s.revokeCredentials!(id, 'bc-u-bob', s.ctx());
     expect(store.subjectObjects()).toEqual([]);
     // Every call went as the account principal; again is a no-op; a gone cluster has nothing to forget.
     for (const call of s.kube.calls) expect(call.token.startsWith('k8s-aws-v1.')).toBe(true);
-    await s.k8s.forgetCredentials!(id, 'bc-u-bob', s.ctx());
-    await s.k8s.forgetCredentials!('us-east-1/bc-k-none', 'bc-u-bob', s.ctx());
+    await s.k8s.revokeCredentials!(id, 'bc-u-bob', s.ctx());
+    await s.k8s.revokeCredentials!('us-east-1/bc-k-none', 'bc-u-bob', s.ctx());
     s.kube.failWith = 503;
-    const error = await rejection(s.k8s.forgetCredentials!(id, 'bc-u-bob', s.ctx()));
+    const error = await rejection(s.k8s.revokeCredentials!(id, 'bc-u-bob', s.ctx()));
     expect(isComputeError(error, 'UNAVAILABLE'), String(error)).toBe(true);
   });
 

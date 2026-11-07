@@ -750,7 +750,7 @@ describe('gke credentials', () => {
     expect(s.kube.issued).toHaveLength(0);
   });
 
-  it('forgetCredentials removes the subject, and bc-access once no subject is left', async () => {
+  it('revokeCredentials removes the subject, and bc-access once no subject is left', async () => {
     const s = await withKube();
     const root = await s.k8s.credentials(
       s.cluster,
@@ -758,7 +758,7 @@ describe('gke credentials', () => {
       s.ctx(),
     );
     await s.k8s.credentials(s.cluster, { subject: 'bc-u-bob', role: 'view', ttlSeconds: 600 }, s.ctx());
-    await s.k8s.forgetCredentials!(s.cluster, 'bc-u-root', s.ctx());
+    await s.k8s.revokeCredentials!(s.cluster, 'bc-u-root', s.ctx());
     expect(s.kube.store.subjectObjects()).toEqual([
       'ClusterRoleBinding/bc-access:bc-u-bob',
       'Namespace/bc-access',
@@ -768,22 +768,22 @@ describe('gke credentials', () => {
     expect(s.kube.store.can(root.token, { verb: 'get', resource: 'pods', namespace: 'default' })).toBe(
       false,
     );
-    await s.k8s.forgetCredentials!(s.cluster, 'bc-u-bob', s.ctx());
+    await s.k8s.revokeCredentials!(s.cluster, 'bc-u-bob', s.ctx());
     expect(s.kube.store.subjectObjects()).toEqual([]);
     // Again: nothing left, nothing fails; a cluster that is gone has nothing to forget.
-    await s.k8s.forgetCredentials!(s.cluster, 'bc-u-bob', s.ctx());
-    await s.k8s.forgetCredentials!('us-central1/bc-k-none', 'bc-u-bob', s.ctx());
+    await s.k8s.revokeCredentials!(s.cluster, 'bc-u-bob', s.ctx());
+    await s.k8s.revokeCredentials!('us-central1/bc-k-none', 'bc-u-bob', s.ctx());
     // A namespace better-compute did not make stays.
     await s.k8s.credentials(s.cluster, { subject: 'bc-u-bob', role: 'view', ttlSeconds: 600 }, s.ctx());
     s.kube.namespaces.get('bc-access')!.metadata.labels = {};
-    await s.k8s.forgetCredentials!(s.cluster, 'bc-u-bob', s.ctx());
+    await s.k8s.revokeCredentials!(s.cluster, 'bc-u-bob', s.ctx());
     expect(s.kube.store.subjectObjects()).toEqual(['Namespace/bc-access']);
     // Failures throw (the caller retries), with no token in them.
     s.kube.failWith = 503;
-    const error = await rejection(s.k8s.forgetCredentials!(s.cluster, 'bc-u-bob', s.ctx()));
+    const error = await rejection(s.k8s.revokeCredentials!(s.cluster, 'bc-u-bob', s.ctx()));
     expect(isComputeError(error, 'UNAVAILABLE')).toBe(true);
     for (const token of s.gke.gce.mintedTokens) expect(String(error)).not.toContain(token);
-    expect(isComputeError(await rejection(s.k8s.forgetCredentials!(s.cluster, 'Bad_Subject', s.ctx())), 'INVALID_INPUT')).toBe(true);
+    expect(isComputeError(await rejection(s.k8s.revokeCredentials!(s.cluster, 'Bad_Subject', s.ctx())), 'INVALID_INPUT')).toBe(true);
   });
 
   it('validates the subject, role and ttl before calling anything', async () => {

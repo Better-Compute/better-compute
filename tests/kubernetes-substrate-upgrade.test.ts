@@ -147,4 +147,34 @@ describe('substrate: drain before upgrade', () => {
     ]);
     expect((await reasons(pool.id)).some((list) => list.includes(substrateUpgradeReason))).toBe(false);
   });
+
+  it('refuses a direct kubernetesClusters.update version change that would skip the drain', async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(spec({ upgrades: 'drain' }, '1.33'));
+    await world.converge(pool.id, 6);
+    const nodes = await world.joinNodes(pool.id, 2);
+    await world.converge(pool.id, 2);
+    await book(nodes[0]!, pool.id, 1);
+    const row = await world.substrate(pool.id);
+    const ref = { tenantId: world.rootTenant, clusterId: row.cluster_id };
+    await expect(world.api.kubernetesClusters.update(world.root, { ...ref, version: '1.34' })).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message: expect.stringMatching(/policy\.substrate\.cluster\.create\.version/),
+    });
+    // Nothing reached the cluster row: no upgrade started around the drain.
+    expect(await cluster(pool.id)).toMatchObject({ requestedVersion: '1.33' });
+    // What does not change the version is still allowed.
+    await world.api.kubernetesClusters.update(world.root, { ...ref, description: 'GPU substrate' });
+    await world.api.kubernetesClusters.update(world.root, { ...ref, version: '1.33' });
+    // Without upgrades: 'drain', an operator upgrade is still a direct update.
+    const surge = await world.createPool(spec({}, '1.33'), 'surge-pool');
+    await world.converge(surge.id, 6);
+    const surgeRow = await world.substrate(surge.id);
+    await world.api.kubernetesClusters.update(world.root, {
+      tenantId: world.rootTenant,
+      clusterId: surgeRow.cluster_id,
+      version: '1.34',
+    });
+    expect(await cluster(surge.id)).toMatchObject({ requestedVersion: '1.34' });
+  });
 });

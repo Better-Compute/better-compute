@@ -11,6 +11,7 @@ import { readAccount, zoneRegion } from '@better-compute/vps';
 import { canonical, sha256Hex } from './input.js';
 import { credentialSubject, renderKubeconfig } from './kubeconfig.js';
 import { maxNodePoolsPerCluster } from './parse.js';
+import { parsePoolSubstrate } from './substrate-policy.js';
 import {
   accountKubernetes,
   clusterColumns,
@@ -458,7 +459,8 @@ export async function listClusters(
 /**
  * A pool substrate's cluster is the pool's (`policy.substrate`): its node pools follow the pool's flavors and it goes
  * with the pool. `what` names the refused change; `kubernetesClusters.update` is allowed on a created one (an
- * operator upgrade), never on an adopted one, which better-compute does not change.
+ * operator upgrade; a version change only when its pool does not drain before upgrades, `assertNoDrainBypass`), never
+ * on an adopted one, which better-compute does not change.
  */
 function assertNotSubstrate(row: ClusterRow, what: 'update' | 'delete' | 'nodePools'): void {
   if (row.adopted && what === 'update')
@@ -470,6 +472,34 @@ function assertNotSubstrate(row: ClusterRow, what: 'update' | 'delete' | 'nodePo
     throw new ComputeError(
       'INVALID_STATE',
       `Cluster ${row.id} is pool ${row.substrate_pool_id}'s substrate: change policy.substrate (flavors), or archive the pool to remove it`,
+      undefined,
+      { poolId: row.substrate_pool_id },
+    );
+}
+
+/**
+ * A version change made directly on a created substrate cluster whose pool has `upgrades: 'drain'` would upgrade at
+ * once, around the drain (no `substrate-upgrade` NoSchedule, no wait for bookings): refused, pointing to the pool
+ * policy, where the substrate drains before it pushes the version. A policy that cannot be read refuses too (fail
+ * closed).
+ */
+async function assertNoDrainBypass(tx: SqlTx, row: ClusterRow): Promise<void> {
+  const { rows } = await tx.query<{ policy: Record<string, unknown> | string | null }>(
+    `SELECT policy FROM pools WHERE id = $1`,
+    [row.substrate_pool_id],
+  );
+  let drain = true;
+  try {
+    const policy = rows[0]?.policy;
+    const substrate = policy ? parsePoolSubstrate(json(policy) as Record<string, unknown>) : undefined;
+    drain = substrate?.upgrades === 'drain';
+  } catch {
+    drain = true;
+  }
+  if (drain)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Cluster ${row.id} is pool ${row.substrate_pool_id}'s substrate with upgrades: 'drain': change policy.substrate.cluster.create.version, and the substrate drains the pool's nodes before it upgrades`,
       undefined,
       { poolId: row.substrate_pool_id },
     );
@@ -513,6 +543,8 @@ export async function updateCluster(
 ): Promise<KubernetesClusterView> {
   const row = await openCluster(tx, input);
   assertNotSubstrate(row, 'update');
+  if (row.substrate_pool_id !== null && input.version !== undefined && input.version !== row.requested_version)
+    await assertNoDrainBypass(tx, row);
   const networks = json(row.authorized_networks);
   const providerChange =
     (input.version !== undefined && input.version !== row.requested_version) ||

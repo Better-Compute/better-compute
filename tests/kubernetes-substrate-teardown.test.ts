@@ -115,6 +115,84 @@ describe('substrate: teardown', () => {
     expect([...world.cloud.clusters.get(adoptId)!.pools.keys()]).toEqual(['default']);
     expect(world.cloud.calls.some((call) => call.startsWith('deleteCluster'))).toBe(false);
     expect(world.kube.kinds('https://34.118.9.1')).toEqual([]);
+    // The cluster-admin identity the substrate minted its credentials for goes too, last.
+    expect(world.cloud.subjects.get(adoptId)?.has('bc-substrate')).toBe(false);
+    expect(world.cloud.calls.filter((call) => call.startsWith('revokeCredentials'))).toEqual(['revokeCredentials bc-substrate']);
+    expect(world.cloud.calls.at(-1)).not.toBe('credentials bc-substrate');
+    expect((await world.substrate(pool.id)).message).toBeNull();
+  });
+
+  it('keeps tearing down an adopted cluster until its credential identity is revoked, and says so when it cannot be', async () => {
+    world = await substrateWorld();
+    existingCluster(world);
+    const pool = await world.createPool({ kind: 'kubernetes', cluster: { adopt: adoptId }, flavors: [] });
+    await world.converge(pool.id, 6);
+    await archive(pool.id);
+    // The provider refuses the revoke: teardown fails closed (the cluster row is not let go) and tries again.
+    world.cloud.refuse.add('revokeCredentials');
+    await world.converge(pool.id, 6);
+    const stuck = await world.substrate(pool.id);
+    expect(stuck).toMatchObject({ state: 'deleting', desired_state: 'deleted' });
+    expect(stuck.message).toMatch(/bc-substrate could not be revoked/);
+    expect(world.cloud.subjects.get(adoptId)?.has('bc-substrate')).toBe(true);
+    const { rows } = await world.fixture.database.query<{ desired_state: string }>(
+      `SELECT desired_state FROM kubernetes_clusters WHERE id = $1`,
+      [stuck.cluster_id],
+    );
+    expect(rows[0]!.desired_state).toBe('present');
+    world.cloud.refuse.delete('revokeCredentials');
+    await world.converge(pool.id, 30);
+    expect(await world.substrate(pool.id)).toMatchObject({ state: 'deleted', message: null });
+    expect(world.cloud.subjects.get(adoptId)?.has('bc-substrate')).toBe(false);
+
+    // A driver without revokeCredentials: the substrate is deleted, and says the identity stays.
+    const second = await world.createPool(
+      { kind: 'kubernetes', cluster: { adopt: adoptId }, flavors: [] },
+      'second-adopt',
+    );
+    world.cloud.noRevoke = true;
+    await world.converge(second.id, 6);
+    expect(await world.substrate(second.id)).toMatchObject({ state: 'ready' });
+    await archive(second.id);
+    await world.converge(second.id, 10);
+    const left = await world.substrate(second.id);
+    expect(left.state).toBe('deleted');
+    expect(left.message).toMatch(/service account bc-substrate .*remains on the adopted cluster/);
+    expect(world.cloud.subjects.get(adoptId)?.has('bc-substrate')).toBe(true);
+    const findings = await world.module.selfCheck!({ sql: world.fixture.database } as never);
+    expect(findings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ check: 'kubernetes.substrate-credentials-left', count: 1 })]),
+    );
+  });
+
+  it('a deleted tenant\'s substrate clusters go through the substrate, so bcd leaves an adopted cluster', async () => {
+    world = await substrateWorld();
+    existingCluster(world);
+    const server = 'https://34.118.9.1';
+    const pool = await world.createPool({ kind: 'kubernetes', cluster: { adopt: adoptId }, flavors: [] });
+    await world.converge(pool.id, 6);
+    expect(world.kube.kinds(server)).toContain('DaemonSet/bcd');
+    const ready = await world.substrate(pool.id);
+    const hook = world.module.tenantDeleted!;
+    const context = world.fixture.compute.context;
+    // The cluster is the substrate's: not marked deleted behind its back (teardown would then skip removing bcd).
+    expect(await hook(context, world.rootTenant)).toBe('SYNC_AGAIN');
+    const { rows } = await world.fixture.database.query<{ desired_state: string }>(
+      `SELECT desired_state FROM kubernetes_clusters WHERE id = $1`,
+      [ready.cluster_id],
+    );
+    expect(rows[0]!.desired_state).toBe('present');
+    // Capacity's part of the tenant teardown archives the pool: the substrate tears down as usual.
+    await archive(pool.id);
+    let answer = 'SYNC_AGAIN';
+    for (let round = 0; round < 15 && answer !== 'DONE'; round++) {
+      await world.converge(pool.id, 1);
+      answer = await hook(context, world.rootTenant);
+    }
+    expect(answer).toBe('DONE');
+    expect(await world.substrate(pool.id)).toMatchObject({ state: 'deleted' });
+    expect(world.kube.kinds(server)).toEqual([]);
+    expect(world.cloud.clusters.has(adoptId)).toBe(true);
   });
 
   it('keeps tearing down an adopted cluster until bcd is really gone (a refused delete is never "done")', async () => {

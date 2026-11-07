@@ -908,7 +908,7 @@ describe('doks credentials', () => {
     expect(error.message).toMatch(/1\.30/);
   });
 
-  it('forgetCredentials removes every role of the subject, and bc-access once empty', async () => {
+  it('revokeCredentials removes every role of the subject, and bc-access once empty', async () => {
     const s = await withCluster();
     const server = `https://${s.cluster}.k8s.ondigitalocean.com`;
     const root = await s.k8s.credentials(
@@ -919,7 +919,7 @@ describe('doks credentials', () => {
     await s.k8s.credentials(s.cluster, { subject: 'bc-u-root', role: 'view', ttlSeconds: 600 }, s.ctx());
     await s.k8s.credentials(s.cluster, { subject: 'bc-u-bob', role: 'view', ttlSeconds: 600 }, s.ctx());
     const store = s.doks.kube.clusters.find(server)!;
-    await s.k8s.forgetCredentials!(s.cluster, 'bc-u-root', s.ctx());
+    await s.k8s.revokeCredentials!(s.cluster, 'bc-u-root', s.ctx());
     expect(store.subjectObjects()).toEqual([
       'ClusterRoleBinding/bc-access:bc-u-bob-v',
       'Namespace/bc-access',
@@ -928,12 +928,12 @@ describe('doks credentials', () => {
     expect(s.doks.kube.can(server, root.token, { verb: 'get', resource: 'pods', namespace: 'default' })).toBe(
       false,
     );
-    await s.k8s.forgetCredentials!(s.cluster, 'bc-u-bob', s.ctx());
+    await s.k8s.revokeCredentials!(s.cluster, 'bc-u-bob', s.ctx());
     expect(store.subjectObjects()).toEqual([]);
-    await s.k8s.forgetCredentials!(s.cluster, 'bc-u-bob', s.ctx());
-    await s.k8s.forgetCredentials!('0d0c5000-0000-4000-8000-999999999999', 'bc-u-bob', s.ctx());
+    await s.k8s.revokeCredentials!(s.cluster, 'bc-u-bob', s.ctx());
+    await s.k8s.revokeCredentials!('0d0c5000-0000-4000-8000-999999999999', 'bc-u-bob', s.ctx());
     s.doks.kube.failWith = 503;
-    expect((await failure(s.k8s.forgetCredentials!(s.cluster, 'bc-u-bob', s.ctx()))).code).toBe(
+    expect((await failure(s.k8s.revokeCredentials!(s.cluster, 'bc-u-bob', s.ctx()))).code).toBe(
       'UNAVAILABLE',
     );
   });
