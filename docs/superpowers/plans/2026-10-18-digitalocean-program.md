@@ -846,8 +846,17 @@ Spending stays under the test account's cap; the sweeper leaves no `better-compu
     shared one). A shared volume attaches to many instances of its network; `detach` takes `instanceId`; views carry
     `kind`, `networkId`, `attachments[]` and `mount { source, type: 'nfs4' }`. `sharedVolumeMount(source, path)`
     makes the cloud-config `mounts` entry and the fstab line (`nfs4`, `_netdev,nofail`).
+  - **Review fixes (2026-11-06).** Unique share names are unverified, so `ensure` and `find` keep the oldest share of
+    a name (then the lowest id) and delete each younger one no Droplet carries the tag of
+    (`digitalocean.duplicateShareReaped`; a held one is logged, `duplicateShareHeld`); a create lists again after it,
+    so a create that raced an older one gives way. A share DO answers with whose id is not a UUID or that is in
+    another region is `PROVIDER_ERROR` `badBody`, never an id. A FAILED share detaches (and prunes) as soon as the
+    Droplet is untagged, with no VPC action, so it can be deleted. The account delete refuses (`INVALID_STATE`,
+    `volumeIds`) while any provider volume row names the account, instead of a foreign-key error.
   - **Deferred.** The bcd mount hook on pool members (as P2's block mount), per-tenant access points, and a pool-wide
-    share mounted into every member at join.
+    share mounted into every member at join. `DoVolumes.kinds` advertises `shared` whatever the account probe's `nfs`
+    family says (a region without NFS refuses the create in the reconciler, late but closed). The NFS API shape, the
+    50 GiB minimum, unique names, untagged shares and the `nfs:read` scope wait on the opt-in live suite.
 - **DOCR.**
   - An OCI `ImageSource` auth helper: a registry token from `GET /v2/registry/docker-credentials`, sealed and
     short-lived.
