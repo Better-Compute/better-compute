@@ -680,11 +680,12 @@ export function providerLoadBalancerView(row: LoadBalancerRow): ProviderLoadBala
 export async function readLoadBalancer(
   tx: SqlTx,
   loadBalancerId: string,
-  options: { tenantId?: string; lock?: boolean } = {},
+  options: { tenantId?: string; lock?: boolean | 'share' } = {},
 ): Promise<LoadBalancerRow | undefined> {
+  const lock = options.lock === 'share' ? ' FOR SHARE' : options.lock ? ' FOR UPDATE' : '';
   const { rows } = await tx.query<LoadBalancerRow>(
     `SELECT ${loadBalancerColumns} FROM provider_load_balancers
-      WHERE id = $1 AND ($2::text IS NULL OR tenant_id = $2)${options.lock ? ' FOR UPDATE' : ''}`,
+      WHERE id = $1 AND ($2::text IS NULL OR tenant_id = $2)${lock}`,
     [loadBalancerId, options.tenantId ?? null],
   );
   return rows[0];
@@ -743,7 +744,10 @@ function certificatesOf(settings: Partial<LoadBalancerSettings>): string[] {
 /**
  * The certificates and targets a load balancer names must be the tenant's, on its provider account, and not being
  * deleted: another tenant's are NOT_FOUND (never confirmed to exist), others INVALID_INPUT or INVALID_STATE. Returns
- * the subnet each named instance is on (null: no tenant network).
+ * the subnet each named instance is on (null: no tenant network). Certificates and target load balancers are read FOR
+ * SHARE: their delete locks the row FOR UPDATE before it looks for users, so a delete and a create (or update) that
+ * names the row run one after the other, and the second sees the first (a delete never misses a new user, a create
+ * never names a row being deleted).
  */
 async function checkReferences(
   tx: SqlTx,
@@ -755,7 +759,7 @@ async function checkReferences(
   for (const certificateId of certificateIds) {
     const { rows } = await tx.query<{ provider_account_id: string; desired_state: string }>(
       `SELECT provider_account_id, desired_state FROM provider_certificates
-        WHERE id = $1 AND tenant_id = $2 AND state <> 'deleted'`,
+        WHERE id = $1 AND tenant_id = $2 AND state <> 'deleted' FOR SHARE`,
       [certificateId, lb.tenantId],
     );
     const certificate = rows[0];
@@ -776,7 +780,7 @@ async function checkReferences(
     instanceSubnets.set(instanceId, instance.subnet_id ?? null);
   }
   for (const loadBalancerId of targets?.loadBalancerIds ?? []) {
-    const target = await readLoadBalancer(tx, loadBalancerId, { tenantId: lb.tenantId });
+    const target = await readLoadBalancer(tx, loadBalancerId, { tenantId: lb.tenantId, lock: 'share' });
     if (!target || target.state === 'deleted')
       throw new ComputeError('NOT_FOUND', `Load balancer ${loadBalancerId} not found`);
     if (target.scope !== 'regional' || target.id === lb.selfId)

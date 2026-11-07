@@ -784,6 +784,68 @@ describe('loadBalancers', () => {
     ).toBe('NOT_FOUND');
   });
 
+  it('reads the certificates and load balancers it names FOR SHARE, so a concurrent delete waits or is seen', async () => {
+    const statements: string[] = [];
+    const real = db;
+    const recording = async <T>(fn: () => Promise<T>): Promise<T> => {
+      db = {
+        ...real,
+        transaction: (body, options) =>
+          real.transaction(
+            (tx) =>
+              body(
+                new Proxy(tx, {
+                  get(target, key) {
+                    if (key === 'query')
+                      return (text: string, params?: unknown[]) => {
+                        statements.push(text);
+                        return target.query(text, params);
+                      };
+                    const value = (target as unknown as Record<string | symbol, unknown>)[key];
+                    return typeof value === 'function' ? value.bind(target) : value;
+                  },
+                }),
+              ),
+            options,
+          ),
+      } as SqlExecutor;
+      try {
+        return await fn();
+      } finally {
+        db = real;
+      }
+    };
+    const certificate = await createCertificate();
+    const regional = await createLoadBalancer();
+    await drain();
+    await recording(() =>
+      createLoadBalancer({
+        forwarding: [
+          { entryProtocol: 'https', entryPort: 443, targetProtocol: 'http', targetPort: 80, certificateId: certificate.id },
+        ],
+      }),
+    );
+    expect(statements.some((text) => /FROM provider_certificates[\s\S]*FOR SHARE/.test(text))).toBe(true);
+    await setQuota(db, 'root', pool, 'loadBalancers', 3);
+    statements.length = 0;
+    await recording(() =>
+      createLoadBalancer({
+        scope: 'global',
+        region: undefined,
+        targets: { loadBalancerIds: [regional.id] },
+        domains: [{ name: 'app.example.com' }],
+      }),
+    );
+    expect(statements.some((text) => /FROM provider_load_balancers[\s\S]*FOR SHARE/.test(text))).toBe(true);
+    // Once both names are taken, neither can be deleted (the deletes lock their row, then look for users).
+    expect(await codeOf(call('certificates', 'delete', { tenantId: 'root', certificateId: certificate.id }))).toBe(
+      'INVALID_STATE',
+    );
+    expect(await codeOf(call('loadBalancers', 'delete', { tenantId: 'root', loadBalancerId: regional.id }))).toBe(
+      'INVALID_STATE',
+    );
+  });
+
   it('update changes it in place; delete removes it and refunds its quota', async () => {
     const lb = await createLoadBalancer();
     await drain();
