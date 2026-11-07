@@ -77,7 +77,9 @@ export const awsConfig = manifest({
   eventSources: field
     .list(field.option(['aws.ec2', 'aws.health', 'aws.guardduty']), { min: 1 })
     .optional()
-    .describe('EventBridge sources taken from the queue (default aws.ec2 and aws.health); anything else is dropped'),
+    .describe(
+      'EventBridge sources taken from the queue (default aws.ec2 and aws.health); anything else is dropped',
+    ),
 });
 
 /** The validated account configuration. */
@@ -102,7 +104,7 @@ export interface AwsConfig {
 export interface AwsProviderOptions {
   fetch?: typeof fetch;
   /** Tests and VPC endpoints; host options, never account config. */
-  endpoints?: Partial<Record<'ec2' | 'sts' | 'sqs', string>>;
+  endpoints?: Partial<Record<'ec2' | 'sts' | 'ssm' | 'sqs', string>>;
   /** Ambient identity for platform accounts (default `ambientCredentials()`). */
   credentials?: CredentialSource;
   /** ExternalId prefix: `${externalIdPrefix}:${providerAccountId}` (default 'better-compute'). */
@@ -121,6 +123,13 @@ export interface AwsProviderOptions {
    * private parameters are refused unless listed here.
    */
   ssmImagePrefixes?: readonly string[];
+  /**
+   * AWS account ids (12 digits) whose private AMIs a raw `ami-…` image may name. Public AMIs and
+   * those owned by `amazon` or `aws-marketplace` always pass; any other private AMI the account can
+   * see (its own golden images, images shared with it) is refused, because the image comes from the
+   * tenant and EC2 launches it as the account.
+   */
+  imageOwners?: readonly string[];
 }
 
 function invalid(message: string, reason: string): ComputeError {

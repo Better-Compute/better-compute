@@ -1124,7 +1124,11 @@ in one region: a fleet in several regions is several accounts.
 - **Offers and images.** An offer is `<zone>/<instanceType>` (bare metal is not offered; reservation and Spot offers
   are `UNSUPPORTED` until a later phase). An image is an `ami-…`, a `resolve:ssm:<parameter>`, or one of the aliases
   `ubuntu-24.04`, `ubuntu-22.04`, `al2023`, `dlami-gpu` and `eks-al2023-<k8s>`, resolved for the instance type's
-  architecture.
+  architecture. The image comes from the tenant, so a raw `ami-…` must be public, owned by `amazon` or
+  `aws-marketplace`, or owned by an account in `awsProvider({ imageOwners })`, and a raw `resolve:ssm:` must name a
+  public `/aws/service/` parameter or one under `awsProvider({ ssmImagePrefixes })`; anything else is
+  `INVALID_INPUT` (reason `image`). `reinstall` reads an SSM image to its AMI id first, since root-volume replacement
+  takes only AMI ids.
 - **Hardened defaults.** IMDSv2 only, hop limit 1, instance metadata tags off, an encrypted root volume, and a
   shutdown from inside the instance stops it.
 - **Creates.** `RunInstances` carries a `ClientToken` derived from the instance id, so a retried create is the same

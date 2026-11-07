@@ -65,6 +65,42 @@ export function ssmImagePrefixes(extra: readonly string[] = []): readonly string
   return [publicSsmPrefix, ...extra];
 }
 
+/** Owner aliases whose AMIs any tenant may launch (EC2's `imageOwnerAlias`). */
+export const trustedImageOwnerAliases: readonly string[] = ['amazon', 'aws-marketplace'];
+
+/**
+ * The host's `imageOwners`, checked: 12-digit AWS account ids whose private AMIs a tenant may name.
+ * A raw `ami-…` comes from the tenant and EC2 launches whatever the account can see (its own
+ * private images, images shared with it), so a private AMI is refused unless its owner is listed.
+ */
+export function imageOwnersOf(owners: readonly string[] = []): readonly string[] {
+  for (const owner of owners)
+    if (typeof owner !== 'string' || !/^\d{12}$/.test(owner))
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'imageOwners are 12-digit AWS account ids',
+        undefined,
+        { provider: 'aws', reason: 'imageOwners' },
+      );
+  return [...owners];
+}
+
+/** Whether a tenant may launch an AMI with these DescribeImages attributes. */
+export function imageAllowed(
+  image: { isPublic?: string; ownerId?: string; ownerAlias?: string },
+  owners: readonly string[],
+): boolean {
+  if (image.isPublic === 'true') return true;
+  if (image.ownerAlias !== undefined && trustedImageOwnerAliases.includes(image.ownerAlias))
+    return true;
+  return image.ownerId !== undefined && owners.includes(image.ownerId);
+}
+
+/** Whether `image` is a plain AMI id. */
+export function isAmiId(image: string): boolean {
+  return amiPattern.test(image);
+}
+
 /**
  * `ami-…` passes through, `resolve:ssm:…` when its parameter is under one of `ssmPrefixes`; aliases
  * expand per arch; anything else is INVALID_INPUT.

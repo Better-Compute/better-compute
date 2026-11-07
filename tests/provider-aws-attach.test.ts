@@ -159,6 +159,38 @@ describe('provider-aws attach', () => {
     });
   });
 
+  it('get right after a claim retries while the ownership tag is not visible yet', async () => {
+    const { ec2emu, impl, call } = await world();
+    const foreign = ec2emu.addInstance();
+    await impl.claim(foreign.id, 'ins_get', call('ins_get'));
+    // A lagging replica serves the instance without the tag claim just wrote (and re-read).
+    ec2emu.serveStaleTags(foreign.id, {});
+    expect(await rejection(() => impl.get(foreign.id, call('ins_get')))).toMatchObject({
+      code: 'UNAVAILABLE',
+      details: { reason: 'tag-propagation' },
+    });
+    expect((await impl.get(foreign.id, call('ins_get')))?.claimedBy).toBe('ins_get');
+    // The same holds for a managed claim.
+    const managed = ec2emu.addInstance();
+    await impl.claim(managed.id, 'ins_get2', call('ins_get2'), { managed: true });
+    ec2emu.serveStaleTags(managed.id, {});
+    expect((await rejection(() => impl.get(managed.id, call('ins_get2')))).code).toBe(
+      'UNAVAILABLE',
+    );
+  });
+
+  it('get reports a missing tag once the claim is older than the consistency window', async () => {
+    const { emu, ec2emu, impl, call } = await world();
+    const foreign = ec2emu.addInstance();
+    await impl.claim(foreign.id, 'ins_old', call('ins_old'));
+    emu.clock.advance(120_000);
+    foreign.tags.delete('better-compute:instance');
+    expect((await impl.get(foreign.id, call('ins_old')))?.claimedBy).toBeUndefined();
+    // An instance this client never claimed reads as it is.
+    const other = ec2emu.addInstance();
+    expect((await impl.get(other.id, call()))?.claimedBy).toBeUndefined();
+  });
+
   it('release removes only its own tag', async () => {
     const { ec2emu, impl, call } = await world();
     const foreign = ec2emu.addInstance();

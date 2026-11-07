@@ -3,6 +3,7 @@ import { ComputeError } from '@better-compute/core';
 import { assertRegion, parseArn, type AwsPartition } from '@better-compute/aws-core';
 import { parseDiscoverTag } from './config.js';
 import { tags } from './ids.js';
+import { ssmImagePrefixes } from './images.js';
 
 // The CLI commands that onboard an AWS account (`aws iam-policy`, `aws trust-policy`). The CLI never
 // imports providers, so an application that uses this one adds the commands to its configuration:
@@ -49,6 +50,8 @@ export function iamPolicy(
     kmsKeyArn?: string;
     /** (A4) The name of the accounts' intake queue (`eventQueueUrl`): adds receive and delete on it. */
     eventQueue?: string;
+    /** The host's `ssmImagePrefixes` (`/my/team/`): adds ssm:GetParameters on them. */
+    ssmPrefixes?: readonly string[];
   } = {},
 ): IamPolicyDocument {
   const partition = options.partition ?? 'aws';
@@ -161,6 +164,23 @@ export function iamPolicy(
     },
     { Sid: 'Identity', Effect: 'Allow', Action: 'sts:GetCallerIdentity', Resource: '*' },
   ];
+  if (options.ssmPrefixes !== undefined && options.ssmPrefixes.length > 0) {
+    try {
+      ssmImagePrefixes(options.ssmPrefixes);
+    } catch {
+      throw usage(
+        '--ssm-prefix is SSM parameter path prefixes such as /my/team/ (leading and trailing /)',
+      );
+    }
+    statements.push({
+      Sid: 'PrivateImages',
+      Effect: 'Allow',
+      Action: 'ssm:GetParameters',
+      Resource: options.ssmPrefixes.map(
+        (prefix) => `arn:${partition}:ssm:${region}:${account}:parameter${prefix}*`,
+      ),
+    });
+  }
   if (options.kmsKeyArn !== undefined) {
     let key;
     try {
@@ -314,7 +334,7 @@ export function awsIamPolicyCommand() {
     group: 'Providers' as const,
     summary: 'Print the IAM permissions policy an AWS provider account needs',
     description:
-      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; ec2:DescribeInstanceStatus reads scheduled events, and --event-queue adds sqs:ReceiveMessage and sqs:DeleteMessage on the event intake queue (aws event-rules).',
+      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; --ssm-prefix /a/,/b/ adds ssm:GetParameters on the host ssmImagePrefixes; ec2:DescribeInstanceStatus reads scheduled events, and --event-queue adds sqs:ReceiveMessage and sqs:DeleteMessage on the event intake queue (aws event-rules).',
     target: 'none' as const,
     output: 'text' as const,
     flags: {
@@ -352,7 +372,14 @@ export function awsIamPolicyCommand() {
       'event-queue': {
         type: 'string' as const,
         value: 'NAME',
-        description: 'The intake queue of the accounts (aws event-rules): adds sqs:ReceiveMessage and sqs:DeleteMessage on it',
+        description:
+          'The intake queue of the accounts (aws event-rules): adds sqs:ReceiveMessage and sqs:DeleteMessage on it',
+      },
+      'ssm-prefix': {
+        type: 'string' as const,
+        value: 'PREFIXES',
+        description:
+          'The host ssmImagePrefixes, comma-separated (/my/team/): adds ssm:GetParameters',
       },
       out: outFlag,
     },
@@ -373,6 +400,13 @@ export function awsIamPolicyCommand() {
             : {}),
           ...(text(context.flags['event-queue'])
             ? { eventQueue: text(context.flags['event-queue'])! }
+            : {}),
+          ...(text(context.flags['ssm-prefix'])
+            ? {
+                ssmPrefixes: text(context.flags['ssm-prefix'])!
+                  .split(',')
+                  .map((prefix) => prefix.trim()),
+              }
             : {}),
         }),
       );

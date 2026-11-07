@@ -29,6 +29,19 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
         ...(options.endpoints?.ec2 !== undefined ? { endpoint: options.endpoints.ec2 } : {}),
         ...(options.rateLimit ? { rateLimit: options.rateLimit } : {}),
       });
+      // SSM Parameter Store: reinstall resolves resolve:ssm: images to an AMI id with it.
+      const ssm = jsonClient({
+        service: 'ssm',
+        jsonVersion: '1.1',
+        targetPrefix: 'AmazonSSM',
+        region: config.region,
+        credentials: account.source,
+        fetch: options.fetch,
+        clock: context.clock,
+        log: context.log,
+        ...(options.endpoints?.ssm !== undefined ? { endpoint: options.endpoints.ssm } : {}),
+        ...(options.rateLimit ? { rateLimit: options.rateLimit } : {}),
+      });
       // A4: the event-intake queue, when the account has one (SQS JSON 1.0 protocol).
       const sqs =
         config.eventQueueUrl === undefined
@@ -47,6 +60,7 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
             });
       return new AwsCompute(config, context, options, {
         ec2,
+        ssm,
         ...(sqs ? { sqs } : {}),
         account,
         types: instanceTypeCache(ec2, { clock: context.clock }),

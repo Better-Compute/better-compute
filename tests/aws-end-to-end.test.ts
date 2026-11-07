@@ -7,7 +7,8 @@ import { Ec2Emulator, type EmuInstance } from './support/aws-emulator/ec2.js';
 
 // The real provider-aws against the AWS emulator, wired through vps: one root (platform) AWS
 // account in us-east-1 backs a provider pool offered to acme; discovery runs every minute. Covers
-// create through the pool, EC2 eventual consistency, attach/detach, an async stockout, and F1.
+// create through the pool, EC2 eventual consistency, attach/detach, an async stockout, F1, and a
+// tenant's own account reached through its role (ExternalId, the platform-account guard).
 
 afterEach(closeFixtures);
 
@@ -267,6 +268,134 @@ describe('provider-aws through vps, end to end', () => {
       },
     });
     expect(ok.provider).toBe('aws');
+  });
+
+  it("a tenant on the platform's pool cannot launch the platform account's private AMI", async () => {
+    const w = await world();
+    // An operator golden image in the platform account backing the pool.
+    w.ec2.images.set('ami-000000000000000aa', {
+      rootDevice: '/dev/xvda',
+      arch: 'x86_64',
+      ownerId: '111111111111',
+      public: false,
+    });
+    const created = await w.api.instances.create(
+      w.acme,
+      createInput(w, { idempotencyKey: 'golden', imageId: 'ami-000000000000000aa' }),
+    );
+    for (let round = 0; round < 4; round++) await w.tick('vps.instances', 15_000);
+    expect(vmOf(w, created.id)).toBeUndefined();
+    expect(w.emu.calls('RunInstances')).toHaveLength(0);
+    const seen = await w.view(created.id);
+    expect(seen.state).not.toBe('running');
+    expect(JSON.stringify(seen.conditions)).toContain('INVALID_INPUT');
+  });
+
+  it("a tenant's own account hops through its role with the platform-assigned ExternalId", async () => {
+    const w = await world();
+    const roleArn = 'arn:aws:iam::222222222222:role/bc';
+    /** A tenant's own (custom) site and provider pool over `accountId`, with one flavor. */
+    const poolFor = async (who: { token: string }, tenantId: string, accountId: string) => {
+      const site = await w.api.sites.create(who, {
+        tenantId,
+        kind: 'custom',
+        region: 'us-east-1',
+        idempotencyKey: `site-${accountId}`,
+      });
+      const pool = await w.api.pools.create(who, {
+        tenantId,
+        siteId: site.id,
+        class: 'provider',
+        providerAccountId: accountId,
+        ownerQuota: { vcpu: 100, memoryGiB: 1000, diskGiB: 10_000 },
+        idempotencyKey: `pool-${accountId}`,
+      });
+      await w.api.flavors.create(who, {
+        tenantId,
+        poolId: pool.id,
+        name: 'm7i.large',
+        vcpu: 2,
+        memoryGiB: 8,
+        diskGiB: 100,
+        offerId: `${ZONE}/m7i.large`,
+      });
+      return pool;
+    };
+    const account = await w.api.providerAccounts.create(w.acme, {
+      tenantId: w.acmeTenant,
+      provider: 'aws',
+      name: 'acme-own',
+      config: { region: 'us-east-1', zones: [ZONE], assumeRoleArn: roleArn },
+    });
+    // The role acme made with `aws trust-policy`: the platform identity, with acme's ExternalId.
+    w.emu.sts.roles.set(roleArn, {
+      externalId: `better-compute:${account.id}`,
+      trustedAccounts: ['111111111111'],
+    });
+    const pool = await poolFor(w.acme, w.acmeTenant, account.id);
+    const created = await w.api.instances.create(
+      w.acme,
+      createInput(w, { poolId: pool.id, idempotencyKey: 'own-1' }),
+    );
+    expect(await settle(w, created.id, 'running')).toMatchObject({ state: 'running' });
+    expect(
+      w.emu.sts.assumed.map(({ roleArn: arn, externalId, caller }) => [arn, externalId, caller]),
+    ).toContainEqual([roleArn, `better-compute:${account.id}`, '111111111111']);
+    // Every EC2 call for acme's account was signed with the role's minted keys, in its account.
+    const [run] = w.emu.calls('RunInstances');
+    expect(run!.accessKeyId).toMatch(/^ASIA/);
+    expect(w.emu.sts.identities.get(run!.accessKeyId!)?.account).toBe('222222222222');
+
+    // Another tenant naming acme's role gets its own ExternalId, which the role refuses: no launch.
+    const other = { token: w.fixture.tenants.other.token };
+    w.fixture.iam.allow({ token: other.token });
+    const otherTenant = w.fixture.tenants.other.id;
+    const stolen = await w.api.providerAccounts.create(other, {
+      tenantId: otherTenant,
+      provider: 'aws',
+      name: 'stolen',
+      config: { region: 'us-east-1', zones: [ZONE], assumeRoleArn: roleArn },
+    });
+    const otherPool = await poolFor(other, otherTenant, stolen.id);
+    const denied = await w.api.instances.create(other, {
+      ...createInput(w, { poolId: otherPool.id, idempotencyKey: 'stolen-1' }),
+      tenantId: otherTenant,
+    });
+    for (let round = 0; round < 4; round++) await w.tick('vps.instances', 15_000);
+    const seen = await w.api.instances.get(other, { tenantId: otherTenant, instanceId: denied.id });
+    expect(seen.state).not.toBe('running');
+    expect(seen.conditions).toContainEqual(
+      expect.objectContaining({ type: 'ProviderError', reason: 'ACCESS_DENIED' }),
+    );
+    expect(vmOf(w, denied.id)).toBeUndefined();
+    expect(w.emu.calls('RunInstances')).toHaveLength(1);
+    expect(
+      w.emu.sts.assumed.filter((entry) => entry.externalId === `better-compute:${stolen.id}`)
+        .length,
+    ).toBeGreaterThan(0);
+
+    // A tenant role in the platform's own AWS account is refused before any AssumeRole.
+    const platformRole = 'arn:aws:iam::111111111111:role/bc-internal';
+    w.emu.sts.roles.set(platformRole, {});
+    const sneaky = await w.api.providerAccounts.create(w.acme, {
+      tenantId: w.acmeTenant,
+      provider: 'aws',
+      name: 'sneaky',
+      config: { region: 'us-east-1', zones: [ZONE], assumeRoleArn: platformRole },
+    });
+    const sneakyPool = await poolFor(w.acme, w.acmeTenant, sneaky.id);
+    const refused = await w.api.instances.create(
+      w.acme,
+      createInput(w, { poolId: sneakyPool.id, idempotencyKey: 'sneaky-1' }),
+    );
+    for (let round = 0; round < 4; round++) await w.tick('vps.instances', 15_000);
+    expect(vmOf(w, refused.id)).toBeUndefined();
+    const refusedView = await w.view(refused.id);
+    expect(refusedView.conditions).toContainEqual(
+      expect.objectContaining({ type: 'ProviderError', reason: 'ACCESS_DENIED' }),
+    );
+    expect(w.emu.sts.assumed.some((entry) => entry.roleArn === platformRole)).toBe(false);
+    expect(w.emu.calls('RunInstances')).toHaveLength(1);
   });
 
   it('async stockout fails the instance permanently with CAPACITY_UNAVAILABLE', async () => {
