@@ -69,8 +69,11 @@ interface FakeAddress {
   spec: ProviderAddressSpec;
   address: string;
   assignedTo?: string;
-  /** Like DO's reserved IP project or reservation time: differs for a later reservation at the same IP. */
-  fingerprint: string;
+  /**
+   * Like a DO reserved IPv6's reservation time: differs for a later reservation at the same IP. Absent like a reserved
+   * IPv4's, which has none.
+   */
+  fingerprint?: string;
 }
 
 const cloud = {
@@ -82,6 +85,8 @@ const cloud = {
   calls: [] as string[],
   /** The next provider call throws this. */
   failNext: undefined as ComputeError | undefined,
+  /** The next reserve hands out this IP (as DO hands out a released one again), with no fingerprint (like IPv4). */
+  nextIp: undefined as string | undefined,
   /** Each volume create, attach, resize and reserve answers `pending` this many times first. */
   pendingTicks: 0,
   progress: new Map<string, number>(),
@@ -109,6 +114,7 @@ const cloud = {
     this.machines.clear();
     this.calls.length = 0;
     this.failNext = undefined;
+    this.nextIp = undefined;
     this.pendingTicks = 0;
     this.progress.clear();
   },
@@ -163,7 +169,7 @@ const cloud = {
         family: address.spec.family,
         region: address.spec.region,
         ...(address.assignedTo ? { assignedTo: address.assignedTo } : {}),
-        fingerprint: address.fingerprint,
+        ...(address.fingerprint !== undefined ? { fingerprint: address.fingerprint } : {}),
       },
     };
   },
@@ -314,6 +320,14 @@ const doLike = defineProvider({
           throw new ComputeError('NOT_FOUND', 'no such address');
         }
         // Like DigitalOcean: no name, so every reserve without an id is a new address.
+        if (cloud.nextIp !== undefined) {
+          const ip = cloud.nextIp;
+          cloud.nextIp = undefined;
+          if (cloud.addresses.has(ip)) throw new Error(`${ip} is still reserved`);
+          const reused: FakeAddress = { id: ip, spec, address: ip };
+          cloud.addresses.set(ip, reused);
+          return cloud.addressState(reused);
+        }
         const address: FakeAddress = {
           id: `203.0.113.${++cloud.counter}`,
           spec,
@@ -1022,6 +1036,44 @@ describe('providerVolumes', () => {
     expect(Math.max(...offsets)).toBeLessThan(3_600_000);
   });
 
+  it('a ready volume deleted at the provider outside better-compute is an error, never created again', async () => {
+    const instanceId = await insertInstance();
+    const volume = await createVolume({ instanceId });
+    await drain();
+    const ready = await getVolume(volume.id);
+    expect(ready).toMatchObject({ state: 'ready', attachment: { state: 'ready' } });
+    const externalId = [...cloud.volumes.keys()][0]!;
+    // Deleted at the provider by hand (console, API, another tool).
+    cloud.volumes.delete(externalId);
+    cloud.calls.length = 0;
+    events.length = 0;
+    await driftNow();
+    await drain();
+    const after = await getVolume(volume.id);
+    expect(after.state).toBe('error');
+    expect(after.message).toMatch(/deleted at the provider outside better-compute/);
+    expect(cloud.volumes.size).toBe(0);
+    expect(cloud.calls.filter((label) => !label.startsWith('getVolume'))).toEqual([]);
+    expect(events.map((event) => event.type)).toEqual(['providerVolume.error']);
+    const { rows } = await db.query<{ external_id: string }>(
+      `SELECT external_id FROM provider_volumes WHERE id = $1`,
+      [volume.id],
+    );
+    expect(rows[0]!.external_id).toBe(externalId);
+    // Another pass changes nothing and publishes nothing new.
+    await runKey('all');
+    await drain();
+    expect(cloud.volumes.size).toBe(0);
+    expect(events).toHaveLength(1);
+    // Its delete finishes without a provider write, and refunds its quota.
+    await call('providerVolumes', 'detach', { tenantId: 'root', volumeId: volume.id }).catch(() => undefined);
+    await call('providerVolumes', 'delete', { tenantId: 'root', volumeId: volume.id });
+    await drain();
+    expect((await getVolume(volume.id)).state).toBe('deleted');
+    expect(await quotaUsed('diskGiB')).toBe(0);
+    expect(cloud.calls.filter((label) => !label.startsWith('getVolume'))).toEqual([]);
+  });
+
   it('a volume never sent to the provider is deleted without a provider call', async () => {
     const volume = await createVolume();
     await call('providerVolumes', 'delete', { tenantId: 'root', volumeId: volume.id });
@@ -1387,6 +1439,34 @@ describe('providerSnapshots', () => {
   });
 });
 
+describe('providerSnapshots: restore keeps the snapshot filesystem', () => {
+  it('a restore takes no filesystem, and asks the provider for none (a format could wipe the restored data)', async () => {
+    const volume = await createVolume({ filesystem: 'ext4' });
+    await drain();
+    const snapshot: ProviderSnapshotView = await call('providerVolumes', 'snapshot', {
+      tenantId: 'root',
+      volumeId: volume.id,
+      name: 'base',
+      idempotencyKey: 'snap-fs',
+    });
+    await drain();
+    const restoreRaw = { tenantId: 'root', snapshotId: snapshot.id, name: 'copy-fs', idempotencyKey: 'r-fs' };
+    expect(await codeOf(call('providerSnapshots', 'restore', { ...restoreRaw, filesystem: 'xfs' }))).toBe(
+      'INVALID_INPUT',
+    );
+    const restored: ProviderVolumeView = await call('providerSnapshots', 'restore', restoreRaw);
+    // It shows the filesystem it inherits from the snapshot's volume.
+    expect(restored.filesystem).toBe('ext4');
+    await drain();
+    expect((await getVolume(restored.id)).state).toBe('ready');
+    const made = [...cloud.volumes.values()].find(
+      (entry) => entry.spec.name === providerResourceName(restored.id),
+    )!;
+    expect(made.spec.snapshotId).toBeDefined();
+    expect(made.spec.filesystem).toBeUndefined();
+  });
+});
+
 describe('providerAddresses', () => {
   it('reserves, assigns, refuses a second instance and another tenant, unassigns and deletes', async () => {
     const instanceId = await insertInstance();
@@ -1471,6 +1551,111 @@ describe('providerAddresses', () => {
     expect(await quotaUsed('addresses')).toBe(0);
     expect(cloud.addresses.get(ip)).toMatchObject({ fingerprint: 'owner', assignedTo: 'droplet-owner' });
     expect(cloud.calls.filter((label) => !label.startsWith('getAddress'))).toEqual([]);
+  });
+
+  const addressRow = async (addressId: string) =>
+    (
+      await db.query<{ external_id: string | null; lost: boolean; instance_id: string | null }>(
+        `SELECT external_id, lost, instance_id FROM provider_addresses WHERE id = $1`,
+        [addressId],
+      )
+    ).rows[0]!;
+
+  it('an address released outside better-compute is lost for good: never re-adopted, assigned or released', async () => {
+    const instanceId = await insertInstance();
+    const address = await createAddress();
+    await call('providerAddresses', 'assign', { tenantId: 'root', addressId: address.id, instanceId });
+    await drain();
+    const ip = (await getAddress(address.id)).address!;
+    expect(await getAddress(address.id)).toMatchObject({ state: 'ready', assignmentState: 'ready' });
+    const fingerprint = cloud.addresses.get(ip)!.fingerprint;
+    // Released out of band.
+    cloud.addresses.delete(ip);
+    events.length = 0;
+    await driftNow();
+    await drain();
+    const lost = await getAddress(address.id);
+    expect(lost).toMatchObject({ state: 'error', assignmentState: 'none' });
+    expect(lost.message).toMatch(/released at the provider outside better-compute/);
+    expect(lost.instanceId).toBeUndefined();
+    expect(await addressRow(address.id)).toMatchObject({ external_id: null, lost: true });
+    expect(events.map((event) => event.type)).toEqual(['providerAddress.error']);
+    // The provider hands the IP to a reservation in the same project (an IPv4 fingerprint cannot tell them apart).
+    cloud.addresses.set(ip, { id: ip, spec: { name: 'x', region: 'nyc3', family: 'ipv4' }, address: ip, fingerprint });
+    cloud.calls.length = 0;
+    await driftNow();
+    await runKey('all');
+    await drain();
+    expect((await getAddress(address.id)).state).toBe('error');
+    expect(await codeOf(call('providerAddresses', 'assign', { tenantId: 'root', addressId: address.id, instanceId }))).toBe(
+      'INVALID_STATE',
+    );
+    await call('providerAddresses', 'delete', { tenantId: 'root', addressId: address.id });
+    await drain();
+    expect((await getAddress(address.id)).state).toBe('deleted');
+    expect(await quotaUsed('addresses')).toBe(0);
+    expect(cloud.calls).toEqual([]);
+    expect(cloud.addresses.get(ip)).toBeDefined();
+  });
+
+  it('a reserve handed an IP another live row still records marks that row lost before it records it', async () => {
+    const instanceId = await insertInstance();
+    const first = await createAddress();
+    await drain();
+    const ip = (await getAddress(first.id)).address!;
+    // Released out of band (before any drift pass noticed), and handed out again to the next reserve: same project,
+    // no fingerprint to tell the reservations apart.
+    cloud.addresses.delete(ip);
+    cloud.nextIp = ip;
+    events.length = 0;
+    const second = await createAddress();
+    await drain();
+    expect(await getAddress(second.id)).toMatchObject({ state: 'ready', address: ip });
+    expect(await addressRow(second.id)).toMatchObject({ external_id: ip, lost: false });
+    expect(await getAddress(first.id)).toMatchObject({ state: 'error' });
+    expect(await addressRow(first.id)).toMatchObject({ external_id: null, lost: true });
+    expect(events.filter((event) => event.type === 'providerAddress.error')).toHaveLength(1);
+    // The older row never assigns or releases the newer reservation.
+    cloud.calls.length = 0;
+    expect(
+      await codeOf(call('providerAddresses', 'assign', { tenantId: 'root', addressId: first.id, instanceId })),
+    ).toBe('INVALID_STATE');
+    await call('providerAddresses', 'delete', { tenantId: 'root', addressId: first.id });
+    await drain();
+    expect((await getAddress(first.id)).state).toBe('deleted');
+    expect(cloud.calls).toEqual([]);
+    expect(cloud.addresses.get(ip)).toBeDefined();
+    await call('providerAddresses', 'assign', { tenantId: 'root', addressId: second.id, instanceId });
+    await drain();
+    expect(await getAddress(second.id)).toMatchObject({ instanceId, assignmentState: 'ready' });
+  });
+
+  it('two live rows never record the same provider address', async () => {
+    const first = await createAddress();
+    const second = await createAddress();
+    await drain();
+    await db.query(`UPDATE provider_addresses SET external_id = '203.0.113.200' WHERE id = $1`, [first.id]);
+    await expect(
+      db.query(`UPDATE provider_addresses SET external_id = '203.0.113.200' WHERE id = $1`, [second.id]),
+    ).rejects.toThrow(/provider_addresses_external|unique/);
+  });
+
+  it('a reserve skipped for the run budget is not taken for a lost answer', async () => {
+    const address = await createAddress();
+    const now = clock.now.bind(clock);
+    let reads = 0;
+    // The run starts, then its budget is spent before its first provider call.
+    clock.now = () => now() + (++reads > 1 ? 60_000 : 0);
+    try {
+      await runKey(address.id);
+    } finally {
+      clock.now = now;
+    }
+    expect(cloud.calls).toEqual([]);
+    queue.set(address.id, clock.now());
+    await drain();
+    expect((await getAddress(address.id)).state).toBe('ready');
+    expect(cloud.calls.filter((label) => label === 'ensureAddress new')).toHaveLength(1);
   });
 
   it('an address quota of 0 refuses the reserve', async () => {

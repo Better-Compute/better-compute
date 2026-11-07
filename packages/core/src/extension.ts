@@ -795,9 +795,16 @@ export interface ProviderVolumeSpec {
   /** Whole GiB, at least 1. */
   sizeGiB: number;
   kind: 'block' | 'shared';
-  /** The filesystem the provider formats the volume with; absent or `none`: left raw. */
+  /**
+   * The filesystem the provider formats the volume with; absent or `none`: left raw. Ignored with `snapshotId`: a
+   * restored volume keeps the snapshot's filesystem (a format would wipe it), and a provider neither asks for one nor
+   * compares it.
+   */
   filesystem?: 'ext4' | 'xfs' | 'none';
-  /** Creates the volume from this snapshot (an id `snapshotVolume` returned); `sizeGiB` is at least the snapshot's. */
+  /**
+   * Creates the volume from this snapshot (an id `snapshotVolume` returned); `sizeGiB` is at least the snapshot's. A
+   * provider restores only a snapshot it made for this deployment (`INVALID_STATE` otherwise, before any write).
+   */
   snapshotId?: string;
   /** Plain labels, written as the provider's labels or tags. `better-compute-*` keys are the provider's own. */
   labels?: Readonly<Record<string, string>>;
@@ -918,7 +925,7 @@ export interface ProviderAddressExpectation {
  * (provider addresses) Reserved public addresses on a provider account, idempotent and non-blocking like
  * `ProviderVolumes`. Outputs: `address`, `family`, `region`, `assignedTo` (the machine id; absent while
  * unassigned) and, where the provider has one, `fingerprint`: what tells this reservation apart from a later one at
- * the same address (DigitalOcean: its project or reservation time). `assignAddress` and `unassignAddress` return the assignment's state (`pending`/`ready`,
+ * the same address (DigitalOcean: a reserved IPv6's reservation time; a reserved IPv4 has none). `assignAddress` and `unassignAddress` return the assignment's state (`pending`/`ready`,
  * `deleting`/`deleted`). An address assigned to another machine is `CONFLICT` (never moved silently); an assigned
  * address is not deleted (`INVALID_STATE`); a machine in another region is `INVALID_INPUT`.
  */

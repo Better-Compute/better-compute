@@ -33,7 +33,8 @@ import type { DoSnapshot, DoVolume } from './types.js';
 // Volume snapshots are found by name among the volume's snapshots and carry the same two tags.
 // DO keeps no snapshot name unique, so two racing calls may both take one: the call keeps the
 // oldest of ours and deletes the others (as Droplet creates do, DO-D4). A snapshot outlives its
-// volume; `ensureVolume` with `snapshotId` restores one into a new volume.
+// volume; `ensureVolume` with `snapshotId` restores one of ours into a new volume, which keeps the
+// snapshot's filesystem (no `filesystem_type` is sent, and the one DO reports is not compared).
 //
 // `kind: 'shared'` volumes are Network File Storage shares (P6, ./nfs.ts): `ensureVolume` and
 // every call given a share id (`nfs:<region>:<uuid>`) go to `DoShares`.
@@ -290,7 +291,10 @@ export class DoVolumes implements ProviderVolumes {
     return [managedTag, this.deploymentTag, ...labelTags(spec.labels)];
   }
 
-  /** The volume `found` names for `spec`: ours, and formatted as the spec asks, or refused. */
+  /**
+   * The volume `found` names for `spec`: ours, and formatted as the spec asks, or refused. A restore's filesystem is
+   * the snapshot's (whatever the spec says), so it is not compared.
+   */
   protected matching(spec: ProviderVolumeSpec, found: DoVolume): ProviderResourceState {
     if (!this.owned(found.tags))
       throw fail(
@@ -298,6 +302,7 @@ export class DoVolumes implements ProviderVolumes {
         `a volume named ${spec.name} in ${spec.region} exists and is not managed by this better-compute deployment`,
         'nameTaken',
       );
+    if (spec.snapshotId !== undefined) return state(found.id, 'ready', volumeOutputs(found));
     const wanted = spec.filesystem === 'none' ? '' : (spec.filesystem ?? '');
     if ((found.filesystem_type ?? '') !== wanted)
       throw fail(
@@ -323,6 +328,7 @@ export class DoVolumes implements ProviderVolumes {
     const { signal } = ctx;
     const [existing] = await this.byName(spec.name, spec.region, signal);
     if (existing) return this.matching(spec, existing);
+    if (spec.snapshotId !== undefined) await this.restorable(spec.snapshotId, signal);
     let created: DoVolume | undefined;
     try {
       const reply = await this.client.request<{ volume?: DoVolume }>('POST', '/volumes', {
@@ -331,7 +337,8 @@ export class DoVolumes implements ProviderVolumes {
           region: spec.region,
           size_gigabytes: spec.sizeGiB,
           description: 'better-compute volume',
-          ...(spec.filesystem !== undefined && spec.filesystem !== 'none'
+          // A restore keeps the snapshot's filesystem: asking for one could format the restored data away.
+          ...(spec.snapshotId === undefined && spec.filesystem !== undefined && spec.filesystem !== 'none'
             ? { filesystem_type: spec.filesystem }
             : {}),
           ...(spec.snapshotId !== undefined ? { snapshot_id: spec.snapshotId } : {}),
@@ -357,6 +364,22 @@ export class DoVolumes implements ProviderVolumes {
         { provider: 'digitalocean', reason: 'badBody' },
       );
     return state(created.id, 'ready', volumeOutputs(created));
+  }
+
+  /**
+   * Refuses a restore from a snapshot that is not a volume snapshot of this deployment (DO-D16): any volume snapshot
+   * in the account would otherwise restore, another deployment's or the owner's own. A missing one is `NOT_FOUND`.
+   */
+  protected async restorable(snapshotId: string, signal: AbortSignal): Promise<void> {
+    const snapshot = await this.snapshot(snapshotId.toLowerCase(), signal);
+    if (!snapshot)
+      throw fail('NOT_FOUND', `snapshot ${snapshotId} does not exist`, 'snapshot');
+    if (snapshot.resource_type !== 'volume' || !this.owned(snapshot.tags))
+      throw fail(
+        'INVALID_STATE',
+        `snapshot ${snapshot.id} is not a volume snapshot managed by this better-compute deployment and is never restored by it`,
+        'notManaged',
+      );
   }
 
   async findVolume(

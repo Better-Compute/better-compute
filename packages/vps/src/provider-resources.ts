@@ -196,9 +196,12 @@ CREATE TABLE provider_addresses (
   family text NOT NULL CHECK (family IN ('ipv4', 'ipv6')),
   external_id text,
   address text,
-  -- The provider's fingerprint output at reserve time (DO: the reserved IP's project or reservation time): an address
-  -- at external_id that does not show it is another reservation, never released or taken over.
+  -- The provider's fingerprint output at reserve time (DO: a reserved IPv6's reservation time; a reserved IPv4 has
+  -- none): an address at external_id that does not show it is another reservation, never released or taken over.
   fingerprint text,
+  -- The reservation is gone: released at the provider outside better-compute, or its IP handed to another row's
+  -- reserve. external_id is cleared, and the row never calls the provider again (its delete only finishes it).
+  lost bool NOT NULL DEFAULT false,
   -- The instance the tenant wants the address on (NULL: unassigned), and the machine the provider last reported.
   instance_id text REFERENCES instances,
   assigned_machine text,
@@ -209,6 +212,9 @@ CREATE TABLE provider_addresses (
   charged int NOT NULL DEFAULT 0 CHECK (charged >= 0),${columns}
 );
 CREATE UNIQUE INDEX provider_addresses_name ON provider_addresses (tenant_id, name) WHERE state <> 'deleted';
+-- One live row per reservation: a reserve handed an IP another live row records marks that row lost first.
+CREATE UNIQUE INDEX provider_addresses_external ON provider_addresses (provider_account_id, external_id)
+  WHERE state <> 'deleted' AND external_id IS NOT NULL;
 CREATE INDEX provider_addresses_live ON provider_addresses (state) WHERE state <> 'deleted';
 CREATE INDEX provider_addresses_instance ON provider_addresses (instance_id) WHERE instance_id IS NOT NULL;
 CREATE TRIGGER provider_addresses_stamp_deleted BEFORE UPDATE ON provider_addresses
@@ -348,9 +354,8 @@ export interface ListProviderSnapshotsInput {
 export interface RestoreProviderSnapshotInput extends ProviderSnapshotRef {
   name: string;
   description?: string;
-  /** At least the snapshot's size; absent: the snapshot's size. */
+  /** At least the snapshot's size; absent: the snapshot's size. The filesystem is the snapshot's (no field). */
   sizeGiB?: number;
-  filesystem?: 'ext4' | 'xfs' | 'none';
   deleteWithInstance?: boolean;
   idempotencyKey: string;
 }
@@ -528,13 +533,15 @@ export function parseListProviderSnapshots(raw: unknown): ListProviderSnapshotsI
   return out;
 }
 export function parseRestoreProviderSnapshot(raw: unknown): RestoreProviderSnapshotInput {
+  // A restore keeps the snapshot's filesystem: asking the provider for one could format the restored data away.
+  if (raw !== null && typeof raw === 'object' && 'filesystem' in raw)
+    fail("filesystem: a restored volume keeps its snapshot's filesystem; leave it out");
   const input = object(raw, [
     'tenantId',
     'snapshotId',
     'name',
     'description',
     'sizeGiB',
-    'filesystem',
     'deleteWithInstance',
     'idempotencyKey',
   ]);
@@ -548,8 +555,6 @@ export function parseRestoreProviderSnapshot(raw: unknown): RestoreProviderSnaps
   if (description !== undefined) out.description = description;
   const sizeGiB = optional(input.sizeGiB, sizeOf);
   if (sizeGiB !== undefined) out.sizeGiB = sizeGiB;
-  const filesystem = optional(input.filesystem, filesystemOf);
-  if (filesystem !== undefined) out.filesystem = filesystem;
   if (input.deleteWithInstance !== undefined)
     out.deleteWithInstance = bool(input.deleteWithInstance, 'deleteWithInstance');
   return out;
@@ -743,7 +748,6 @@ export const providerResourceSchemas = {
       name: nameSchema('The new volume name, unique in the tenant'),
       description: descriptionSchema,
       sizeGiB: sizeSchema("The new volume's size in GiB: at least the snapshot's (the default)"),
-      filesystem: filesystemSchema,
       deleteWithInstance: deleteWithInstanceSchema,
       idempotencyKey: keySchema,
     },
@@ -849,6 +853,7 @@ interface AddressRow {
   external_id: string | null;
   address: string | null;
   fingerprint: string | null;
+  lost: boolean;
   instance_id: string | null;
   assigned_machine: string | null;
   assignment_state: ProviderAddressView['assignmentState'];
@@ -871,7 +876,7 @@ const volumeColumns = `id, tenant_id, project_id, pool_id, provider_account_id, 
 const snapshotColumns = `id, tenant_id, project_id, pool_id, provider_account_id, volume_id, name, region, size_gib,
   external_id, ${common}`;
 const addressColumns = `id, tenant_id, project_id, pool_id, provider_account_id, name, description, region, family,
-  external_id, address, fingerprint, instance_id, assigned_machine, assignment_state, assignment_message, charged, ${common}`;
+  external_id, address, fingerprint, lost, instance_id, assigned_machine, assignment_state, assignment_message, charged, ${common}`;
 const attachmentColumns = `id, volume_id, instance_id, machine_id, state, desired_state, message`;
 
 const iso = (value: Date | string) => new Date(value).toISOString();
@@ -1925,7 +1930,6 @@ export async function restoreProviderSnapshot(
       name: input.name,
       description: input.description,
       sizeGiB: input.sizeGiB,
-      filesystem: input.filesystem,
       deleteWithInstance: input.deleteWithInstance === true,
     }),
   );
@@ -1980,7 +1984,8 @@ export async function restoreProviderSnapshot(
     region: snapshot.region,
     sizeGiB,
     kind: 'block',
-    ...(input.filesystem !== undefined ? { filesystem: input.filesystem } : {}),
+    // Shown as the snapshot's volume's (the restore keeps it); never sent to the provider (volumeSpec).
+    ...(source?.filesystem ? { filesystem: source.filesystem } : {}),
     sourceSnapshotId: snapshot.id,
     deleteWithInstance: input.deleteWithInstance === true,
     createdBy: identity,
@@ -2160,6 +2165,11 @@ async function openAddress(tx: SqlTx, ref: ProviderAddressRef): Promise<AddressR
   const row = await requireAddress(tx, ref, true);
   if (row.desired_state === 'deleted' || row.state === 'deleted')
     throw new ComputeError('INVALID_STATE', `Address ${ref.addressId} is being deleted`);
+  if (row.lost)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Address ${ref.addressId} no longer holds its reservation at the provider; delete it`,
+    );
   return row;
 }
 
@@ -2290,6 +2300,8 @@ class Run {
   lastCode: string | undefined;
   /** That error's `details.reason`, when it had one. */
   lastReason: string | undefined;
+  /** The last `attempt` called nothing: the run's budget was spent (the provider was not asked). */
+  skipped = false;
   readonly #started: number;
 
   constructor(
@@ -2325,8 +2337,10 @@ class Run {
     what: string,
     op: () => Promise<ProviderResourceState | undefined>,
   ): Promise<ProviderResourceState | 'missing' | undefined> {
+    this.skipped = false;
     if (this.deps.clock.now() - this.#started > runBudgetMs) {
       this.again = true;
+      this.skipped = true;
       return undefined;
     }
     this.lastCode = undefined;
@@ -2375,15 +2389,25 @@ class Run {
   /**
    * Writes observed fields of one row, guarded by the version the run decided on; publishes `event` when the row
    * changed. Answers whether it wrote (a row changed meanwhile is left alone and the run continues at once).
+   * `before` runs first in the same transaction, only while the row is still at that version.
    */
   async write(
     table: 'provider_volumes' | 'provider_snapshots' | 'provider_addresses',
     row: { id: string; version: number | string },
     fields: Fields,
     after?: (tx: SqlTx) => Promise<void>,
+    before?: (tx: SqlTx) => Promise<void>,
   ): Promise<boolean> {
     const set = assignments(fields);
     const written = await this.sql.transaction(async (tx) => {
+      if (before) {
+        const current = await tx.query(`SELECT id FROM ${table} WHERE id = $1 AND version = $2 FOR UPDATE`, [
+          row.id,
+          row.version,
+        ]);
+        if (current.rows.length === 0) return false;
+        await before(tx);
+      }
       const { rows } = await tx.query(
         `UPDATE ${table} SET ${set.sql} WHERE id = $1 AND version = $2 RETURNING id`,
         [row.id, row.version, ...set.params],
@@ -2710,11 +2734,37 @@ function volumeSpec(
     region: volume.region,
     sizeGiB: Number(volume.size_gib),
     kind: volume.kind ?? 'block',
-    ...(volume.filesystem ? { filesystem: volume.filesystem } : {}),
+    // A restore keeps its snapshot's filesystem: none is asked for (a format could wipe the restored data).
+    ...(volume.filesystem && snapshotId === undefined ? { filesystem: volume.filesystem } : {}),
     ...(snapshotId !== undefined ? { snapshotId } : {}),
     // A share is made in its network's VPC in the region: the provider refuses one without it (fail closed).
     ...(volume.kind === 'shared' && network !== undefined ? { network: { network } } : {}),
   };
+}
+
+/** The message of a volume the provider no longer has although vps made it and never deleted it. */
+const volumeDeletedOutsideMessage =
+  'The volume was deleted at the provider outside better-compute; its data is gone and it is never created again. Delete this volume';
+
+/**
+ * A volume vps made that the provider no longer has: `error` (published once), its external id kept, and never
+ * created again. A detach asked meanwhile is settled without a provider call; a wanted attachment says why it is not.
+ */
+async function volumeGone(
+  run: Run,
+  volume: VolumeRow,
+  attachments: readonly VolumeAttachment[],
+): Promise<void> {
+  run.deps.log.warn('providerResources: volume deleted at the provider outside better-compute', {
+    volumeId: volume.id,
+    providerAccountId: volume.provider_account_id,
+  });
+  for (const attachment of attachments) {
+    if (attachment.desired_state === 'deleted') await settleDetached(run, attachment, volume);
+    else if (attachment.state !== 'error' || attachment.message !== 'The volume is gone')
+      await writeAttachment(run, attachment, { state: 'error', message: 'The volume is gone' });
+  }
+  await setVolume(run, volume, settled('error', volumeDeletedOutsideMessage));
 }
 
 async function convergeVolume(
@@ -2730,23 +2780,40 @@ async function convergeVolume(
     attachments.some((a) => a.desired_state === 'present' && a.instance_state === 'deleting')
   )
     return;
-  let snapshotId: string | undefined;
-  if (volume.source_snapshot_id) {
-    // A restore waits for its snapshot's provider id; a snapshot that went away fails it.
-    if (!source?.external_id) {
-      if (!source || source.state === 'deleted' || source.state === 'error')
-        await setVolume(run, volume, settled('error', `Snapshot ${volume.source_snapshot_id} is gone`));
-      else run.inFlight = true;
+  let ensured: ProviderResourceState | 'missing' | undefined;
+  if (volume.external_id) {
+    // Made already: only read. A volume gone from the provider was deleted outside better-compute; an ensure by name
+    // would quietly make a new, empty one at the same guest path, so the row fails instead and nothing is created.
+    const id = volume.external_id;
+    const observed = await run.attempt(`get ${volume.id}`, () =>
+      volumes.getVolume(id, run.call(`get:${volume.id}`)),
+    );
+    if (observed === undefined) return;
+    if (observed === 'missing' || observed.state === 'deleted') {
+      await volumeGone(run, volume, attachments);
       return;
     }
-    snapshotId = source.external_id;
+    ensured = observed;
+  } else {
+    let snapshotId: string | undefined;
+    if (volume.source_snapshot_id) {
+      // A restore waits for its snapshot's provider id; a snapshot that went away fails it.
+      if (!source?.external_id) {
+        if (!source || source.state === 'deleted' || source.state === 'error')
+          await setVolume(run, volume, settled('error', `Snapshot ${volume.source_snapshot_id} is gone`));
+        else run.inFlight = true;
+        return;
+      }
+      snapshotId = source.external_id;
+    }
+    if (!volume.ensure_requested) {
+      if (!(await run.write('provider_volumes', volume, { ensure_requested: true }))) return;
+    }
+    // First create, or a create whose answer was lost: the ensure finds by name what an earlier attempt made.
+    ensured = await run.attempt(`ensure ${volume.id}`, () =>
+      volumes.ensureVolume(volumeSpec(volume, snapshotId, network), run.call(`ensure:${volume.id}`)),
+    );
   }
-  if (!volume.ensure_requested) {
-    if (!(await run.write('provider_volumes', volume, { ensure_requested: true }))) return;
-  }
-  const ensured = await run.attempt(`ensure ${volume.id}`, () =>
-    volumes.ensureVolume(volumeSpec(volume, snapshotId, network), run.call(`ensure:${volume.id}`)),
-  );
   if (ensured === undefined) return;
   if (ensured === 'missing' || ensured.state === 'error') {
     // A refusal created nothing: a delete then needs no provider call, and its quota is refunded at once.
@@ -3052,7 +3119,7 @@ async function reconcileAddress(run: Run, addressId: string): Promise<void> {
   });
   if (!loaded || loaded.address.state === 'deleted') return;
   const { address, instance } = loaded;
-  const set = async (fields: Fields) => {
+  const set = async (fields: Fields, before?: (tx: SqlTx) => Promise<void>) => {
     const state = fields.state as ProviderResourceStatus | undefined;
     const becameReady = state === 'ready' && address.state !== 'ready';
     const becameError =
@@ -3080,8 +3147,15 @@ async function reconcileAddress(run: Run, addressId: string): Promise<void> {
             message: String(fields.message ?? ''),
           });
       },
+      before,
     );
   };
+  if (address.lost) {
+    // The reservation is gone: no provider call, ever. A delete finishes the row; anything else keeps it in error.
+    if (address.desired_state === 'deleted') await finishAddress(run, address);
+    else await set(settled('error', addressLostMessage));
+    return;
+  }
   const addresses = await run.client(loaded.account, address.provider_account_id, 'addresses');
   if (typeof addresses === 'string') {
     await set(settled('error', addresses));
@@ -3091,12 +3165,80 @@ async function reconcileAddress(run: Run, addressId: string): Promise<void> {
   else await convergeAddress(run, addresses, address, instance, set);
 }
 
+/** The message of an address whose reservation is gone (`lost`). */
+const addressLostMessage =
+  'The reserved address was released at the provider outside better-compute, or its IP handed to another reservation; it is never re-adopted, assigned or released. Delete this address';
+
+/** What a row that lost its reservation keeps: no provider id, no assignment, never another provider call. */
+const lostFields = (): Fields => ({
+  lost: true,
+  external_id: null,
+  instance_id: null,
+  assigned_machine: null,
+  assignment_state: 'none',
+  assignment_message: null,
+  ...settled('error', addressLostMessage),
+});
+
+/** Marks the address lost (its reservation is gone), publishing `providerAddress.error` once. */
+async function loseAddress(run: Run, address: AddressRow): Promise<void> {
+  run.deps.log.warn('providerResources: the reservation of this address is gone; it is never re-adopted', {
+    addressId: address.id,
+    providerAccountId: address.provider_account_id,
+  });
+  await run.write('provider_addresses', address, lostFields(), (tx) =>
+    publish(run.deps, tx, 'providerAddress', address, 'error', { message: addressLostMessage }),
+  );
+}
+
+/**
+ * Before a fresh reserve's id is recorded: any other live row that still records it lost its reservation (the
+ * provider hands out only an address no reservation holds, so that one was released outside better-compute). Each
+ * is marked lost, so it never assigns or releases the new reservation, and woken to settle.
+ */
+async function claimAddress(run: Run, tx: SqlTx, address: AddressRow, externalId: string): Promise<void> {
+  const lost = lostFields();
+  const set = assignments(lost);
+  const { rows } = await tx.query<AddressRow>(
+    `UPDATE provider_addresses SET ${set.sql}, version = version + 1
+      WHERE provider_account_id = $1 AND external_id = $2 AND id <> $${set.params.length + 3}
+        AND state <> 'deleted'
+      RETURNING ${addressColumns}`,
+    [address.provider_account_id, externalId, ...set.params, address.id],
+  );
+  for (const row of rows) {
+    run.deps.log.warn('providerResources: a reserve was handed the address another row recorded; that row is lost', {
+      addressId: row.id,
+      newAddressId: address.id,
+      providerAccountId: address.provider_account_id,
+    });
+    await publish(run.deps, tx, 'providerAddress', row, 'error', { message: addressLostMessage });
+    await run.deps.work.enqueue(tx, providerResourcesWork, row.id);
+  }
+}
+
+async function finishAddress(run: Run, address: AddressRow): Promise<boolean> {
+  return run.write(
+    'provider_addresses',
+    address,
+    { state: 'deleted', message: null, charged: 0 },
+    async (tx) => {
+      if (Number(address.charged) > 0)
+        await refundQuota(tx, address.tenant_id, address.pool_id, {
+          [addressQuotaResource]: Number(address.charged),
+        });
+      await run.deps.authz.remove(tx, { type: 'provider-address', id: address.id });
+      await publish(run.deps, tx, 'providerAddress', address, 'deleted');
+    },
+  );
+}
+
 async function convergeAddress(
   run: Run,
   addresses: ProviderAddresses,
   address: AddressRow,
   instance: { external_id: string | null; state: string } | undefined,
-  set: (fields: Fields) => Promise<void>,
+  set: (fields: Fields, before?: (tx: SqlTx) => Promise<void>) => Promise<void>,
 ): Promise<void> {
   if (!address.external_id && address.ensure_requested) {
     // A reserve whose answer was lost may have reserved an address no id names (a provider whose addresses carry no
@@ -3124,9 +3266,25 @@ async function convergeAddress(
     addresses.ensureAddress(spec, run.call(`ensure:${address.id}`)),
   );
   if (ensured === undefined) {
-    // Rate limited before anything was reserved: the next run may reserve again.
-    if (!address.external_id && run.lastCode !== undefined && !ambiguousCodes.includes(run.lastCode))
+    // Rate limited before anything was reserved, or not sent at all (the run's budget was spent): the next run may
+    // reserve again.
+    if (
+      !address.external_id &&
+      (run.skipped || (run.lastCode !== undefined && !ambiguousCodes.includes(run.lastCode)))
+    )
       await run.write('provider_addresses', address, { ensure_requested: false });
+    return;
+  }
+  if (
+    address.external_id &&
+    ensured !== 'missing' &&
+    ensured.state === 'error' &&
+    (run.lastCode === 'NOT_FOUND' ||
+      (run.lastCode === 'INVALID_STATE' && (run.lastReason === 'notManaged' || run.lastReason === 'region')))
+  ) {
+    // The reservation is gone (released outside better-compute), or the address at its id is another one: lost for
+    // good, never re-adopted later when the provider hands the IP out again.
+    await loseAddress(run, address);
     return;
   }
   if (ensured === 'missing' || ensured.state === 'error' || !ensured.id) {
@@ -3141,6 +3299,10 @@ async function convergeAddress(
     return;
   }
   const externalId = ensured.id;
+  // A fresh reserve: another live row recording this id lost its reservation, and is marked so first.
+  const claim = address.external_id
+    ? undefined
+    : (tx: SqlTx) => claimAddress(run, tx, address, externalId);
   const fields: Fields = {
     external_id: externalId,
     ...(output(ensured, 'address') ? { address: output(ensured, 'address')! } : {}),
@@ -3151,7 +3313,7 @@ async function convergeAddress(
   };
   if (ensured.state !== 'ready') {
     run.inFlight = true;
-    await set({ ...fields, ...settled('pending') });
+    await set({ ...fields, ...settled('pending') }, claim);
     return;
   }
   const assignedTo = output(ensured, 'assignedTo');
@@ -3183,7 +3345,7 @@ async function convergeAddress(
       ...(address.instance_id !== null ? { instance_id: null } : {}),
     };
   }
-  await set({ ...fields, ...assignment, ...settled('ready') });
+  await set({ ...fields, ...assignment, ...settled('ready') }, claim);
 }
 
 async function unassign(
@@ -3250,15 +3412,7 @@ async function teardownAddress(
   address: AddressRow,
   set: (fields: Fields) => Promise<void>,
 ): Promise<void> {
-  const finish = () =>
-    run.write('provider_addresses', address, { state: 'deleted', message: null, charged: 0 }, async (tx) => {
-      if (Number(address.charged) > 0)
-        await refundQuota(tx, address.tenant_id, address.pool_id, {
-          [addressQuotaResource]: Number(address.charged),
-        });
-      await run.deps.authz.remove(tx, { type: 'provider-address', id: address.id });
-      await publish(run.deps, tx, 'providerAddress', address, 'deleted');
-    });
+  const finish = () => finishAddress(run, address);
   const externalId = address.external_id;
   if (!externalId) {
     // Never reserved: nothing to release. A reserve whose answer was lost cannot be found again by vps: the row is

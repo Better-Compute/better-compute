@@ -67,6 +67,12 @@ export interface ProviderConformanceSubject {
   sharedVolumeGiB?: number;
   /** The subnet range the shared-volume case makes (default `10.200.0.0/24`). */
   sharedVolumeCidr?: string;
+  /**
+   * A volume and a volume snapshot at the provider that this deployment did not make (another deployment's, or the
+   * account owner's): the ownership case checks a delete refuses each (`INVALID_STATE`) and leaves it. Each check is
+   * skipped without its id; the address check needs none.
+   */
+  foreign?: { volumeId?: string; snapshotId?: string };
 }
 
 const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -810,6 +816,81 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
             await addresses.deleteAddress(addressId, call('region-addr-cleanup')).catch(() => {});
           await cleanUp(impl, call, foreign.id);
           await cleanUp(impl, call, machine.id);
+        }
+      },
+    },
+    {
+      name: 'volumes and addresses (when offered): a delete refuses what this deployment did not make',
+      async run(subject) {
+        const { impl, call } = await client(subject);
+        const volumes = impl.volumes;
+        const addresses = impl.addresses;
+        if (!volumes && !addresses) return;
+        const foreign = subject.foreign ?? {};
+        if (volumes && foreign.volumeId !== undefined) {
+          const id = foreign.volumeId;
+          checkResource(await volumes.getVolume(id, call('foreign-vol-get')), "the subject's foreign volume");
+          await checkRejects(
+            () => volumes.deleteVolume(id, call('foreign-vol-delete')),
+            'INVALID_STATE',
+            'deleting a volume this deployment did not make',
+          );
+          const after = await volumes.getVolume(id, call('foreign-vol-after'));
+          check(
+            after !== undefined && after.state !== 'deleting' && after.state !== 'deleted',
+            'a refused delete leaves the volume',
+          );
+        }
+        if (volumes && foreign.snapshotId !== undefined) {
+          const id = foreign.snapshotId;
+          checkResource(await volumes.getSnapshot(id, call('foreign-snap-get')), "the subject's foreign snapshot");
+          await checkRejects(
+            () => volumes.deleteSnapshot(id, call('foreign-snap-delete')),
+            'INVALID_STATE',
+            'deleting a snapshot this deployment did not make',
+          );
+          const after = await volumes.getSnapshot(id, call('foreign-snap-after'));
+          check(
+            after !== undefined && after.state !== 'deleting' && after.state !== 'deleted',
+            'a refused delete leaves the snapshot',
+          );
+        }
+        if (!addresses) return;
+        // An address that does not match what was recorded (here: its region) is another reservation: never released.
+        const region =
+          subject.region ?? (await impl.listOffers({})).find((offer) => offer.id === subject.offerId)?.region;
+        if (region === undefined) return;
+        let addressId: string | undefined;
+        try {
+          const address = await settle(
+            subject,
+            () =>
+              addresses.ensureAddress(
+                { name: key(subject, 'owner-addr'), region, family: 'ipv4' },
+                call('owner-addr'),
+              ),
+            ['ready'],
+            'ensureAddress',
+          );
+          addressId = address.id;
+          await checkRejects(
+            () =>
+              addresses.deleteAddress(address.id, call('owner-addr-delete'), {
+                region: `${region}-elsewhere`,
+              }),
+            'INVALID_STATE',
+            'releasing an address that does not match what this deployment recorded',
+          );
+          const after = await addresses.getAddress(address.id, call('owner-addr-after'));
+          check(
+            after !== undefined && after.state !== 'deleting' && after.state !== 'deleted',
+            'a refused release leaves the address',
+          );
+        } finally {
+          if (addressId !== undefined)
+            await addresses
+              .deleteAddress(addressId, call('owner-addr-cleanup'), { region })
+              .catch(() => {});
         }
       },
     },

@@ -54,6 +54,7 @@ import { seedAutoscalePool } from './support/do-emulator/autoscale.js';
 import { seedDroplet } from './support/do-emulator/droplets.js';
 import { DoEmulator, type RecordedRequest } from './support/do-emulator/index.js';
 import { seedSshKey } from './support/do-emulator/keys.js';
+import { seedSnapshot, seedVolume } from './support/do-emulator/volumes.js';
 import { seedVpc } from './support/do-emulator/vpcs.js';
 import {
   build,
@@ -2217,7 +2218,11 @@ describe('definition', () => {
       // A create needs an SSH key: the account's default one.
       const key = seedSshKey(emu.state, 'ops', testKey);
       const hand = seedDroplet(emu.state, { name: 'legacy', tags: [] });
+      // The account owner's own volume and snapshot (no better-compute tags): never deleted.
+      const theirs = seedVolume(emu.state, { name: 'owner-data', tags: ['team:ops'] });
+      const theirSnapshot = seedSnapshot(emu.state, { volume: theirs, name: 'owner-nightly', tags: ['team:ops'] });
       return {
+        foreign: { volumeId: theirs.id, snapshotId: theirSnapshot.id },
         provider: digitaloceanProvider({ fetch: emu.fetch }),
         config: { ...doAccount, regions: ['nyc3', 'sfo3'], sshKeyFingerprint: key.fingerprint },
         attachable: String(hand.id),
@@ -2326,7 +2331,19 @@ describe('definition', () => {
         nfs: 'ok',
       },
       missing: [],
+      // A read-only probe cannot see write scopes: it names those it did not check, for the operator.
+      unverified: expect.arrayContaining([
+        'droplet:create',
+        'block_storage:create',
+        'block_storage:delete',
+        'block_storage_action:create',
+        'block_storage_snapshot:create',
+        'reserved_ip:create',
+        'reserved_ip:update',
+        'reserved_ip:delete',
+      ]),
     });
+    expect(report.unverified.every((scope) => !scope.endsWith(':read'))).toBe(true);
     // Single, read-only requests: one page of each, nothing that changes anything.
     expect(reads(emu).sort()).toEqual(
       [

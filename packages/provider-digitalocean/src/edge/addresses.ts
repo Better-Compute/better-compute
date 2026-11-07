@@ -22,6 +22,13 @@ import { carries } from '../storage/volumes.js';
 // that never arrives is not retried here: the error stands and the address, if DO made it, is
 // left for the operator (logged), which is cheaper than handing a tenant somebody else's address.
 //
+// The `fingerprint` output tells one reservation of an IP apart from a later one: a reserved
+// IPv6's `reserved_at`. A reserved IPv4 has none. Its `project_id` is not one: every reserved IP
+// better-compute makes lands in the account's default project, as do the owner's own, so a
+// re-reservation of the same IP shows the same project. For IPv4 the control plane's own record
+// is the only guard (vps keeps one live row per address, and an address gone at DO is lost for
+// good there); this provider never presents the project as a fingerprint.
+//
 // What the provider can check, it does, before any write. An address only goes to a Droplet in
 // its region that belongs to an instance of this deployment; one assigned to another Droplet is
 // `CONFLICT` (DO's assign would move it silently); one assigned to a Droplet that is not this
@@ -72,14 +79,19 @@ interface Address {
   region: string;
   droplet: DoDroplet | undefined;
   locked: boolean;
-  /** What tells this reservation apart from a later one at the same IP (reserved IPs carry no tags). */
+  /**
+   * What tells this reservation apart from a later one at the same IP (reserved IPs carry no tags): IPv6 only, see
+   * `fingerprintOf`.
+   */
   fingerprint: string | undefined;
 }
 
-/** A reserved IPv6's reservation time, else a reserved IPv4's project: undefined when DO did not say. */
-function fingerprintOf(found: { project_id?: string; reserved_at?: string }): string | undefined {
+/**
+ * A reserved IPv6's reservation time; undefined for a reserved IPv4, which has nothing that tells one reservation
+ * from a later one (its project is shared by every reservation in the project), and when DO did not say.
+ */
+function fingerprintOf(found: { reserved_at?: string }): string | undefined {
   if (typeof found.reserved_at === 'string' && found.reserved_at !== '') return `reserved:${found.reserved_at}`;
-  if (typeof found.project_id === 'string' && found.project_id !== '') return `project:${found.project_id}`;
   return undefined;
 }
 
@@ -137,7 +149,8 @@ export class DoAddresses implements ProviderAddresses {
           region: found.region.slug,
           droplet: found.droplet ?? undefined,
           locked: found.locked === true,
-          fingerprint: fingerprintOf(found),
+          // A reserved IPv4 has no fingerprint (its project is no reservation's own).
+          fingerprint: undefined,
         };
       }
       const { reserved_ipv6: found } = await this.client.request<{
@@ -264,7 +277,6 @@ export class DoAddresses implements ProviderAddresses {
           { body: { region: spec.region }, signal, budget: 'mutate' },
         );
         ip = reply.reserved_ip?.ip;
-        fingerprint = reply.reserved_ip ? fingerprintOf(reply.reserved_ip) : undefined;
       } else {
         const reply = await this.client.request<{ reserved_ipv6?: DoReservedIpv6 }>(
           'POST',

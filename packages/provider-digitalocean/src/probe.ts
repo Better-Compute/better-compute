@@ -5,7 +5,9 @@ import type { DoConfig, DoProviderOptions } from './config.js';
 
 // A read-only look at what a token may do, for the CLI's account check: GET /account, then one
 // page of each list the provider reads. A 403 on a list is that scope missing; `account:read` is
-// fatal, since without it nothing else is worth reporting.
+// fatal, since without it nothing else is worth reporting. Write scopes are not probed: DO has no
+// read-only way to see them, and a trial write could create (and bill) something. The report names
+// them as `unverified`, so a token that reads but cannot create is not taken for a working one.
 
 /**
  * Whether the token may read a family of resources. `unavailable` is only for an optional family
@@ -24,7 +26,37 @@ export interface DoAccountReport {
   >;
   /** The read scopes the token lacks, in probe order. */
   missing: string[];
+  /**
+   * The write scopes the provider needs that a read-only probe cannot check (the README's scope table): a token
+   * without one passes the probe and fails the first write with `ACCESS_DENIED`.
+   */
+  unverified: string[];
 }
+
+/** The write scopes the provider uses, by family; never probed (see the top of this file). */
+const writeScopes: readonly string[] = [
+  'droplet:create',
+  'droplet:update',
+  'droplet:delete',
+  'ssh_key:create',
+  'tag:create',
+  'tag:delete',
+  'vpc:create',
+  'vpc:update',
+  'vpc:delete',
+  'firewall:create',
+  'firewall:update',
+  'firewall:delete',
+  'block_storage:create',
+  'block_storage:update',
+  'block_storage:delete',
+  'block_storage_action:create',
+  'block_storage_snapshot:create',
+  'block_storage_snapshot:delete',
+  'reserved_ip:create',
+  'reserved_ip:update',
+  'reserved_ip:delete',
+];
 
 type Family = keyof DoAccountReport['families'];
 
@@ -164,5 +196,6 @@ async function probe(
     },
     families,
     missing,
+    unverified: [...writeScopes],
   };
 }
