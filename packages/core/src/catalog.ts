@@ -738,6 +738,10 @@ group('networks', 'vps', [
   ['removeSubnet', 'mutation', 'networks:update', 'network', 'v1.0'],
   // The platform registers a provider VPC that already exists as a tenant network (root only).
   ['adopt', 'mutation', 'providers:manage', 'fleet', 'v1.0'],
+  // (DO P4) The network's edge: a subnet's NAT gateway, peerings between subnets, a subnet's static routes.
+  ['natGateway', 'mutation', 'networks:update', 'network', 'v1.0'],
+  ['peer', 'mutation', 'networks:update', 'network', 'v1.0'],
+  ['routes', 'mutation', 'networks:update', 'network', 'v1.0'],
 ]);
 group('firewallRules', 'vps', [
   ['create', 'mutation', 'networks:update', 'network', 'v1.0'],

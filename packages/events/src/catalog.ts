@@ -244,7 +244,7 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     subject: 'network/{id}',
     module: 'vps',
     description:
-      'Tenant networks (VPCs): created, adopted (an existing provider VPC, networks.adopt: { externalNetwork, sharedTagScoped }), ready, error, deleting, deleted; network.subnet.ready and network.rule.ready/error when a subnet or firewall rule converges; data { networkId, ... }',
+      'Tenant networks (VPCs): created, adopted (an existing provider VPC, networks.adopt: { externalNetwork, sharedTagScoped }), ready, error, deleting, deleted; network.subnet.ready and network.rule.ready/error when a subnet or firewall rule converges; (edge) network.natGateway.ready/error, network.peering.ready/error and network.route.ready/error { edgeId, subnetId }; data { networkId, ... }',
   },
   {
     type: 'providerVolume.*',

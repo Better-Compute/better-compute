@@ -10,7 +10,10 @@ import {
   type MethodContext,
   type ModuleContext,
   type ProviderFirewallSpec,
+  type ProviderNatGatewaySpec,
   type ProviderNetworkSpec,
+  type ProviderPeeringSpec,
+  type ProviderRouteSpec,
   type ProviderNetworkState,
   type ProviderSubnetSpec,
   type SqlExecutor,
@@ -71,6 +74,10 @@ const gce = {
   networks: new Map<string, ProviderNetworkSpec>(),
   subnets: new Map<string, ProviderSubnetSpec>(),
   firewalls: new Map<string, ProviderFirewallSpec>(),
+  /** (edge) NAT gateways by `region/name`, peerings by name, routes by `subnet/name`. */
+  nats: new Map<string, ProviderNatGatewaySpec>(),
+  peerings: new Map<string, ProviderPeeringSpec>(),
+  routes: new Map<string, ProviderRouteSpec>(),
   tags: new Map<string, string[]>(),
   /** The instance id each setTags named. */
   tagOwners: new Map<string, string | undefined>(),
@@ -97,6 +104,9 @@ const gce = {
     this.networks.clear();
     this.subnets.clear();
     this.firewalls.clear();
+    this.nats.clear();
+    this.peerings.clear();
+    this.routes.clear();
     this.tags.clear();
     this.tagOwners.clear();
     this.claimedBy.clear();
@@ -223,6 +233,15 @@ const gceLike = defineProvider({
         });
       },
       async deleteSubnet(region, name) {
+        const used =
+          [...gce.nats.values(), ...gce.routes.values()].some((edge) => edge.subnet === name) ||
+          [...gce.peerings.values()].some(
+            (peering) => peering.subnet === name || peering.peer.subnet === name,
+          );
+        if (used) {
+          gce.calls.push(`deleteSubnet ${name}`);
+          return { id: name, state: 'deleting' };
+        }
         return gce.step('deleteSubnet', name, !gce.subnets.has(`${region}/${name}`), () => {
           gce.subnets.delete(`${region}/${name}`);
           return 'deleted';
@@ -233,6 +252,66 @@ const gceLike = defineProvider({
           gce.firewalls.delete(name);
           return 'deleted';
         });
+      },
+      async ensureNatGateway(spec) {
+        const answer = gce.step(
+          'ensureNatGateway',
+          spec.name,
+          gce.nats.has(`${spec.region}/${spec.name}`),
+          () => {
+            gce.nats.set(`${spec.region}/${spec.name}`, spec);
+            return 'ready';
+          },
+        );
+        return {
+          ...answer,
+          id: `nat-${spec.name}`,
+          ...(answer.state === 'ready'
+            ? { outputs: { region: spec.region, address: '203.0.113.7', gateway: '10.0.0.1' } }
+            : {}),
+        };
+      },
+      async deleteNatGateway(region, name) {
+        return gce.step('deleteNatGateway', name, !gce.nats.has(`${region}/${name}`), () => {
+          gce.nats.delete(`${region}/${name}`);
+          return 'deleted';
+        });
+      },
+      async ensurePeering(spec) {
+        const answer = gce.step('ensurePeering', spec.name, gce.peerings.has(spec.name), () => {
+          gce.peerings.set(spec.name, spec);
+          return 'ready';
+        });
+        return { ...answer, id: `peer-${spec.name}` };
+      },
+      async deletePeering(name) {
+        return gce.step('deletePeering', name, !gce.peerings.has(name), () => {
+          gce.peerings.delete(name);
+          return 'deleted';
+        });
+      },
+      async ensureRoute(spec) {
+        const answer = gce.step(
+          'ensureRoute',
+          spec.name,
+          gce.routes.has(`${spec.subnet}/${spec.name}`),
+          () => {
+            gce.routes.set(`${spec.subnet}/${spec.name}`, spec);
+            return 'ready';
+          },
+        );
+        return { ...answer, id: `route-${spec.name}` };
+      },
+      async deleteRoute(ref) {
+        return gce.step(
+          'deleteRoute',
+          ref.name,
+          !gce.routes.has(`${ref.subnet}/${ref.name}`),
+          () => {
+            gce.routes.delete(`${ref.subnet}/${ref.name}`);
+            return 'deleted';
+          },
+        );
       },
       async setTags(machineId, tags, _call, instanceId) {
         gce.calls.push(`setTags ${machineId}`);
@@ -537,6 +616,7 @@ beforeEach(async () => {
   await db.query(`DELETE FROM provider_machines`);
   await db.query(`DELETE FROM instance_usage_intervals`);
   await db.query(`DELETE FROM instances`);
+  await db.query(`DELETE FROM network_edges`);
   await db.query(`DELETE FROM network_firewall_rules`);
   await db.query(`DELETE FROM network_subnets`);
   await db.query(`DELETE FROM networks`);
@@ -2221,5 +2301,387 @@ describe('networks.adopt', () => {
       subnet: providerResourceName(view.subnets[0]!.id),
       tags: [networkTag(created.id)],
     });
+  });
+});
+
+// --- Edge: NAT gateways, peerings and routes (DO P4) ----------------------------------------------
+
+describe('network edge (networks.natGateway, networks.peer, networks.routes)', () => {
+  const natGateway = (networkId: string, subnetId: string, enabled = true, who: Caller = alice) =>
+    call('networks', 'natGateway', { tenantId: who.tenantId, networkId, subnetId, enabled }, who);
+  const routes = (networkId: string, subnetId: string, list: unknown[], who: Caller = alice) =>
+    call('networks', 'routes', { tenantId: who.tenantId, networkId, subnetId, routes: list }, who);
+  const peer = (
+    networkId: string,
+    subnetId: string,
+    peerNetworkId: string,
+    peerSubnetId: string,
+    enabled = true,
+    who: Caller = alice,
+  ) =>
+    call(
+      'networks',
+      'peer',
+      { tenantId: who.tenantId, networkId, subnetId, peerNetworkId, peerSubnetId, enabled },
+      who,
+    );
+  const edgesSettled = async (networkId: string) => {
+    const view = await getNetwork(networkId);
+    return (
+      view.state === 'ready' &&
+      [...(view.natGateways ?? []), ...(view.peerings ?? []), ...(view.routes ?? [])].every(
+        (edge) => edge.state === 'ready',
+      )
+    );
+  };
+
+  it('a NAT gateway carries a subnet’s egress, is idempotent, and goes when disabled', async () => {
+    const { network } = await readyNetwork(['10.0.0.0/20'], 0);
+    const subnet = network.subnets[0]!;
+    const asked = await natGateway(network.id, subnet.id);
+    expect(asked.state).toBe('pending');
+    expect(asked.natGateways).toEqual([
+      { id: expect.stringMatching(/^nedge_/), subnetId: subnet.id, state: 'pending' },
+    ]);
+    // Asking again changes nothing.
+    const again = await natGateway(network.id, subnet.id);
+    expect(again.natGateways).toEqual(asked.natGateways);
+    await until(() => edgesSettled(network.id));
+    const gatewayId = asked.natGateways![0]!.id;
+    expect([...gce.nats.values()]).toEqual([
+      {
+        name: providerResourceName(gatewayId),
+        network: providerResourceName(network.id),
+        subnet: providerResourceName(subnet.id),
+        region: 'us-central1',
+      },
+    ]);
+    expect((await getNetwork(network.id)).natGateways).toEqual([
+      { id: gatewayId, subnetId: subnet.id, state: 'ready', addresses: ['203.0.113.7'] },
+    ]);
+    expect(events.map((event) => event.type)).toContain('network.natGateway.ready');
+
+    await natGateway(network.id, subnet.id, false);
+    await until(() => edgesSettled(network.id));
+    expect(gce.nats.size).toBe(0);
+    expect((await getNetwork(network.id)).natGateways).toBeUndefined();
+    // Disabling what is not there is a no-op.
+    expect((await natGateway(network.id, subnet.id, false)).natGateways).toBeUndefined();
+  });
+
+  it('checks the subnet, and refuses another tenant', async () => {
+    const { network } = await readyNetwork(['10.0.0.0/20'], 0);
+    const other = await readyNetwork(['10.1.0.0/20'], 0);
+    expect(await codeOf(natGateway(network.id, other.network.subnets[0]!.id))).toBe('NOT_FOUND');
+    expect(await codeOf(natGateway(network.id, 'snet_x'))).toBe('INVALID_INPUT');
+    expect(
+      await codeOf(
+        call('networks', 'natGateway', {
+          tenantId: 'root',
+          networkId: network.id,
+          subnetId: network.subnets[0]!.id,
+        }),
+      ),
+    ).toBe('INVALID_INPUT');
+    expect(
+      await codeOf(
+        call(
+          'networks',
+          'natGateway',
+          {
+            tenantId: 'other',
+            networkId: network.id,
+            subnetId: network.subnets[0]!.id,
+            enabled: true,
+          },
+          mallory,
+        ),
+      ),
+    ).toBe('ACCESS_DENIED');
+  });
+
+  it('routes: a NAT next hop waits for the gateway, and the list is replaced as a whole', async () => {
+    const { network } = await readyNetwork(['10.0.0.0/20'], 0);
+    const subnet = network.subnets[0]!;
+    const egress = { name: 'egress', destination: '0.0.0.0/0', nextHop: { natGateway: true } };
+    // No gateway on the subnet yet.
+    expect(await codeOf(routes(network.id, subnet.id, [egress]))).toBe('INVALID_STATE');
+    const withGateway = await natGateway(network.id, subnet.id);
+    const view = await routes(network.id, subnet.id, [egress]);
+    expect(view.routes).toEqual([
+      {
+        id: expect.stringMatching(/^nedge_/),
+        subnetId: subnet.id,
+        name: 'egress',
+        destination: '0.0.0.0/0',
+        nextHop: { natGateway: true },
+        state: 'pending',
+      },
+    ]);
+    await until(() => edgesSettled(network.id));
+    // The gateway was made before the route that needs its provider id.
+    expect(gce.calls.findIndex((entry) => entry.startsWith('ensureNatGateway'))).toBeLessThan(
+      gce.calls.findIndex((entry) => entry.startsWith('ensureRoute')),
+    );
+    const gatewayName = providerResourceName(withGateway.natGateways![0]!.id);
+    expect([...gce.routes.values()]).toEqual([
+      {
+        name: providerResourceName(view.routes![0]!.id),
+        network: providerResourceName(network.id),
+        subnet: providerResourceName(subnet.id),
+        region: 'us-central1',
+        destination: '0.0.0.0/0',
+        nextHop: { kind: 'natGateway', id: `nat-${gatewayName}` },
+      },
+    ]);
+    // The gateway cannot go while a route uses it.
+    expect(await codeOf(natGateway(network.id, subnet.id, false))).toBe('INVALID_STATE');
+    // The same list again changes nothing; a changed route is replaced (deleted, then made anew).
+    const same = await routes(network.id, subnet.id, [egress]);
+    expect(same.routes![0]!.id).toBe(view.routes![0]!.id);
+    const changed = await routes(network.id, subnet.id, [
+      { name: 'egress', destination: '10.8.0.0/16', nextHop: { address: '10.0.0.9' } },
+    ]);
+    expect(changed.routes!.map((route) => route.id)).not.toContain(view.routes![0]!.id);
+    await until(() => edgesSettled(network.id));
+    expect([...gce.routes.values()].map((route) => [route.destination, route.nextHop])).toEqual([
+      ['10.8.0.0/16', { kind: 'address', id: '10.0.0.9' }],
+    ]);
+    expect(gce.calls.some((entry) => entry.startsWith('deleteRoute'))).toBe(true);
+    // An empty list removes every route; then the gateway can go.
+    await routes(network.id, subnet.id, []);
+    await until(() => edgesSettled(network.id));
+    expect(gce.routes.size).toBe(0);
+    await natGateway(network.id, subnet.id, false);
+  });
+
+  it('routes: checks names, destinations and next hops', async () => {
+    const { network } = await readyNetwork(['10.0.0.0/20'], 0);
+    const subnet = network.subnets[0]!;
+    const other = await readyNetwork(['10.1.0.0/20'], 0);
+    const route = (nextHop: unknown, extra: Record<string, unknown> = {}) => ({
+      name: 'r',
+      destination: '10.9.0.0/16',
+      nextHop,
+      ...extra,
+    });
+    const refused = async (list: unknown[]) => codeOf(routes(network.id, subnet.id, list));
+    expect(await refused([route({ address: '10.1.0.5' })])).toBe('INVALID_INPUT');
+    expect(await refused([route({ address: '10.0.0.0' })])).toBe('INVALID_INPUT');
+    expect(await refused([route({ address: 'x' })])).toBe('INVALID_INPUT');
+    expect(await refused([route({ address: '10.0.0.5' }, { destination: '10.9.0.1/16' })])).toBe(
+      'INVALID_INPUT',
+    );
+    expect(await refused([route({ address: '10.0.0.5' }, { name: 'Bad' })])).toBe('INVALID_INPUT');
+    expect(await refused([route({ address: '10.0.0.5', natGateway: true })])).toBe(
+      'INVALID_INPUT',
+    );
+    expect(await refused([route({ address: '10.0.0.5' }), route({ address: '10.0.0.6' })])).toBe(
+      'INVALID_INPUT',
+    );
+    // An instance next hop must be on this subnet.
+    const elsewhere = await insertInstance({
+      networkId: other.network.id,
+      subnetId: other.network.subnets[0]!.id,
+    });
+    expect(await refused([route({ instanceId: elsewhere })])).toBe('INVALID_INPUT');
+    const theirs = await insertInstance({
+      networkId: network.id,
+      subnetId: subnet.id,
+      tenantId: 'other',
+    });
+    expect(await refused([route({ instanceId: theirs })])).toBe('NOT_FOUND');
+    const router = await insertInstance({
+      networkId: network.id,
+      subnetId: subnet.id,
+      externalId: 'vm-router',
+    });
+    await routes(network.id, subnet.id, [route({ instanceId: router })]);
+    await until(() => edgesSettled(network.id));
+    expect([...gce.routes.values()][0]!.nextHop).toEqual({ kind: 'machine', id: 'vm-router' });
+  });
+
+  it('peers two subnets of the tenant, seen from both networks, and unpeers from either side', async () => {
+    const left = (await readyNetwork(['10.0.0.0/20'], 0)).network;
+    const right = (await readyNetwork(['10.1.0.0/20'], 0)).network;
+    const view = await peer(left.id, left.subnets[0]!.id, right.id, right.subnets[0]!.id);
+    const peeringId = view.peerings![0]!.id;
+    expect(view.peerings).toEqual([
+      {
+        id: expect.stringMatching(/^nedge_/),
+        subnetId: left.subnets[0]!.id,
+        peerNetworkId: right.id,
+        peerSubnetId: right.subnets[0]!.id,
+        state: 'pending',
+      },
+    ]);
+    // The same pair from the other side is the same peering.
+    const reverse = await peer(right.id, right.subnets[0]!.id, left.id, left.subnets[0]!.id);
+    expect(reverse.peerings).toEqual([
+      {
+        id: peeringId,
+        subnetId: right.subnets[0]!.id,
+        peerNetworkId: left.id,
+        peerSubnetId: left.subnets[0]!.id,
+        state: 'pending',
+      },
+    ]);
+    await until(() => edgesSettled(left.id));
+    expect([...gce.peerings.values()]).toEqual([
+      {
+        name: providerResourceName(peeringId),
+        network: providerResourceName(left.id),
+        subnet: providerResourceName(left.subnets[0]!.id),
+        region: 'us-central1',
+        peer: {
+          network: providerResourceName(right.id),
+          subnet: providerResourceName(right.subnets[0]!.id),
+          region: 'us-central1',
+        },
+      },
+    ]);
+    expect((await getNetwork(right.id)).peerings![0]!.state).toBe('ready');
+    await peer(right.id, right.subnets[0]!.id, left.id, left.subnets[0]!.id, false);
+    await until(async () => gce.peerings.size === 0 && (await edgesSettled(left.id)));
+    expect((await getNetwork(left.id)).peerings).toBeUndefined();
+    expect((await getNetwork(right.id)).peerings).toBeUndefined();
+  });
+
+  it('refuses peering a subnet with itself, another tenant’s network, or a missing subnet', async () => {
+    const { network } = await readyNetwork(['10.0.0.0/20', '10.1.0.0/20'], 0);
+    const [a, b] = network.subnets;
+    expect(await codeOf(peer(network.id, a!.id, network.id, a!.id))).toBe('INVALID_INPUT');
+    // A network of another tenant (on the same account): as if that tenant had made it.
+    const theirs = await createNetwork();
+    const theirsWithSubnet = await addSubnet(theirs.id, { cidr: '10.5.0.0/20' });
+    await db.query(`UPDATE networks SET tenant_id = 'other' WHERE id = $1`, [theirs.id]);
+    expect(
+      await codeOf(peer(network.id, a!.id, theirs.id, theirsWithSubnet.subnets[0]!.id)),
+    ).toBe('NOT_FOUND');
+    expect(await codeOf(peer(network.id, a!.id, network.id, 'snet_x'))).toBe('INVALID_INPUT');
+    // Two subnets of one network may be peered (a provider whose subnets are networks needs it).
+    const view = await peer(network.id, a!.id, network.id, b!.id);
+    expect(view.peerings).toHaveLength(1);
+  });
+
+  it('decides a peering on the other network too, and a route through an instance on that instance', async () => {
+    const asked: { action: string; resource: { type: string; id: string } }[] = [];
+    const context = {
+      ...moduleContext(db),
+      caller: alice,
+      credential: { token: 't' },
+      iam: {
+        rootTenantId: 'root',
+        async require(_credential: unknown, request: (typeof asked)[number]) {
+          asked.push({ action: request.action, resource: request.resource });
+        },
+      },
+    } as unknown as MethodContext;
+    type Checked = { admission: { check(c: MethodContext, i: unknown, r: unknown): Promise<void> } };
+    const methods = api.networks as unknown as Record<string, Definition & Checked>;
+    const peerInput = methods.peer!.validate({
+      tenantId: 'root',
+      networkId: 'net_01jz0000000000000000000001',
+      subnetId: 'snet_01jz0000000000000000000001',
+      peerNetworkId: 'net_01jz0000000000000000000002',
+      peerSubnetId: 'snet_01jz0000000000000000000002',
+    });
+    await methods.peer!.admission.check(context, peerInput, undefined);
+    expect(asked).toEqual([
+      {
+        action: 'compute:networks:update',
+        resource: { type: 'compute-network', id: 'net_01jz0000000000000000000002' },
+      },
+    ]);
+    asked.length = 0;
+    const routesInput = methods.routes!.validate({
+      tenantId: 'root',
+      networkId: 'net_01jz0000000000000000000001',
+      subnetId: 'snet_01jz0000000000000000000001',
+      routes: [
+        { name: 'a', destination: '10.9.0.0/16', nextHop: { instanceId: 'inst_01jz00000000000000000000aa' } },
+        { name: 'b', destination: '10.8.0.0/16', nextHop: { address: '10.0.0.5' } },
+      ],
+    });
+    await methods.routes!.admission.check(context, routesInput, undefined);
+    expect(asked).toEqual([
+      {
+        action: 'compute:instances:update',
+        resource: { type: 'compute-instance', id: 'inst_01jz00000000000000000000aa' },
+      },
+    ]);
+    // Without the caller's own credential, a peering of two networks is refused.
+    await expect(
+      methods.peer!.admission.check({ ...context, credential: undefined } as never, peerInput, undefined),
+    ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+  });
+
+  it('tears down routes, then gateways and peerings, then subnets, then the network', async () => {
+    const left = (await readyNetwork(['10.0.0.0/20'], 0)).network;
+    const right = (await readyNetwork(['10.1.0.0/20'], 0)).network;
+    const subnet = left.subnets[0]!;
+    await natGateway(left.id, subnet.id);
+    await routes(left.id, subnet.id, [
+      { name: 'egress', destination: '0.0.0.0/0', nextHop: { natGateway: true } },
+    ]);
+    await peer(left.id, subnet.id, right.id, right.subnets[0]!.id);
+    await until(() => edgesSettled(left.id));
+    gce.calls.length = 0;
+    gce.operationDelayTicks = 1;
+    await call('networks', 'delete', { tenantId: 'root', networkId: left.id });
+    await until(async () => (await getNetwork(left.id)).state === 'deleted', 12);
+    const deletes = gce.calls
+      .filter((entry) => entry.startsWith('delete'))
+      .map((entry) => entry.split(' ')[0]!);
+    const lastOf = (kind: string) => deletes.lastIndexOf(kind);
+    const firstOf = (kind: string) => deletes.indexOf(kind);
+    expect(lastOf('deleteRoute')).toBeLessThan(firstOf('deleteNatGateway'));
+    expect(lastOf('deleteNatGateway')).toBeLessThan(firstOf('deleteSubnet'));
+    expect(lastOf('deletePeering')).toBeLessThan(firstOf('deleteSubnet'));
+    expect(lastOf('deleteSubnet')).toBeLessThan(firstOf('deleteNetwork'));
+    expect([gce.nats.size, gce.routes.size, gce.peerings.size]).toEqual([0, 0, 0]);
+    expect((await getNetwork(right.id)).peerings).toBeUndefined();
+    const { rows } = await db.query<{ state: string }>(
+      `SELECT DISTINCT state FROM network_edges WHERE network_id = $1`,
+      [left.id],
+    );
+    expect(rows).toEqual([{ state: 'deleted' }]);
+  });
+
+  it('removing a subnet removes its gateway first; deleting the peer network removes the peering first', async () => {
+    const left = (await readyNetwork(['10.0.0.0/20', '10.2.0.0/20'], 0)).network;
+    const right = (await readyNetwork(['10.1.0.0/20'], 0)).network;
+    const [withGateway, peered] = left.subnets;
+    const gateway = (await natGateway(left.id, withGateway!.id)).natGateways![0]!;
+    await peer(left.id, peered!.id, right.id, right.subnets[0]!.id);
+    await until(() => edgesSettled(left.id));
+    gce.calls.length = 0;
+    await call('networks', 'removeSubnet', {
+      tenantId: 'root',
+      networkId: left.id,
+      subnetId: withGateway!.id,
+    });
+    await until(
+      async () => (await getNetwork(left.id)).subnets.length === 1 && (await edgesSettled(left.id)),
+    );
+    expect(gce.calls.indexOf(`deleteNatGateway ${providerResourceName(gateway.id)}`)).toBeLessThan(
+      gce.calls.lastIndexOf(`deleteSubnet ${providerResourceName(withGateway!.id)}`),
+    );
+    expect(gce.nats.size).toBe(0);
+
+    // The peer network (which does not own the peering row) is deleted: the owner deletes the peering, then the
+    // peer's subnet goes.
+    gce.calls.length = 0;
+    await call('networks', 'delete', { tenantId: 'root', networkId: right.id });
+    await until(async () => (await getNetwork(right.id)).state === 'deleted', 12);
+    expect(gce.calls.findIndex((entry) => entry.startsWith('deletePeering'))).toBeLessThan(
+      gce.calls.findIndex((entry) => entry.startsWith('deleteSubnet')),
+    );
+    expect(gce.peerings.size).toBe(0);
+    expect((await getNetwork(left.id)).peerings).toBeUndefined();
+    // A deleted network cannot be peered.
+    expect(await codeOf(peer(left.id, peered!.id, right.id, right.subnets[0]!.id))).toBe(
+      'INVALID_STATE',
+    );
   });
 });

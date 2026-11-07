@@ -398,6 +398,69 @@ describe('provider-digitalocean through vps, end to end', () => {
     );
   });
 
+  it('gives a subnet a NAT gateway and peers two subnets on DigitalOcean, and tears both down first', async () => {
+    const w = await world();
+    const network = await w.api.networks.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      name: 'edge',
+      idempotencyKey: 'net-edge',
+    });
+    const ref = { tenantId: w.acmeTenant, networkId: network.id };
+    await w.api.networks.addSubnet(w.acme, { ...ref, name: 'app', region: REGION, cidr: '10.30.0.0/24' });
+    const both = await w.api.networks.addSubnet(w.acme, {
+      ...ref,
+      name: 'db',
+      region: REGION,
+      cidr: '10.31.0.0/24',
+    });
+    const [app, db] = [...both.subnets].sort((a: { name: string }, b: { name: string }) =>
+      a.name.localeCompare(b.name),
+    );
+    await w.api.networks.natGateway(w.acme, { ...ref, subnetId: app.id, enabled: true });
+    await w.api.networks.peer(w.acme, {
+      ...ref,
+      subnetId: app.id,
+      peerNetworkId: network.id,
+      peerSubnetId: db.id,
+    });
+    const view = () => w.api.networks.get(w.acme, ref);
+    const edgesReady = async () => {
+      const current = await view();
+      return (
+        current.state === 'ready' &&
+        current.natGateways?.[0]?.state === 'ready' &&
+        current.peerings?.[0]?.state === 'ready'
+      );
+    };
+    for (let round = 0; round < 12 && !(await edgesReady()); round++)
+      await w.tick('vps.networks', 5_000);
+    const ready = await view();
+    expect(ready.natGateways).toEqual([
+      expect.objectContaining({ subnetId: app.id, state: 'ready', addresses: [expect.stringMatching(/^203\.0\.113\./)] }),
+    ]);
+    expect(ready.peerings).toEqual([
+      expect.objectContaining({ subnetId: app.id, peerSubnetId: db.id, state: 'ready' }),
+    ]);
+    // DO holds one gateway serving the app subnet's VPC, and one peering between the two subnet VPCs.
+    const vpcOf = (subnetId: string) =>
+      [...w.emu.state.vpcs.values()].find((vpc) => vpc.name === providerResourceName(subnetId))!;
+    const gateways = [...w.emu.state.natGateways.values()];
+    expect(gateways).toHaveLength(1);
+    expect(gateways[0]!.vpcs.map((vpc: Json) => vpc.vpc_uuid)).toEqual([vpcOf(app.id).id]);
+    const peerings = [...w.emu.state.vpcPeerings.values()];
+    expect(peerings).toHaveLength(1);
+    expect([...peerings[0]!.vpc_ids].sort()).toEqual([vpcOf(app.id).id, vpcOf(db.id).id].sort());
+
+    await w.api.networks.delete(w.acme, ref);
+    for (let round = 0; round < 16 && (await view()).state !== 'deleted'; round++)
+      await w.tick('vps.networks', 5_000);
+    expect((await view()).state).toBe('deleted');
+    expect(w.emu.state.natGateways.size).toBe(0);
+    expect(w.emu.state.vpcPeerings.size).toBe(0);
+    expect([...w.emu.state.vpcs.values()].filter((vpc) => !vpc.default)).toEqual([]);
+  });
+
   it('a create DO refuses for capacity ends the instance in error with ProvisionFailed', async () => {
     const w = await world();
     // DO accepts the create with a 202, then its create action ends `errored`.

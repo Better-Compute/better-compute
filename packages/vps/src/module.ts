@@ -269,6 +269,15 @@ import {
 } from './volumes.js';
 import { volumeStorageSelfCheck, volumeStorageStatusHandler } from './volume-storage.js';
 import {
+  networkEdgeSchemas,
+  parsePeerNetwork,
+  parseSetNatGateway,
+  parseSetRoutes,
+  type PeerNetworkInput,
+  type SetNatGatewayInput,
+  type SetRoutesInput,
+} from './network-edge.js';
+import {
   addSubnet,
   adoptNetwork,
   clearStagedNetwork,
@@ -291,8 +300,11 @@ import {
   parseRuleRef,
   parseUpdateNetwork,
   parseUpdateRule,
+  peerNetwork,
   prepareCreateNetwork,
   removeSubnet,
+  setNatGateway,
+  setRoutes,
   updateNetwork,
   updateRule,
   type AddSubnetInput,
@@ -620,6 +632,12 @@ export type VpsApi = {
     addSubnet: MethodDefinition<AddSubnetInput, NetworkView>;
     removeSubnet: MethodDefinition<RemoveSubnetInput, NetworkView>;
     adopt: MethodDefinition<AdoptNetworkInput, NetworkView>;
+    /** (DO P4) A subnet's NAT gateway, on or off (network-edge.ts). */
+    natGateway: MethodDefinition<SetNatGatewayInput, NetworkView>;
+    /** (DO P4) Peers two subnets of the tenant's networks, or unpeers them. */
+    peer: MethodDefinition<PeerNetworkInput, NetworkView>;
+    /** (DO P4) Replaces a subnet's static routes. */
+    routes: MethodDefinition<SetRoutesInput, NetworkView>;
   };
   firewallRules: {
     create: MethodDefinition<CreateRuleInput, FirewallRuleView>;
@@ -1146,6 +1164,23 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       tenantId,
       action: 'compute:instances:update',
       resource: { type: `${prefix}instance`, id: instanceId },
+    });
+  };
+  /** (DO P4) `networks.peer`: the other network is decided as the first one (`compute:networks:update`). */
+  const peerNetworkCheck = async (context: MethodContext, input: PeerNetworkInput): Promise<void> => {
+    if (input.peerNetworkId === input.networkId || !input.enabled) return;
+    if (!context.credential)
+      throw new ComputeError(
+        'ACCESS_DENIED',
+        'Peering two networks is decided on the caller’s own credential',
+        undefined,
+        { reason: 'credential-required' },
+      );
+    const prefix = context.typePrefix ?? typePrefix;
+    await context.iam.require(context.credential, {
+      tenantId: input.tenantId,
+      action: 'compute:networks:update',
+      resource: { type: `${prefix}network`, id: input.peerNetworkId },
     });
   };
   /** (DO P4) A load balancer's named target instances: each decided as `targetInstanceCheck` decides one. */
@@ -2059,6 +2094,51 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         resource: () => ({ type: 'fleet', id: fleetResourceId }),
         validate: describedBy(networkSchemas.adoptNetwork, parseAdoptNetwork),
         handler: (context, input) => adoptNetwork(networkDeps(context), context, input),
+      }),
+      natGateway: defineMethod({
+        action: 'compute:networks:update',
+        kind: 'mutation',
+        resource: networkResource,
+        validate: describedBy(networkEdgeSchemas.natGateway, parseSetNatGateway),
+        handler: (context, input) => setNatGateway(networkDeps(context), context.sql, input),
+      }),
+      peer: defineMethod({
+        action: 'compute:networks:update',
+        kind: 'mutation',
+        resource: networkResource,
+        validate: describedBy(networkEdgeSchemas.peer, parsePeerNetwork),
+        admission: {
+          prepare: async (_context, input) => ({
+            status: 'decide',
+            resource: networkResource(input),
+          }),
+          // A peering joins the other network too: decided on it as well (the same right, on the caller's own
+          // credential), unless it is the same network.
+          check: (context, input) => peerNetworkCheck(context, input),
+        },
+        handler: (context, input) => peerNetwork(networkDeps(context), context.sql, input),
+      }),
+      routes: defineMethod({
+        action: 'compute:networks:update',
+        kind: 'mutation',
+        resource: networkResource,
+        validate: describedBy(networkEdgeSchemas.routes, parseSetRoutes),
+        admission: {
+          prepare: async (_context, input) => ({
+            status: 'decide',
+            resource: networkResource(input),
+          }),
+          // Sending a subnet's traffic through an instance hands that instance the traffic: decided on it too.
+          check: (context, input) =>
+            instancesCheck(
+              context,
+              input.tenantId,
+              input.routes.flatMap((route) =>
+                'instanceId' in route.nextHop ? [route.nextHop.instanceId] : [],
+              ),
+            ),
+        },
+        handler: (context, input) => setRoutes(networkDeps(context), context.sql, input),
       }),
     },
     firewallRules: {
