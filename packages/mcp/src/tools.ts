@@ -29,7 +29,9 @@ export interface JsonSchema {
 
 const sha256Hex = async (text: string): Promise<string> =>
   Array.from(
-    new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))),
+    new Uint8Array(
+      await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)),
+    ),
     (byte) => byte.toString(16).padStart(2, '0'),
   ).join('');
 
@@ -193,8 +195,12 @@ async function withConfirmation(
         await context.sleep(polling.intervalMs ?? 2000);
       }
     } catch (failure) {
-      if (failure instanceof ComputeClientError && failure.code !== 'CONFIRMATION_REQUIRED') throw failure;
-      return { ...pending, message: `${pending.message} (Checking the approval failed; retry with the same idempotencyKey.)` };
+      if (failure instanceof ComputeClientError && failure.code !== 'CONFIRMATION_REQUIRED')
+        throw failure;
+      return {
+        ...pending,
+        message: `${pending.message} (Checking the approval failed; retry with the same idempotencyKey.)`,
+      };
     }
     return pending;
   }
@@ -213,7 +219,7 @@ function planView(plan: unknown): unknown {
  * applies a reviewed plan (`better-compute fleet apply --plan-hash`).
  */
 export function computeTools(
-  options: { execCommand?: boolean; fleet?: boolean } = {},
+  options: { execCommand?: boolean; fleet?: boolean; providers?: boolean } = {},
 ): ComputeTool[] {
   const tools: ComputeTool[] = [
     {
@@ -597,7 +603,9 @@ export function computeTools(
         })) as { items?: Record<string, unknown>[] } & Record<string, unknown>;
         return {
           ...page,
-          items: (page.items ?? []).map(({ userData: _userData, env: _env, ...template }) => template),
+          items: (page.items ?? []).map(
+            ({ userData: _userData, env: _env, ...template }) => template,
+          ),
         };
       },
     },
@@ -758,7 +766,12 @@ export function computeTools(
         required: ['volumeId', 'sizeGiB'],
         properties: {
           volumeId: id('vol', 'The volume'),
-          sizeGiB: { type: 'integer', minimum: 1, maximum: 16_384, description: 'The new size in GiB' },
+          sizeGiB: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 16_384,
+            description: 'The new size in GiB',
+          },
         },
         additionalProperties: false,
       },
@@ -1040,6 +1053,139 @@ export function computeTools(
           ),
       },
     );
+  // Provider accounts (P9), read-only and opt-in: what an operator's agent needs to tell why an account cannot
+  // create (a missing scope, a locked account). Nothing here changes an account or reads a secret.
+  if (options.providers)
+    tools.push(
+      {
+        name: 'list_provider_accounts',
+        title: 'List provider accounts',
+        description:
+          "Lists the tenant's cloud provider accounts (DigitalOcean, Hetzner, GCP, …): id, provider, name and config. Credentials appear only as secret references. Start here to find an accountId.",
+        inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+        annotations: { readOnlyHint: true, openWorldHint: false },
+        run: (_args, context) =>
+          context.api.$request('providerAccounts/list', { tenantId: context.tenantId }),
+      },
+      {
+        name: 'check_provider_account',
+        title: 'Check a provider account',
+        description:
+          "Asks the provider what the account's credential may do, without changing anything: the account's state there, the permissions instances need that it lacks (missing) and the ones only optional features need (optional), and the credential's request rate limit there (rateLimit: remaining of limit until resetAt) when the provider reports it. ok is false when instances cannot be created.",
+        inputSchema: {
+          type: 'object',
+          required: ['accountId'],
+          properties: { accountId: id('pacct', 'The provider account') },
+          additionalProperties: false,
+        },
+        annotations: { readOnlyHint: true, openWorldHint: true },
+        run: (args, context) =>
+          context.api.$request('providerAccounts/check', {
+            tenantId: context.tenantId,
+            accountId: args.accountId,
+          }),
+      },
+      {
+        name: 'provider_account_findings',
+        title: 'Read provider account findings',
+        description:
+          "What the provider says an operator should look at on the account (DigitalOcean: its latest security scan), read-only: each finding's id, kind, severity (critical, warning or info), title and detail. A part the credential may not read is itself a finding, never an empty list.",
+        inputSchema: {
+          type: 'object',
+          required: ['accountId'],
+          properties: { accountId: id('pacct', 'The provider account') },
+          additionalProperties: false,
+        },
+        annotations: { readOnlyHint: true, openWorldHint: true },
+        run: (args, context) =>
+          context.api.$request('providerAccounts/findings', {
+            tenantId: context.tenantId,
+            accountId: args.accountId,
+          }),
+      },
+      {
+        name: 'provider_account_billing',
+        title: 'Read a provider account’s bill',
+        description:
+          "The account's own bill at its provider (DigitalOcean: balance, month to date, invoices and billing history), read-only, in integer micros of its currency. What the provider charges the account, not what compute meters. Needs permission to manage the account.",
+        inputSchema: {
+          type: 'object',
+          required: ['accountId'],
+          properties: { accountId: id('pacct', 'The provider account') },
+          additionalProperties: false,
+        },
+        annotations: { readOnlyHint: true, openWorldHint: true },
+        run: (args, context) =>
+          context.api.$request('providerAccounts/billing', {
+            tenantId: context.tenantId,
+            accountId: args.accountId,
+          }),
+      },
+      {
+        name: 'list_billing_leaks',
+        title: 'List billing leaks',
+        description:
+          "Platform operators only: the billing leaks raised on the platform's provider accounts over the last `days` days (default 31), newest first. A leak is an instance the provider billed more hours of compute for than compute metered (a machine compute no longer tracks): account, instance, its tenant, providerHours and meteredHours.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            days: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 400,
+              description: 'How many days back to list (default 31)',
+            },
+          },
+          additionalProperties: false,
+        },
+        annotations: { readOnlyHint: true, openWorldHint: false },
+        run: (args, context) => {
+          const day = 86_400_000;
+          const to = Math.ceil((Date.now() + 1) / day) * day;
+          const days = typeof args.days === 'number' ? args.days : 31;
+          return context.api.$request('billing/leaks', { from: to - (days + 1) * day, to });
+        },
+      },
+      // Connecting an account by OAuth: only the authorization URL. `providerAccounts.connect` has no tool on
+      // purpose: its code comes from the provider's redirect to a registered URI, in the browser that keeps the
+      // state, and it seals a credential; a model never holds either.
+      {
+        name: 'provider_account_connect_url',
+        title: 'Get a provider account connect URL',
+        description:
+          "The provider's authorization URL for connecting an account by OAuth (DigitalOcean), for a person to open in a browser. redirectUri must be one the platform registered, and state the caller's anti-forgery value, kept by the browser session that receives the redirect. Nothing is connected or stored here: the console finishes the connect from the redirect.",
+        inputSchema: {
+          type: 'object',
+          required: ['provider', 'redirectUri', 'state'],
+          properties: {
+            provider: {
+              type: 'string',
+              pattern: '^[a-z][a-z0-9-]{0,63}$',
+              description: 'The provider id (digitalocean)',
+            },
+            redirectUri: {
+              type: 'string',
+              maxLength: 2048,
+              description: 'A redirect URI the platform registered for the provider',
+            },
+            state: {
+              type: 'string',
+              pattern: '^[A-Za-z0-9._~-]{16,256}$',
+              description: 'The anti-forgery state, 16 to 256 characters of [A-Za-z0-9._~-]',
+            },
+          },
+          additionalProperties: false,
+        },
+        annotations: { readOnlyHint: true, openWorldHint: false },
+        run: (args, context) =>
+          context.api.$request('providerAccounts/connectSetup', {
+            tenantId: context.tenantId,
+            provider: args.provider,
+            redirectUri: args.redirectUri,
+            state: args.state,
+          }),
+      },
+    );
   return tools;
 }
 
@@ -1060,7 +1206,9 @@ export function validateArguments(
       for (const [key, item] of Object.entries(record)) {
         // Own properties only: `constructor`, `__proto__`, `toString` are not arguments (review 14 L1).
         const property =
-          schema.properties && Object.hasOwn(schema.properties, key) ? schema.properties[key] : undefined;
+          schema.properties && Object.hasOwn(schema.properties, key)
+            ? schema.properties[key]
+            : undefined;
         if (!property) {
           if (schema.additionalProperties === false)
             return `${path}.${key} is not a known argument`;
@@ -1078,7 +1226,10 @@ export function validateArguments(
         return `${path} has more than ${schema.maxItems} items`;
       if (schema.minItems !== undefined && value.length < schema.minItems)
         return `${path} needs at least ${schema.minItems} items`;
-      if (schema.uniqueItems && new Set(value.map((item) => JSON.stringify(item))).size !== value.length)
+      if (
+        schema.uniqueItems &&
+        new Set(value.map((item) => JSON.stringify(item))).size !== value.length
+      )
         return `${path} has duplicate items`;
       if (schema.items)
         for (const [index, item] of value.entries()) {

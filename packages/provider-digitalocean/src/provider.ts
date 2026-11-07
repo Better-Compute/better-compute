@@ -4,6 +4,14 @@ import { clientFor } from './client/build.js';
 import { DoCompute } from './compute/droplets.js';
 import { doConfig, type DoConfig, type DoProviderOptions } from './config.js';
 import { DoKubernetes } from './doks/index.js';
+import { deploymentTag } from './ids.js';
+import { accountBilling, billingSummary } from './ops/billing.js';
+import { doBilling, readInvoiceCosts } from './ops/costs.js';
+import { doConnect } from './ops/oauth.js';
+import { withTenantProjects } from './ops/projects.js';
+import { readFindings } from './ops/security.js';
+import { doMetricsSource } from './ops/monitoring.js';
+import { checkReport, probeAccount } from './probe.js';
 
 const maxInCallWaitMs = 20_000;
 const discoverTagPattern = /^[a-z0-9:_-]{1,255}$/;
@@ -27,6 +35,9 @@ function invalidConfig(message: string, reason: string): ComputeError {
 export function digitaloceanProvider(
   options: DoProviderOptions = {},
 ): ProviderDefinition<DoConfig> {
+  const connect = options.oauth
+    ? doConnect(options.oauth, options.fetch ?? globalThis.fetch.bind(globalThis))
+    : undefined;
   return defineProvider<DoConfig>({
     id: 'digitalocean',
     version: '0.1.0',
@@ -49,6 +60,17 @@ export function digitaloceanProvider(
       'dns',
       'certificates',
     ],
+    billing: doBilling,
+    // "Connect a DigitalOcean account" (P9): only when the host registered a redirect URI for its OAuth app.
+    ...(connect ? { connect } : {}),
+    // providerAccounts.check (P9): the read scopes, the operations ones as optional.
+    probeAccount: async (config: DoConfig, context) =>
+      checkReport(await probeAccount(config, context, options, { operations: true })),
+    // providerAccounts.findings (P9): the latest security scan.
+    findings: (config: DoConfig, context) => readFindings(config, context, options),
+    // providerAccounts.billing (P9): the balance, invoices and billing history (billing:read).
+    billingSummary: async (config: DoConfig, context) =>
+      accountBilling(await billingSummary(config, context, options)),
     create: (config: DoConfig, context: ProviderContext) => {
       if (config.regions.length === 0)
         throw invalidConfig('A DigitalOcean account lists at least one region', 'regions');
@@ -94,6 +116,16 @@ export function digitaloceanProvider(
         deployment,
         ...(options.kubeTransport ? { kubeTransport: options.kubeTransport } : {}),
       });
+      if (config.costs === true) {
+        const tag = deploymentTag(deployment);
+        compute.costs = (window, call) => readInvoiceCosts(client, tag, window, call);
+      }
+      if (config.projectPerTenant === true) withTenantProjects(compute, client, context.log);
+      // Host metrics of its Droplets (vps({ externalMetrics })): the metrics agent is on unless monitoring is off.
+      if (config.monitoring !== false) {
+        const source = doMetricsSource(config, context, options);
+        compute.readMetrics = (machines, call) => source.read(machines, call);
+      }
       return compute;
     },
   });

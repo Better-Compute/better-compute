@@ -1444,6 +1444,51 @@ describe('isolation between tenants, and between tenants and the root tenant', (
             }),
           expect: 'INVALID_CONFIG',
         },
+        // The P9 account reads and the OAuth connect flow: decided as declared, then answered by the provider
+        // (this one has no connect flow, findings or bill).
+        {
+          path: 'providerAccounts.connectSetup',
+          tenant: R,
+          call: () =>
+            api.providerAccounts.connectSetup(root, {
+              tenantId: R,
+              provider: 'gcp',
+              redirectUri: 'https://console.example.test/provider-accounts/connect/callback',
+              state: 'state-0123456789abcdef',
+            }),
+          expect: 'UNSUPPORTED',
+        },
+        {
+          path: 'providerAccounts.connect',
+          tenant: R,
+          call: () =>
+            api.providerAccounts.connect(root, {
+              tenantId: R,
+              provider: 'gcp',
+              name: 'connected',
+              code: 'code-1',
+              redirectUri: 'https://console.example.test/provider-accounts/connect/callback',
+              config: {},
+            }),
+          expect: 'UNSUPPORTED',
+        },
+        {
+          path: 'providerAccounts.check',
+          tenant: R,
+          call: () => api.providerAccounts.check(root, { tenantId: R, accountId: w.accountId }),
+        },
+        {
+          path: 'providerAccounts.findings',
+          tenant: R,
+          call: () => api.providerAccounts.findings(root, { tenantId: R, accountId: w.accountId }),
+          expect: 'UNSUPPORTED',
+        },
+        {
+          path: 'providerAccounts.billing',
+          tenant: R,
+          call: () => api.providerAccounts.billing(root, { tenantId: R, accountId: w.accountId }),
+          expect: 'UNSUPPORTED',
+        },
         // Allowed, and then refused by state: the account still backs a pool.
         {
           path: 'providerAccounts.delete',

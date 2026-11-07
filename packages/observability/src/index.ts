@@ -11,3 +11,4 @@ export * from './database.js';
 export * from './catalog.js';
 export * from './traceparent.js';
 export * from './node-telemetry.js';
+export * from './external.js';

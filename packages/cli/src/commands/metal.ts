@@ -659,6 +659,76 @@ export const metalCommands = [
     },
   }),
   defineCommand({
+    name: 'provider-accounts check',
+    group: 'Metal',
+    summary:
+      'Ask the provider what the account’s credential may do, read-only (providerAccounts.check)',
+    description:
+      'provider-accounts check reads the account at its provider without changing anything: the account’s state there, the permissions instances need that the credential lacks (missing) and the ones only optional features need (optional). It exits with an error when the provider refuses the credential.',
+    target: 'token',
+    args: [{ name: 'account', description: 'The account id (pacct_…)', required: true }],
+    flags: { tenant: tenantFlag },
+    examples: ['better-compute provider-accounts check pacct_01k5w…'],
+    async run({ flags, args, api }) {
+      return (await api()).call('providerAccounts/check', {
+        tenantId: flags.tenant,
+        accountId: id(args[0]!, 'pacct', 'provider account'),
+      });
+    },
+  }),
+  // `digitalocean …` (alias `do …`): the provider-account verbs for one DigitalOcean account, refused for an account
+  // of another provider (P9). The CLI dispatches two-word names, so not `providers digitalocean …`.
+  ...(['check', 'offers', 'discover'] as const).map((verb) =>
+    defineCommand({
+      name: `digitalocean ${verb}`,
+      aliases: [`do ${verb}`],
+      group: 'Metal',
+      summary: {
+        check: 'Check a DigitalOcean account’s token scopes, read-only (providerAccounts.check)',
+        offers: 'List the Droplet sizes a DigitalOcean account can get (providerAccounts.offers)',
+        discover: 'List a DigitalOcean account’s Droplets again now (providerAccounts.discover)',
+      }[verb],
+      target: 'token',
+      ...(verb === 'offers' ? { defaultFormat: 'table' as const } : {}),
+      args: [{ name: 'account', description: 'The account id (pacct_…)', required: true }],
+      flags: {
+        tenant: tenantFlag,
+        ...(verb === 'offers'
+          ? {
+              region: {
+                type: 'string' as const,
+                value: 'REGION',
+                description: 'Only this region (nyc3)',
+              },
+              'gpu-model': { type: 'string' as const, value: 'MODEL', description: 'Only this GPU model' },
+            }
+          : {}),
+      },
+      examples: [`better-compute digitalocean ${verb} pacct_01k5w…`],
+      async run({ flags, args, api }) {
+        const client = await api();
+        const ref = {
+          tenantId: flags.tenant,
+          accountId: id(args[0]!, 'pacct', 'provider account'),
+        };
+        const account = (await client.call('providerAccounts/get', ref)) as { provider?: string };
+        if (account.provider !== 'digitalocean')
+          throw usageError(
+            `${ref.accountId} is a ${account.provider ?? 'unknown'} account, not a DigitalOcean one: use provider-accounts ${verb}`,
+          );
+        if (verb === 'check') return client.call('providerAccounts/check', ref);
+        if (verb === 'discover') return client.call('providerAccounts/discover', ref);
+        const options = flags as { region?: string; 'gpu-model'?: string };
+        const query = {
+          kind: 'vps',
+          ...(options.region ? { region: options.region } : {}),
+          ...(options['gpu-model'] ? { gpuModel: options['gpu-model'] } : {}),
+        };
+        return client.call('providerAccounts/offers', { ...ref, query });
+      },
+    }),
+  ),
+  defineCommand({
     name: 'provider-accounts bootstrap',
     group: 'Metal',
     summary: 'Turn a provider machine into a bcd host of a pool (providerAccounts.bootstrap)',

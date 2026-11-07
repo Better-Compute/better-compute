@@ -1,0 +1,159 @@
+---
+title: DigitalOcean
+description: Running compute on DigitalOcean accounts - token scopes, the per-token rate budget, an OAuth app and its redirect URI, provider costs and leaks, findings, Droplet metrics, and the opt-in live suite.
+icon: Cloud
+packages: ['@better-compute/provider-digitalocean', '@better-compute/vps', '@better-compute/observability']
+sources:
+  - packages/provider-digitalocean/README.md
+  - packages/provider-digitalocean/src/probe.ts
+  - packages/provider-digitalocean/src/client/budget.ts
+  - packages/provider-digitalocean/src/ops/oauth.ts
+  - packages/provider-digitalocean/src/ops/costs.ts
+  - packages/provider-digitalocean/src/ops/security.ts
+  - packages/provider-digitalocean/src/ops/monitoring.ts
+  - packages/vps/src/costs.ts
+  - tests/live/digitalocean.live.test.ts
+---
+
+What an operator sets up and watches for DigitalOcean provider accounts. The provider itself (offers, Droplets,
+networks, attach) is in the [providers guide](/docs/guides/vps/providers#digitalocean); this page is the account side.
+
+## Token scopes
+
+A personal access token, or an OAuth grant, needs these to run Droplets. `providerAccounts.check` (CLI
+`better-compute digitalocean check <account>`) reads one list per scope and reports what the token lacks, read-only:
+
+| Family     | Read scopes the check probes                   | Writes compute makes                                  |
+| ---------- | ---------------------------------------------- | ----------------------------------------------------- |
+| Compute    | `droplet:read`, `regions:read`, `sizes:read`   | Droplet create, delete, power and rebuild actions     |
+| Networks   | `vpc:read`, `firewall:read`                    | VPCs and firewalls of tenant networks                 |
+| Keys       | `ssh_key:read`                                 | none (the account's key is named by fingerprint)      |
+| Tags       | `tag:read`                                     | Tags on create (`tag:create`), claim and release      |
+
+The operations features are optional; each needs its own read scope, and the check lists what is missing under
+`optional`, never under `missing`:
+
+| Feature                                         | Scope                                  |
+| ----------------------------------------------- | -------------------------------------- |
+| Provider costs (`costs: true`), billing summary | `billing:read`                         |
+| A project per tenant (`projectPerTenant`)       | `project:read`, plus `project:create`, `project:update` |
+| Droplet metrics                                 | `monitoring:read`                      |
+| Security findings                               | `security:read`                        |
+
+A check is `ok` only when the account is `active` and nothing is `missing`. The token never appears in an answer,
+row, log, event or error.
+
+## Rate budget
+
+DigitalOcean allows 250 requests a minute and 5,000 an hour per token, shared by everything that uses it. The
+provider keeps each token under both: listing and sweeps (discovery, costs, metrics) spend at most 20% of a window,
+single reads 30%, and writes whatever is left, so a busy cost or metrics pass defers before a create does. A call
+over its share is `RATE_LIMITED` with `retryAfterMs`, and the reconcilers retry. Two deployments sharing one token
+each keep their own budget, so give each deployment its own token.
+
+The token's own count, as DigitalOcean's `ratelimit-*` headers report it, is the account-wide gauge:
+`providerAccounts.check` (and `better-compute digitalocean check`) answers it as `rateLimit`, `{ limit, remaining,
+resetAt }`, and the admin panel's **Provider accounts** page draws it under each checked account. When that count is
+lower than the deployment's own (another process is using the token), the budget follows it, and sweeps and single
+reads wait once less than half of the hour is left, keeping that half for writes.
+
+## An OAuth app
+
+Connecting an account through DigitalOcean's consent screen (the console's **Connect a DigitalOcean account**)
+needs an OAuth app registered by the platform:
+
+1. In DigitalOcean's control panel, under API → OAuth Applications, register an app. Its callback URL is the
+   console's `https://<console>/provider-accounts/connect/callback`.
+2. Pass the app to the provider, with the same URL in `redirectUris`, and a `rotate` that writes rotated refresh
+   tokens back over the account's own secret:
+
+   ```ts title="compute.ts"
+   digitaloceanProvider({
+     oauth: {
+       clientId: process.env.DO_OAUTH_CLIENT_ID!,
+       clientSecret: process.env.DO_OAUTH_CLIENT_SECRET!,
+       redirectUris: ['https://console.example.com/provider-accounts/connect/callback'],
+       rotate: rotateInto(secretStore),
+     },
+   });
+   ```
+
+3. `providerAccounts.connectSetup` answers the authorization URL for a registered redirect URI; any other redirect URI
+   is `INVALID_INPUT`. The scope asked for is `read write` unless `oauth.scope` says otherwise: whether DigitalOcean's
+   OAuth apps accept the granular scopes above is not verified yet.
+
+DigitalOcean rotates the refresh token on every exchange, so a lost write-back strands the account. Every client of an
+account in one process shares one access token until a minute before it expires (or until DigitalOcean refuses it),
+so the refresh token rotates about once a month per process, not on every check or findings read. A refusal while the
+store still holds the refused token waits about two seconds for another process's write-back (`oauth.raceWaitMs`),
+then is `UNAVAILABLE` (`oauthRace`, retryable) the first time; refused again, it is `INVALID_CONFIG`
+(`oauthGrant`), and the fix is to connect the account again. Only an `invalid_grant` answer counts as a refusal: a
+429 from the token endpoint is `RATE_LIMITED` (with its `retry-after`), a 408 `UNAVAILABLE`, any other 4xx
+`PROVIDER_ERROR`, all retryable. The token endpoint's parameters go in a form-encoded
+body, never in the URL; `oauth.tokenParams: 'query'` is the fallback for DigitalOcean's documented query form.
+The app's client secret is the platform's, held by the provider definition, never stored in an account.
+
+The refresh token `providerAccounts.connect` sealed is compute's to dispose of. Deleting the account enqueues the
+`vps.connect-secrets` sweep, which revokes the grant at DigitalOcean (`POST /v1/oauth/revoke`, RFC 7009, the stored
+refresh token and the access token in use; `oauth.revokeEndpoint` overrides the URL) and deletes the sealed secret.
+A connect that sealed a token but never stored its account (a refused account check, a crash, a restart) is
+revoked and deleted the same way once it is 15 minutes old. A ref another account still names is kept. A revoke
+DigitalOcean refuses is logged (`vps.connectSecrets`), and the secret is deleted anyway.
+
+## Costs and leaks
+
+With `costs: true` on a platform account, the `vps.costs` worker reads DigitalOcean invoices (the month-to-date
+preview, and final invoices of closed months) and attributes each Droplet item to the instance and tenant that own
+it. Invoices carry no tags, so an item is matched by its Droplet id: to the live Droplet's labels, and after the
+Droplet is deleted to the instance that held that id (instance rows keep it). A later read of the month, the final
+invoice included, never takes an attribution away. An invoice item is a Droplet's month so far, so the leak check compares its hours with the hours the instance's
+running and stopped intervals cover of its span (DigitalOcean bills a powered-off Droplet until it is destroyed). A
+gap over `max(leakToleranceHours, 5%)` of the billed hours raises `billing.leak` once per instance and month, and
+`billing.leaks` lists the raised ones for root. A leak usually means a Droplet compute no longer tracks: find it
+with `better-compute digitalocean discover <account>`, then attach or delete it.
+
+DigitalOcean spend reaches tenants' budgets through `billing.passThrough` rules on the platform account
+([Billing](/docs/guides/vps/providers#billing)): an item of a tenant's Droplet that compute does not meter itself,
+such as `Droplet Backups`, is billed to that tenant at cost times the rule's multiplier on a `reported` meter, so its
+Better IAM budgets and budget alerts count it with the rest of its usage. Droplet hours, volumes and reserved IPs are
+compute's own meters: a rule whose pattern matches them (`Droplets`) is `INVALID_CONFIG`, and they are never billed
+twice. Items no tenant's Droplet explains (Spaces, an account-level charge) stay the platform's.
+
+`providerAccounts.billing` reads the account's own bill at DigitalOcean (balance, month to date, final invoices and the
+newest 50 billing history entries, scope `billing:read`), read-only, in micros of USD. Its history names payments, so
+it is decided as `compute:providers:manage` on the account. A leak is what compute meters against what DigitalOcean
+bills per Droplet; the bill is the account's total.
+
+## Findings
+
+`providerAccounts.findings` reads the account's latest DigitalOcean security scan, read-only, as findings
+(`security:<rule>`, with `critical`, `warning` or `info` severity). Without `security:read` it answers one
+`security:unreadable` finding rather than an empty list that reads as a clean account. The admin panel's Provider
+accounts page reads findings at most every ten minutes per account, and shows them with the billing leaks in its
+attention queue.
+
+## Droplet metrics
+
+An attached Droplet runs no bcd. With DigitalOcean's metrics agent on it and `monitoring:read`, `doMetricsSource`
+reads its CPU, memory and load for [host metrics of machines without bcd](/docs/operations/observability#host-metrics-of-machines-without-bcd).
+With `vps({ externalMetrics: {} })` vps reads them for every live instance of the account on a schedule (the
+account's `monitoring` left on), on the `sweep` budget.
+
+## The live suite
+
+The emulator under `tests/support/do-emulator` covers the shapes of DigitalOcean's specification; a few behaviours
+are only checked against a real account by an opt-in suite, which has not been run yet:
+
+```sh
+# Droplets, networks and the conformance cases: creates billable Droplets, always sweeps them.
+BC_DO_LIVE=1 BC_DO_TOKEN=<token> BC_DO_SSH_KEY_FINGERPRINT=<md5 fingerprint of an account key> \
+  node node_modules/vitest/vitest.mjs run tests/live/digitalocean.live.test.ts
+
+# The operations reads only (probe, billing summary, this month's cost rows, findings): read-only, no sweep.
+BC_DO_LIVE=1 BC_DO_TOKEN=<token> BC_DO_OPERATIONS=1 [BC_DO_METRICS_DROPLET=<droplet id>] \
+  node node_modules/vitest/vitest.mjs run tests/live/digitalocean.live.test.ts -t operations
+```
+
+Optional: `BC_DO_REGION` (`nyc3`), `BC_DO_SIZE`, `BC_DO_IMAGE`, and `BC_DO_ATTACHABLE` (a hand-made Droplet the
+claim and discover cases may tag and untag). Every resource a run creates carries its own tag or name prefix, and the
+sweeper deletes only those.

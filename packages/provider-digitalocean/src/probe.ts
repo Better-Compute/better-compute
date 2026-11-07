@@ -1,6 +1,13 @@
-import { ComputeError, isComputeError, type ProviderContext } from '@better-compute/core';
+import {
+  ComputeError,
+  isComputeError,
+  type ProviderAccountProbe,
+  type ProviderContext,
+} from '@better-compute/core';
 import { clientFor } from './client/build.js';
+import { readDeadline } from './client/deadline.js';
 import type { DoClient } from './client/http.js';
+import type { ReportedRateLimit } from './client/budget.js';
 import type { DoConfig, DoProviderOptions } from './config.js';
 
 // A read-only look at what a token may do, for the CLI's account check: GET /account, then one
@@ -18,8 +25,16 @@ export type DoFamilyState = 'ok' | 'denied' | 'unavailable';
 
 /** What `probeAccount` found. */
 export interface DoAccountReport {
-  /** `dropletLimit` is absent when the token lacks `droplet:read`: DigitalOcean then leaves it out. */
-  account: { uuid: string; status: string; dropletLimit?: number };
+  /**
+   * `dropletLimit` is absent when the token lacks `droplet:read`: DigitalOcean then leaves it out. `team` (P9
+   * Organizations) is the team the token belongs to, read-only: its id and name, never its members' details.
+   */
+  account: {
+    uuid: string;
+    status: string;
+    dropletLimit?: number;
+    team?: { uuid?: string; name?: string };
+  };
   families: Record<
     | 'compute'
     | 'networks'
@@ -33,14 +48,32 @@ export interface DoAccountReport {
     | 'certificates',
     DoFamilyState
   >;
-  /** The read scopes the token lacks, in probe order. */
+  /** The read scopes the token lacks, in probe order (the operations scopes last). */
   missing: string[];
   /**
    * The write scopes the provider needs that a read-only probe cannot check (the README's scope table): a token
    * without one passes the probe and fails the first write with `ACCESS_DENIED`.
    */
   unverified: string[];
+  /** (P9) The operations families, only when the probe is asked for them (`{ operations: true }`). */
+  operations?: Partial<Record<DoOperationsFamily, DoFamilyState>>;
+  /**
+   * (P9) What DigitalOcean's answers to the probe left of the token's hourly request limit (every process using
+   * the token counts against it), for the admin panel's rate-budget gauge. Absent when no answer carried it.
+   */
+  rateLimit?: ReportedRateLimit;
 }
+
+/** (P9) Read scopes the operations surfaces need: none of them is needed to run Droplets. */
+export type DoOperationsFamily = 'billing' | 'projects' | 'monitoring' | 'security';
+
+/** One read per operations scope. */
+const operationsProbes: readonly { family: DoOperationsFamily; path: string; scope: string }[] = [
+  { family: 'billing', path: '/customers/my/balance', scope: 'billing:read' },
+  { family: 'projects', path: '/projects', scope: 'project:read' },
+  { family: 'monitoring', path: '/monitoring/alerts', scope: 'monitoring:read' },
+  { family: 'security', path: '/security/scans', scope: 'security:read' },
+];
 
 /** The write scopes the provider uses, by family; never probed (see the top of this file). */
 const writeScopes: readonly string[] = [
@@ -121,21 +154,19 @@ function badBody(): ComputeError {
  */
 export async function probeAccount(
   config: DoConfig,
-  context: ProviderContext,
+  context: ProviderContext & { signal?: AbortSignal },
   options: DoProviderOptions = {},
+  scope: { operations?: boolean } = {},
 ): Promise<DoAccountReport> {
   const client: DoClient = clientFor(config, context, options);
-  const controller = new AbortController();
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, probeTimeoutMs);
+  const deadline = readDeadline(context, probeTimeoutMs);
   try {
-    return await probe(client, config, controller.signal);
+    const report = await probe(client, config, deadline.signal, scope.operations === true);
+    const rateLimit = client.rateLimit?.();
+    return rateLimit ? { ...report, rateLimit } : report;
   } catch (error) {
     // The client rethrows an abort as it is; a caller should see a ComputeError.
-    if (timedOut)
+    if (deadline.timedOut())
       throw new ComputeError(
         'UNAVAILABLE',
         `The DigitalOcean account probe took longer than ${probeTimeoutMs / 1000} seconds`,
@@ -144,7 +175,22 @@ export async function probeAccount(
       );
     throw error;
   } finally {
-    clearTimeout(timer);
+    deadline.done();
+  }
+}
+
+/** Whether a GET is refused for scope (true), allowed (false), or failed otherwise (thrown). */
+async function refusedForScope(
+  client: DoClient,
+  path: string,
+  signal: AbortSignal,
+): Promise<boolean> {
+  try {
+    await client.request('GET', path, { query: { per_page: '1' }, signal, budget: 'observe' });
+    return false;
+  } catch (error) {
+    if (isComputeError(error, 'ACCESS_DENIED')) return true;
+    throw error;
   }
 }
 
@@ -152,9 +198,10 @@ async function probe(
   client: DoClient,
   config: DoConfig,
   signal: AbortSignal,
+  withOperations: boolean,
 ): Promise<DoAccountReport> {
   const { account } = await client.request<{
-    account?: { uuid?: unknown; status?: unknown; droplet_limit?: unknown };
+    account?: { uuid?: unknown; status?: unknown; droplet_limit?: unknown; team?: unknown };
   }>('GET', '/account', { signal, budget: 'observe' });
   // droplet_limit needs droplet:read in DigitalOcean's model: without it the body omits the field.
   if (typeof account?.uuid !== 'string' || typeof account.status !== 'string') throw badBody();
@@ -204,14 +251,61 @@ async function probe(
       missing.push(scope);
     } else if (answer === 'unavailable' && families[family] === 'ok') families[family] = answer;
   });
+  let operations: DoAccountReport['operations'];
+  if (withOperations) {
+    const refused = await Promise.all(
+      operationsProbes.map(({ path }) => refusedForScope(client, path, signal)),
+    );
+    operations = {};
+    operationsProbes.forEach(({ family, scope }, i) => {
+      operations![family] = refused[i] ? 'denied' : 'ok';
+      if (refused[i]) missing.push(scope);
+    });
+  }
+  const rawTeam = (account.team ?? {}) as { uuid?: unknown; name?: unknown };
+  const team = {
+    ...(typeof rawTeam.uuid === 'string' && rawTeam.uuid
+      ? { uuid: rawTeam.uuid.slice(0, 64) }
+      : {}),
+    ...(typeof rawTeam.name === 'string' && rawTeam.name
+      ? { name: rawTeam.name.slice(0, 200) }
+      : {}),
+  };
   return {
+    ...(operations ? { operations } : {}),
     account: {
       uuid: account.uuid,
       status: account.status,
       ...(typeof account.droplet_limit === 'number' ? { dropletLimit: account.droplet_limit } : {}),
+      ...(Object.keys(team).length ? { team } : {}),
     },
     families,
     missing,
     unverified: [...writeScopes],
+  };
+}
+
+/**
+ * A probe report as `providerAccounts.check` answers it (`ProviderAccountProbe`): the scopes Droplets need are
+ * `missing`, the operations scopes `optional`, and the account is ok only when it is `active` with nothing missing
+ * (a locked or warned account cannot create Droplets).
+ */
+export function checkReport(report: DoAccountReport): ProviderAccountProbe {
+  const operationsScopes = new Set(operationsProbes.map(({ scope }) => scope));
+  const missing = report.missing.filter((scope) => !operationsScopes.has(scope));
+  const optional = report.missing.filter((scope) => operationsScopes.has(scope));
+  return {
+    ok: missing.length === 0 && report.account.status === 'active',
+    missing,
+    optional,
+    details: {
+      account: {
+        ...report.account,
+        ...(report.account.team ? { team: { ...report.account.team } } : {}),
+      },
+      families: { ...report.families },
+      ...(report.operations ? { operations: { ...report.operations } } : {}),
+    },
+    ...(report.rateLimit ? { rateLimit: { ...report.rateLimit } } : {}),
   };
 }

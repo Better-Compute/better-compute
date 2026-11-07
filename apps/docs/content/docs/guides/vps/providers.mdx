@@ -79,6 +79,15 @@ sources:
     'tests/provider-digitalocean-images.test.ts',
     'tests/provider-digitalocean-spot.test.ts',
     'tests/provider-digitalocean-metal.test.ts',
+    'packages/provider-digitalocean/src/ops/prices.ts',
+    'packages/provider-digitalocean/src/ops/costs.ts',
+    'packages/provider-digitalocean/src/ops/billing.ts',
+    'packages/provider-digitalocean/src/ops/projects.ts',
+    'packages/provider-digitalocean/src/ops/monitoring.ts',
+    'packages/provider-digitalocean/src/ops/security.ts',
+    'packages/provider-digitalocean/src/ops/oauth.ts',
+    'packages/observability/src/external.ts',
+    'tests/do-costs-end-to-end.test.ts',
   ]
 ---
 
@@ -944,8 +953,12 @@ await compute.api.providerAccounts.create(
     token: {
       type: 'SecretRef',
       description:
-        'A personal access token with the scopes below. Resolved on the first request of a client.',
-      required: true,
+        'A personal access token with the scopes below. Resolved on the first request of a client. An account holds exactly one of token and refreshToken.',
+    },
+    refreshToken: {
+      type: 'SecretRef',
+      description:
+        'An OAuth refresh token from connecting a DigitalOcean account; rotated on every exchange (see Operations below).',
     },
     regions: {
       type: 'string[]',
@@ -984,6 +997,17 @@ await compute.api.providerAccounts.create(
       type: 'boolean',
       description:
         'Products DigitalOcean still marks as previews. Today: Spot (with allowSpot), whose API shape better-compute has not verified yet.',
+      default: 'false',
+    },
+    costs: {
+      type: 'boolean',
+      description: 'Read the invoices into provider costs (vps.costs). Needs billing:read.',
+      default: 'false',
+    },
+    projectPerTenant: {
+      type: 'boolean',
+      description:
+        'Assign each new Droplet to the project bc-<tenant>, made on first use. Needs project:read,create,update.',
       default: 'false',
     },
   }}
@@ -1064,6 +1088,56 @@ The token needs the custom scopes `account:read`, `regions:read`, `sizes:read`, 
 - **Errors** map to `ComputeError` codes (`INVALID_CONFIG` for a refused token, `ACCESS_DENIED`, `NOT_FOUND`,
   `CONFLICT`, `RATE_LIMITED`, `CAPACITY_UNAVAILABLE`, `QUOTA_EXCEEDED`, `INVALID_INPUT`, `UNAVAILABLE`), with
   `details: { provider: 'digitalocean', status, reason }`. Never the token.
+
+### Operations
+
+Billing, projects, monitoring, security and OAuth. Each is opt-in and needs its own read scope (`billing:read`,
+`project:read,create,update`, `monitoring:read`, `security:read`). Called with the fourth argument
+`{ operations: true }`, `probeAccount` reports which of them a token has.
+
+- **List prices.** DigitalOcean prices a Droplet size as a whole, so `listPrices` reports one `instance` price per
+  size and account region, naming its offer, and `billing.proposePrices` prices a flavor meter whose flavors share
+  that offer at its price plus the margin. No vCPU, memory or GPU price is derived from a size price.
+- **Provider costs** (`costs: true`). The `vps.costs` worker reads the invoices: a closed month from its final
+  invoice, the current one from the month-to-date preview. An invoice item is a month aggregate, so it is read by
+  every window it overlaps and keeps its row id as it grows; the final invoice replaces the preview's amounts.
+  Items carry no tags, so a Droplet item takes the instance and tenant tags of this deployment's Droplet with that id
+  and is attributed to the instance; a Droplet already deleted is left to the account. `Droplets` and
+  `GPU Droplets` are compute SKUs and volumes and reserved IPs metered ones, so pass-through never bills them.
+- **Leaks.** An invoice item is a month aggregate whose duration is hours, so the provider declares
+  `billing: { periodRows: true, billsStopped: true }`: the leak check compares an item's hours with the hours the
+  instance's running and stopped intervals cover of the item's span (DigitalOcean bills a powered-off Droplet), and a
+  gap over `max(leakToleranceHours, 5%)` raises `billing.leak` once per instance and month. `billing.leaks` lists them.
+- **Billing summary.** `billingSummary(config, context)` reads the balance, invoices, month to date and newest
+  history entries, in micros of USD.
+- **Projects** (`projectPerTenant`). Each new Droplet goes to the project `bc-<tenant>`: grouping in DigitalOcean's
+  console and invoices, never authority. A failed assignment is logged and never fails the create.
+- **Droplet metrics.** `doMetricsSource(config, context)` is an `externalMetrics` source for attached Droplets that
+  run no bcd. The host pulls it through `externalMetricsCollector` (`@better-compute/observability`), which serves
+  `better_compute_external_host_*{source, instance}` gauges.
+- **Security findings.** `readSecurityFindings` reads the latest posture scan, read-only. `providerAccounts.findings`
+  answers it per account as findings (`security:<rule>`, severity `critical`, `warning` or `info`); a token without
+  `security:read` answers one `security:unreadable` finding instead of an empty list. The admin panel's Provider
+  accounts page and attention queue show findings and billing leaks.
+- **Account check.** `providerAccounts.check` (CLI `better-compute provider-accounts check`, or
+  `better-compute digitalocean check|offers|discover <account>`) runs the probe with the operations scopes on a
+  stored account, read-only: `ok` is false when the account is not `active` or a scope Droplets need is
+  `missing`; the operations scopes it lacks are `optional`, and `details` holds the account and per-family results.
+- **OAuth.** An account may hold `refreshToken` instead of `token`. The host passes
+  `digitaloceanProvider({ oauth: { clientId, clientSecret, redirectUris, rotate: rotateInto(store) } })`, where
+  `rotateInto` writes each rotated refresh token over the account's own secret ref in the host's `SecretStore`; a
+  host without `oauth` refuses OAuth accounts. A refresh token DigitalOcean no longer accepts is `INVALID_CONFIG`
+  (`oauthGrant`): connect the account again.
+- **Connect a DigitalOcean account.** With at least one registered `redirectUris` entry, the console's Provider
+  accounts page offers it: `providerAccounts.connectSetup` answers DigitalOcean's authorization URL (scope
+  `read write` by default, `oauth.scope` to change it) for a registered redirect URI and the console's state, and
+  the callback page, after comparing the state with the one its tab kept, calls `providerAccounts.connect` with the
+  code. Compute trades the code, seals the refresh token through the secret broker and stores the account with it as
+  `refreshToken`; a refused account check deletes the sealed token again, and the state keys the call, so a retry
+  replays instead of spending the code twice. Register the console's `/provider-accounts/connect/callback` URL with
+  the OAuth app and in `redirectUris`; any other redirect URI is `INVALID_INPUT`.
+
+Alert policies, Insights rules and uptime checks are cloud resources (a later phase), not provider-account settings.
 
 `tests/provider-digitalocean.test.ts` and `tests/provider-digitalocean-networks.test.ts` run the conformance cases and
 the DigitalOcean specifics against an in-memory emulator passed as `fetch`, and `tests/do-end-to-end.test.ts` runs the

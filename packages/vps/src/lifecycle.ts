@@ -676,6 +676,8 @@ async function reconcileProvider(
             isSecretRef(row.userData) ? await deps.secrets.resolve(row.userData) : renderUserData(row),
           ),
           name: row.id,
+          // For provider-side grouping only (a DigitalOcean project per tenant).
+          tenantId: row.tenantId,
           ...(row.sshKeys.length ? { sshKeys: row.sshKeys } : {}),
           // Only an EKS node launch gets the account's EKS node identity (eksNodeInstanceProfile).
           ...(eks ? { kubernetesNode: 'eks' as const } : {}),

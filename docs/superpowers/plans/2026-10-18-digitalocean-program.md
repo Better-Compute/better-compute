@@ -1002,6 +1002,24 @@ Spending stays under the test account's cap; the sweeper leaves no `better-compu
 11. Admin module.
 12. Docs and final program verification.
 
+**Lane notes (do-ops, review round 2026-11-06)**
+
+- Tasks 2 and 3 (alert policies, Insights rules, `do.uptime-check`) and the console network, volume, address and
+  cloud-resources pages wait for P7 (`cloudResources`) and P2.
+- Organizations: the check result names the token's own team (uuid, name). DO has no public member listing.
+- MCP: `provider_account_connect_url` answers `providerAccounts.connectSetup`. `providerAccounts.connect` has no tool
+  on purpose: its code arrives on the redirect to a registered URI, in the browser session that kept the state, and
+  it seals a credential.
+- Cost attribution: a Droplet item carries its Droplet id (`ProviderCostRecord.instanceExternalId`, additive). vps
+  resolves it against the account's instances, deleted ones included. A later read of a month never takes an
+  instance or tenant-label attribution away.
+- The OAuth token endpoint: only `invalid_grant` refuses a grant. 429 is `RATE_LIMITED`, 408 `UNAVAILABLE`, any
+  other 4xx `PROVIDER_ERROR`.
+- A connected credential is vps's for its whole life (`provider_connect_secrets`, vps/0076, the `vps.connect-secrets`
+  sweep). On account delete, or when a connect never stores its account, the grant is revoked
+  (`ProviderConnect.revoke`, additive; DO `POST /v1/oauth/revoke`, unverified live) and the sealed secret deleted.
+- A period row's leak is keyed on its billing month (`YYYY-MM-01`).
+
 ---
 
 ## Testing strategy

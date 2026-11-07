@@ -35,12 +35,21 @@ const mutateReserve = 1 - budgetShares.sweep - budgetShares.observe;
 /** How long a re-seed without a usable `ratelimit-reset` holds. */
 const defaultSeedMs = 1000;
 
+/** What the API last said was left of a token's hour (`RateBudget.reported`). `resetAt` is epoch ms. */
+export interface ReportedRateLimit {
+  limit: number;
+  remaining: number;
+  resetAt?: number;
+}
+
 export class RateBudget {
   readonly #clock: Clock;
   readonly #minute: Window;
   readonly #hour: Window;
   /** What the API last said was left this hour (of its own limit), until its `ratelimit-reset`. */
   #seeded: { remaining: number; limit: number; until: number } | undefined;
+  /** What the API's answers last said, for a gauge: the lowest count of the newest window. */
+  #reported: ReportedRateLimit | undefined;
 
   constructor(options: { perMinute: number; perHour: number; clock: Clock }) {
     this.#clock = options.clock;
@@ -91,6 +100,7 @@ export class RateBudget {
     const rawLimit = headers.get('ratelimit-limit');
     const reported = rawLimit === null || rawLimit === '' ? NaN : Number(rawLimit);
     const limit = Number.isFinite(reported) && reported > 0 ? reported : this.#hour.capacity;
+    this.#report(limit, remaining, headers.get('ratelimit-reset'), now);
     // The count is shared by every process using the token, so it can only add to ours.
     if (limit - remaining <= this.#hour.spends.length) {
       this.#seeded = undefined;
@@ -103,6 +113,30 @@ export class RateBudget {
       limit,
       until: Number.isFinite(reset) && reset > now ? reset : now + defaultSeedMs,
     };
+  }
+
+  /**
+   * What the API last said was left of the token's hour, or undefined before any answer and once its reset has
+   * passed. The count is the token's own (every process using it), so it is a gauge of the account, not of this
+   * process. Answers to parallel requests arrive out of order: within one window the lowest count stands.
+   */
+  reported(): ReportedRateLimit | undefined {
+    const reported = this.#reported;
+    if (!reported) return undefined;
+    if (reported.resetAt !== undefined && reported.resetAt <= this.#clock.now()) return undefined;
+    return { ...reported };
+  }
+
+  #report(limit: number, remaining: number, rawReset: string | null, now: number): void {
+    const reset = rawReset === null || rawReset === '' ? NaN : Number(rawReset) * 1000;
+    const resetAt = Number.isFinite(reset) && reset > now ? reset : undefined;
+    const kept = Math.max(0, Math.min(Math.floor(remaining), limit));
+    const last = this.#reported;
+    if (last && resetAt !== undefined && last.resetAt === resetAt && last.limit === limit) {
+      last.remaining = Math.min(last.remaining, kept);
+      return;
+    }
+    this.#reported = { limit, remaining: kept, ...(resetAt !== undefined ? { resetAt } : {}) };
   }
 }
 

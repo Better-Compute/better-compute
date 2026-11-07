@@ -15,6 +15,7 @@ const areas = [
   { href: '/batches', label: 'Batches' },
   { href: '/pools', label: 'Pools & capacity' },
   { href: '/quotas', label: 'Quotas' },
+  { href: '/provider-accounts', label: 'Provider accounts' },
   { href: '/usage', label: 'Usage & spend' },
   { href: '/activity', label: 'Activity' },
   { href: '/webhooks', label: 'Webhooks' },

@@ -19,6 +19,7 @@ import {
   type ReservationOffering,
   type ProviderDefinition,
   type ProviderKubernetesCluster,
+  type SecretRef,
   type SecretResolver,
   type WorkloadIssuerPort,
 } from '@better-compute/core';
@@ -33,6 +34,9 @@ import {
   parseCreateAccount,
   passThroughMeterCheck,
   parseFederationSetup,
+  probeStoredAccount,
+  readStoredBilling,
+  readStoredFindings,
   parseTenantVaultPaths,
   providerOf,
   ProviderClients,
@@ -45,8 +49,31 @@ import {
   type FederationSetup,
   type FederationSetupInput,
   type ProviderAccount,
+  type ProviderAccountCheck,
+  type ProviderAccountBillingView,
+  type ProviderAccountFindings,
   type TenantVaultPaths,
 } from './accounts.js';
+import {
+  claimSealed,
+  configRefs,
+  connectSecretsReconciler,
+  connectSecretsWork,
+  recordSealed,
+  releaseSealed,
+  sweepConnectSecrets,
+  type ConnectSecretsDeps,
+} from './connect-secrets.js';
+import {
+  assertConnectConfig,
+  connectedCreate,
+  connectOf,
+  connectStaging,
+  parseConnectAccount,
+  parseConnectSetup,
+  type ConnectAccountInput,
+  type ConnectSetupInput,
+} from './connect.js';
 import {
   createFlavor,
   deleteFlavor,
@@ -214,6 +241,11 @@ import {
   recomputePassable,
   type CostsOptions,
 } from './costs.js';
+import {
+  externalMetricsReconciler,
+  externalMetricsSettings,
+  type ExternalMetricsOptions,
+} from './external-metrics.js';
 import { vpsMigrations } from './migrations.js';
 import { listProviderClusters } from './provider-clusters.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
@@ -569,6 +601,12 @@ export interface VpsOptions {
    */
   costs?: CostsOptions;
   /**
+   * (P9) Reads provider-measured host metrics of the VMs on provider pools (`ProviderImpl.readMetrics`) into
+   * `instance_external_metrics`, each account every `every` (default 5m). Off unless set: it spends the accounts'
+   * rate budgets.
+   */
+  externalMetrics?: ExternalMetricsOptions;
+  /**
    * Where sandbox snapshots are stored (§3.7): presigned uploads for `instance.snapshot` and the URL
    * restores fetch. Without it `sandboxes.snapshot` is INVALID_CONFIG.
    */
@@ -629,8 +667,18 @@ export type VpsApi = {
     create: MethodDefinition<CreateAccountInput, ProviderAccountView>;
     list: MethodDefinition<{ tenantId: string }, { items: ProviderAccountView[] }>;
     federationSetup: MethodDefinition<FederationSetupInput, FederationSetup>;
+    /** (P9) The provider's OAuth authorization URL for a redirect URI and the caller's state. */
+    connectSetup: MethodDefinition<ConnectSetupInput, { authorizeUrl: string }>;
+    /** (P9) Trades an OAuth code for a sealed credential and stores the account (as create does). */
+    connect: MethodDefinition<ConnectAccountInput, ProviderAccountView>;
     get: MethodDefinition<AccountRef, ProviderAccountView>;
     offers: MethodDefinition<AccountRef & { query: OfferQuery }, { items: Offer[] }>;
+    /** (P9) What the account's credential may do, as its provider probes it (read-only). */
+    check: MethodDefinition<AccountRef, ProviderAccountCheck>;
+    /** (P9) What the provider says an operator should look at on the account (read-only). */
+    findings: MethodDefinition<AccountRef, ProviderAccountFindings>;
+    /** (P9) The account's own billing state at its provider: balance, invoices, history (read-only). */
+    billing: MethodDefinition<AccountRef, ProviderAccountBillingView>;
     update: MethodDefinition<
       AccountRef & { config: unknown; billing?: AccountBilling },
       ProviderAccountView
@@ -964,6 +1012,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     );
   // vps.costs' settings (validated again by its reconciler): the lookback a rule change recomputes over.
   const costConfig = costSettings(options.costs ?? {}, currency);
+  if (options.externalMetrics) externalMetricsSettings(options.externalMetrics);
   const runtimes = options.runtimes ?? ['libvirt-kvm'];
   if (runtimes.length === 0 || !runtimes.every((runtime) => /^[a-z][a-z0-9-]{0,63}$/.test(runtime)))
     throw new ComputeError('INVALID_CONFIG', 'vps({ runtimes }) must list runtime driver ids');
@@ -1091,6 +1140,45 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     if (accountId === undefined) {
       accountId = await accountIdOf(context, input);
       requestAccountIds.set(input, accountId);
+    }
+    return accountId;
+  };
+  /**
+   * `providerAccounts.connect` (P9): the create request each connect becomes once its admission check sealed the
+   * credential (staged by what the request is, so a composite's re-validated input finds it, and discarded with
+   * its sealed credential when the request fails or never reaches its handler), and the account id it gets, drawn
+   * once per request as create's is.
+   */
+  const connectStaged = connectStaging(() => Date.now());
+  /** Whether a provider has a connect flow (`vps.connect-secrets` runs only then). */
+  const connectFlows = [...providers.values()].some((provider) => provider.connect);
+  const connectSecretsDeps = (context: ModuleContext): ConnectSecretsDeps => ({
+    sql: context.sql,
+    secrets: context.secrets,
+    providers,
+    clock: context.clock,
+    log: context.log,
+  });
+  /** A sealed credential whose connect failed: released, then revoked and deleted (the sweep retries a failure). */
+  const discardSealed = async (context: ModuleContext, ref: string): Promise<void> => {
+    await releaseSealed(context.sql, ref);
+    await sweepConnectSecrets(connectSecretsDeps(context), [ref]);
+  };
+  const connectIds = new WeakMap<ConnectAccountInput, string>();
+  const connectAccountId = async (
+    context: ModuleContext & { caller?: { identityId: string } },
+    input: ConnectAccountInput,
+  ): Promise<string> => {
+    let accountId = connectIds.get(input);
+    if (accountId === undefined) {
+      accountId = await accountIdOf(context, {
+        tenantId: input.tenantId,
+        provider: input.provider,
+        name: input.name,
+        config: {},
+        ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+      });
+      connectIds.set(input, accountId);
     }
     return accountId;
   };
@@ -1779,6 +1867,127 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           };
         },
       }),
+      // OAuth-connected accounts (P9). A pure read: the provider builds its authorization URL, no provider call.
+      connectSetup: defineMethod({
+        action: 'compute:providers:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(schemas.connectSetup, parseConnectSetup),
+        handler: async (_context, input) => {
+          // Staged connects that never reached their handler are dropped here too, not only by a later connect.
+          await connectStaged.purge();
+          return {
+            authorizeUrl: connectOf(providers, input.provider).authorizeUrl({
+              redirectUri: input.redirectUri,
+              state: input.state,
+            }),
+          };
+        },
+      }),
+      // As create, with the credential from the code: the admission check (no transaction open) exchanges the
+      // code, seals the credential and runs the provider's account checks on the full config; the handler stores
+      // the account. A refused check or a failed store deletes the sealed credential again.
+      connect: defineMethod({
+        action: 'compute:providers:manage',
+        kind: 'mutation',
+        resource: tenantResource,
+        validate: describedBy(schemas.connectAccount, parseConnectAccount),
+        admission: {
+          async prepare(context, input, tx) {
+            const decide = { status: 'decide' as const, resource: tenantResource(input) };
+            if (input.idempotencyKey === undefined) return decide;
+            const existing = await readAccount(
+              tx,
+              await connectAccountId(context, input),
+              input.tenantId,
+            );
+            if (!existing) return decide;
+            if (existing.provider !== input.provider || existing.name !== input.name)
+              throw new ComputeError(
+                'CONFLICT',
+                'This idempotency key was used for a different request',
+              );
+            return { status: 'replay', result: existing };
+          },
+          check: async (context, input) => {
+            const connect = connectOf(providers, input.provider);
+            assertConnectConfig(input, connect.field);
+            const secrets = context.secrets;
+            if (!secrets)
+              throw new ComputeError(
+                'INVALID_CONFIG',
+                'Connecting an account needs the secret broker, to seal its credential',
+              );
+            const connection = await connect.exchange({
+              code: input.code,
+              redirectUri: input.redirectUri,
+              clock: context.clock,
+              signal: context.signal ?? AbortSignal.timeout(55_000),
+            });
+            await connectStaged.purge();
+            const ref = await secrets.put(input.tenantId, connection.secret);
+            // vps owns the sealed credential from here: the marker outlives this process (a restart cannot orphan
+            // it), and vps.connect-secrets revokes and deletes it unless the account is stored.
+            try {
+              await recordSealed(context.sql, {
+                ref,
+                tenantId: input.tenantId,
+                provider: input.provider,
+              });
+            } catch (error) {
+              await secrets.delete?.(ref).catch(() => {});
+              throw error;
+            }
+            const request = connectedCreate(input, connect.field, ref);
+            const accountId = await connectAccountId(context, input);
+            try {
+              await accountAdmissionCheck(context, request, {
+                id: accountId,
+                tenantId: input.tenantId,
+                name: input.name,
+              });
+            } catch (error) {
+              await discardSealed(context, ref);
+              throw error;
+            }
+            await connectStaged.put(input, {
+              request,
+              accountId,
+              ref,
+              discard: () => discardSealed(context, ref),
+            });
+          },
+          // Transaction 2 failed (the handler threw, e.g. the name is taken): the sealed credential goes too.
+          async abandoned(_context, input) {
+            await connectStaged.abandon(input);
+          },
+        },
+        handler: async (context, input) => {
+          const staged = connectStaged.get(input);
+          if (!staged)
+            throw new ComputeError('INTERNAL_ERROR', 'The connect request was not checked');
+          // A throw here leaves the request staged: `abandoned` deletes the sealed credential once this transaction
+          // has rolled back (a delete inside it could roll back with it), and a composite's failed call is
+          // discarded when it goes stale.
+          // The account and its credential's claim commit together; a credential already discarded is refused.
+          await claimSealed(context.sql, staged.ref);
+          const account: ProviderAccount = await createAccount(
+            context.sql,
+            providers,
+            staged.request,
+            staged.accountId,
+            accountCheck(context),
+          );
+          await context.authz.upsert(context.sql, {
+            type: 'provider-account',
+            id: account.id,
+            tenantId: account.tenantId,
+            attributes: { provider: account.provider },
+          });
+          connectStaged.done(input);
+          return account;
+        },
+      }),
       get: defineMethod({
         action: 'compute:providers:read',
         kind: 'read',
@@ -1816,6 +2025,61 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             throw new ComputeError('NOT_FOUND', `Provider account ${input.accountId} not found`);
           const client = await clients.client(account, depsOf(context));
           return { items: await client.listOffers(input.query) };
+        },
+      }),
+      // A read-only look at what the stored credential may do (P9): the provider's probe, as offers reads.
+      check: defineMethod({
+        action: 'compute:providers:read',
+        kind: 'read',
+        resource: accountResource,
+        validate: describedBy(schemas.account, (raw) => parseAccountRef(raw) as AccountRef),
+        handler: async (context, input) => {
+          const account = await readAccount(context.sql, input.accountId, input.tenantId);
+          if (!account)
+            throw new ComputeError('NOT_FOUND', `Provider account ${input.accountId} not found`);
+          return probeStoredAccount(
+            providers,
+            account,
+            accountCheck(context),
+            context.signal ?? AbortSignal.timeout(55_000),
+          );
+        },
+      }),
+      // What the provider says needs an operator on the account (P9: DigitalOcean's security scan), read-only.
+      findings: defineMethod({
+        action: 'compute:providers:read',
+        kind: 'read',
+        resource: accountResource,
+        validate: describedBy(schemas.account, (raw) => parseAccountRef(raw) as AccountRef),
+        handler: async (context, input) => {
+          const account = await readAccount(context.sql, input.accountId, input.tenantId);
+          if (!account)
+            throw new ComputeError('NOT_FOUND', `Provider account ${input.accountId} not found`);
+          return readStoredFindings(
+            providers,
+            account,
+            accountCheck(context),
+            context.signal ?? AbortSignal.timeout(55_000),
+          );
+        },
+      }),
+      // The account's own bill at its provider (P9: DigitalOcean's balance, invoices and billing history),
+      // read-only. Its history names payments, so it is decided as managing the account, not reading it.
+      billing: defineMethod({
+        action: 'compute:providers:manage',
+        kind: 'read',
+        resource: accountResource,
+        validate: describedBy(schemas.account, (raw) => parseAccountRef(raw) as AccountRef),
+        handler: async (context, input) => {
+          const account = await readAccount(context.sql, input.accountId, input.tenantId);
+          if (!account)
+            throw new ComputeError('NOT_FOUND', `Provider account ${input.accountId} not found`);
+          return readStoredBilling(
+            providers,
+            account,
+            accountCheck(context),
+            context.signal ?? AbortSignal.timeout(55_000),
+          );
         },
       }),
       update: defineMethod({
@@ -1869,7 +2133,17 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         resource: accountResource,
         validate: describedBy(schemas.account, (raw) => parseAccountRef(raw) as AccountRef),
         handler: async (context, input) => {
+          const before = await readAccount(context.sql, input.accountId, input.tenantId);
           await deleteAccount(context.sql, input);
+          // A connected account's credential is vps's: the sweep, enqueued with the delete (so it runs once the
+          // delete commits, and again should it fail), revokes it at the provider and deletes it; a ref another
+          // account names is kept.
+          if (
+            connectFlows &&
+            before &&
+            configRefs(before.config as Record<string, unknown>).length > 0
+          )
+            await context.work.enqueue(context.sql, connectSecretsWork, 'all');
           await context.authz.remove(context.sql, {
             type: 'provider-account',
             id: input.accountId,
@@ -2888,6 +3162,17 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         currency,
         closeGraceHours,
       ),
+      // P9: the credentials providerAccounts.connect sealed, revoked and deleted once unused.
+      ...(connectFlows ? [connectSecretsReconciler(connectSecretsDeps)] : []),
+      // P9: provider-measured host metrics of provider-pool VMs (opt-in).
+      ...(options.externalMetrics
+        ? [
+            externalMetricsReconciler(options.externalMetrics, (context) => ({
+              ...depsOf(context),
+              providers,
+            })),
+          ]
+        : []),
       {
         // §3.7: sandbox expiry, sandbox.ready/deleted events, and warm pools per template.
         name: sandboxWork,

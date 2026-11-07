@@ -500,6 +500,27 @@ describe('client: rate budget', () => {
     budget.take('sweep');
   });
 
+  it('reports what the API last said was left: the lowest count of a window, a new window replacing it', () => {
+    const clock = manualClock(1_000_000);
+    const budget = new RateBudget({ perMinute: 10, perHour: 100, clock });
+    expect(budget.reported()).toBeUndefined();
+    // A header without a number reports nothing.
+    budget.observe(new Headers({ 'ratelimit-limit': '5000' }));
+    expect(budget.reported()).toBeUndefined();
+    budget.observe(new Headers({ 'ratelimit-limit': '5000', 'ratelimit-remaining': '4990', 'ratelimit-reset': '2000' }));
+    // Parallel answers arrive out of order: the lower count of the same window wins.
+    budget.observe(new Headers({ 'ratelimit-limit': '5000', 'ratelimit-remaining': '4995', 'ratelimit-reset': '2000' }));
+    expect(budget.reported()).toEqual({ limit: 5000, remaining: 4990, resetAt: 2_000_000 });
+    budget.observe(new Headers({ 'ratelimit-limit': '5000', 'ratelimit-remaining': '4999', 'ratelimit-reset': '5600' }));
+    expect(budget.reported()).toEqual({ limit: 5000, remaining: 4999, resetAt: 5_600_000 });
+    // Past its reset, a report is stale: nothing is reported.
+    clock.advance(5_600_000);
+    expect(budget.reported()).toBeUndefined();
+    // Without a reset or a limit header, the answer stands on its own with this budget's hourly limit.
+    budget.observe(new Headers({ 'ratelimit-remaining': '7' }));
+    expect(budget.reported()).toEqual({ limit: 100, remaining: 7 });
+  });
+
   it('only ever lowers the hourly remainder from a header', () => {
     const budget = new RateBudget({ perMinute: 10, perHour: 100, clock: manualClock(1_000_000) });
     budget.observe(new Headers({ 'ratelimit-limit': '5000', 'ratelimit-remaining': '4999' }));
@@ -2412,7 +2433,12 @@ describe('definition', () => {
     emu.account.droplet_limit = 40;
     const report = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
     expect(report).toEqual({
-      account: { uuid: emu.account.uuid, status: 'active', dropletLimit: 40 },
+      account: {
+        uuid: emu.account.uuid,
+        status: 'active',
+        dropletLimit: 40,
+        team: { uuid: emu.account.team.uuid, name: 'My Team' },
+      },
       families: {
         compute: 'ok',
         networks: 'ok',
@@ -2437,8 +2463,11 @@ describe('definition', () => {
         'reserved_ip:update',
         'reserved_ip:delete',
       ]),
+      // What the API's last answers left of the token's hour (each answer counts its own request).
+      rateLimit: { limit: 5000, remaining: emu.rate.remaining, resetAt: emu.rate.resetAt * 1000 },
     });
     expect(report.unverified.every((scope) => !scope.endsWith(':read'))).toBe(true);
+    expect(emu.rate.remaining).toBe(5000 - emu.requests.length);
     // Single, read-only requests: one page of each, nothing that changes anything.
     expect(reads(emu).sort()).toEqual(
       [
@@ -2580,6 +2609,17 @@ describe('definition: scoped account bodies and timeouts', () => {
     account: platformAccount,
   };
 
+  it('probeAccount names the team read-only, and none for an account outside a team', async () => {
+    const emu = emulator();
+    emu.account.team = { uuid: 'team-1', name: 'Ops', members: [{ email: 'a@example.com' }] };
+    const inTeam = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
+    expect(inTeam.account.team).toEqual({ uuid: 'team-1', name: 'Ops' });
+    expect(JSON.stringify(inTeam)).not.toContain('a@example.com');
+    delete emu.account.team;
+    const alone = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
+    expect(alone.account.team).toBeUndefined();
+  });
+
   it('probeAccount reports compute denied when droplet:read is missing and the body has no droplet_limit', async () => {
     const emu = emulator();
     delete emu.account.droplet_limit;
@@ -2599,7 +2639,11 @@ describe('definition: scoped account bodies and timeouts', () => {
     });
     expect(report.missing).toEqual(['droplet:read']);
     expect(report.account.dropletLimit).toBeUndefined();
-    expect(report.account).toEqual({ uuid: emu.account.uuid, status: 'active' });
+    expect(report.account).toEqual({
+      uuid: emu.account.uuid,
+      status: 'active',
+      team: { uuid: emu.account.team.uuid, name: 'My Team' },
+    });
   });
 
   it('probeAccount refuses an account body without a uuid', async () => {

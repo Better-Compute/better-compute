@@ -7,6 +7,8 @@ import { networkMeteringMigration } from './ancillary-usage.js';
 import { instanceUsageMigration } from './instance-usage.js';
 import { providerCostsMigration } from './costs.js';
 import { quotaBookingsMigration } from './quota-bookings.js';
+import { externalMetricsMigration } from './external-metrics.js';
+import { connectSecretsMigration } from './connect-secrets.js';
 import { reservationGrantsMigration } from './reservation-grants.js';
 import { vpsVolumeResizeHoldMigration, vpsVolumesMigration } from './volumes.js';
 import { vpsVolumeStorageMigration } from './volume-storage.js';
@@ -268,4 +270,6 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   providerLoadBalancersMigration,
   providerEdgeMigration,
   quotaBookingsMigration,
+  externalMetricsMigration,
+  connectSecretsMigration,
 ]);

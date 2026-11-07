@@ -1,6 +1,6 @@
 import { ComputeError, type Clock, type Logger } from '@better-compute/core';
 import type { DoAction } from '../compute/types.js';
-import { tokenHash, type BudgetClass, type RateBudget } from './budget.js';
+import { tokenHash, type BudgetClass, type RateBudget, type ReportedRateLimit } from './budget.js';
 import { mapDoError } from './errors.js';
 
 // A DigitalOcean API v2 client over plain fetch. Paths are relative to the endpoint
@@ -31,13 +31,19 @@ export interface DoClient {
   ): AsyncIterable<T>;
   /** `GET /actions/{id}` (budget `observe`). */
   action(id: number, signal: AbortSignal): Promise<DoAction>;
+  /** (P9) What DigitalOcean's last answers said was left of the token's hourly limit; undefined before any. */
+  rateLimit?(): ReportedRateLimit | undefined;
 }
 
 export interface DoClientOptions {
   fetch: typeof fetch;
   endpoint: string;
-  /** Resolves the API token; called once, on first use. */
-  token: () => Promise<string>;
+  /**
+   * Resolves the API token; called once, on first use. A token with an expiry (an OAuth access token) is resolved
+   * again a minute before it expires, and after a 401, when the call names the token DigitalOcean refused (so a
+   * source that shares one access token between clients does not answer it again).
+   */
+  token: (hint?: { refused?: string }) => Promise<string | { token: string; expiresAt: number }>;
   /**
    * The token's budget, or a function that picks it by `tokenHash(token)` once the token is
    * resolved (the token itself never leaves the client).
@@ -61,13 +67,33 @@ export function doClient(options: DoClientOptions): DoClient {
   const endpoint = options.endpoint.replace(/\/+$/, '');
   const { origin, pathname: basePath } = new URL(endpoint);
 
-  // One shared in-flight promise; a failed resolution is not remembered, so a later call retries.
+  // One shared in-flight promise; a failed resolution is not remembered, so a later call retries. A token that
+  // expires is dropped a minute before it does.
   let pending: Promise<string> | undefined;
+  let expiresAt: number | undefined;
+  let refused: string | undefined;
   function token(): Promise<string> {
-    pending ??= options.token().catch((error: unknown) => {
+    if (pending && expiresAt !== undefined && options.clock.now() >= expiresAt - 60_000)
       pending = undefined;
-      throw error;
-    });
+    if (!pending) {
+      const hint = refused !== undefined ? { refused } : undefined;
+      refused = undefined;
+      const started: Promise<string> = options.token(hint).then(
+        (value) => {
+          if (typeof value === 'string') {
+            expiresAt = undefined;
+            return value;
+          }
+          expiresAt = value.expiresAt;
+          return value.token;
+        },
+        (error: unknown) => {
+          if (pending === started) pending = undefined;
+          throw error;
+        },
+      );
+      pending = started;
+    }
     return pending;
   }
   let budget: RateBudget | undefined =
@@ -128,6 +154,11 @@ export function doClient(options: DoClientOptions): DoClient {
           response.status,
         );
       return (payload ?? {}) as T;
+    }
+    // An expiring token DigitalOcean refuses is resolved again on the next call (it may have been revoked early).
+    if (response.status === 401 && expiresAt !== undefined) {
+      pending = undefined;
+      refused = bearer;
     }
     throw mapDoError(response.status, payload, response.headers, options.clock.now(), what);
   }
@@ -191,5 +222,7 @@ export function doClient(options: DoClientOptions): DoClient {
     return reply.action;
   }
 
-  return { clock: options.clock, request, pages, action };
+  // The budget is picked when the token first resolves: before any request there is nothing to report.
+  const rateLimit = () => budget?.reported();
+  return { clock: options.clock, request, pages, action, rateLimit };
 }

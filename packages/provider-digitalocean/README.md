@@ -14,7 +14,8 @@ An account is data, validated by the provider's manifest:
 
 | Field               | Meaning                                                                                                                                                                              |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `token`             | A secret reference to a personal access token with the scopes below.                                                                                                                 |
+| `token`             | A secret reference to a personal access token with the scopes below. An account holds exactly one of `token` and `refreshToken`.              |
+| `refreshToken`      | A secret reference to an OAuth refresh token ("Connect a DigitalOcean account"); see [Operations](#operations).                               |
 | `regions`           | At least one region slug. Offers and discovery are limited to these, and so is every create, claim and subnet.                                                                       |
 | `vpc`               | A VPC name or uuid that `create` uses when it gets no tenant network (default: the region's default VPC).                                                                            |
 | `sshKeyFingerprint` | The MD5 fingerprint of an account SSH key that is added to every Droplet (a fingerprint, not a secret; see below).                                                                   |
@@ -26,6 +27,8 @@ An account is data, validated by the provider's manifest:
 | `spacesAccessKey`   | A secret reference to a Spaces access key id. With `spacesSecretKey`, it is the S3 key pair that manages tenant buckets (see [Storage](#storage-spaces-cdn-and-container-registry)). |
 | `spacesSecretKey`   | A secret reference to the Spaces secret key that goes with `spacesAccessKey`. Set both or neither.                                                                                   |
 | `networkModel`      | Default `vpc-per-subnet` (a VPC per subnet). `vpc-subnets` is reserved for DO's VPC Subnets preview and refused (`INVALID_CONFIG`) for now.   |
+| `costs`             | Read the invoices into provider costs (`vps.costs`), default `false`; needs `billing:read`. See [Operations](#operations).                    |
+| `projectPerTenant`  | Assign each new Droplet to the project `bc-<tenant>`, default `false`; needs `project:read,create,update`.                                    |
 
 ## Usage
 
@@ -78,7 +81,9 @@ Create the token as a custom-scope token with at least:
 
 Managed Kubernetes (below) also needs `kubernetes:read,create,update,delete` and `kubernetes:access_cluster` (the short-lived cluster credential the mint uses).
 
-A token without a scope fails the call that needs it with `ACCESS_DENIED` (`details.reason` `scope`); `probeAccount` names the missing read scopes up front. It never writes (a trial create could bill), so a token with the read scopes but without `block_storage:create` or `reserved_ip:create` passes it and fails the first create; its `unverified` list names those scopes for the operator to check.
+The operations surfaces need more, only when they are used: `billing:read` (costs and the billing summary), `project:read,create,update` (`projectPerTenant`), `monitoring:read` (Droplet metrics) and `security:read` (security findings).
+
+A token without a scope fails the call that needs it with `ACCESS_DENIED` (`details.reason` `scope`); `probeAccount` names the missing read scopes up front, and `probeAccount(config, context, options, { operations: true })` the operations ones too. It never writes (a trial create could bill), so a token with the read scopes but without `block_storage:create` or `reserved_ip:create` passes it and fails the first create; its `unverified` list names those scopes for the operator to check. Its report names the account (uuid, status, Droplet limit) and, read-only, the team the token belongs to (`team`: uuid and name, never its members), which `providerAccounts.check` answers in `details.account` and the console shows beside the check.
 
 ## Tag scheme
 
@@ -497,6 +502,22 @@ Token scopes: read, create, update and delete on the GenAI (Agent Platform) and 
 the Managed Agents ones for the previews; the exact scope names are not confirmed yet. The bodies follow the API reference; the guardrail,
 Managed Agents and Signals paths are assumed. None of them is checked against recorded responses yet: the live suite
 must capture them before release.
+
+## Operations
+
+Billing, projects, monitoring, security and OAuth (program phase P9). Every read here is a GET with the account's own token, on the `sweep` budget unless noted, and none of them puts a token in a log or an error. Response shapes beyond the research notes are parsed tolerantly: a row it cannot read is left out, never guessed (costs fail the read instead, so a pass is retried rather than wrong).
+
+- **List prices** (`listPrices`). DigitalOcean prices a size as a whole, so each (size, account region) is one `instance` price naming its offer (`nyc3/s-2vcpu-4gb`), in micros of USD per hour, from the offers catalog. No vCPU, memory or GPU part is derived from a size price, and Spot, volume and address prices are not listed. vps proposes a flavor meter whose flavors share an offer at that offer's price plus the margin.
+- **Provider costs** (`costs: true`). The invoices whose month overlaps the window (a closed month from its final invoice, the current one from the month-to-date `invoice_preview`), one record per month, product, resource and cost type (items sharing one are summed). An item is a month aggregate, so it is read by every window it overlaps, and its id leaves out what grows (amount, duration, end) and what the final invoice may word differently from the preview (descriptions, project, category, start): later reads correct the stored row, and the final invoice replaces the preview's. Usage end is clamped to the read. Items carry no tags: a Droplet item is labelled with the instance and tenant tags of this deployment's Droplet of that id, so vps attributes it; a Droplet already deleted labels nothing. `billing.computeSku` names `Droplets` and `GPU Droplets`; `meteredSku` names volumes and reserved IPs. `periodRows` and `billsStopped` tell the vps leak check to compare an item's hours with the instance's running and stopped hours over its span, not hour slots.
+- **Billing summary** (`billingSummary(config, context)`): balance, final invoices, the month to date and the newest 50 history entries, in micros of USD. The definition answers it as `ProviderInput.billingSummary`, so `providerAccounts.billing` (decided as `compute:providers:manage` on the account) and the MCP `provider_account_billing` tool read it.
+- **Projects** (`projectPerTenant`). Each Droplet a create returns is assigned to `bc-<tenantId>` (vps passes the instance's tenant as the create request's `tenantId`), made on first use. It is grouping, never authority, and best effort: a failure is logged (`digitalocean.projectAssignFailed`) and never fails a create that has its Droplet.
+- **Droplet metrics** (`doMetricsSource(config, context)`). An `externalMetrics` source (`@better-compute/observability`) for attached Droplets that run no bcd: CPU utilisation, memory and load by default, the root filesystem and public bandwidth opt-in (`metrics`), over the last ten minutes. Bandwidth is read as megabits per second, which is **unverified**. Droplets are read four at a time (`concurrency`). When the budget runs out, or the caller's signal aborts (its deadline), it answers what it read, and the next pull starts at the first Droplet it read nothing for.
+- **Security findings** (`readSecurityFindings`, `observe` budget): the latest posture scan's findings, most severe first, and `securityAttention` maps them onto the admin panel's attention items. The provider's `findings` hook (`providerAccounts.findings`) answers them as `security:<rule>` findings, and a token without `security:read` as one `security:unreadable` finding. Read-only. The Security API shapes are **unverified** against a live account.
+- **OAuth** (`refreshToken`). The provider exchanges the refresh token at `https://cloud.digitalocean.com/v1/oauth/token` for a 30-day access token. The refresh token rotates on every exchange, so the host must pass `digitaloceanProvider({ oauth: { clientId, clientSecret, redirectUris, rotate: rotateInto(store) } })`: `rotate` writes the new refresh token over the account's secret (`SecretStore.put(tenantId, value, { ref })`). A host without it refuses OAuth accounts. Every client of the account in one process shares one access token until a minute before it expires (or a 401), so the refresh token rotates about once a month, not per client. Every exchange reads the store, and an `invalid_grant` re-reads it for about two seconds (`raceWaitMs`), so a token another process rotated is used; still unchanged, it is `UNAVAILABLE` (`oauthRace`) the first time and a dead grant, `INVALID_CONFIG` (`oauthGrant`), the next. The token request is form-encoded in the body, never in the URL (`tokenParams: 'query'` falls back to DO's documented query form). With at least one `redirectUris` entry the definition carries a connect flow (`ProviderInput.connect`): `providerAccounts.connectSetup` answers the authorization URL for a registered redirect URI, and `providerAccounts.connect` trades the code (`exchangeAuthorizationCode`), seals the refresh token and stores the account with it as `refreshToken`. The console's Provider accounts page drives it.
+
+`providerAccounts.check` runs `probeAccount` with the operations scopes on a stored account (`ProviderInput.probeAccount`): the Droplet scopes it lacks are `missing`, the operations ones `optional`, and it is `ok` only when the account is `active` with nothing missing. The CLI has `better-compute digitalocean check|offers|discover <account>` (alias `do`), and the MCP server opt-in `list_provider_accounts` and `check_provider_account` tools (`createComputeMcp({ providers: true })`).
+
+Not here yet: alert policies, Insights rules and uptime checks (they are `cloudResources` kinds, program phase P7), and the admin panel surfaces.
 
 ## Rate budget
 

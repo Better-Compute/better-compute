@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ComputeError,
   manifest,
   manualClock,
   type CallContext,
@@ -333,5 +334,112 @@ describe('provider contract extensions: filesystems (AWS A10)', () => {
       { fstype: 'nfs4', source: 'fs.example:/', options: '_netdev', path: '/mnt/shared' },
     ]);
     expect(full().filesystems).toBeUndefined();
+  });
+});
+
+describe('the P9 optional hooks (listPrices, readMetrics, probeAccount, findings, connect, billing hints)', () => {
+  const SECRET = 'tok-very-secret-value';
+  const live = new Map<string, ExternalMachine>();
+  const p9 = (breaks: boolean) =>
+    defineProvider({
+      id: breaks ? 'p9-broken' : 'p9-fake',
+      version: '1.0.0',
+      provides: ['vps'],
+      config: manifest({}),
+      billing: { computeSku: () => true, periodRows: true, billsStopped: !breaks },
+      probeAccount: async (_config, ctx) => {
+        const token = await ctx.secrets.resolve('secret://t/tok');
+        return breaks
+          ? { ok: true, missing: ['droplet:read'], details: { token } }
+          : {
+              ok: false,
+              missing: ['droplet:read'],
+              optional: ['billing:read'],
+              details: { id: 'a1' },
+            };
+      },
+      billingSummary: async () => ({
+        currency: breaks ? 'dollars' : 'USD',
+        monthToDateMicros: 5,
+        invoices: [{ id: 'i1', period: '2026-09', amountMicros: 1 }],
+        history: [],
+      }),
+      findings: async () =>
+        breaks
+          ? [
+              { id: 'f1', kind: 'security', severity: 'warning', title: 'a' },
+              { id: 'f1', kind: 'security', severity: 'warning', title: 'b' },
+            ]
+          : [{ id: 'f1', kind: 'security', severity: 'warning', title: 'a', at: 1 }],
+      connect: {
+        field: 'refreshToken',
+        authorizeUrl: ({ redirectUri }) => {
+          if (!breaks && redirectUri !== 'https://ok/cb')
+            throw new ComputeError('INVALID_INPUT', 'no');
+          return 'https://auth.example/authorize';
+        },
+        exchange: async ({ redirectUri }) => {
+          if (redirectUri !== 'https://ok/cb') throw new ComputeError('INVALID_INPUT', 'no');
+          return { secret: 's' };
+        },
+      },
+      create: () =>
+        ({
+          listOffers: async (query) => (query.minVcpu && query.minVcpu > 1000 ? [] : [offer]),
+          create: async (request, ctx) => {
+            const made = machine(`m-${ctx.idempotencyKey}`, { name: request.name });
+            live.set(made.id, made);
+            return made;
+          },
+          get: async (id) => live.get(id),
+          delete: async (id) => {
+            live.delete(id);
+          },
+          listPrices: async () => [
+            {
+              resource: 'instance',
+              region: 'r1',
+              ...(breaks ? {} : { offerId: 'o' }),
+              spot: false,
+              unitPriceMicros: breaks ? 0.5 : 5000,
+              unit: 'hour',
+              currency: 'USD',
+              sku: 's-1',
+            },
+          ],
+          readMetrics: async (machines) => [
+            { instance: machines[0]!.instance, metric: 'load1', value: 0.5, at: 1 },
+            ...(breaks ? [{ instance: 'someone-else', metric: 'Load-1', value: NaN, at: 1 }] : []),
+          ],
+        }) satisfies ProviderImpl,
+    });
+  const run = (breaks: boolean) =>
+    runConformance(providerConformanceCases(), {
+      provider: p9(breaks),
+      config: {},
+      offerId: 'o',
+      image: 'i',
+      context: { clock, secrets: { resolve: async () => SECRET } },
+    });
+  const p9Cases = [
+    'listPrices (when offered) answers well-formed list prices',
+    'readMetrics (when offered) answers well-formed samples of the machines asked only',
+    'probeAccount (when offered) answers a well-formed probe that holds no secret',
+    'findings (when offered) are well formed, uniquely named and hold no secret',
+    'billingSummary (when offered) answers integer amounts in a currency and holds no secret',
+    'connect (when offered) refuses a redirect URI the platform did not register',
+  ];
+
+  it('passes a provider that keeps them', async () => {
+    const report = await run(false);
+    expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
+    for (const name of [...p9Cases, 'the billing hints (when given) are well formed'])
+      expect(report.passed).toContain(name);
+  });
+
+  it('fails a provider that breaks them, and never prints the secret it leaked', async () => {
+    const report = await run(true);
+    expect(report.failed.map(({ name }) => name).sort()).toEqual([...p9Cases].sort());
+    expect(JSON.stringify(report.failed.map(({ error }) => String(error)))).not.toContain(SECRET);
   });
 });

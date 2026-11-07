@@ -18,7 +18,13 @@ import {
   type ProviderListPrice,
   type SqlExecutor,
 } from '@better-compute/core';
-import { noGroupKey, providerCostTotals, type MarginGroup } from './costs.js';
+import {
+  listLeaks,
+  noGroupKey,
+  providerCostTotals,
+  type LeakView,
+  type MarginGroup,
+} from './costs.js';
 import { fail, id as idOf, object, optional, tenant } from './input.js';
 import { proposePrices, type FlavorMeterBasis, type PriceProposals } from './proposals.js';
 
@@ -141,7 +147,15 @@ export type BillingApi = {
   proposePrices: MethodDefinition<ProposePricesInput, PriceProposals>;
   /** Revenue (better-iam spend) minus provider cost, by tenant, pool, account or meter (D12). */
   margins: MethodDefinition<MarginsInput, MarginsResult>;
+  /** (P9) The leaks raised on the platform's accounts (`billing.leak`) whose day is in the range, newest first. */
+  leaks: MethodDefinition<LeaksInput, { items: LeakView[] }>;
 };
+
+export interface LeaksInput {
+  /** Epoch ms: the leaks whose UTC day is in `[from, to)`. */
+  from: number;
+  to: number;
+}
 
 /** What `billing.proposePrices` needs from the module: the account's provider list prices. */
 export interface BillingProviders {
@@ -316,6 +330,13 @@ export const billingSchemas = {
       },
     },
     ['from', 'to', 'groupBy'],
+  ),
+  leaks: strictObject(
+    {
+      from: { type: 'integer', minimum: 0, description: 'Start of the range of leak days, epoch ms' },
+      to: { type: 'integer', minimum: 1, description: 'End of the range (exclusive), epoch ms' },
+    },
+    ['from', 'to'],
   ),
   prices: strictObject({ meter: meterKey, targetTenantId }),
   setPrices: strictObject(
@@ -492,6 +513,18 @@ export function parseProposePrices(raw: unknown): ProposePricesInput {
 
 // --- Methods -------------------------------------------------------------------------------------
 
+export function parseLeaks(raw: unknown): LeaksInput {
+  const input = object(raw, ['from', 'to']);
+  for (const field of ['from', 'to'] as const)
+    if (typeof input[field] !== 'number' || !Number.isSafeInteger(input[field]) || input[field] < 0)
+      fail(`${field} must be a time in epoch milliseconds`);
+  const from = input.from as number;
+  const to = input.to as number;
+  if (!(to > from)) fail('to must be after from');
+  if (to - from > marginsMaxRangeMs) fail('The range is at most 400 days');
+  return { from, to };
+}
+
 const fleetResource = () => ({ type: 'fleet' as const, id: fleetResourceId });
 const noInput = (raw: unknown): Record<string, never> => {
   object(raw ?? {}, []);
@@ -560,6 +593,15 @@ export function billingApi(options: BillingOptions = {}, providers?: BillingProv
         });
         return { rows, unattributedCostMicros: unattributedMicros, currency, ...range };
       },
+    }),
+    leaks: defineMethod({
+      action: 'compute:billing:read',
+      kind: 'read',
+      resource: fleetResource,
+      validate: describedBy(billingSchemas.leaks, parseLeaks),
+      handler: async (context, input) => ({
+        items: await listLeaks(context.sql, { ...input, rootTenantId: context.iam.rootTenantId }),
+      }),
     }),
     meters: defineMethod({
       action: 'compute:billing:read',

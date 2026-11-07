@@ -1,6 +1,7 @@
 // Every metric family this package defines (PLAN.md §14), listed by running each definer against a recording
 // registry, so the list (and the generated reference page built from it) cannot drift from the code.
 
+import { externalMetricsCollector } from './external.js';
 import { createObserver } from './spans.js';
 import {
   eventCounter,
@@ -116,5 +117,6 @@ export function metricCatalog(options: { prefix?: string } = {}): readonly Metri
   as('gatewayCollector', () => gatewayCollector(registry, () => []));
   as('revocationFeedCollector', () => revocationFeedCollector(registry, () => ({})));
   as('eventCounter', () => eventCounter(registry));
+  as('externalMetricsCollector', () => externalMetricsCollector(registry, []));
   return families;
 }

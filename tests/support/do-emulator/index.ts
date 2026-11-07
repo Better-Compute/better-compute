@@ -5,6 +5,7 @@ import { registerAddons } from './addons.js';
 import { registerOneClicks } from './one-clicks.js';
 import { registerApps } from './apps.js';
 import { registerAutoscale } from './autoscale.js';
+import { registerBilling } from './billing.js';
 import { registerCatalog } from './catalog.js';
 import { registerDatabases } from './databases.js';
 import { registerCertificates } from './certificates.js';
@@ -23,6 +24,9 @@ import { registerNfs } from './nfs.js';
 import { registerPartner } from './partner.js';
 import { registerLoadBalancers } from './load-balancers.js';
 import { registerNatGateways } from './nat-gateways.js';
+import { registerMonitoring } from './monitoring.js';
+import { registerProjects } from './projects.js';
+import { registerSecurity } from './security.js';
 import { registerTags } from './tags.js';
 import { registerVolumes } from './volumes.js';
 import { registerVpcPeerings } from './vpc-peerings.js';
@@ -218,6 +222,8 @@ export class DoEmulator {
   }
 
   fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    // Like fetch: a request whose signal has aborted never leaves.
+    if (init?.signal?.aborted) throw init.signal.reason;
     const url = new URL(typeof input === 'object' && 'url' in input ? input.url : String(input));
     const method = (init?.method ?? 'GET').toUpperCase();
     const headers = new Headers(init?.headers);
@@ -368,5 +374,9 @@ export class DoEmulator {
     registerKnowledgeBases(this);
     registerGuardrails(this);
     registerManagedAgents(this);
+    registerBilling(this);
+    registerProjects(this);
+    registerMonitoring(this);
+    registerSecurity(this);
   }
 }

@@ -34,6 +34,12 @@ export interface ComputeMcpOptions {
   /** Build the read-only `fleet_export` and `fleet_plan` tools (off by default; platform admins only). */
   fleet?: boolean;
   /**
+   * Build the read-only provider tools (off by default; P9): `list_provider_accounts`, `check_provider_account`,
+   * `provider_account_findings`, `provider_account_billing`, `list_billing_leaks` (platform operators) and
+   * `provider_account_connect_url` (the OAuth authorization URL; connecting itself is the browser's).
+   */
+  providers?: boolean;
+  /**
    * Wait for people to approve held-back actions inside the tool call (see `ConfirmationPolling`):
    * fixed, or per request so the poll runs with the caller's credential (`iamConfirmations`).
    */
@@ -162,6 +168,7 @@ export function createComputeMcp(options: ComputeMcpOptions): ComputeMcp {
   const tools = computeTools({
     execCommand: options.execCommand ?? false,
     fleet: options.fleet ?? false,
+    providers: options.providers ?? false,
   });
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
   const maxBodyBytes = options.maxBodyBytes ?? 1024 * 1024;
@@ -345,13 +352,19 @@ export interface GateToolRule {
  * twice about different resources.
  */
 export function gateTools(
-  options: { typePrefix?: string; execCommand?: boolean; fleet?: boolean } = {},
+  options: {
+    typePrefix?: string;
+    execCommand?: boolean;
+    fleet?: boolean;
+    providers?: boolean;
+  } = {},
 ): Record<string, GateToolRule> {
   const prefix = options.typePrefix ?? 'compute-';
   // The gate runs before compute validates anything, and a resource id can end up in a confirmation a
   // person reads: only well-formed ids pass; anything else throws, and the gate denies (review 14 M2).
   const idOf = (value: unknown, pattern: RegExp, what: string): string => {
-    if (typeof value !== 'string' || !pattern.test(value)) throw new Error(`${what} is not a valid id`);
+    if (typeof value !== 'string' || !pattern.test(value))
+      throw new Error(`${what} is not a valid id`);
     return value;
   };
   const pool = (args: Record<string, unknown>) => ({
@@ -419,6 +432,33 @@ export function gateTools(
     };
     rules.fleet_export = fleetAdmin;
     rules.fleet_plan = fleetAdmin;
+  }
+  if (options.providers) {
+    // Compute decides the list per tenant; a check needs to see the account it names.
+    rules.list_provider_accounts = { public: true };
+    rules.check_provider_account = {
+      action: 'compute:providers:read',
+      resource: (args: Record<string, unknown>) => ({
+        type: `${prefix}provider-account`,
+        id: idOf(args.accountId, /^pacct_[0-9a-hjkmnp-tv-z]{26,52}$/, 'accountId'),
+      }),
+    };
+    rules.provider_account_findings = rules.check_provider_account;
+    // The bill names payments: compute decides it as managing the account.
+    rules.provider_account_billing = {
+      action: 'compute:providers:manage',
+      resource: (args: Record<string, unknown>) => ({
+        type: `${prefix}provider-account`,
+        id: idOf(args.accountId, /^pacct_[0-9a-hjkmnp-tv-z]{26,52}$/, 'accountId'),
+      }),
+    };
+    // Leaks are the platform's (root's) billing: decided on the fleet, which resolves only in the root tenant.
+    rules.list_billing_leaks = {
+      action: 'compute:billing:read',
+      resource: () => ({ type: `${prefix}fleet`, id: 'global' }),
+    };
+    // Compute decides connectSetup on the tenant (providers:read); it calls no provider and stores nothing.
+    rules.provider_account_connect_url = { public: true };
   }
   return rules;
 }

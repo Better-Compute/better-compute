@@ -147,6 +147,33 @@ interface StoredCost {
   cost_micros: string | number;
   credits_micros: string | number;
   passed: boolean;
+  instance_id: string | null;
+  tenant_id: string | null;
+  attribution: CostAttribution;
+}
+
+/**
+ * A later export of a stored row that attributes it to nobody, when the stored row was attributed to an instance or
+ * by tenant label: the attribution already made is kept, with the labels it was made from. A provider whose labels
+ * come from the live resource (DigitalOcean reads a Droplet's tags; a deleted Droplet has none) would otherwise move
+ * a deleted VM's month off its tenant on the next read of that month. A label is never taken away by a later read;
+ * a different label still replaces it.
+ */
+function keepAttribution(cost: AttributedCost, before: StoredCost): AttributedCost {
+  if (cost.attribution !== 'unattributed') return cost;
+  if (before.attribution !== 'instance' && before.attribution !== 'tenant-label') return cost;
+  const previous = json(before.record);
+  const kept: Record<string, string> = {};
+  for (const key of [costLabels.instance, costLabels.tenant])
+    if (previous.labels[key] !== undefined && cost.record.labels[key] === undefined)
+      kept[key] = previous.labels[key]!;
+  return {
+    ...cost,
+    record: { ...cost.record, labels: Object.freeze({ ...cost.record.labels, ...kept }) },
+    instanceId: before.instance_id,
+    tenantId: before.tenant_id,
+    attribution: before.attribution,
+  };
 }
 
 const json = <T>(value: T | string): T =>
@@ -166,7 +193,9 @@ export const isPlatformAccount = (
 
 /**
  * Attributes records of one account (D10): the `better-compute-instance` label when it names an instance of this
- * account (its tenant), then the `better-compute-tenant` label, then the account's tenant when the account is a
+ * account (its tenant), then the record's `instanceExternalId` when exactly one instance of this account has that
+ * external id (deleted instances keep theirs, so a VM's cost read after the VM is gone stays its own; an id two
+ * instances held is ambiguous and attributes nothing), then the `better-compute-tenant` label, then the account's tenant when the account is a
  * tenant's own (BYO), else `unattributed`. On a tenant's own account the tenant wrote the labels, so a label never
  * moves a cost to another tenant: an instance label must name an instance of this account, and a tenant label is
  * ignored there (the account's tenant pays).
@@ -192,6 +221,23 @@ async function attribute(
       [account.id, labelled],
     );
     for (const row of rows) instances.set(row.id, row.tenant_id);
+  }
+  const externalIds = [
+    ...new Set(
+      records
+        .map((record) => record.instanceExternalId)
+        .filter((value): value is string => typeof value === 'string' && value.length > 0),
+    ),
+  ];
+  const byExternal = new Map<string, { id: string; tenantId: string }>();
+  if (externalIds.length > 0) {
+    const { rows } = await tx.query<{ external_id: string; id: string; tenant_id: string }>(
+      `SELECT external_id, min(id) AS id, min(tenant_id) AS tenant_id FROM instances
+        WHERE provider_account_id = $1 AND external_id = ANY($2::text[])
+        GROUP BY external_id HAVING count(*) = 1`,
+      [account.id, externalIds],
+    );
+    for (const row of rows) byExternal.set(row.external_id, { id: row.id, tenantId: row.tenant_id });
   }
   // A tenant label names a tenant compute knows (it owns or is offered a pool, or holds instances, accounts or
   // projects); any other is unattributed, never billed to a name nobody checked.
@@ -222,8 +268,18 @@ async function attribute(
   return records.map((record) => {
     const conditions =
       record.currency.toUpperCase() === currency.toUpperCase() ? [] : [currencyMismatch];
-    const instanceId = record.labels[costLabels.instance];
-    const instanceTenant = instanceId !== undefined ? instances.get(instanceId) : undefined;
+    const labelled = record.labels[costLabels.instance];
+    const external =
+      record.instanceExternalId !== undefined
+        ? byExternal.get(record.instanceExternalId)
+        : undefined;
+    // The label first; the provider's id of the VM when the label names no instance of this account.
+    const [instanceId, instanceTenant] =
+      labelled !== undefined && instances.has(labelled)
+        ? [labelled, instances.get(labelled)]
+        : external !== undefined
+          ? [external.id, external.tenantId]
+          : [labelled, undefined];
     if (!platform)
       // A tenant's own account: the tenant pays the provider for every row, whoever runs on it (its pool may be
       // offered to another tenant); the instance is kept only when it is the account tenant's own.
@@ -311,15 +367,17 @@ async function writeBatch(
   const judge = passableJudge(deps, account);
   const asJson = (cost: AttributedCost) => rowJson(cost, judge(cost));
   const { rows } = await tx.query<StoredCost>(
-    `SELECT source_row_id, record, cost_micros, credits_micros, passed_through_at IS NOT NULL AS passed
+    `SELECT source_row_id, record, cost_micros, credits_micros, passed_through_at IS NOT NULL AS passed,
+            instance_id, tenant_id, attribution
        FROM provider_costs WHERE account_id = $1 AND source_row_id = ANY($2::text[]) FOR UPDATE`,
     [account.id, batch.map((cost) => cost.record.sourceRowId)],
   );
   const stored = new Map(rows.map((row) => [row.source_row_id, row]));
   const inserts: AttributedCost[] = [];
   const updates: { cost: AttributedCost; before: StoredCost }[] = [];
-  for (const cost of batch) {
-    const before = stored.get(cost.record.sourceRowId);
+  for (const exported of batch) {
+    const before = stored.get(exported.record.sourceRowId);
+    const cost = before ? keepAttribution(exported, before) : exported;
     if (!before) inserts.push(cost);
     else {
       const previous = json(before.record);
@@ -912,8 +970,14 @@ export async function detectLeaks(
 ): Promise<{ leaks: number }> {
   // Platform accounts only: a tenant's own account is the tenant's cost, not the platform's.
   if (!isPlatformAccount(account, deps.rootTenantId)) return { leaks: 0 };
-  const computeSku = deps.providers.get(account.provider)?.billing?.computeSku;
+  const billing = deps.providers.get(account.provider)?.billing;
+  const computeSku = billing?.computeSku;
   if (typeof computeSku !== 'function') return { leaks: 0 };
+  if (billing?.periodRows === true)
+    return detectPeriodLeaks(deps, tx, account, window, toleranceHours, {
+      computeSku,
+      billsStopped: billing.billsStopped === true,
+    });
   // Only the columns the check reads, of regular usage rows attributed to an instance root bills (an instance
   // with billing 'none' has no intervals by design).
   const { rows } = await tx.query<LeakRow>(
@@ -1035,6 +1099,189 @@ export async function detectLeaks(
     }
   }
   return { leaks };
+}
+
+/** Share of a period row's hours tolerated as rounding (per-hour billing of each start, stop and resize). */
+export const periodLeakShare = 0.05;
+
+/**
+ * The leak check for a provider of period rows (`billing.periodRows`, P9): a row is a resource's charge for a
+ * billing period so far, so the hours it bills (its quantity, in an hour unit; other units are not checked) are
+ * compared with the hours the instance's intervals (`running`, and `stopped` when the provider bills those) cover
+ * of the row's span. Every row whose span overlaps the window is checked, since a month's row starts on its first
+ * day. The rows of one instance and billing month (the UTC month of their start) are summed; a gap over
+ * `max(toleranceHours, 5%)` of the billed hours raises `billing.leak` once per instance and period (`day` = the
+ * period's first UTC day, `YYYY-MM-01`), never the row's own start: a later read of the month whose start differs
+ * (the final invoice after the preview) is the same period, not another leak.
+ */
+async function detectPeriodLeaks(
+  deps: Pick<CostsDeps, 'events' | 'clock'>,
+  tx: SqlTx,
+  account: ProviderAccount,
+  window: { from: number; to: number },
+  toleranceHours: number,
+  hooks: {
+    computeSku: (record: Pick<ProviderCostRecord, 'service' | 'sku' | 'skuDescription'>) => boolean;
+    billsStopped: boolean;
+  },
+): Promise<{ leaks: number }> {
+  const { rows } = await tx.query<LeakRow & { quantity: number; unit: string | null }>(
+    `SELECT c.instance_id, c.tenant_id, c.record->>'service' AS service, c.record->>'sku' AS sku,
+            c.record->>'skuDescription' AS sku_description,
+            (c.record->>'quantity')::float8 AS quantity, lower(c.record->>'unit') AS unit,
+            (extract(epoch FROM c.usage_start) * 1000)::float8 AS start_ms,
+            (extract(epoch FROM c.usage_end) * 1000)::float8 AS end_ms
+       FROM provider_costs c JOIN instances i ON i.id = c.instance_id
+      WHERE c.account_id = $1 AND c.instance_id IS NOT NULL
+        AND c.usage_start < to_timestamp($3::float8 / 1000) AND c.usage_end > to_timestamp($2::float8 / 1000)
+        AND COALESCE(c.record->>'costType', 'regular') = 'regular'
+        AND (c.record->>'quantity')::float8 > 0
+        AND i.billing IS DISTINCT FROM 'none'`,
+    [account.id, window.from, window.to],
+  );
+  // instance → period day → billed hours and the span they cover
+  const billed = new Map<
+    string,
+    { tenantId: string | null; periods: Map<string, { hours: number; start: number; end: number }> }
+  >();
+  for (const row of rows) {
+    if (!hourUnits.test(row.unit ?? '')) continue;
+    const sku = {
+      service: row.service ?? '',
+      sku: row.sku ?? '',
+      ...(row.sku_description !== null ? { skuDescription: row.sku_description } : {}),
+    };
+    if (!hooks.computeSku(sku)) continue;
+    const entry = billed.get(row.instance_id) ?? { tenantId: row.tenant_id, periods: new Map() };
+    billed.set(row.instance_id, entry);
+    const start = Number(row.start_ms);
+    const end = Number(row.end_ms);
+    const day = `${dayOf(start).slice(0, 7)}-01`;
+    const period = entry.periods.get(day);
+    entry.periods.set(
+      day,
+      period
+        ? {
+            hours: period.hours + Number(row.quantity),
+            start: Math.min(period.start, start),
+            end: Math.max(period.end, end),
+          }
+        : { hours: Number(row.quantity), start, end },
+    );
+  }
+  if (billed.size === 0) return { leaks: 0 };
+  const phases = hooks.billsStopped ? ['running', 'stopped'] : ['running'];
+  const earliest = Math.min(
+    ...[...billed.values()].flatMap(({ periods }) => [...periods.values()].map((period) => period.start)),
+  );
+  const { rows: intervals } = await tx.query<{
+    instance_id: string;
+    started_ms: number;
+    ended_ms: number | null;
+  }>(
+    `SELECT instance_id, (extract(epoch FROM started_at) * 1000)::float8 AS started_ms,
+            (extract(epoch FROM ended_at) * 1000)::float8 AS ended_ms
+       FROM instance_usage_intervals
+      WHERE instance_id = ANY($1::text[]) AND phase = ANY($2::text[])
+        AND (ended_at IS NULL OR ended_at > to_timestamp($3::float8 / 1000))`,
+    [[...billed.keys()], phases, earliest],
+  );
+  const now = deps.clock.now();
+  let leaks = 0;
+  for (const [instanceId, { tenantId, periods }] of billed) {
+    const spans = intervals
+      .filter((interval) => interval.instance_id === instanceId)
+      .map((interval) => ({
+        start: Number(interval.started_ms),
+        end: interval.ended_ms === null ? now : Number(interval.ended_ms),
+      }));
+    for (const [day, period] of [...periods].sort(([a], [b]) => a.localeCompare(b))) {
+      let covered = 0;
+      for (const span of spans)
+        covered += Math.max(0, Math.min(span.end, period.end) - Math.max(span.start, period.start));
+      const providerHours = Math.round(period.hours * 100) / 100;
+      const meteredHours = Math.round((covered / HOUR) * 100) / 100;
+      if (providerHours - meteredHours <= Math.max(toleranceHours, providerHours * periodLeakShare))
+        continue;
+      const { rows: raised } = await tx.query(
+        `INSERT INTO provider_cost_leaks (instance_id, day, account_id, provider_hours, metered_hours)
+         VALUES ($1, $2::date, $3, $4, $5) ON CONFLICT DO NOTHING RETURNING instance_id`,
+        [instanceId, day, account.id, providerHours, meteredHours],
+      );
+      if (raised.length === 0) continue;
+      leaks++;
+      await deps.events.publish(tx, {
+        type: 'billing.leak',
+        tenantId: account.tenantId,
+        subject: `provider-account/${account.id}`,
+        data: { accountId: account.id, instanceId, tenantId, day, providerHours, meteredHours },
+      });
+    }
+  }
+  return { leaks };
+}
+
+/** One raised leak (`billing.leaks`): what `billing.leak` said, with the account it was found on. */
+export interface LeakView {
+  accountId: string;
+  accountName: string;
+  provider: string;
+  instanceId: string;
+  /** The instance's tenant; null when the instance is gone. */
+  tenantId: string | null;
+  /** UTC day (`YYYY-MM-DD`): the day of hour-slot rows, the period's first day of period rows. */
+  day: string;
+  providerHours: number;
+  meteredHours: number;
+  /** Epoch ms. */
+  raisedAt: number;
+}
+
+/** The most leaks one `billing.leaks` answers. */
+export const leaksLimit = 500;
+
+/**
+ * The leaks raised on the platform's (root's) accounts whose day is in `[from, to)`, newest day first, at most
+ * `leaksLimit`. Nothing without a root tenant: a tenant's own account is never checked.
+ */
+export async function listLeaks(
+  sql: { query: SqlTx['query'] },
+  input: { from: number; to: number; rootTenantId: string | undefined },
+): Promise<LeakView[]> {
+  if (input.rootTenantId === undefined) return [];
+  const { rows } = await sql.query<{
+    account_id: string;
+    name: string;
+    provider: string;
+    instance_id: string;
+    tenant_id: string | null;
+    day: string;
+    provider_hours: string | number;
+    metered_hours: string | number;
+    raised_ms: number;
+  }>(
+    `SELECT l.account_id, a.name, a.provider, l.instance_id, i.tenant_id, to_char(l.day, 'YYYY-MM-DD') AS day,
+            l.provider_hours, l.metered_hours, (extract(epoch FROM l.raised_at) * 1000)::float8 AS raised_ms
+       FROM provider_cost_leaks l
+       JOIN provider_accounts a ON a.id = l.account_id AND a.tenant_id = $3
+       LEFT JOIN instances i ON i.id = l.instance_id
+      WHERE l.day >= (to_timestamp($1::float8 / 1000) AT TIME ZONE 'UTC')::date
+        AND l.day < (to_timestamp($2::float8 / 1000) AT TIME ZONE 'UTC')::date
+      ORDER BY l.day DESC, l.raised_at DESC, l.instance_id
+      LIMIT ${leaksLimit}`,
+    [input.from, input.to, input.rootTenantId],
+  );
+  return rows.map((row) => ({
+    accountId: row.account_id,
+    accountName: row.name,
+    provider: row.provider,
+    instanceId: row.instance_id,
+    tenantId: row.tenant_id,
+    day: row.day,
+    providerHours: Number(row.provider_hours),
+    meteredHours: Number(row.metered_hours),
+    raisedAt: Number(row.raised_ms),
+  }));
 }
 
 // --- Margins (D12) -------------------------------------------------------------------------------------------

@@ -158,11 +158,13 @@ export const GROUP_ORDER = ['Overview', 'Capacity', 'Fleet', 'Workloads', 'Opera
 import { overviewModule } from '@/components/overview/module';
 import { fleetModule } from '@/components/fleet/module';
 import { capacityModule } from '@/components/capacity/module';
+import { providersModule } from '@/components/providers/module';
 
 export const modules: AdminModule[] = [
   overviewModule,
   capacityModule,
   fleetModule,
+  providersModule,
 ];
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 

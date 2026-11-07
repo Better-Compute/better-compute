@@ -34,6 +34,8 @@ interface Ledger {
   windows: { from: number; to: number }[];
   /** Runs inside every read before it yields (e.g. moving the clock: a slow export). */
   onRead?: () => Promise<void>;
+  /** Yield the rows whose usage overlaps the window (a provider of period rows), not only those starting in it. */
+  overlap?: boolean;
 }
 
 /** fake-gce with a cost ledger: the same VMs and calls, plus `costs`. */
@@ -62,7 +64,11 @@ function costingGce(
             throw failure;
           }
           for (const row of ledger.rows)
-            if (row.usageStart >= window.from && row.usageStart < window.to)
+            if (
+              ledger.overlap
+                ? row.usageStart < window.to && row.usageEnd > window.from
+                : row.usageStart >= window.from && row.usageStart < window.to
+            )
               yield structuredClone(row);
         },
       });
@@ -149,7 +155,11 @@ interface CostView {
   updatedAt: number;
 }
 
-async function costWorld(options: Pick<VpsOptions, 'costs' | 'billing'> = {}): Promise<CostWorld> {
+async function costWorld(
+  options: Pick<VpsOptions, 'costs' | 'billing'> = {},
+  /** More of fake-gce's billing hooks (periodRows, billsStopped). */
+  billing: Record<string, unknown> = {},
+): Promise<CostWorld> {
   const cloud: FakeGce = { machines: new Map(), requests: [] };
   const byo: FakeGce = { machines: new Map(), requests: [] };
   const ledger: Ledger = { rows: [], windows: [] };
@@ -159,7 +169,7 @@ async function costWorld(options: Pick<VpsOptions, 'costs' | 'billing'> = {}): P
     modules: [
       vps({
         providers: [
-          costingGce(cloud, ledger, 'fake-gce', { billing: fakeBilling }),
+          costingGce(cloud, ledger, 'fake-gce', { billing: { ...fakeBilling, ...billing } }),
           costingGce(byo, byoLedger, 'fake-gce-byo', { billing: fakeBilling }),
           fakeGceProvider({ machines: new Map(), requests: [] }, 'fake-gce-plain'),
         ],
@@ -444,6 +454,46 @@ describe('ingestion and attribution', () => {
     expect(await world.events('billing.cost-corrected')).toHaveLength(1);
     // unattributed is published once per row, not per correction
     expect(await world.events('billing.unattributed')).toHaveLength(1);
+  });
+
+  it('a later export without the labels keeps the attribution already made, and corrects the cost', async () => {
+    const world = await costWorld();
+    const vm = await createVm(world);
+    const at = world.now() - DAY;
+    world.ledger.rows.push(
+      costRow({ sourceRowId: 'vm', usageStart: at, exportTime: at + HOUR, labels: { [instanceLabel]: vm.id } }),
+      costRow({ sourceRowId: 'tl', usageStart: at, exportTime: at + HOUR, labels: { [tenantLabel]: world.acmeTenant } }),
+    );
+    await world.scan();
+    // The VM is gone at the provider: its later export carries no labels (and a larger amount).
+    await world.fixture.advance(6 * HOUR);
+    world.ledger.rows = [
+      costRow({ sourceRowId: 'vm', usageStart: at, exportTime: at + 7 * HOUR, costMicros: 900_000, labels: {} }),
+      costRow({ sourceRowId: 'tl', usageStart: at, exportTime: at + 7 * HOUR, costMicros: 800_000, labels: {} }),
+    ];
+    await world.scan();
+    const byId = new Map((await world.costs()).map((cost) => [cost.sourceRowId, cost]));
+    expect(byId.get('vm')).toMatchObject({
+      attribution: 'instance',
+      instanceId: vm.id,
+      tenantId: world.acmeTenant,
+      costMicros: 900_000,
+    });
+    expect(byId.get('tl')).toMatchObject({
+      attribution: 'tenant-label',
+      instanceId: null,
+      tenantId: world.acmeTenant,
+      costMicros: 800_000,
+    });
+    expect(await world.events('billing.cost-corrected')).toHaveLength(2);
+    expect(await world.events('billing.unattributed')).toEqual([]);
+    // The kept attribution is stable: the same export again is unchanged, not rewritten every pass.
+    await world.fixture.advance(6 * HOUR);
+    await world.scan();
+    const passes = (await world.events('billing.cost-ingested')).filter(
+      (event) => event.data.accountId === world.accountId,
+    );
+    expect(passes.at(-1)!.data).toMatchObject({ rows: 2, inserted: 0, corrected: 0, unchanged: 2 });
   });
 
   it('rate limits defer the account', async () => {
@@ -1176,6 +1226,41 @@ describe('leak detection', () => {
     expect(await world.events('billing.leak')).toHaveLength(1);
   });
 
+  it('billing.leaks lists the raised leaks, newest day first; only root reads them', async () => {
+    const world = await costWorld();
+    const vm = await freshVm(world);
+    const day1 = Math.floor((world.now() - 2 * DAY) / DAY) * DAY;
+    computeHours(world, vm.id, day1 + 2 * HOUR, 5);
+    computeHours(world, vm.id, day1 + DAY + 2 * HOUR, 3);
+    await world.scan();
+    const range = { from: day1 - DAY, to: world.now() + DAY };
+    const { items } = await world.api.billing.leaks(world.root, range);
+    expect(items).toEqual([
+      {
+        accountId: world.accountId,
+        accountName: 'gce-main',
+        provider: 'fake-gce',
+        instanceId: vm.id,
+        tenantId: world.acmeTenant,
+        day: new Date(day1 + DAY).toISOString().slice(0, 10),
+        providerHours: 3,
+        meteredHours: 0,
+        raisedAt: expect.any(Number),
+      },
+      expect.objectContaining({ day: new Date(day1).toISOString().slice(0, 10), providerHours: 5 }),
+    ]);
+    // the range is of the leak's day
+    expect(
+      (await world.api.billing.leaks(world.root, { from: day1 + DAY, to: day1 + 2 * DAY })).items,
+    ).toHaveLength(1);
+    await expect(world.api.billing.leaks(world.acme, range)).rejects.toMatchObject({
+      code: 'ACCESS_DENIED',
+    });
+    await expect(
+      world.api.billing.leaks(world.root, { from: range.to, to: range.from }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
   it('within tolerance raises nothing', async () => {
     const world = await costWorld();
     const vm = await freshVm(world);
@@ -1264,6 +1349,153 @@ describe('leak detection', () => {
     expect((await world.events('billing.leak')).map((event) => event.data.providerHours)).toEqual([
       24,
     ]);
+  });
+
+  // (P9) A provider of period rows (DigitalOcean: one invoice item per Droplet and month, its quantity the hours
+  // billed so far): the row's hours are compared with the instance's hours over the row's span.
+  describe('period rows', () => {
+    /** A stopped interval of the instance over `[start, end)`. */
+    async function stopped(world: CostWorld, instanceId: string, start: number, end: number) {
+      await world.fixture.database.query(
+        `INSERT INTO instance_usage_intervals (id, instance_id, tenant_id, pool_id, provider, phase, mode, shape,
+                                               started_at, ended_at, metered_until)
+         VALUES ($1, $2, $3, $4, 'fake-gce', 'stopped', 'metered', '{}'::jsonb, to_timestamp($5::float8 / 1000),
+                 to_timestamp($6::float8 / 1000), to_timestamp($6::float8 / 1000))`,
+        [`iui_s_${start}`, instanceId, world.acmeTenant, world.poolId, start, end],
+      );
+    }
+
+    /** One month-aggregate row of the instance: `hours` billed over `[start, end)`. */
+    function periodRow(world: CostWorld, instanceId: string, start: number, end: number, hours: number) {
+      world.ledger.overlap = true;
+      world.ledger.rows.push(
+        costRow({
+          sourceRowId: `period-${instanceId}`,
+          service: 'Compute Engine',
+          sku: 'instance',
+          skuDescription: 'N2 Instance Core month',
+          usageStart: start,
+          usageEnd: end,
+          quantity: hours,
+          unit: 'hours',
+          labels: { [instanceLabel]: instanceId },
+        }),
+      );
+    }
+
+    it('a row starting before the lookback is checked by its hours, not its hour slots', async () => {
+      const world = await costWorld({}, { periodRows: true });
+      const vm = await freshVm(world);
+      const start = Math.floor((world.now() - 10 * DAY) / DAY) * DAY;
+      const end = world.now();
+      const hours = Math.floor((end - start) / HOUR);
+      // billed the whole span, metered for its last 5 days only
+      periodRow(world, vm.id, start, end, hours);
+      await running(world, vm.id, end - 5 * DAY, end);
+      await world.scan();
+      expect((await world.events('billing.leak')).map((event) => event.data)).toEqual([
+        {
+          accountId: world.accountId,
+          instanceId: vm.id,
+          tenantId: world.acmeTenant,
+          // The period's first UTC day: the month the row bills.
+          day: `${new Date(start).toISOString().slice(0, 7)}-01`,
+          providerHours: hours,
+          meteredHours: 120,
+        },
+      ]);
+      // once per instance and period, however the month-to-date row grows
+      world.ledger.rows[0]!.quantity += 6;
+      await world.fixture.advance(6 * HOUR);
+      await world.scan();
+      expect(await world.events('billing.leak')).toHaveLength(1);
+    });
+
+    it('a later read of the period with another start (the final invoice after the preview) raises no second leak', async () => {
+      const world = await costWorld({}, { periodRows: true });
+      const vm = await freshVm(world);
+      const tenDaysAgo = new Date(world.now() - 10 * DAY);
+      const monthStart = Date.UTC(tenDaysAgo.getUTCFullYear(), tenDaysAgo.getUTCMonth(), 1);
+      const end = world.now();
+      periodRow(world, vm.id, monthStart, end, Math.floor((end - monthStart) / HOUR));
+      await running(world, vm.id, end - 5 * DAY, end);
+      await world.scan();
+      const month = `${new Date(monthStart).toISOString().slice(0, 7)}-01`;
+      expect((await world.events('billing.leak')).map((event) => event.data.day)).toEqual([month]);
+      // The same row read again (a newer export) says the usage started a day later.
+      const row = world.ledger.rows[0]!;
+      row.usageStart = monthStart + DAY;
+      row.exportTime = end + HOUR;
+      row.quantity += 6;
+      await world.fixture.advance(6 * HOUR);
+      row.usageEnd = world.now();
+      await world.scan();
+      expect((await world.events('billing.leak')).map((event) => event.data.day)).toEqual([month]);
+    });
+
+    it('hours metered over the span raise nothing; 5% of the hours is tolerated', async () => {
+      const world = await costWorld({}, { periodRows: true });
+      const vm = await freshVm(world);
+      const start = Math.floor((world.now() - 10 * DAY) / DAY) * DAY;
+      const end = world.now();
+      const hours = Math.floor((end - start) / HOUR);
+      // billed every hour of the span (rounded up), metered all but 4% of it
+      periodRow(world, vm.id, start, end, hours);
+      await running(world, vm.id, start + Math.round(hours * 0.04) * HOUR, end);
+      await world.scan();
+      expect(await world.events('billing.leak')).toEqual([]);
+    });
+
+    it('stopped hours count when the provider bills a stopped machine', async () => {
+      const world = await costWorld({}, { periodRows: true, billsStopped: true });
+      const vm = await freshVm(world);
+      const start = Math.floor((world.now() - 10 * DAY) / DAY) * DAY;
+      const end = world.now();
+      const hours = Math.floor((end - start) / HOUR);
+      periodRow(world, vm.id, start, end, hours);
+      await running(world, vm.id, start, start + 5 * DAY);
+      await stopped(world, vm.id, start + 5 * DAY, end);
+      await world.scan();
+      expect(await world.events('billing.leak')).toEqual([]);
+
+      // without billsStopped, the stopped days are a gap
+      const plain = await costWorld({}, { periodRows: true });
+      const other = await freshVm(plain);
+      const from = Math.floor((plain.now() - 10 * DAY) / DAY) * DAY;
+      periodRow(plain, other.id, from, plain.now(), Math.floor((plain.now() - from) / HOUR));
+      await running(plain, other.id, from, from + 5 * DAY);
+      await stopped(plain, other.id, from + 5 * DAY, plain.now());
+      await plain.scan();
+      expect((await plain.events('billing.leak')).map((event) => event.data.meteredHours)).toEqual([
+        120,
+      ]);
+    });
+
+    it('a row whose unit is not hours is not checked', async () => {
+      const world = await costWorld({}, { periodRows: true });
+      const vm = await freshVm(world);
+      const start = Math.floor((world.now() - 10 * DAY) / DAY) * DAY;
+      periodRow(world, vm.id, start, world.now(), 240);
+      world.ledger.rows[0]!.unit = 'months';
+      await world.scan();
+      expect(await world.events('billing.leak')).toEqual([]);
+    });
+
+    it('defineProvider takes billing.periodRows and billing.billsStopped as booleans', () => {
+      const base = fakeGceProvider({ machines: new Map(), requests: [] });
+      const define = (billing: unknown) =>
+        defineProvider({
+          id: 'hooks',
+          version: '1.0.0',
+          provides: ['vps'],
+          config: base.config,
+          create: base.create,
+          billing: billing as never,
+        });
+      expect(define({ periodRows: true, billsStopped: false }).billing).toBeDefined();
+      expect(() => define({ periodRows: 'yes' })).toThrow(/billing.periodRows/);
+      expect(() => define({ billsStopped: 1 })).toThrow(/billing.billsStopped/);
+    });
   });
 });
 

@@ -1787,6 +1787,12 @@ export interface ProviderCostRecord {
   zone?: string;
   project?: string;
   resourceName?: string;
+  /**
+   * (additive) The provider's own id of the VM the row is for (a DigitalOcean Droplet id), when the provider can
+   * name it but may not label it (its invoice carries no tags, and a deleted VM has none to read). vps attributes
+   * the row to the account's instance with that external id when no instance label does.
+   */
+  instanceExternalId?: string;
   usageStart: number;
   usageEnd: number;
   /** Usage in the pricing unit (`unit`). */
@@ -1817,9 +1823,11 @@ export interface RescueAccess {
  * (platform compute billing) One provider list price, in micros of `currency` per `unit`: what the provider charges
  * for a resource in a region. `hour` is per vCPU, GPU or address hour; `gib-hour` per GiB of memory or disk hour;
  * Commitment prices are not listed, and neither is egress (billed by pass-through at its real cost).
+ * (additive) `instance` is a whole machine shape priced as one, per `hour`, for a provider that does not price vCPUs
+ * and memory apart (a DigitalOcean Droplet size); it names the offer it prices (`offerId`).
  */
 export interface ProviderListPrice {
-  resource: 'vcpu' | 'memory' | 'gpu' | 'disk' | 'ip';
+  resource: 'vcpu' | 'memory' | 'gpu' | 'disk' | 'ip' | 'instance';
   region: string;
   /** The catalog GPU family slug (`h100`), for `resource: 'gpu'`. */
   gpuModel?: string;
@@ -1827,6 +1835,8 @@ export interface ProviderListPrice {
   diskType?: string;
   /** The machine family (`n2`), for `vcpu` and `memory`. */
   machineFamily?: string;
+  /** The provider's offer id the price is for (`nyc3/s-2vcpu-4gb`), for `resource: 'instance'`. */
+  offerId?: string;
   spot: boolean;
   unitPriceMicros: number;
   unit: 'hour' | 'gib-hour';
@@ -1928,6 +1938,11 @@ export interface ProviderImpl {
       kubernetesNode?: 'eks';
       /** (DO P3) The catalog image `image` names, as the host resolved it; absent for other refs. */
       catalogImage?: CatalogImageIdentity;
+      /**
+       * (additive, DigitalOcean P9) The tenant the instance belongs to, for provider-side grouping a provider may
+       * do (a DigitalOcean project per tenant). Never an authority: ownership stays in the provider's labels.
+       */
+      tenantId?: string;
     },
     context: CallContext,
   ): Promise<ExternalMachine>;
@@ -2046,6 +2061,24 @@ export interface ProviderImpl {
     context: CallContext,
     options: { waitMs: number; max: number },
   ): Promise<ProviderEventBatch>;
+  /**
+   * (P9, additive) Host metrics of the account's machines that run no bcd, from the provider's monitoring
+   * (DigitalOcean Monitoring): the newest sample of each metric it has for the machines asked, in base units, named
+   * as `@better-compute/observability`'s external metrics (`cpu_utilization_ratio`, `memory_used_bytes`, …). A
+   * machine or metric it cannot read is left out. Read-only, outside any transaction.
+   */
+  readMetrics?(
+    machines: readonly { instance: string; machineId: string }[],
+    context: { signal: AbortSignal },
+  ): Promise<ProviderMetricSample[]>;
+}
+
+/** (P9) One reading of one host metric of one machine (`ProviderImpl.readMetrics`); `at` is epoch ms. */
+export interface ProviderMetricSample {
+  instance: string;
+  metric: string;
+  value: number;
+  at: number;
 }
 
 export interface ProviderContext {
@@ -2079,6 +2112,100 @@ export interface ProviderContext {
   };
 }
 
+/** (P9) What `ProviderInput.probeAccount` found. Never a secret: no token, key or credential value. */
+export interface ProviderAccountProbe {
+  /** Whether the credential may do everything instances need (`missing` is empty, the account is usable). */
+  ok: boolean;
+  /** Permissions instances need that the credential lacks, in the provider's own names (`droplet:read`). */
+  missing: string[];
+  /** Permissions only optional features need (costs, metrics, security findings) that it lacks. */
+  optional?: string[];
+  /** The provider's own detail (its account id and state, per-family results). JSON, never a secret. */
+  details?: { [key: string]: Json };
+  /**
+   * (Additive) The credential's request rate limit at the provider, as its last answer counted it, for a rate-budget
+   * gauge: `remaining` of `limit` requests until `resetAt` (epoch ms). Absent when the provider does not say.
+   */
+  rateLimit?: { limit: number; remaining: number; resetAt?: number };
+}
+
+/** (P9) One thing on a provider account an operator should look at (`ProviderInput.findings`). Never a secret. */
+export interface ProviderFinding {
+  /** Stable across reads of the same finding (the provider's rule id), unique in one answer. */
+  id: string;
+  /** What it is about: `security`, `billing`, … */
+  kind: string;
+  severity: 'critical' | 'warning' | 'info';
+  title: string;
+  detail?: string;
+  /** Epoch ms the provider found it. */
+  at?: number;
+  /** Findings of one kind that read as one (the rule's name). */
+  group?: string;
+}
+
+/**
+ * (P9, additive) A provider account's own billing state at the provider (`ProviderInput.billingSummary`): what the
+ * provider bills the account, not what compute meters. Amounts are integer micros of `currency`. Never a secret.
+ */
+export interface ProviderAccountBilling {
+  currency: string;
+  /** Owed for the month so far. */
+  monthToDateMicros?: number;
+  /** The balance as of the last invoice; negative is credit. */
+  balanceMicros?: number;
+  /** Usage so far this month. */
+  monthToDateUsageMicros?: number;
+  /** Epoch ms the provider computed the balance. */
+  generatedAt?: number;
+  /** Final invoices, newest first: `period` is `YYYY-MM`. */
+  invoices: { id: string; period: string; amountMicros: number }[];
+  /** The newest billing history entries (invoices, payments, credits), newest first; `at` is epoch ms. */
+  history: { at: number; type: string; description: string; amountMicros: number }[];
+}
+
+/**
+ * (P9) A provider's OAuth connect flow (`providerAccounts.connectSetup` and `connect`): the person's browser goes
+ * to `authorizeUrl`, comes back to the redirect URI with a code, and `exchange` trades the code (single use) for the
+ * credential vps seals as the new account's secret. The OAuth app's client id and secret are the platform's,
+ * held by the provider definition, never a tenant's. Each refuses a redirect URI the platform did not register
+ * (`INVALID_INPUT`).
+ */
+export interface ProviderConnect {
+  /** The config field (a `field.secret()`) that names the sealed credential, e.g. `refreshToken`. */
+  field: string;
+  /** The provider's authorization URL; `state` is the caller's anti-forgery value, echoed back on the redirect. */
+  authorizeUrl(input: { redirectUri: string; state: string }): string;
+  /** Trades an authorization code; `INVALID_INPUT` for a code the provider refuses. */
+  exchange(input: {
+    code: string;
+    redirectUri: string;
+    clock: Clock;
+    signal: AbortSignal;
+  }): Promise<ProviderConnection>;
+  /**
+   * (additive) Withdraws a credential `exchange` answered, at the provider (DigitalOcean: its OAuth revoke
+   * endpoint), and forgets what the provider holds in memory for `ref` (cached access tokens). vps calls it when it
+   * deletes a connected account's sealed credential (the account was deleted, or its connect never completed);
+   * best effort: vps deletes the sealed credential whether it resolves or throws. `secret` is the sealed value,
+   * absent when it could no longer be read.
+   */
+  revoke?(input: {
+    ref: SecretRef;
+    secret?: string;
+    clock: Clock;
+    signal: AbortSignal;
+  }): Promise<void>;
+}
+
+/** What `ProviderConnect.exchange` answers. */
+export interface ProviderConnection {
+  /** The credential: sealed in the secret store, never stored elsewhere, logged or answered. */
+  secret: string;
+  /** What the provider says about the connected account (its id, name). JSON, never a secret. */
+  account?: { [key: string]: Json };
+}
+
 /** A provider as written for `defineProvider` (vps). Accounts are data validated by `config`. */
 export interface ProviderInput<C> {
   id: string;
@@ -2094,6 +2221,34 @@ export interface ProviderInput<C> {
    * store nothing, so a retry with the same idempotency key runs the check again.
    */
   checkAccount?(config: C, context: ProviderContext & { signal: AbortSignal }): Promise<void>;
+  /**
+   * (P9) A read-only look at what a stored account's credential may do, for `providerAccounts.check`: the
+   * account's identity at the provider and the permissions it lacks. Read-only at the provider. Throws when the
+   * credential is refused outright (`INVALID_CONFIG`) or the provider cannot be asked.
+   */
+  probeAccount?(
+    config: C,
+    context: ProviderContext & { signal: AbortSignal },
+  ): Promise<ProviderAccountProbe>;
+  /**
+   * (P9) What an operator should look at on a stored account, as the provider reports it (DigitalOcean: its
+   * security scan), for `providerAccounts.findings`. Read-only at the provider; a part it may not read is itself a
+   * finding, never an empty answer that looks clean.
+   */
+  findings?(
+    config: C,
+    context: ProviderContext & { signal: AbortSignal },
+  ): Promise<ProviderFinding[]>;
+  /**
+   * (P9, additive) The account's own billing state at the provider (balance, invoices, billing history), for
+   * `providerAccounts.billing`. Read-only at the provider, with the account's own credential.
+   */
+  billingSummary?(
+    config: C,
+    context: ProviderContext & { signal: AbortSignal },
+  ): Promise<ProviderAccountBilling>;
+  /** (P9) An OAuth connect flow, when the provider has one configured (`providerAccounts.connect`). */
+  connect?: ProviderConnect;
   /** A key no two accounts of this provider may share (e.g. a federation audience). Pure; no I/O. */
   accountKey?(config: C): string | undefined;
   /**
@@ -2122,6 +2277,15 @@ export interface ProviderInput<C> {
     computeSku?(record: Pick<ProviderCostRecord, 'service' | 'sku' | 'skuDescription'>): boolean;
     /** Other SKUs compute meters itself (disks, public addresses): never passed through either. */
     meteredSku?(record: Pick<ProviderCostRecord, 'service' | 'sku' | 'skuDescription'>): boolean;
+    /**
+     * (P9, additive) The provider's cost rows are period aggregates: one row per resource and billing period (a
+     * DigitalOcean invoice item is a Droplet's month), its `quantity` the hours billed so far (`unit`
+     * hours). Leak detection then compares that quantity with the instance's hours over the row's span, instead of
+     * counting the hour slots the span covers.
+     */
+    periodRows?: boolean;
+    /** (P9, additive) The provider bills a stopped machine's hours as compute (DigitalOcean): leaks count them. */
+    billsStopped?: boolean;
   };
 }
 export interface ProviderDefinition<C = any> extends ProviderInput<C>, Extension {

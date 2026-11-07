@@ -7,6 +7,9 @@ import {
   type Clock,
   type Json,
   type Logger,
+  type ProviderAccountBilling,
+  type ProviderAccountProbe,
+  type ProviderFinding,
   type ProviderContext,
   type ProviderDefinition,
   type ProviderImpl,
@@ -1054,6 +1057,240 @@ export function describedAccount(
   } catch {
     return account;
   }
+}
+
+/** What `providerAccounts.check` answers: the provider's probe of a stored account (never a secret). */
+export interface ProviderAccountCheck extends ProviderAccountProbe {
+  accountId: string;
+  provider: string;
+  /** Epoch ms. */
+  checkedAt: number;
+}
+
+/**
+ * `providerAccounts.check` (P9): asks the provider what a stored account's credential may do
+ * (`ProviderInput.probeAccount`), read-only at the provider. The stored config is validated and its refs
+ * checked again, and its secrets are scoped to the account exactly as a client's. A provider with only
+ * `checkAccount` answers `ok` when it passes; one with neither is `UNSUPPORTED`. Errors propagate.
+ */
+export async function probeStoredAccount(
+  providers: ReadonlyMap<string, ProviderDefinition>,
+  account: ProviderAccount,
+  deps: ClientDeps,
+  signal: AbortSignal,
+): Promise<ProviderAccountCheck> {
+  const provider = providerOf(providers, account.provider);
+  if (!provider.probeAccount && !provider.checkAccount)
+    throw new ComputeError(
+      'UNSUPPORTED',
+      `Provider ${account.provider} cannot check an account`,
+      undefined,
+      { provider: account.provider },
+    );
+  const { config, context } = await storedAccountContext(provider, account, deps, signal);
+  let probe: ProviderAccountProbe;
+  if (provider.probeAccount) probe = await provider.probeAccount(config, context);
+  else {
+    await provider.checkAccount!(config, context);
+    probe = { ok: true, missing: [] };
+  }
+  return {
+    accountId: account.id,
+    provider: account.provider,
+    checkedAt: deps.clock.now(),
+    ok: probe.ok === true,
+    missing: [...(probe.missing ?? [])],
+    ...(probe.optional !== undefined ? { optional: [...probe.optional] } : {}),
+    ...(probe.details !== undefined ? { details: probe.details } : {}),
+    ...rateLimitOf(probe.rateLimit),
+  };
+}
+
+/** A probe's rate limit when it is one (a positive limit, 0 <= remaining <= limit); otherwise no gauge at all. */
+function rateLimitOf(raw: ProviderAccountProbe['rateLimit']): Pick<ProviderAccountCheck, 'rateLimit'> {
+  if (!raw || typeof raw !== 'object') return {};
+  const { limit, remaining, resetAt } = raw;
+  if (typeof limit !== 'number' || !Number.isFinite(limit) || limit <= 0) return {};
+  if (typeof remaining !== 'number' || !Number.isFinite(remaining) || remaining < 0 || remaining > limit)
+    return {};
+  const reset = typeof resetAt === 'number' && Number.isFinite(resetAt) && resetAt > 0 ? { resetAt } : {};
+  return { rateLimit: { limit, remaining, ...reset } };
+}
+
+/**
+ * A stored account's validated config and the context a provider reads it with: the refs checked again, its
+ * secrets scoped to the account exactly as a client's.
+ */
+async function storedAccountContext(
+  provider: ProviderDefinition,
+  account: ProviderAccount,
+  deps: ClientDeps,
+  signal: AbortSignal,
+) {
+  const config = await validateConfig(provider, account.config);
+  assertNoInlineSecrets(config);
+  assertAccountSecretRefs(config, account, deps);
+  return { config, context: { ...providerContext(provider, account, deps, deps), signal } };
+}
+
+/** What `providerAccounts.findings` answers: the provider's findings on a stored account (never a secret). */
+export interface ProviderAccountFindings {
+  accountId: string;
+  provider: string;
+  /** Epoch ms. */
+  readAt: number;
+  items: ProviderFinding[];
+}
+
+/** The most findings one answer keeps, and the longest title, detail, id and group kept (characters). */
+export const findingsLimit = 200;
+const findingLimits = { id: 200, kind: 64, title: 200, detail: 2000, group: 200 } as const;
+const findingSeverities: readonly ProviderFinding['severity'][] = ['critical', 'warning', 'info'];
+
+/** A provider's finding as vps answers it: required fields present, text bounded; undefined when malformed. */
+function findingOf(raw: unknown): ProviderFinding | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  const text = (key: keyof typeof findingLimits) =>
+    typeof value[key] === 'string' && value[key].trim() !== ''
+      ? value[key].trim().slice(0, findingLimits[key])
+      : undefined;
+  const id = text('id');
+  const kind = text('kind');
+  const title = text('title');
+  const severity = value.severity as ProviderFinding['severity'];
+  if (!id || !kind || !title || !findingSeverities.includes(severity)) return undefined;
+  const finding: ProviderFinding = { id, kind, severity, title };
+  const detail = text('detail');
+  if (detail) finding.detail = detail;
+  if (typeof value.at === 'number' && Number.isSafeInteger(value.at) && value.at >= 0)
+    finding.at = value.at;
+  const group = text('group');
+  if (group) finding.group = group;
+  return finding;
+}
+
+/**
+ * `providerAccounts.findings` (P9): what the provider says an operator should look at on a stored account
+ * (`ProviderInput.findings`), read-only at the provider, with the account's own credential. Malformed findings
+ * and repeated ids are left out, text is bounded, at most `findingsLimit` are kept. A provider without the hook is
+ * `UNSUPPORTED`. Errors propagate.
+ */
+export async function readStoredFindings(
+  providers: ReadonlyMap<string, ProviderDefinition>,
+  account: ProviderAccount,
+  deps: ClientDeps,
+  signal: AbortSignal,
+): Promise<ProviderAccountFindings> {
+  const provider = providerOf(providers, account.provider);
+  if (!provider.findings)
+    throw new ComputeError(
+      'UNSUPPORTED',
+      `Provider ${account.provider} reports no findings`,
+      undefined,
+      { provider: account.provider },
+    );
+  const { config, context } = await storedAccountContext(provider, account, deps, signal);
+  const raw = await provider.findings(config, context);
+  const items: ProviderFinding[] = [];
+  const seen = new Set<string>();
+  for (const entry of Array.isArray(raw) ? raw : []) {
+    const finding = findingOf(entry);
+    if (!finding || seen.has(finding.id)) continue;
+    seen.add(finding.id);
+    items.push(finding);
+    if (items.length === findingsLimit) break;
+  }
+  return { accountId: account.id, provider: account.provider, readAt: deps.clock.now(), items };
+}
+
+/** What `providerAccounts.billing` answers: the account's billing state at its provider (never a secret). */
+export interface ProviderAccountBillingView extends ProviderAccountBilling {
+  accountId: string;
+  provider: string;
+  /** Epoch ms. */
+  readAt: number;
+}
+
+/** The most invoices and history entries one answer keeps, and the longest text kept (characters). */
+export const billingInvoicesLimit = 120;
+export const billingHistoryLimit = 50;
+const billingTextLimit = 200;
+
+const micros = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isSafeInteger(value) ? value : undefined;
+const bounded = (value: unknown): string | undefined =>
+  typeof value === 'string' ? value.trim().slice(0, billingTextLimit) : undefined;
+
+/** A provider's billing summary as vps answers it: integer amounts, bounded text, malformed entries left out. */
+function providerBillingOf(raw: ProviderAccountBilling): ProviderAccountBilling {
+  const value = (
+    typeof raw === 'object' && raw !== null ? raw : {}
+  ) as Partial<ProviderAccountBilling>;
+  const currency = bounded(value.currency);
+  if (!currency || !/^[A-Z]{3}$/.test(currency))
+    throw new ComputeError(
+      'PROVIDER_ERROR',
+      'The provider answered a billing summary without a currency',
+    );
+  const out: ProviderAccountBilling = { currency, invoices: [], history: [] };
+  for (const key of ['monthToDateMicros', 'balanceMicros', 'monthToDateUsageMicros'] as const) {
+    const amount = micros(value[key]);
+    if (amount !== undefined) out[key] = amount;
+  }
+  const generatedAt = micros(value.generatedAt);
+  if (generatedAt !== undefined && generatedAt >= 0) out.generatedAt = generatedAt;
+  for (const invoice of Array.isArray(value.invoices) ? value.invoices : []) {
+    const id = bounded(invoice?.id);
+    const period = bounded(invoice?.period);
+    const amountMicros = micros(invoice?.amountMicros);
+    if (!id || !period || !/^\d{4}-\d{2}$/.test(period) || amountMicros === undefined) continue;
+    out.invoices.push({ id, period, amountMicros });
+    if (out.invoices.length === billingInvoicesLimit) break;
+  }
+  for (const entry of Array.isArray(value.history) ? value.history : []) {
+    const at = micros(entry?.at);
+    const amountMicros = micros(entry?.amountMicros);
+    if (at === undefined || at < 0 || amountMicros === undefined) continue;
+    out.history.push({
+      at,
+      type: bounded(entry.type) ?? '',
+      description: bounded(entry.description) ?? '',
+      amountMicros,
+    });
+    if (out.history.length === billingHistoryLimit) break;
+  }
+  return out;
+}
+
+/**
+ * `providerAccounts.billing` (P9): the account's own billing state at the provider (`ProviderInput.billingSummary`),
+ * read-only at the provider, with the account's own credential. Amounts are integers, text bounded, at most
+ * `billingInvoicesLimit` invoices and `billingHistoryLimit` history entries. A provider without the hook is
+ * `UNSUPPORTED`. Errors propagate.
+ */
+export async function readStoredBilling(
+  providers: ReadonlyMap<string, ProviderDefinition>,
+  account: ProviderAccount,
+  deps: ClientDeps,
+  signal: AbortSignal,
+): Promise<ProviderAccountBillingView> {
+  const provider = providerOf(providers, account.provider);
+  if (!provider.billingSummary)
+    throw new ComputeError(
+      'UNSUPPORTED',
+      `Provider ${account.provider} cannot read an account's billing`,
+      undefined,
+      { provider: account.provider },
+    );
+  const { config, context } = await storedAccountContext(provider, account, deps, signal);
+  const summary = providerBillingOf(await provider.billingSummary(config, context));
+  return {
+    accountId: account.id,
+    provider: account.provider,
+    readAt: deps.clock.now(),
+    ...summary,
+  };
 }
 
 /** Builds provider clients from accounts, cached per (account id, version). */

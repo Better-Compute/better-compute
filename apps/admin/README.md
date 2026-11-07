@@ -74,6 +74,7 @@ Every widget can be pinned to a site in Configure (`useScope()` and `useLive()` 
 | `components/ui`       | Panel, PageHeader, Stat, Led/Tag, charts, DataTable (saved views), Drawer, Menu, feedback     |
 | `components/base`     | BoardUI components (copies from apps/docs)                                                    |
 | `components/overview` | Overview module: KPIs, utilization, attention, fleet wall, control plane, sites, digest       |
+| `components/providers` | Provider accounts module (live only): credential check, provider findings, billing leaks     |
 | `lib/data`            | Seeded generators over a shared topology; platform signals; formatting                        |
 | `lib/api.ts`, `lib/upstream.ts`, `app/api/upstream` | The live connection                                             |
 

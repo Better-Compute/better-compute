@@ -15,6 +15,7 @@
     "upgrades",
     "backup-and-recovery",
     "hardware-requirements",
+    "digitalocean",
     "---Secure---",
     "security",
     "pki",

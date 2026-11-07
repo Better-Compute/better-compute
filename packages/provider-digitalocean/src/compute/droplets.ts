@@ -11,6 +11,7 @@ import {
   type ProviderDeleteOptions,
   type ProviderImpl,
   type ProviderKubernetes,
+  type ProviderListPrice,
 } from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
 import type { DoConfig, DoProviderOptions } from '../config.js';
@@ -36,6 +37,7 @@ import { DoNetworks } from '../networks/index.js';
 import { DoVolumes } from '../storage/volumes.js';
 import { DoResources } from '../resources/registry.js';
 import { networkNamer, vpcForNetwork } from '../networks/vpcs.js';
+import { listPrices } from '../ops/prices.js';
 import { poolMembers } from './autoscale.js';
 import { ensureSshKeys } from './keys.js';
 import { DoCatalogImages } from './catalog.js';
@@ -202,6 +204,10 @@ export class DoCompute implements ProviderImpl {
   readonly dns: DoDns;
   /** TLS certificates for load balancers (P4). */
   readonly certificates: DoCertificates;
+  /** Provider costs from the invoices (P9); set only when the account turns `costs` on. */
+  costs?: ProviderImpl['costs'];
+  /** Droplet metrics from DigitalOcean Monitoring (P9); set unless the account turns `monitoring` off. */
+  readMetrics?: ProviderImpl['readMetrics'];
 
   constructor(
     config: DoConfig,
@@ -258,6 +264,14 @@ export class DoCompute implements ProviderImpl {
 
   async listOffers(query: OfferQuery): Promise<Offer[]> {
     return listOffers(this.client, this.config, query, new AbortController().signal);
+  }
+
+  /** (platform compute billing) Whole-size list prices, from the offers catalog (D-ops-1). */
+  async listPrices(
+    query: { regions?: readonly string[] },
+    ctx: CallContext,
+  ): Promise<ProviderListPrice[]> {
+    return listPrices(this.client, this.config.regions, query, ctx.signal);
   }
 
   // ------------------------------------------------------------------------------- create
