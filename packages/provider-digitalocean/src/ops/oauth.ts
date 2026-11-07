@@ -36,6 +36,8 @@ import {
 
 /** DigitalOcean's token endpoint. */
 export const defaultOAuthEndpoint = 'https://cloud.digitalocean.com/v1/oauth/token';
+/** DigitalOcean's revoke endpoint (RFC 7009), for a connected account's grant when vps deletes its credential. */
+export const defaultRevokeEndpoint = 'https://cloud.digitalocean.com/v1/oauth/revoke';
 /** DigitalOcean's authorization endpoint (the browser goes there to connect an account). */
 export const defaultAuthorizeEndpoint = 'https://cloud.digitalocean.com/v1/oauth/authorize';
 
@@ -58,6 +60,8 @@ export interface DoOAuthOptions {
   scope?: string;
   /** Default `https://cloud.digitalocean.com/v1/oauth/authorize`; https only. */
   authorizeEndpoint?: string;
+  /** Default `https://cloud.digitalocean.com/v1/oauth/revoke`; https only. */
+  revokeEndpoint?: string;
   /**
    * Where the token endpoint's parameters go: `body` (default, form-encoded) or `query` (DigitalOcean's documented
    * form, which puts the client secret and tokens in the URL; a fallback only).
@@ -396,6 +400,74 @@ export function oauthTokenSource(
   };
 }
 
+/** Forgets the in-process OAuth state of one account's secret (its credential is being deleted). */
+function forgetOAuthState(ref: SecretRef): void {
+  inFlight.delete(ref);
+  accessTokens.delete(ref);
+  unwritten.delete(ref);
+  suspect.delete(ref);
+}
+
+/** What this process holds for a secret ref, as booleans (never a token): diagnostics and tests. */
+export function oauthStateOf(ref: SecretRef): {
+  accessToken: boolean;
+  unwritten: boolean;
+  suspect: boolean;
+} {
+  return {
+    accessToken: accessTokens.has(ref),
+    unwritten: unwritten.has(ref),
+    suspect: suspect.has(ref),
+  };
+}
+
+/**
+ * Revokes tokens of a connected account at DigitalOcean (RFC 7009: `token` and the client's id and secret in a
+ * form body, never the URL); an unknown or already revoked token is a 200 there. One request per token; a refusal
+ * or an unreachable endpoint throws (the caller deletes the credential anyway).
+ */
+export async function revokeTokens(input: {
+  tokens: readonly string[];
+  clientId: string;
+  clientSecret: string;
+  fetch: typeof fetch;
+  endpoint?: string;
+  signal: AbortSignal;
+}): Promise<void> {
+  const url = endpointOf(input.endpoint ?? defaultRevokeEndpoint);
+  let failed: ComputeError | undefined;
+  for (const token of input.tokens) {
+    let status = 0;
+    try {
+      const response = await input.fetch(url.toString(), {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          token,
+          client_id: input.clientId,
+          client_secret: input.clientSecret,
+        }).toString(),
+        signal: input.signal,
+      });
+      await response.text().catch(() => '');
+      status = response.status;
+      if (response.ok) continue;
+    } catch (error) {
+      if (input.signal.aborted) throw error;
+    }
+    failed ??= oauthError(
+      status >= 500 || status === 0 ? 'UNAVAILABLE' : 'PROVIDER_ERROR',
+      'DigitalOcean did not revoke the account’s OAuth grant',
+      'oauthRevoke',
+      status,
+    );
+  }
+  if (failed) throw failed;
+}
+
 /** Forgets the in-process OAuth state (tests). */
 export function resetOAuthState(): void {
   inFlight.clear();
@@ -463,6 +535,30 @@ export function doConnect(
         secret: tokens.refreshToken,
         ...(tokens.account ? { account: { ...tokens.account } } : {}),
       };
+    },
+    // The account's credential is being deleted: its refresh token (a rotated one not written back yet first) and
+    // the access token this process holds are revoked, and the process forgets them whatever DigitalOcean answers.
+    async revoke({ ref, secret, signal }) {
+      const tokens = [
+        ...new Set(
+          [unwritten.get(ref), secret, accessTokens.get(ref)?.token].filter(
+            (token): token is string => typeof token === 'string' && token !== '',
+          ),
+        ),
+      ];
+      try {
+        if (tokens.length === 0) return;
+        await revokeTokens({
+          tokens,
+          clientId: options.clientId,
+          clientSecret: await options.clientSecret(),
+          fetch: fetchImpl,
+          ...(options.revokeEndpoint !== undefined ? { endpoint: options.revokeEndpoint } : {}),
+          signal,
+        });
+      } finally {
+        forgetOAuthState(ref);
+      }
     },
   };
 }

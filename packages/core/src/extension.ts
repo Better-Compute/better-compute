@@ -1195,6 +1195,19 @@ export interface ProviderConnect {
     clock: Clock;
     signal: AbortSignal;
   }): Promise<ProviderConnection>;
+  /**
+   * (additive) Withdraws a credential `exchange` answered, at the provider (DigitalOcean: its OAuth revoke
+   * endpoint), and forgets what the provider holds in memory for `ref` (cached access tokens). vps calls it when it
+   * deletes a connected account's sealed credential (the account was deleted, or its connect never completed);
+   * best effort: vps deletes the sealed credential whether it resolves or throws. `secret` is the sealed value,
+   * absent when it could no longer be read.
+   */
+  revoke?(input: {
+    ref: SecretRef;
+    secret?: string;
+    clock: Clock;
+    signal: AbortSignal;
+  }): Promise<void>;
 }
 
 /** What `ProviderConnect.exchange` answers. */

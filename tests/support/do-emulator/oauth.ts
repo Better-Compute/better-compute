@@ -19,6 +19,10 @@ export class OAuthEmulator {
   clientId = 'client-1';
   clientSecret = 'client-secret-1';
   /** Answers the token endpoint gives next, before anything else (rate limits, odd refusals), one per request. */
+  /** Tokens revoked (`POST /v1/oauth/revoke`), in order. */
+  readonly revoked: string[] = [];
+  /** The revoke endpoint's answer (200, or a failure to script). */
+  revokeStatus = 200;
   readonly scripted: { status: number; body: unknown; headers?: Record<string, string> }[] = [];
   #n = 0;
 
@@ -35,6 +39,17 @@ export class OAuthEmulator {
     if (body && headers.get('content-type') === 'application/x-www-form-urlencoded')
       for (const [key, value] of new URLSearchParams(body)) q.set(key, value);
     this.requests.push({ url, method, params: q, body });
+    if (url.pathname === '/v1/oauth/revoke' && method === 'POST') {
+      // RFC 7009: the client authenticates; an unknown token is still a 200.
+      if (q.get('client_id') !== this.clientId || q.get('client_secret') !== this.clientSecret)
+        return json(401, { error: 'invalid_client' });
+      if (this.revokeStatus !== 200) return json(this.revokeStatus, { error: 'unavailable' });
+      const token = q.get('token') ?? '';
+      this.revoked.push(token);
+      this.refreshTokens.delete(token);
+      this.api.validTokens.delete(token);
+      return json(200, {});
+    }
     if (url.pathname !== '/v1/oauth/token' || method !== 'POST')
       return json(404, { error: 'not_found' });
     const scripted = this.scripted.shift();

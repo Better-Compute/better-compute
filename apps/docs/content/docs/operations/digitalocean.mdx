@@ -87,9 +87,18 @@ account in one process shares one access token until a minute before it expires 
 so the refresh token rotates about once a month per process, not on every check or findings read. A refusal while the
 store still holds the refused token waits about two seconds for another process's write-back (`oauth.raceWaitMs`),
 then is `UNAVAILABLE` (`oauthRace`, retryable) the first time; refused again, it is `INVALID_CONFIG`
-(`oauthGrant`), and the fix is to connect the account again. The token endpoint's parameters go in a form-encoded
+(`oauthGrant`), and the fix is to connect the account again. Only an `invalid_grant` answer counts as a refusal: a
+429 from the token endpoint is `RATE_LIMITED` (with its `retry-after`), a 408 `UNAVAILABLE`, any other 4xx
+`PROVIDER_ERROR`, all retryable. The token endpoint's parameters go in a form-encoded
 body, never in the URL; `oauth.tokenParams: 'query'` is the fallback for DigitalOcean's documented query form.
 The app's client secret is the platform's, held by the provider definition, never stored in an account.
+
+The refresh token `providerAccounts.connect` sealed is compute's to dispose of. Deleting the account enqueues the
+`vps.connect-secrets` sweep, which revokes the grant at DigitalOcean (`POST /v1/oauth/revoke`, RFC 7009, the stored
+refresh token and the access token in use; `oauth.revokeEndpoint` overrides the URL) and deletes the sealed secret.
+A connect that sealed a token but never stored its account (a refused account check, a crash, a restart) is
+revoked and deleted the same way once it is 15 minutes old. A ref another account still names is kept. A revoke
+DigitalOcean refuses is logged (`vps.connectSecrets`), and the secret is deleted anyway.
 
 ## Costs and leaks
 

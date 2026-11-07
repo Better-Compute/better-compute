@@ -160,7 +160,9 @@ export const connectStageMs = 15 * 60_000;
  * The connect requests between their admission check and their handler, by what the request is (tenant, provider,
  * name, the single-use code and the redirect URI), not by the parsed input object: a composite call re-validates
  * the raw input into a new object between `check` and `invoke`. A request that never reaches its handler (a
- * cancelled request, a replay) is discarded, sealed credential and all, once it is older than `connectStageMs`.
+ * cancelled request, a replay) is discarded, sealed credential and all, once it is older than `connectStageMs` (on
+ * the next connect or connectSetup). The staging is memory only: the durable side is `provider_connect_secrets`
+ * (connect-secrets.ts), whose sweep revokes and deletes a credential the process forgot (a restart).
  */
 export function connectStaging(now: () => number) {
   const staged = new Map<string, StagedConnect>();
@@ -173,14 +175,19 @@ export function connectStaging(now: () => number) {
   const discard = async (entry: StagedConnect) => {
     await entry.discard().catch(() => {});
   };
+  /** Discards the requests older than `connectStageMs`. */
+  const purge = async (at = now()): Promise<void> => {
+    for (const [key, old] of staged)
+      if (at - old.at > connectStageMs) {
+        staged.delete(key);
+        await discard(old);
+      }
+  };
   return {
+    purge: () => purge(),
     async put(input: ConnectAccountInput, entry: Omit<StagedConnect, 'at'>): Promise<void> {
       const at = now();
-      for (const [key, old] of staged)
-        if (at - old.at > connectStageMs) {
-          staged.delete(key);
-          await discard(old);
-        }
+      await purge(at);
       const key = keyOf(input);
       const previous = staged.get(key);
       staged.set(key, { ...entry, at });

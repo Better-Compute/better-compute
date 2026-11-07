@@ -52,6 +52,16 @@ import {
   type TenantVaultPaths,
 } from './accounts.js';
 import {
+  claimSealed,
+  configRefs,
+  connectSecretsReconciler,
+  connectSecretsWork,
+  recordSealed,
+  releaseSealed,
+  sweepConnectSecrets,
+  type ConnectSecretsDeps,
+} from './connect-secrets.js';
+import {
   assertConnectConfig,
   connectedCreate,
   connectOf,
@@ -828,6 +838,20 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
    * once per request as create's is.
    */
   const connectStaged = connectStaging(() => Date.now());
+  /** Whether a provider has a connect flow (`vps.connect-secrets` runs only then). */
+  const connectFlows = [...providers.values()].some((provider) => provider.connect);
+  const connectSecretsDeps = (context: ModuleContext): ConnectSecretsDeps => ({
+    sql: context.sql,
+    secrets: context.secrets,
+    providers,
+    clock: context.clock,
+    log: context.log,
+  });
+  /** A sealed credential whose connect failed: released, then revoked and deleted (the sweep retries a failure). */
+  const discardSealed = async (context: ModuleContext, ref: string): Promise<void> => {
+    await releaseSealed(context.sql, ref);
+    await sweepConnectSecrets(connectSecretsDeps(context), [ref]);
+  };
   const connectIds = new WeakMap<ConnectAccountInput, string>();
   const connectAccountId = async (
     context: ModuleContext & { caller?: { identityId: string } },
@@ -1443,12 +1467,16 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         kind: 'read',
         resource: tenantResource,
         validate: describedBy(schemas.connectSetup, parseConnectSetup),
-        handler: async (_context, input) => ({
-          authorizeUrl: connectOf(providers, input.provider).authorizeUrl({
-            redirectUri: input.redirectUri,
-            state: input.state,
-          }),
-        }),
+        handler: async (_context, input) => {
+          // Staged connects that never reached their handler are dropped here too, not only by a later connect.
+          await connectStaged.purge();
+          return {
+            authorizeUrl: connectOf(providers, input.provider).authorizeUrl({
+              redirectUri: input.redirectUri,
+              state: input.state,
+            }),
+          };
+        },
       }),
       // As create, with the credential from the code: the admission check (no transaction open) exchanges the
       // code, seals the credential and runs the provider's account checks on the full config; the handler stores
@@ -1490,7 +1518,20 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
               clock: context.clock,
               signal: context.signal ?? AbortSignal.timeout(55_000),
             });
+            await connectStaged.purge();
             const ref = await secrets.put(input.tenantId, connection.secret);
+            // vps owns the sealed credential from here: the marker outlives this process (a restart cannot orphan
+            // it), and vps.connect-secrets revokes and deletes it unless the account is stored.
+            try {
+              await recordSealed(context.sql, {
+                ref,
+                tenantId: input.tenantId,
+                provider: input.provider,
+              });
+            } catch (error) {
+              await secrets.delete?.(ref).catch(() => {});
+              throw error;
+            }
             const request = connectedCreate(input, connect.field, ref);
             const accountId = await connectAccountId(context, input);
             try {
@@ -1500,16 +1541,14 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
                 name: input.name,
               });
             } catch (error) {
-              await secrets.delete?.(ref).catch(() => {});
+              await discardSealed(context, ref);
               throw error;
             }
             await connectStaged.put(input, {
               request,
               accountId,
               ref,
-              discard: async () => {
-                await secrets.delete?.(ref);
-              },
+              discard: () => discardSealed(context, ref),
             });
           },
           // Transaction 2 failed (the handler threw, e.g. the name is taken): the sealed credential goes too.
@@ -1524,6 +1563,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           // A throw here leaves the request staged: `abandoned` deletes the sealed credential once this transaction
           // has rolled back (a delete inside it could roll back with it), and a composite's failed call is
           // discarded when it goes stale.
+          // The account and its credential's claim commit together; a credential already discarded is refused.
+          await claimSealed(context.sql, staged.ref);
           const account: ProviderAccount = await createAccount(
             context.sql,
             providers,
@@ -1679,7 +1720,17 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         resource: accountResource,
         validate: describedBy(schemas.account, (raw) => parseAccountRef(raw) as AccountRef),
         handler: async (context, input) => {
+          const before = await readAccount(context.sql, input.accountId, input.tenantId);
           await deleteAccount(context.sql, input);
+          // A connected account's credential is vps's: the sweep, enqueued with the delete (so it runs once the
+          // delete commits, and again should it fail), revokes it at the provider and deletes it; a ref another
+          // account names is kept.
+          if (
+            connectFlows &&
+            before &&
+            configRefs(before.config as Record<string, unknown>).length > 0
+          )
+            await context.work.enqueue(context.sql, connectSecretsWork, 'all');
           await context.authz.remove(context.sql, {
             type: 'provider-account',
             id: input.accountId,
@@ -2151,6 +2202,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         currency,
         closeGraceHours,
       ),
+      // P9: the credentials providerAccounts.connect sealed, revoked and deleted once unused.
+      ...(connectFlows ? [connectSecretsReconciler(connectSecretsDeps)] : []),
       // P9: provider-measured host metrics of provider-pool VMs (opt-in).
       ...(options.externalMetrics
         ? [

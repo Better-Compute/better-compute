@@ -9,6 +9,7 @@ import {
 } from '@better-compute/provider-digitalocean';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
 import { connectStageMs, connectStaging, vps } from '@better-compute/vps';
+import { oauthStateOf } from '@better-compute/provider-digitalocean';
 import { DoEmulator } from './support/do-emulator/index.js';
 import { OAuthEmulator } from './support/do-emulator/oauth.js';
 
@@ -208,6 +209,152 @@ describe('providerAccounts.connect (DigitalOcean OAuth)', () => {
         state: 'state-0123456789abcdef',
       }),
     ).rejects.toMatchObject({ code: 'UNSUPPORTED' });
+  });
+});
+
+describe('the sealed credential of a connected account (owned by vps)', () => {
+  const connectInput = (tenantId: string, code: string, name = 'do-main') => ({
+    tenantId,
+    provider: 'digitalocean',
+    name,
+    code,
+    redirectUri: REDIRECT,
+    config: { regions: ['nyc3'] },
+  });
+  const sealedRefs = async (fixture: any, tenantId: string): Promise<string[]> =>
+    (
+      await fixture.database.query(
+        'SELECT ref FROM sealed_secrets WHERE tenant_id = $1 ORDER BY ref',
+        [tenantId],
+      )
+    ).rows.map((row: { ref: string }) => row.ref);
+  const markers = async (fixture: any): Promise<string[]> =>
+    (
+      await fixture.database.query('SELECT ref FROM provider_connect_secrets ORDER BY ref')
+    ).rows.map((row: { ref: string }) => row.ref);
+
+  it('deleting the account revokes the grant, deletes the sealed refresh token and forgets the cached token', async () => {
+    const { oauth, call, acme, tenants, fixture, api, lines } = await world();
+    oauth.codes.set('code-1', REDIRECT);
+    const account = await call.providerAccounts.connect(
+      acme,
+      connectInput(tenants.acme.id, 'code-1'),
+    );
+    const ref = account.config.refreshToken as string;
+    expect(await markers(fixture)).toEqual([ref]);
+    await call.providerAccounts.check(acme, { tenantId: tenants.acme.id, accountId: account.id });
+    expect(oauthStateOf(ref as never).accessToken).toBe(true);
+    expect(api.validTokens.has('access-2')).toBe(true);
+
+    await call.providerAccounts.delete(acme, { tenantId: tenants.acme.id, accountId: account.id });
+    // The delete enqueued the sweep: it runs now, not in five minutes.
+    expect(await sealedRefs(fixture, tenants.acme.id)).toEqual([ref]);
+    await fixture.compute.jobs['vps.connect-secrets']!.tick();
+    expect(await sealedRefs(fixture, tenants.acme.id)).toEqual([]);
+    // The stored refresh token and the access token in use are revoked at DigitalOcean.
+    expect(oauth.revoked).toEqual(['refresh-1', 'access-2']);
+    expect(api.validTokens.has('access-2')).toBe(false);
+    expect(oauthStateOf(ref as never)).toEqual({
+      accessToken: false,
+      unwritten: false,
+      suspect: false,
+    });
+    expect(await markers(fixture)).toEqual([]);
+    for (const secret of ['refresh-1', 'refresh-2', 'access-2', 'client-secret-1'])
+      expect(JSON.stringify(lines)).not.toContain(secret);
+  });
+
+  it('a revoke DigitalOcean refuses is logged without a token, and the credential is deleted anyway', async () => {
+    const { oauth, call, acme, tenants, fixture, lines } = await world();
+    oauth.codes.set('code-1', REDIRECT);
+    const account = await call.providerAccounts.connect(
+      acme,
+      connectInput(tenants.acme.id, 'code-1'),
+    );
+    const ref = account.config.refreshToken as string;
+    await call.providerAccounts.check(acme, { tenantId: tenants.acme.id, accountId: account.id });
+    // DigitalOcean's revoke endpoint is down.
+    oauth.revokeStatus = 503;
+    await call.providerAccounts.delete(acme, { tenantId: tenants.acme.id, accountId: account.id });
+    await fixture.compute.jobs['vps.connect-secrets']!.tick();
+    expect(oauth.revoked).toEqual([]);
+    expect(await sealedRefs(fixture, tenants.acme.id)).toEqual([]);
+    expect(await markers(fixture)).toEqual([]);
+    expect(oauthStateOf(ref as never).accessToken).toBe(false);
+    const warned = lines.filter((line) => line.includes('did not revoke'));
+    expect(warned).toHaveLength(1);
+    for (const secret of ['refresh-1', 'access-2', 'client-secret-1'])
+      expect(JSON.stringify(lines)).not.toContain(secret);
+  });
+
+  it('a credential another account also names is kept', async () => {
+    const { oauth, call, acme, tenants, fixture } = await world();
+    oauth.codes.set('code-1', REDIRECT);
+    const account = await call.providerAccounts.connect(
+      acme,
+      connectInput(tenants.acme.id, 'code-1'),
+    );
+    const ref = account.config.refreshToken as string;
+    // A second account stored by hand with the same ref (rows, not the API: the API would exchange it).
+    await fixture.database.query(
+      `INSERT INTO provider_accounts (id, tenant_id, provider, name, config, version)
+       VALUES ('pacct_twin', $1, 'digitalocean', 'twin', $2::jsonb, 1)`,
+      [tenants.acme.id, JSON.stringify({ ...account.config })],
+    );
+    await call.providerAccounts.delete(acme, { tenantId: tenants.acme.id, accountId: account.id });
+    await fixture.compute.jobs['vps.connect-secrets']!.tick();
+    expect(await sealedRefs(fixture, tenants.acme.id)).toEqual([ref]);
+    expect(oauth.revoked).toEqual([]);
+  });
+
+  it('a sealed credential no account claimed (a restart between check and handler) is revoked and deleted by vps.connect-secrets', async () => {
+    const { oauth, call, acme, tenants, fixture, store } = await world();
+    // What a connect check leaves behind when the process stops before the handler: a sealed refresh token and its
+    // marker, and nothing in memory.
+    oauth.refreshTokens.add('refresh-orphan');
+    const ref = await store.put(tenants.acme.id, 'refresh-orphan');
+    await fixture.database.query(
+      `INSERT INTO provider_connect_secrets (ref, tenant_id, provider, sealed_at)
+       VALUES ($1, $2, 'digitalocean', compute_now() - interval '1 hour')`,
+      [ref, tenants.acme.id],
+    );
+    // A young one (a connect still between check and handler) is left alone.
+    const young = await store.put(tenants.acme.id, 'refresh-young');
+    await fixture.database.query(
+      `INSERT INTO provider_connect_secrets (ref, tenant_id, provider) VALUES ($1, $2, 'digitalocean')`,
+      [young, tenants.acme.id],
+    );
+    await fixture.compute.jobs['vps.connect-secrets']!.tick();
+    expect(await sealedRefs(fixture, tenants.acme.id)).toEqual([young]);
+    expect(oauth.revoked).toEqual(['refresh-orphan']);
+    expect(await markers(fixture)).toEqual([young]);
+
+    // A connect whose account is stored claims its marker: however old, the sweep never touches it.
+    oauth.codes.set('code-1', REDIRECT);
+    const account = await call.providerAccounts.connect(
+      acme,
+      connectInput(tenants.acme.id, 'code-1'),
+    );
+    await fixture.database.query(
+      `UPDATE provider_connect_secrets SET sealed_at = compute_now() - interval '1 day'`,
+    );
+    await fixture.advance(6 * 60_000);
+    await fixture.compute.jobs['vps.connect-secrets']!.tick();
+    expect(await sealedRefs(fixture, tenants.acme.id)).toEqual([account.config.refreshToken]);
+    expect(oauth.revoked).toEqual(['refresh-orphan', 'refresh-young']);
+  });
+
+  it('a caller without providers:manage reaches no code exchange and seals nothing', async () => {
+    const { oauth, call, acme, tenants, fixture } = await world();
+    fixture.iam.deny({ token: tenants.acme.token, action: 'compute:providers:manage' });
+    oauth.codes.set('code-1', REDIRECT);
+    await expect(
+      call.providerAccounts.connect(acme, connectInput(tenants.acme.id, 'code-1')),
+    ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    expect(oauth.requests).toEqual([]);
+    expect(await sealedRefs(fixture, tenants.acme.id)).toEqual([]);
+    expect(await markers(fixture)).toEqual([]);
+    expect(oauth.codes.has('code-1')).toBe(true);
   });
 });
 

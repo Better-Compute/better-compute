@@ -286,11 +286,19 @@ describe('token endpoint answers that are not a dead grant', () => {
     const w = world();
     const oauth = { ...w.hooks, raceWaitMs: [1, 1] };
     for (let round = 0; round < 2; round++) {
-      w.oauth.scripted.push({ status: 429, body: { error: 'too_many_requests' }, headers: { 'retry-after': '7' } });
+      w.oauth.scripted.push({
+        status: 429,
+        body: { error: 'too_many_requests' },
+        headers: { 'retry-after': '7' },
+      });
       const error = await (await w.build({ oauth })).listOffers({}).catch((e: unknown) => e);
       expect(error).toMatchObject({
         code: 'RATE_LIMITED',
-        details: expect.objectContaining({ reason: 'oauthRateLimit', status: 429, retryAfterMs: 7_000 }),
+        details: expect.objectContaining({
+          reason: 'oauthRateLimit',
+          status: 429,
+          retryAfterMs: 7_000,
+        }),
       });
     }
     // No token was taken as refused: the next answer is honoured and the account works.
@@ -305,15 +313,28 @@ describe('token endpoint answers that are not a dead grant', () => {
     await (await w.build({ oauth })).listOffers({}).catch(() => undefined);
     w.oauth.refreshTokens.clear();
     const error = await (await w.build({ oauth })).listOffers({}).catch((e: unknown) => e);
-    expect(error).toMatchObject({ code: 'UNAVAILABLE', details: expect.objectContaining({ reason: 'oauthRace' }) });
+    expect(error).toMatchObject({
+      code: 'UNAVAILABLE',
+      details: expect.objectContaining({ reason: 'oauthRace' }),
+    });
   });
 
   it('400 invalid_request, 408 and an unknown 4xx are retryable, never a dead grant', async () => {
     const w = world();
     const oauth = { ...w.hooks, raceWaitMs: [1, 1] };
     const answers = [
-      { status: 400, body: { error: 'invalid_request' }, code: 'PROVIDER_ERROR', reason: 'oauthRequest' },
-      { status: 400, body: { error: 'invalid_request' }, code: 'PROVIDER_ERROR', reason: 'oauthRequest' },
+      {
+        status: 400,
+        body: { error: 'invalid_request' },
+        code: 'PROVIDER_ERROR',
+        reason: 'oauthRequest',
+      },
+      {
+        status: 400,
+        body: { error: 'invalid_request' },
+        code: 'PROVIDER_ERROR',
+        reason: 'oauthRequest',
+      },
       { status: 408, body: {}, code: 'UNAVAILABLE', reason: 'oauthTimeout' },
       { status: 403, body: 'nope', code: 'PROVIDER_ERROR', reason: 'oauthRequest' },
     ];
@@ -329,11 +350,20 @@ describe('token endpoint answers that are not a dead grant', () => {
   it('only invalid_grant (400 or 401) refuses the grant', async () => {
     const w = world();
     const oauth = { ...w.hooks, raceWaitMs: [1, 1] };
-    w.oauth.scripted.push({ status: 400, body: { error: 'invalid_grant' } }, { status: 400, body: { error: 'invalid_grant' } });
+    w.oauth.scripted.push(
+      { status: 400, body: { error: 'invalid_grant' } },
+      { status: 400, body: { error: 'invalid_grant' } },
+    );
     const first = await (await w.build({ oauth })).listOffers({}).catch((e: unknown) => e);
-    expect(first).toMatchObject({ code: 'UNAVAILABLE', details: expect.objectContaining({ reason: 'oauthRace' }) });
+    expect(first).toMatchObject({
+      code: 'UNAVAILABLE',
+      details: expect.objectContaining({ reason: 'oauthRace' }),
+    });
     const second = await (await w.build({ oauth })).listOffers({}).catch((e: unknown) => e);
-    expect(second).toMatchObject({ code: 'INVALID_CONFIG', details: expect.objectContaining({ reason: 'oauthGrant' }) });
+    expect(second).toMatchObject({
+      code: 'INVALID_CONFIG',
+      details: expect.objectContaining({ reason: 'oauthGrant' }),
+    });
   });
 
   it('a code exchange that is rate limited is RATE_LIMITED, not a refused code', async () => {
@@ -354,7 +384,9 @@ describe('token endpoint answers that are not a dead grant', () => {
       details: expect.objectContaining({ retryAfterMs: 60_000 }),
     });
     // The code was not spent: the retry trades it.
-    await expect(exchangeAuthorizationCode(input)).resolves.toMatchObject({ refreshToken: 'refresh-1' });
+    await expect(exchangeAuthorizationCode(input)).resolves.toMatchObject({
+      refreshToken: 'refresh-1',
+    });
   });
 });
 

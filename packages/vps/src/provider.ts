@@ -84,12 +84,14 @@ export function defineProvider<C>(provider: ProviderInput<C>): ProviderDefinitio
     if (typeof connect !== 'object' || connect === null || Array.isArray(connect))
       fail('connect', 'must be an object');
     for (const key of Object.keys(connect))
-      if (!['field', 'authorizeUrl', 'exchange'].includes(key))
+      if (!['field', 'authorizeUrl', 'exchange', 'revoke'].includes(key))
         fail(`connect.${key}`, 'is not a known field');
     if (typeof connect.field !== 'string' || !/^[A-Za-z][A-Za-z0-9]{0,63}$/.test(connect.field))
       fail('connect.field', 'must name a config field');
     for (const hook of ['authorizeUrl', 'exchange'])
       if (typeof connect[hook] !== 'function') fail(`connect.${hook}`, 'must be a function');
+    if (connect.revoke !== undefined && typeof connect.revoke !== 'function')
+      fail('connect.revoke', 'must be a function');
   }
   const billing = candidate.billing as Record<string, unknown> | undefined;
   if (billing !== undefined) {
