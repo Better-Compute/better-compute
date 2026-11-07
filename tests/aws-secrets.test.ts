@@ -304,6 +304,18 @@ describe('KMS sealing', () => {
     expect(await codeOf(kmsSealingKeys({ ...base, current: 'k9', wrapped: { k1 } }))).toBe('INVALID_CONFIG');
   });
 
+  it('with keyId, Decrypt is pinned to that key: a blob wrapped under another key is refused (review)', async () => {
+    const { base, kms, emu } = kmsWorld();
+    kms.addSymmetricKey('other-key');
+    const own = await generateKmsSealingKey({ ...base, keyId: 'sealing-key' });
+    const foreign = await generateKmsSealingKey({ ...base, keyId: 'other-key' });
+    const keys = await kmsSealingKeys({ ...base, keyId: 'sealing-key', current: 'k1', wrapped: { k1: own } });
+    expect((keys.keys.k1 as Uint8Array).length).toBe(32);
+    expect(JSON.parse(Buffer.from(emu.calls('Decrypt')[0]!.body).toString()).KeyId).toBe('sealing-key');
+    expect(await codeOf(kmsSealingKeys({ ...base, keyId: 'sealing-key', current: 'k1', wrapped: { k1: own, k2: foreign } }))).toBe('ACCESS_DENIED');
+    expect(await codeOf(kmsSealingKeys({ ...base, keyId: 'not a key id', current: 'k1', wrapped: { k1: own } }))).toBe('INVALID_CONFIG');
+  });
+
   it('generate returns only ciphertext', async () => {
     const { base, kms, emu } = kmsWorld();
     const wrapped = await generateKmsSealingKey({ ...base, keyId: 'sealing-key' });

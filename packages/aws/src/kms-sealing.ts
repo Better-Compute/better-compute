@@ -9,6 +9,7 @@ export const defaultSealingContext: Readonly<Record<string, string>> = Object.fr
 });
 
 const keyIdPattern = /^[A-Za-z0-9_-]{1,64}$/;
+const kmsKeyIdPattern = /^[A-Za-z0-9:/_+=.@-]{1,2048}$/;
 
 function kms(options: AwsServiceOptions): JsonClient {
   return jsonClient(transportFor(options), { hostPrefix: 'kms', jsonVersion: '1.1', targetPrefix: 'TrentService' });
@@ -31,6 +32,12 @@ function checkContext(context: Readonly<Record<string, string>>): Record<string,
 export async function kmsSealingKeys(
   options: AwsServiceOptions & {
     current: string;
+    /**
+     * The KMS key (id, ARN, alias or alias ARN) the sealing keys were wrapped under. Recommended:
+     * Decrypt is then pinned to it, so a substituted blob wrapped under any other key the role can
+     * use fails (IncorrectKeyException, ACCESS_DENIED) instead of unwrapping.
+     */
+    keyId?: string;
     /** key id → base64 CiphertextBlob from GenerateDataKey (AES_256). */
     wrapped: Readonly<Record<string, string>>;
     /** Must match the context used at generation (default { purpose: 'better-compute-sealing' }). */
@@ -45,6 +52,8 @@ export async function kmsSealingKeys(
     if (!keyIdPattern.test(id)) throw new ComputeError('INVALID_CONFIG', 'a sealing key id is [A-Za-z0-9_-]{1,64}');
   if (!Object.hasOwn(options.wrapped, options.current))
     throw new ComputeError('INVALID_CONFIG', 'the current sealing key is not among the wrapped keys');
+  if (options.keyId !== undefined && (typeof options.keyId !== 'string' || !kmsKeyIdPattern.test(options.keyId)))
+    throw new ComputeError('INVALID_CONFIG', 'keyId is a KMS key id, ARN or alias');
   const client = kms(options);
   const keys: Record<string, Uint8Array> = {};
   try {
@@ -56,7 +65,7 @@ export async function kmsSealingKeys(
       try {
         result = await client.call<{ Plaintext?: string }>(
           'Decrypt',
-          { CiphertextBlob: blob, EncryptionContext: context },
+          { CiphertextBlob: blob, EncryptionContext: context, ...(options.keyId !== undefined ? { KeyId: options.keyId } : {}) },
           { signal: options.signal },
         );
       } catch (error) {
@@ -87,7 +96,7 @@ export async function generateKmsSealingKey(
     signal?: AbortSignal;
   },
 ): Promise<string> {
-  if (typeof options.keyId !== 'string' || !/^[A-Za-z0-9:/_+=.@-]{1,2048}$/.test(options.keyId))
+  if (typeof options.keyId !== 'string' || !kmsKeyIdPattern.test(options.keyId))
     throw new ComputeError('INVALID_INPUT', 'keyId is a KMS key id, ARN or alias');
   const context = checkContext(options.encryptionContext ?? defaultSealingContext);
   // WithoutPlaintext: KMS never sends the plaintext, so there is nothing to zero or leak.

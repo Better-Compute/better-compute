@@ -75,7 +75,7 @@ async function awsHost() {
   await seedNode(fixture);
   fixture.iam.allow({ token: fixture.tenants.root.token });
   const wrapped = await generateKmsSealingKey({ ...aws, keyId: 'sealing' });
-  const local = localSealedSecretStore({ sql: fixture.database, keys: await kmsSealingKeys({ ...aws, current: 'k1', wrapped: { k1: wrapped } }) });
+  const local = localSealedSecretStore({ sql: fixture.database, keys: await kmsSealingKeys({ ...aws, keyId: 'sealing', current: 'k1', wrapped: { k1: wrapped } }) });
   const secretsManager = awsSecretsManagerStore(aws);
   const blob = s3BlobStore({ ...aws, bucket: 'bc-blobs' });
   const compute = await sibling(fixture, {

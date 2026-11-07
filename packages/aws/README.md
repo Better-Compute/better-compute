@@ -36,7 +36,7 @@ const aws = { region: 'us-east-1', credentials };
 const secretsManager = awsSecretsManagerStore(aws);
 const local = localSealedSecretStore({
   sql: database,
-  keys: await kmsSealingKeys({ ...aws, current: 'k1', wrapped: { k1: process.env.BC_SEALING_KEY_K1! } }),
+  keys: await kmsSealingKeys({ ...aws, keyId: process.env.BC_SEALING_KMS_KEY!, current: 'k1', wrapped: { k1: process.env.BC_SEALING_KEY_K1! } }),
 });
 const blob = s3BlobStore({ ...aws, bucket: 'bc-blobs', sse: { kind: 'aws:kms' } });
 
@@ -83,7 +83,7 @@ One `secret`-scheme store over several: refs route by the longest matching prefi
 
 ### `kmsSealingKeys(options)` and `generateKmsSealingKey(options)`
 
-Keep local-sealed's sealing keys wrapped by KMS. `better-compute aws kms-sealing-key --key-id <arn>` (`awsKmsSealingKeyCommand`) calls `GenerateDataKeyWithoutPlaintext` and prints only the ciphertext, so the plaintext never leaves KMS. At start, `kmsSealingKeys({ current, wrapped })` decrypts the wrapped keys (encryption context `purpose=better-compute-sealing`) into the `SealingKeys` local-sealed takes. Rotation is local-sealed's own: add a key id, make it current, and `reseal()`.
+Keep local-sealed's sealing keys wrapped by KMS. `better-compute aws kms-sealing-key --key-id <arn>` (`awsKmsSealingKeyCommand`) calls `GenerateDataKeyWithoutPlaintext` and prints only the ciphertext, so the plaintext never leaves KMS. At start, `kmsSealingKeys({ current, wrapped })` decrypts the wrapped keys (encryption context `purpose=better-compute-sealing`) into the `SealingKeys` local-sealed takes. Pass `keyId` (recommended): `Decrypt` is then pinned to that key, so a wrapped blob substituted from another key the role can use fails with `ACCESS_DENIED` instead of unwrapping. Rotation is local-sealed's own: add a key id, make it current, and `reseal()`.
 
 ```json
 { "Effect": "Allow", "Action": ["kms:Decrypt"], "Resource": "<key arn>",
@@ -145,7 +145,7 @@ TBLPROPERTIES (
 
 | Factory | Call | Per call | Entry |
 | --- | --- | --- | --- |
-| `eventBridgeSink` | `PutEvents` | 10 entries, 256 KiB | `Source` (default `better-compute`), `DetailType` = event type, `Detail` = the event |
+| `eventBridgeSink` | `PutEvents` | 10 entries, 256 KiB | `Source` (default `better-compute`; a source starting with `aws.` is `INVALID_CONFIG`, since PutEvents refuses it), `DetailType` = event type, `Detail` = the event |
 | `snsSink` | `PublishBatch` | 10 entries, 256 KiB | `Message` = the event; attributes `type`, `tenantId`, `eventId` |
 | `sqsSink` | `SendMessageBatch` | 10 entries, 256 KiB | `MessageBody` = the event; the same attributes |
 | `kinesisSink` | `PutRecords` | 500 records, 5 MiB (1 MiB each) | a JSON line, partition key = tenant or subject |

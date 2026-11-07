@@ -212,6 +212,10 @@ describe('sink configuration', () => {
     expect(() => snsSink({ ...base(emu), topicArn: 'arn:aws:sqs:us-east-1:111111111111:x' })).toThrow(ComputeError);
     expect(() => sqsSink({ ...base(emu), queueUrl: 'https://sqs.us-east-1.amazonaws.com/x/../y' })).toThrow(ComputeError);
     expect(() => eventBridgeSink({ ...base(emu), source: 'bad source' })).toThrow(ComputeError);
+    // PutEvents refuses every entry whose Source starts with 'aws.' (review): a config error now.
+    for (const source of ['aws.ec2', 'AWS.custom', 'aws.'])
+      expect(() => eventBridgeSink({ ...base(emu), source })).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG' }));
+    expect(() => eventBridgeSink({ ...base(emu), source: 'awsome.app' })).not.toThrow();
   });
 });
 
@@ -296,6 +300,30 @@ describe('Kinesis and Firehose', () => {
     fake.refuse = () => undefined;
     const big = event(9, { data: { blob: 'x'.repeat(1024 * 1024) } });
     await expect(sink.deliver([big])).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE', details: { eventId: big.id } });
+  });
+
+  it.each(['kinesis', 'firehose'] as const)('a record over the per-record limit fails alone before any request (%s, review)', async (which) => {
+    const emu = new AwsEmulator();
+    const fake = which === 'kinesis' ? kinesisFake(emu) : firehoseFake(emu);
+    const sink = which === 'kinesis' ? kinesisSink({ ...base(emu), streamName: 's' }) : firehoseSink({ ...base(emu), deliveryStreamName: 's' });
+    // Firehose's limit is 1000 KiB per record; Kinesis's is 1 MiB including the partition key.
+    const limit = which === 'kinesis' ? 1024 * 1024 : 1000 * 1024;
+    const sized = (n: number, bytes: number) => {
+      const empty = event(n, { tenantId: 'acme', data: { blob: '' } });
+      const overhead = Buffer.byteLength(`${JSON.stringify(empty)}
+`) + (which === 'kinesis' ? Buffer.byteLength('acme') : 0);
+      return event(n, { tenantId: 'acme', data: { blob: 'x'.repeat(bytes - overhead) } });
+    };
+    const over = sized(9, limit + 1);
+    const error = (await sink.deliver([event(1), over, event(2)]).catch((e: unknown) => e)) as ComputeError;
+    expect(error).toBeInstanceOf(ComputeError);
+    expect(error.code).toBe('PAYLOAD_TOO_LARGE');
+    expect(error.details).toMatchObject({ eventId: over.id, limit });
+    expect(emu.requests).toHaveLength(0);
+    expect(fake.records).toHaveLength(0);
+    // Exactly at the limit goes through.
+    await sink.deliver([sized(10, limit)]);
+    expect(fake.records).toHaveLength(1);
   });
 
   it('audit records go through firehoseAuditSink', async () => {

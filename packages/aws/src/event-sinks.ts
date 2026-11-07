@@ -24,6 +24,9 @@ export function eventBridgeSink(options: EventBridgeSinkOptions): EventSink {
   const source = options.source ?? 'better-compute';
   if (!/^[A-Za-z0-9/:_.-]{1,1600}$/.test(busName)) throw new ComputeError('INVALID_CONFIG', 'not an event bus name or ARN');
   if (!/^[A-Za-z0-9._-]{1,256}$/.test(source)) throw new ComputeError('INVALID_CONFIG', 'not an EventBridge source');
+  // PutEvents refuses every entry whose Source starts with 'aws.' (reserved for AWS services): every
+  // batch would fail at runtime and the dispatcher would back off forever, so it is a config error.
+  if (/^aws\./i.test(source)) throw new ComputeError('INVALID_CONFIG', "an EventBridge source must not start with 'aws.' (reserved for AWS services)");
   const client = jsonClient(transportFor(options), { hostPrefix: 'events', jsonVersion: '1.1', targetPrefix: 'AWSEvents' });
   const entryOf = (event: ComputeEvent) => {
     const time = Date.parse(event.time);
