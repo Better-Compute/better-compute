@@ -689,6 +689,10 @@ function checkPolicy(policy: unknown): PoolPolicy {
   const listed = (workloadRoles as { aws?: unknown[] } | undefined)?.aws;
   if (listed?.length && (policy as Record<string, unknown>).workloadIdentity !== true)
     fail('policy.workloadRoles.aws needs policy.workloadIdentity: true');
+  // vps reads it with a boolean cast: anything but a boolean would fail every preemption.
+  const replacePreempted = (policy as Record<string, unknown>).replacePreempted;
+  if (replacePreempted !== undefined && typeof replacePreempted !== 'boolean')
+    fail('policy.replacePreempted must be true or false');
   const billing = (policy as Record<string, unknown>).billing;
   if (billing !== undefined) {
     if (typeof billing !== 'object' || billing === null || Array.isArray(billing))

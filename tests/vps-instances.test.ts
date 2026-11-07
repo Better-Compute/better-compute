@@ -12,6 +12,7 @@ import {
   type ManualClock,
   type MethodContext,
   type ModuleContext,
+  type PoolPolicy,
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
@@ -38,6 +39,8 @@ import {
   hostExhaustedCondition,
   instanceStatusHandler,
   instanceWork,
+  maxPreemptedReplacements,
+  preemptedBackoffMs,
   reportInstances,
   setIpPool,
   vps,
@@ -67,13 +70,17 @@ interface FakeCloud {
   getError?: ComputeError;
   /** Every provider call (create, get, delete, power), in order. */
   calls: string[];
+  /** The `catalogImage` of every create, in order (undefined when it carried none). */
+  catalogImages: unknown[];
 }
-const cloud: FakeCloud = { machines: new Map(), creates: 0, calls: [] };
+const cloud: FakeCloud = { machines: new Map(), creates: 0, calls: [], catalogImages: [] };
 
 const fakeCloud = defineProvider({
   id: 'fake-cloud',
   version: '1.0.0',
   provides: ['vps'],
+  // Its <offer>@spot ids are Spot capacity (the preemption tests).
+  capabilities: ['spot-offers'],
   config: manifest({
     token: field.secret(),
     location: field.option(['fsn1', 'hel1']).default('fsn1'),
@@ -94,6 +101,7 @@ const fakeCloud = defineProvider({
       },
       async create(request, call) {
         cloud.calls.push(`create ${call.idempotencyKey}`);
+        cloud.catalogImages.push(request.catalogImage);
         await context.secrets.resolve('env://FAKE_TOKEN');
         if (cloud.createError) throw cloud.createError;
         if (cloud.fail) throw new ComputeError('PROVIDER_ERROR', cloud.fail);
@@ -157,6 +165,14 @@ const root: Caller = { ...alice, identityId: 'usr_root', tenantId: 'root' };
 
 const images = {
   async resolve(_tx: SqlTx, tenantId: string, imageId: string) {
+    // A catalog ref (name@version) acme's catalog holds.
+    if (imageId === 'ubuntu@24.04' && tenantId === 'acme')
+      return {
+        url: 'https://images.example/ubuntu@24.04.qcow2',
+        sha256: 'cd'.repeat(32),
+        format: 'qcow2' as const,
+        verified: true,
+      };
     if (imageId !== 'ubuntu-24.04' || tenantId === 'nobody') return undefined;
     return {
       url: 'https://images.example/ubuntu-24.04.qcow2',
@@ -336,6 +352,7 @@ beforeEach(async () => {
   cloud.machines.clear();
   cloud.creates = 0;
   cloud.calls = [];
+  cloud.catalogImages = [];
   delete cloud.fail;
   delete cloud.createError;
   delete cloud.getError;
@@ -1432,6 +1449,30 @@ describe('provider instances', () => {
     expect((await readQuotas(db, 'acme', providerPool)).every((row) => row.used === 0)).toBe(true);
   });
 
+  it('a provider create carries catalogImage only for a catalog ref resolved for the tenant', async () => {
+    // The core contract (DO P3): { tenantId, sha256 } for a resolved name@version, never otherwise.
+    for (const [n, imageId] of ['ubuntu-24.04', 'ubuntu-24-04-x64', '12345', 'ubuntu@24.04'].entries()) {
+      const created = (await call(
+        'instances',
+        'create',
+        createProvider({ imageId, idempotencyKey: `img-${n}` }),
+      )) as View;
+      await reconcile(created.id);
+    }
+    expect(cloud.calls.filter((c) => c.startsWith('create '))).toHaveLength(4);
+    expect(cloud.catalogImages).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      { tenantId: 'acme', sha256: 'cd'.repeat(32) },
+    ]);
+    // A catalog ref the tenant can't resolve never reaches the provider.
+    await expect(
+      call('instances', 'create', createProvider({ imageId: 'private@1', idempotencyKey: 'img-p' })),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(cloud.catalogImages).toHaveLength(4);
+  });
+
   it('records provider errors and retries; a vanished machine is lost', async () => {
     cloud.fail = 'rate limited';
     const created = (await call('instances', 'create', createProvider())) as View;
@@ -1446,9 +1487,209 @@ describe('provider instances', () => {
     cloud.machines.clear();
     await reconcile(created.id);
     expect((await get(created.id)).state).toBe('lost');
+    expect((await get(created.id)).conditions).toEqual([]);
+    expect(recorded.events).not.toContain('instance.preempted');
     await call('instances', 'delete', { tenantId: 'acme', instanceId: created.id });
     await reconcile(created.id);
     expect((await get(created.id)).state).toBe('deleted');
+  });
+
+  /** A flavor on Spot capacity (`@spot` offer) in the provider pool. */
+  async function spotFlavor(): Promise<void> {
+    await call(
+      'flavors',
+      'create',
+      {
+        tenantId: 'root',
+        poolId: providerPool,
+        name: 'cx22-spot',
+        vcpu: 2,
+        memoryGiB: 4,
+        diskGiB: 40,
+        offerId: 'cx22@spot',
+      },
+      root,
+    );
+  }
+
+  it('a Spot machine that vanishes is lost with a Preempted condition and instance.preempted', async () => {
+    await spotFlavor();
+    const created = (await call('instances', 'create', createProvider({ flavor: 'cx22-spot' }))) as View;
+    await reconcile(created.id);
+    const machine = [...cloud.machines.values()][0]!;
+    machine.state = 'running';
+    await reconcile(created.id);
+    expect((await get(created.id)).state).toBe('running');
+    cloud.machines.clear();
+    await reconcile(created.id);
+    const lost = await get(created.id);
+    expect(lost.state).toBe('lost');
+    expect(lost.conditions).toEqual([
+      expect.objectContaining({ type: 'Preempted', status: 'true', reason: 'Reclaimed' }),
+    ]);
+    expect(recorded.events.slice(-2)).toEqual(['instance.lost', 'instance.preempted']);
+    // Without replacePreempted it stays lost.
+    await reconcile(created.id);
+    expect((await get(created.id)).state).toBe('lost');
+    expect(cloud.creates).toBe(1);
+  });
+
+  it('a pool with replacePreempted recreates a preempted instance on a new machine', async () => {
+    await spotFlavor();
+    // Set through the pools API, which takes only a boolean.
+    await expect(
+      callCapacity('pools', 'update', {
+        tenantId: 'root',
+        poolId: providerPool,
+        policy: { replacePreempted: 'please' },
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    const policy: PoolPolicy = { replacePreempted: true };
+    await callCapacity('pools', 'update', { tenantId: 'root', poolId: providerPool, policy });
+    const created = (await call('instances', 'create', createProvider({ flavor: 'cx22-spot' }))) as View;
+    await reconcile(created.id);
+    expect((await get(created.id)).externalId).toBe('srv-1');
+    // The provider reports the machine deleted (DigitalOcean: archive) rather than gone.
+    cloud.machines.get('srv-1')!.state = 'deleted';
+    await reconcile(created.id);
+    const again = await get(created.id);
+    expect(again.state).toBe('scheduling');
+    expect(again.externalId).toBeUndefined();
+    expect(recorded.events.slice(-3)).toEqual(['instance.lost', 'instance.preempted', 'instance.recreating']);
+    // It is no longer lost: Preempted (set with `lost`) says it was replaced.
+    expect(again.conditions).toContainEqual(
+      expect.objectContaining({ type: 'Preempted', status: 'false', reason: 'Replaced' }),
+    );
+    expect(again.conditions).not.toContainEqual(
+      expect.objectContaining({ type: 'Preempted', status: 'true' }),
+    );
+    cloud.machines.clear();
+    await reconcile(created.id);
+    expect(cloud.creates).toBe(2);
+    expect(await get(created.id)).toMatchObject({ state: 'provisioning', externalId: 'srv-2' });
+  });
+
+  it('a recreate gets a new machine when the provider dedupes creates by key and still lists the old one', async () => {
+    await spotFlavor();
+    await db.query(`UPDATE pools SET policy = '{"replacePreempted": true}' WHERE id = $1`, [providerPool]);
+    const created = (await call('instances', 'create', createProvider({ flavor: 'cx22-spot' }))) as View;
+    await reconcile(created.id);
+    // Reclaimed, but still listed under its key (DigitalOcean: archive): the fake cloud returns an
+    // existing machine for a create with the same key.
+    cloud.machines.get('srv-1')!.state = 'deleted';
+    await reconcile(created.id);
+    expect((await get(created.id)).state).toBe('scheduling');
+    await reconcile(created.id);
+    expect(cloud.calls.filter((c) => c.startsWith('create '))).toEqual([
+      `create ${created.id}`,
+      `create ${created.id}:r1`,
+    ]);
+    expect(await get(created.id)).toMatchObject({ state: 'provisioning', externalId: 'srv-2' });
+    // Once it runs, its run of replacements is over; its generation stays.
+    cloud.machines.get('srv-2')!.state = 'running';
+    await reconcile(created.id);
+    const running = await get(created.id);
+    expect(running.state).toBe('running');
+    expect(running.conditions).toContainEqual(
+      expect.objectContaining({ type: 'PreemptedReplacements', message: '1/0' }),
+    );
+  });
+
+  it('replacements that never run back off and stop after three: the instance stays lost', async () => {
+    await spotFlavor();
+    await db.query(`UPDATE pools SET policy = '{"replacePreempted": true}' WHERE id = $1`, [providerPool]);
+    const created = (await call('instances', 'create', createProvider({ flavor: 'cx22-spot' }))) as View;
+    await reconcile(created.id);
+    const reclaim = async () => {
+      cloud.machines.get(`srv-${cloud.creates}`)!.state = 'deleted';
+      await reconcile(created.id);
+    };
+    await reclaim(); // replacement 1: at once
+    await reconcile(created.id);
+    expect(cloud.creates).toBe(2);
+    await reclaim(); // replacement 2: after 30 s
+    await reconcile(created.id);
+    expect(cloud.creates).toBe(2);
+    clock.advance(preemptedBackoffMs);
+    await setSimClock(db, clock.now());
+    await reconcile(created.id);
+    expect(cloud.creates).toBe(3);
+    await reclaim(); // replacement 3: after 60 s
+    clock.advance(2 * preemptedBackoffMs);
+    await setSimClock(db, clock.now());
+    await reconcile(created.id);
+    expect(cloud.creates).toBe(4);
+    await reclaim(); // a fourth preemption in a row: lost for good
+    const lost = await get(created.id);
+    expect(lost.state).toBe('lost');
+    expect(lost.conditions).toContainEqual(
+      expect.objectContaining({ type: 'PreemptedReplacements', message: `${maxPreemptedReplacements}/3` }),
+    );
+    clock.advance(60 * preemptedBackoffMs);
+    await setSimClock(db, clock.now());
+    await reconcile(created.id);
+    expect((await get(created.id)).state).toBe('lost');
+    expect(cloud.creates).toBe(4);
+    expect(recorded.events.filter((e) => e === 'instance.recreating')).toHaveLength(3);
+  });
+
+  it('an attached machine on an @spot offer that vanishes is lost, never preempted or recreated', async () => {
+    await spotFlavor();
+    await db.query(`UPDATE pools SET policy = '{"replacePreempted": true}' WHERE id = $1`, [providerPool]);
+    const created = (await call('instances', 'create', createProvider({ flavor: 'cx22-spot' }))) as View;
+    await reconcile(created.id);
+    expect((await get(created.id)).externalId).toBe('srv-1');
+    // As if attached (and claimed): capacity better-compute never created.
+    await db.query(
+      `UPDATE instances SET origin = 'attached', on_delete = 'detach', provider_claimed_at = now() WHERE id = $1`,
+      [created.id],
+    );
+    cloud.machines.clear();
+    await reconcile(created.id);
+    const lost = await get(created.id);
+    expect(lost.state).toBe('lost');
+    expect(lost.conditions.map((c) => c.type)).not.toContain('Preempted');
+    expect(recorded.events).not.toContain('instance.preempted');
+    expect(recorded.events).not.toContain('instance.recreating');
+    await reconcile(created.id);
+    expect((await get(created.id)).state).toBe('lost');
+    expect(cloud.creates).toBe(1);
+  });
+
+  it("an @spot loss on a provider that doesn't declare spot-offers is not a preemption", async () => {
+    // The same provider id without the capability: there `@spot` could name a reservation.
+    const plainCloud = { ...fakeCloud, capabilities: [] as typeof fakeCloud.capabilities };
+    const plain = vps({ runtimes: ['libvirt-kvm'], providers: [plainCloud], images });
+    const reconcilePlain = (instanceId: string) =>
+      plain
+        .reconcilers!.find((entry) => entry.name === instanceWork)!
+        .run({ ...moduleContext(db), signal: new AbortController().signal }, instanceId);
+    await spotFlavor();
+    await db.query(`UPDATE pools SET policy = '{"replacePreempted": true}' WHERE id = $1`, [providerPool]);
+    const created = (await call('instances', 'create', createProvider({ flavor: 'cx22-spot' }))) as View;
+    await reconcilePlain(created.id);
+    expect((await get(created.id)).externalId).toBe('srv-1');
+    cloud.machines.clear();
+    await reconcilePlain(created.id);
+    const lost = await get(created.id);
+    expect(lost.state).toBe('lost');
+    expect(lost.conditions.map((c) => c.type)).not.toContain('Preempted');
+    expect(recorded.events).toContain('instance.lost');
+    expect(recorded.events).not.toContain('instance.preempted');
+    await reconcilePlain(created.id);
+    expect((await get(created.id)).state).toBe('lost');
+    expect(cloud.creates).toBe(1);
+  });
+
+  it('replacePreempted changes nothing for an on-demand machine that vanishes', async () => {
+    await db.query(`UPDATE pools SET policy = '{"replacePreempted": true}' WHERE id = $1`, [providerPool]);
+    const created = (await call('instances', 'create', createProvider())) as View;
+    await reconcile(created.id);
+    cloud.machines.clear();
+    await reconcile(created.id);
+    expect((await get(created.id)).state).toBe('lost');
+    await reconcile(created.id);
+    expect(cloud.creates).toBe(1);
   });
 
   const used = async () =>

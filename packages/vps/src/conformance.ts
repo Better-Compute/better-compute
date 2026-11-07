@@ -63,6 +63,11 @@ export interface ProviderConformanceSubject {
    * skipped without its id; the address check needs none.
    */
   foreign?: { volumeId?: string; snapshotId?: string };
+  /**
+   * `true` when `reinstall` may run on a machine the cases create (it reinstalls the subject image).
+   * The reinstall case is skipped without it: on real hardware it can take many minutes.
+   */
+  reinstallable?: boolean;
 }
 
 const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -302,6 +307,28 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
               on.state === 'running' || on.state === 'pending',
               `power on leaves it running, not ${on.state}`,
             );
+        } finally {
+          await cleanUp(impl, call, machine.id);
+        }
+      },
+    },
+    {
+      // (DO P3) The catalog-image identity is additive: a host sends it only for a catalog ref
+      // (`name@version`), so a reinstall without it, or with options that hold none, must behave as
+      // before the options existed.
+      name: 'reinstall (when offered) needs no options: the catalog-image identity is optional',
+      async run(subject) {
+        if (!subject.reinstallable) return;
+        check(
+          !subject.image.includes('@'),
+          'the subject image is a provider image, not a catalog ref (a host sends catalogImage only for those)',
+        );
+        const { impl, call, machine } = await create(subject, key(subject, 'reinstall'));
+        try {
+          if (!impl.reinstall) return;
+          await impl.reinstall(machine.id, subject.image, call('reinstall'));
+          await impl.reinstall(machine.id, subject.image, call('reinstall-empty'), {});
+          checkMachine(await impl.get(machine.id, call('get-reinstalled')), 'get after reinstall');
         } finally {
           await cleanUp(impl, call, machine.id);
         }

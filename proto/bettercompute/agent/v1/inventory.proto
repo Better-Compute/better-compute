@@ -117,6 +117,40 @@ message SystemSection {
   optional bool secure_boot = 12;
   // Absent when no TPM is present.
   Tpm tpm = 13;
+  // (v0.3) The cloud instance this system is, from the provider's metadata service: absent off a
+  // cloud, and when the service did not answer. Inventory only: it is not signed, so nothing ever
+  // uses it as an identity (hardware_key and node join ignore it).
+  CloudInstance cloud = 14;
+}
+
+// What a cloud's instance metadata service reports about the instance (DigitalOcean:
+// 169.254.169.254/metadata/v1.json, read only on a Droplet). Never user data, vendor data, keys
+// or tokens.
+message CloudInstance {
+  // "digitalocean".
+  string provider = 1;
+  // The provider's instance id (the Droplet id, in decimal).
+  string instance_id = 2;
+  // Region slug, e.g. "nyc3".
+  string region = 3;
+  // Sorted, without duplicates.
+  repeated string tags = 4;
+  // Sorted by network, then MAC.
+  repeated CloudInterface interfaces = 5;
+}
+
+message CloudInterface {
+  // "public" or "private" (the VPC).
+  string network = 1;
+  // Lowercase.
+  string mac = 2;
+  string ipv4_address = 3;
+  string ipv4_netmask = 4;
+  string ipv4_gateway = 5;
+  string ipv6_address = 6;
+  // 0 = no IPv6.
+  uint32 ipv6_prefix_length = 7;
+  string ipv6_gateway = 8;
 }
 
 enum BootMode {

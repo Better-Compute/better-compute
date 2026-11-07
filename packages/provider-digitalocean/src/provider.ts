@@ -31,6 +31,7 @@ export function digitaloceanProvider(
     version: '0.1.0',
     provides: ['vps'],
     config: doConfig as unknown as ProviderDefinition<DoConfig>['config'],
+    // 'spot-offers': its <region>/<size>@spot offer ids are Spot capacity (vps's spotOffersCapability).
     capabilities: [
       'power',
       'reinstall',
@@ -40,6 +41,7 @@ export function digitaloceanProvider(
       'networks',
       'volumes',
       'addresses',
+      'spot-offers',
     ],
     create: (config: DoConfig, context: ProviderContext) => {
       if (config.regions.length === 0)
@@ -60,7 +62,11 @@ export function digitaloceanProvider(
       return new DoCompute(
         config,
         context,
-        { deployment: options.deployment ?? 'default', inCallWaitMs },
+        {
+          deployment: options.deployment ?? 'default',
+          inCallWaitMs,
+          ...(options.catalogImages ? { catalogImages: options.catalogImages } : {}),
+        },
         clientFor(config, context, options),
       );
     },

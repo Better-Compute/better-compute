@@ -35,8 +35,15 @@ import {
   hostExhaustedCondition,
   maxExhaustedReplacements,
   instanceWork,
+  isCatalogImageRef,
   isSecretRef,
   moveInstance,
+  maxPreemptedReplacements,
+  preemptedCondition,
+  preemptedReplacementDelay,
+  preemptedReplacementsCondition,
+  preemptedReplacementsOf,
+  providerCallKey,
   publishInstance,
   readInstance,
   renderUserData,
@@ -56,6 +63,7 @@ import { networkTag, providerResourceName } from './networks.js';
 import { convergeProviderMarks } from './provider-events.js';
 import { specPlacement, type HostPlacement } from './placement.js';
 import { onInstanceDeleted, volumesDeletedWith } from './provider-resources.js';
+import { isSpotOffer } from './spot.js';
 import { markSandboxReady, sandboxWork } from './sandboxes.js';
 import type { SnapshotStore } from './snapshots.js';
 import { instanceVolumeSpecs, volumePlacement } from './volumes.js';
@@ -465,6 +473,102 @@ function providerAction(row: InstanceRow): ProviderAction {
   return { kind: 'get' };
 }
 
+/**
+ * A provider-pool instance whose machine is gone (or reported deleted): `lost`, unbilled from now.
+ * (P3) One created on Spot capacity (an `@spot` offer) was reclaimed by the provider: it also
+ * carries a `Preempted` condition and gets `instance.preempted`, and a pool whose policy says
+ * `replacePreempted: true` recreates it in place: back to `scheduling` with no machine, so the
+ * next step creates a new one under the same id. An attached machine is never recreated.
+ */
+async function loseMachine(
+  deps: InstanceDeps,
+  tx: SqlTx,
+  row: InstanceRow,
+  conditions: Condition[],
+  now: number,
+  provider: string,
+): Promise<number | undefined> {
+  // Spot only on a provider that declares the `@spot` convention (elsewhere it names a reservation).
+  const preempted =
+    row.origin !== 'attached' &&
+    isSpotOffer(row.shape.offerId, deps.clients.definition(provider));
+  const lost = await moveInstance(tx, row, 'lose', 'lost', {
+    conditions: preempted
+      ? withCondition(
+          conditions,
+          {
+            type: preemptedCondition,
+            status: 'true',
+            reason: 'Reclaimed',
+            message: `The provider reclaimed Spot machine ${row.externalId ?? '(unknown)'}`,
+          },
+          now,
+        )
+      : conditions,
+    reportedState: 'absent',
+  });
+  // The lost span is not billed: a recovery opens a new interval.
+  await closeUsage(deps, tx, lost);
+  await publishInstance(deps, tx, lost, 'instance.lost');
+  if (!preempted) return undefined;
+  await publishInstance(deps, tx, lost, 'instance.preempted', {
+    ...(row.externalId !== undefined ? { externalId: row.externalId } : {}),
+  });
+  if (!(await replacePreempted(tx, lost.poolId))) return undefined;
+  // Replacements that never ran are capped: a provider that keeps handing back a reclaimed machine
+  // (or keeps reclaiming at once) leaves the instance lost instead of looping.
+  const { generation, consecutive } = preemptedReplacementsOf(lost.conditions);
+  if (consecutive >= maxPreemptedReplacements) return undefined;
+  const again = await moveInstance(tx, lost, 'recreate', 'scheduling', {
+    externalId: null,
+    addresses: [],
+    reportedState: null,
+    conditions: [
+      // No longer lost: Preempted (set with `lost`) records that the machine was replaced.
+      ...withCondition(
+        lost.conditions,
+        {
+          type: preemptedCondition,
+          status: 'false',
+          reason: 'Replaced',
+          message: `Recreating on a new machine after Spot machine ${row.externalId ?? '(unknown)'} was reclaimed`,
+        },
+        now,
+      ).filter((c) => c.type !== preemptedReplacementsCondition),
+      {
+        type: preemptedReplacementsCondition,
+        status: 'true',
+        reason: 'Recreated',
+        message: `${generation + 1}/${consecutive + 1}`,
+        since: now,
+      },
+    ],
+  });
+  await publishInstance(deps, tx, again, 'instance.recreating', { reason: 'preempted' });
+  return now + preemptedReplacementDelay(consecutive + 1);
+}
+
+/** Resets the consecutive replacements of a recreated instance that reached `running`. */
+async function ranAfterReplacement(tx: SqlTx, row: InstanceRow): Promise<InstanceRow> {
+  const { generation, consecutive } = preemptedReplacementsOf(row.conditions);
+  if (consecutive === 0) return row;
+  return updateInstance(tx, row, {
+    conditions: row.conditions.map((c) =>
+      c.type === preemptedReplacementsCondition
+        ? { ...c, reason: 'Ran', message: `${generation}/0` }
+        : c,
+    ),
+  });
+}
+
+async function replacePreempted(tx: SqlTx, poolId: string): Promise<boolean> {
+  const { rows } = await tx.query<{ replace: boolean | null }>(
+    `SELECT (policy->>'replacePreempted')::boolean AS replace FROM pools WHERE id = $1`,
+    [poolId],
+  );
+  return rows[0]?.replace === true;
+}
+
 const machineStates: Partial<Record<ExternalMachine['state'], ReportedState>> = {
   running: 'running',
   stopped: 'stopped',
@@ -531,6 +635,12 @@ async function reconcileProvider(
   }
   if (!account)
     throw new ComputeError('INVALID_STATE', `Instance ${row.id} has no provider account`);
+  // (P3) A preempted instance recreated in place more than once in a row waits out its backoff.
+  if (action.kind === 'create') {
+    const replaced = preemptedReplacementsOf(row.conditions);
+    const due = replaced.since + preemptedReplacementDelay(replaced.consecutive);
+    if (replaced.consecutive > 0 && now < due) return due;
+  }
 
   let machine: ExternalMachine | undefined;
   let failure: unknown;
@@ -541,7 +651,8 @@ async function reconcileProvider(
   try {
     const client: ProviderImpl = await deps.clients.client(account, deps);
     labelled = typeof client.claim === 'function';
-    const context = callContext(deps, row.id, signal);
+    // A recreated instance's calls carry its generation, so a create never finds the old machine.
+    const context = callContext(deps, providerCallKey(row), signal);
     if (action.kind === 'create') {
       // An attached machine existed before better-compute: it is adopted or lost, never made anew.
       if (row.origin === 'attached')
@@ -554,6 +665,11 @@ async function reconcileProvider(
         {
           offerId: row.shape.offerId,
           image: row.imageId,
+          // (DO P3) A catalog image as it was resolved for the tenant at create: the provider fetches
+          // that artifact, never whatever the bare ref might name elsewhere.
+          ...(row.image !== undefined && isCatalogImageRef(row.imageId)
+            ? { catalogImage: { tenantId: row.tenantId, sha256: row.image.sha256 } }
+            : {}),
           // A tenant's secret:// ref (checked to be its own at create) is resolved for the provider.
           userData: eksNodeUserData(
             eks,
@@ -759,14 +875,7 @@ async function reconcileProvider(
       if (current.state === 'lost') return undefined;
       if (current.state === 'scheduling')
         current = await moveInstance(tx, current, 'complete', 'provisioning');
-      const lost = await moveInstance(tx, current, 'lose', 'lost', {
-        conditions,
-        reportedState: 'absent',
-      });
-      // The lost span is not billed: a recovery opens a new interval.
-      await closeUsage(deps, tx, lost);
-      await publishInstance(deps, tx, lost, 'instance.lost');
-      return undefined;
+      return loseMachine(deps, tx, current, conditions, now, account.provider);
     }
     const reported = machineStates[machine.state];
     const machineKnown = current.externalId !== undefined;
@@ -836,12 +945,11 @@ async function reconcileProvider(
         await publishInstance(deps, tx, failed, 'instance.failed', { reason: 'provider' });
         return undefined;
       }
-      if (reported === 'absent' && current.state !== 'deleting') {
-        const lost = await moveInstance(tx, current, 'lose', 'lost');
-        await closeUsage(deps, tx, lost);
-        await publishInstance(deps, tx, lost, 'instance.lost');
-        return undefined;
-      }
+      if (reported === 'absent' && current.state !== 'deleting')
+        // Already lost (a machine the provider still lists as deleted): it stays lost.
+        return current.state === 'lost'
+          ? undefined
+          : await loseMachine(deps, tx, current, current.conditions, now, account.provider);
       if (reported === 'running' || reported === 'stopped') {
         // A machine that booted while `stopped` is wanted gets powered off next round, and vice versa.
         const booting = current.state === 'provisioning' || current.state === 'starting';
@@ -855,6 +963,8 @@ async function reconcileProvider(
         if (next.state !== current.state)
           await publishInstance(deps, tx, next, `instance.${next.state}`);
         current = next;
+        // (P3) A recreated instance that runs ends its run of replacements (its generation stays).
+        if (current.state === 'running') current = await ranAfterReplacement(tx, current);
         // Billed as observed: a requested stop bills on until the provider reports it stopped, and
         // a recovered instance opens a new interval at its recovery (the lost span is not billed).
         if (!unbilledStates.has(current.state))

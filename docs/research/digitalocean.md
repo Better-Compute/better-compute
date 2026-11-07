@@ -98,10 +98,72 @@ of the two labels it carries.
 | Fact | Status | Source / value |
 |---|---|---|
 | Autoscale pool members: `GET /v2/droplets/autoscale/{id}/members` → `{ droplet_id, status (provisioning/active/deleting/off), health_status }` | spec | `autoscale_pools/models/member.yml` |
-| Spot GPU Droplets (preview since 2026-08-10, daily variable pricing), and the field that signals a preemption | **unverified** | P3 |
-| Bare Metal GPU API visibility | **unverified** (no `bare_metal` resource in the spec) | Program Q1. P3 assumes manual enrolment (DO-D17's fallback) |
-| MicroVMs API (preview): `specification/resources/microvms` | spec, preview | P3 |
+| Spot GPU Droplets (preview since 2026-08-10, daily variable pricing), and the field that signals a preemption | **unverified** | P3. Rechecked 2026-11-05: `droplet_create.yml` and `size.yml` have no Spot member. The docs say a reclaim comes with at least two hours' notice **by email only**, and Spot prices are at or below on-demand and change daily. P3 keeps its assumed wire shape in `compute/spot.ts` (`verified: false`) |
+| Bare Metal GPU API visibility | **unverified** (no `bare_metal` resource in the spec; rechecked 2026-11-05) | Program Q1. P3 ships DO-D17's fallback: `digitaloceanMetal` over SSH, with operator-listed machines |
+| MicroVMs API (preview): `specification/resources/microvms` | spec, preview | P3 design gate: see below |
+| GPU Droplets boot plain OS images | docs ("GPU Droplets also work with existing Droplet images, but you need to manually install GPU drivers") | P3 refuses only AI/ML images on non-GPU or other-vendor sizes (D-P3-4) |
+| Droplet metadata service: `http://169.254.169.254/metadata/v1.json` (`droplet_id`, `region`, `tags`, `interfaces.{public,private}[]`, and also `user_data`, `vendor_data`, `public_keys`, `auth_key`) | docs; unauthenticated, unsigned; response headers undocumented | P3: bcd reads it into `SystemSection.cloud`, see below |
 | The spec's resource folders match the 60 API groups in the program map | spec | `specification/resources/*` |
+
+### P3 MicroVM design gate (2026-11-05)
+
+What the spec says (`specification/resources/microvms`, read 2026-11-05):
+
+- **Endpoints:** `POST`/`GET /v2/microvms`, `GET`/`DELETE /v2/microvms/{id}`, pause, resume, exec, console, file
+  upload and download, checkpoints (create, list, get, delete) and options. Scopes `microvm:*`.
+- **Create:** `name`, `source` (`oci_ref`, a linux/amd64 container image, or `checkpoint_id`), `region`, `size`
+  (`cpu`, `memory`), `http_port`, `http_protocol`, `auto_pause.idle_timeout`, `tags`, `networking` (`public` or
+  `vpc`), `vpc_uuid`, `environment`.
+- **State:** `creating`, `running`, `pausing`, `paused`, `resuming`, `terminating`, `terminated`, `failed` (with
+  `failure_reason`), `unknown`.
+
+**Gate result: not passed, so MicroVMs move to a follow-up.** vps sandboxes run only on hosted pools
+(`sandboxes.ts` refuses a provider pool), and their runtime contract is a `RuntimeDriver` that bcd runs on a node to
+boot a catalog VM image. A DO MicroVM is neither: the control plane would drive it through DO's API, and it boots an
+OCI image or a checkpoint, not a VM image. Taking it needs a provider-backed sandbox backend contract in vps
+(create, pause and resume, exec, files, and checkpoints as snapshots), which is a design of its own.
+
+### P3 bcd metadata capture (2026-11-05)
+
+bcd reads the metadata document into the system section's `cloud` (`CloudInstance`: provider, Droplet id, region,
+tags, interfaces), for inventory only. The service is unauthenticated and unsigned, so the value is never an identity:
+DO nodes still join with tokens (DO-D12).
+
+- **When:** only when DMI `sys_vendor` is `DigitalOcean` (world-readable), so no other machine ever asks
+  169.254.169.254. DO does not document its metadata response headers, so they do not decide it (D-P3-7).
+- **What is kept:** the Droplet id, region, tags and interfaces; `user_data` (it can hold a join token), `vendor_data`, `public_keys`,
+  `auth_key` and the rest are skipped by the decoder. The document is capped at 1 MiB; the client has no proxy,
+  follows no redirect and times out after 2 s; a malformed id or region drops the whole value, malformed tags,
+  MACs and addresses are dropped one by one, and tags (128) and interfaces (16) are capped.
+- **Where:** a field of the `system` section, not a new section: a new section name would need a core migration
+  (`node_inventory_sections` CHECK in postgres `0015`), outside this program's block. The control plane decodes it
+  with `cloudInstanceOf` (`@better-compute/inventory`), normalizing again, and uses it for no label or placement.
+
+### P3 review fixes (2026-11-05)
+
+- **Catalog images are resolved per tenant (D-P3-8).** A `name@version` is unique only within a tenant's catalog and
+  may be private, so vps refuses (`NOT_FOUND`) a catalog-form image id that `vps({ images })` does not resolve for the
+  instance's tenant on a provider pool, and passes the resolution to the provider (core's optional
+  `catalogImage: { tenantId, sha256 }` on create and reinstall). `CatalogImageSource.locate` receives both, and the
+  provider refuses a location with another digest. A catalog ref without a resolution is refused before the source is
+  asked.
+- **Spot creates are checked against the loaded catalog, and need `previews` while unverified (D-P3-9).** A Spot member
+  DO ignored would make an on-demand GPU Droplet at full price that reads back as Spot, so DO is never left to decide:
+  the size catalog is loaded when the client holds none, and Spot needs `previews` until `spotShape.verified`.
+- **`@spot` is the provider's to declare (D-P3-10).** A provider declares the `spot-offers` capability; on any other
+  provider `…@spot` names a reservation called `spot`, which admission requires to exist.
+- **Preempted recreates (D-P3-11).** An `archive` Droplet is never adopted by a create; a recreated instance's
+  provider calls use the key `<id>:r<generation>`; replacements that never reach `running` stop after three, with
+  backoff from the second. Preemption is still read from any disappearance of an `@spot`, non-attached instance:
+  DO-D14's `details.reason 'preempted'` from the action log is not possible, since a gone Droplet's actions can't be
+  read, so a Spot Droplet destroyed by hand is also replaced (bounded by the cap above).
+- **Bare Metal (D-P3-12).** Every machine pins its host key; calls act on the caller's exact claim (so a machine is
+  bootstrapped under the key that claimed it: `providerAccounts.bootstrap` with its `offerId`); a non-root login runs
+  each command through `sudo -n`; a release removes bcd's binary, units, `/etc/bcd` and `/var/lib/bcd` before the
+  claim. The OS is not reinstalled (no API), so anything outside bcd's paths survives a release.
+- **Still open:** no sweeper deletes imported custom images no Droplet uses any more (DO bills their storage), there is
+  no per-region `provider_images` table (D-P3-1 keeps the image as its own record), Spot estimates still say
+  `spot: false` (billing owner), and MicroVMs stay behind the design gate above.
 
 ## Consequences for the plans (applied 2026-10-18)
 

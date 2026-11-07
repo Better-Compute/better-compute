@@ -35,6 +35,7 @@ import { chargeQuota, refundQuota, resizeAllocation } from '@better-compute/capa
 import { readAccount, type ClientDeps, type ProviderClients } from './accounts.js';
 import { readFlavorByName, type FlavorRecord } from './flavors.js';
 import { claimReservationSlot } from './provider-reservations.js';
+import { isSpotOffer } from './spot.js';
 import {
   canonical,
   fail,
@@ -91,6 +92,15 @@ export interface VpsImage {
  */
 export interface ImageResolver {
   resolve(tx: SqlTx, tenantId: string, imageId: string): Promise<VpsImage | undefined>;
+}
+
+/**
+ * Whether an image id names a catalog image (`name@version`, provision's image catalog) rather than
+ * a provider's own image. On a provider pool such an id must resolve for the tenant, and the
+ * resolution (tenant, digest) goes to the provider with it (`catalogImage`).
+ */
+export function isCatalogImageRef(imageId: string): boolean {
+  return imageId.includes('@');
 }
 
 /** What instance services need beyond a transaction. */
@@ -932,6 +942,59 @@ export const duplicateMachineCondition = 'DuplicateMachine';
  */
 export const provisionFailedCondition = 'ProvisionFailed';
 
+/**
+ * (P3) A provider-pool instance on Spot (preemptible) capacity whose machine vanished: the provider
+ * reclaimed it. Set (`status: 'true'`, reason `Reclaimed`) with the `lost` state and the
+ * `instance.preempted` event; a pool whose policy says `replacePreempted: true` recreates the
+ * instance in place (a new machine, the same id), which turns it to `status: 'false'` (reason
+ * `Replaced`).
+ */
+export const preemptedCondition = 'Preempted';
+
+/**
+ * (P3) The in-place replacements of a preempted instance: `message` is `<generation>/<consecutive>`,
+ * `since` the last replacement. The generation only grows: a recreated instance's provider calls use
+ * the key `<id>:r<generation>`, so a provider that dedupes creates by key (a GCE requestId, a DO key
+ * tag that still lists the reclaimed Droplet) never hands back the machine that was reclaimed.
+ * `consecutive` counts replacements that never reached `running`; it is reset once one does.
+ */
+export const preemptedReplacementsCondition = 'PreemptedReplacements';
+/** Replacements in a row that never ran; one more preemption leaves the instance lost. */
+export const maxPreemptedReplacements = 3;
+/** The wait before the second replacement in a row, doubled for each one after it. */
+export const preemptedBackoffMs = 30_000;
+
+/** A preempted instance's replacement counters (`preemptedReplacementsCondition`). */
+export function preemptedReplacementsOf(conditions: readonly Condition[]): {
+  generation: number;
+  consecutive: number;
+  since: number;
+} {
+  const found = conditions.find((c) => c.type === preemptedReplacementsCondition);
+  const [generation, consecutive] = (found?.message ?? '0/0').split('/').map(Number);
+  const count = (value: number | undefined) =>
+    Number.isSafeInteger(value) && value! > 0 ? value! : 0;
+  return {
+    generation: count(generation),
+    consecutive: count(consecutive),
+    since: found?.since ?? 0,
+  };
+}
+
+/** How long after the last replacement the next create of a recreated instance may run. */
+export function preemptedReplacementDelay(consecutive: number): number {
+  return consecutive <= 1 ? 0 : preemptedBackoffMs * 2 ** (consecutive - 2);
+}
+
+/**
+ * The idempotency key of an instance's provider calls: its id, or `<id>:r<generation>` once a
+ * preempted instance has been recreated in place (a new machine needs a key the old one never had).
+ */
+export function providerCallKey(row: Pick<InstanceRow, 'id' | 'conditions'>): string {
+  const { generation } = preemptedReplacementsOf(row.conditions);
+  return generation === 0 ? row.id : `${row.id}:r${generation}`;
+}
+
 /** Whether the instance's provider create failed for good (it holds no machine to act on). */
 export function provisionFailed(conditions: readonly Condition[]): boolean {
   return conditions.some(
@@ -1455,7 +1518,13 @@ export async function prepareCreateInstance(
     if (!image) throw new ComputeError('NOT_FOUND', `Image ${input.imageId} not found`);
   } else if (!pool.providerAccountId)
     throw new ComputeError('INVALID_STATE', `Provider pool ${pool.id} has no provider account`);
-  else image = await deps.images?.resolve(tx, input.tenantId, input.imageId);
+  else {
+    image = await deps.images?.resolve(tx, input.tenantId, input.imageId);
+    // (DO P3) A catalog ref (`name@version`) is unique only within a tenant and may be private: one
+    // the tenant can't see is refused here, so no provider is ever asked to fetch it (fail closed).
+    if (!image && isCatalogImageRef(input.imageId))
+      throw new ComputeError('NOT_FOUND', `Image ${input.imageId} not found`);
+  }
   // (AWS A7) A workload role: hosted pools with workload identity on that list the role.
   if (input.workloadIdentity !== undefined) {
     const { rows: policies } = await tx.query<{ policy: PoolWorkloadPolicy | string | null }>(
@@ -1721,10 +1790,16 @@ export async function completeCreateInstance(
     // creates between two provider polls cannot both take the last slot (CAPACITY_UNAVAILABLE).
     if (next.providerAccountId !== undefined && next.shape.offerId !== undefined) {
       // A reservation grant of the tenant takes it first (D7).
+      const { rows: accounts } = await tx.query<{ provider: string }>(
+        `SELECT provider FROM provider_accounts WHERE id = $1`,
+        [next.providerAccountId],
+      );
+      const provider = accounts[0] ? deps.clients.definition(accounts[0].provider) : undefined;
       const claim = await claimReservationSlot(tx, {
         accountId: next.providerAccountId,
         offerId: next.shape.offerId,
         tenantId: next.tenantId,
+        spot: isSpotOffer(next.shape.offerId, provider),
         ...(next.projectId !== undefined ? { projectId: next.projectId } : {}),
       });
       if (claim !== undefined)

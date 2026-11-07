@@ -14,6 +14,7 @@ export * from './diff.js';
 export * from './store.js';
 export * from './health.js';
 export * from './image-cache.js';
+export * from './cloud.js';
 export * from './hygiene.js';
 export * from './pressure.js';
 export * from './module.js';
@@ -21,6 +22,8 @@ export * from './module.js';
 /** NodeInventory v1 and its sections, as the daemon reports them (`agent/v1/inventory.proto`). */
 export type {
   BmcSection,
+  CloudInstance,
+  CloudInterface,
   CpuSection,
   DisksSection,
   Gpu,

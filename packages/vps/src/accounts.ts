@@ -1022,6 +1022,11 @@ export class ProviderClients {
       if (key.startsWith(`${accountId}@`)) this.#cache.delete(key);
   }
 
+  /** The registered provider `id`; undefined when none is. */
+  definition(id: string): ProviderDefinition | undefined {
+    return this.#providers.get(id);
+  }
+
   client(account: ProviderAccount, deps: ClientDeps): Promise<ProviderImpl> {
     const cacheKey = `${account.id}@${account.version}`;
     let client = this.#cache.get(cacheKey);

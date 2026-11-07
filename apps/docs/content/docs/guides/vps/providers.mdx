@@ -73,6 +73,12 @@ sources:
     'tests/provider-digitalocean.test.ts',
     'tests/provider-digitalocean-networks.test.ts',
     'tests/do-end-to-end.test.ts',
+    'packages/provider-digitalocean/src/compute/catalog.ts',
+    'packages/provider-digitalocean/src/compute/spot.ts',
+    'packages/provider-digitalocean/src/metal/bare-metal.ts',
+    'tests/provider-digitalocean-images.test.ts',
+    'tests/provider-digitalocean-spot.test.ts',
+    'tests/provider-digitalocean-metal.test.ts',
   ]
 ---
 
@@ -965,7 +971,8 @@ await compute.api.providerAccounts.create(
     ipv6: { type: 'boolean', description: 'Give new Droplets an IPv6 address.', default: 'false' },
     allowSpot: {
       type: 'boolean',
-      description: 'Accepted and reserved for Spot capacity, which is not created yet.',
+      description:
+        'Offer and create Spot GPU capacity (region/size@spot) where DigitalOcean reports a Spot price. While the Spot API shape is unverified, previews must be on too.',
       default: 'false',
     },
     discoverTag: {
@@ -975,7 +982,8 @@ await compute.api.providerAccounts.create(
     },
     previews: {
       type: 'boolean',
-      description: 'Accepted and reserved for products DigitalOcean still marks as previews.',
+      description:
+        'Products DigitalOcean still marks as previews. Today: Spot (with allowSpot), whose API shape better-compute has not verified yet.',
       default: 'false',
     },
   }}
@@ -1016,7 +1024,39 @@ The token needs the custom scopes `account:read`, `regions:read`, `sizes:read`, 
   managed tag that was on the Droplet before the claim goes too.
 - **Power:** `on` is `power_on`, `off` is `power_off`, `graceful-off` is `shutdown`, `graceful-restart` is `reboot`,
   `cycle` and `reset` are `power_cycle`; `nmi` is `UNSUPPORTED`. `reinstall` is `rebuild`. Actions are started, not
-  awaited. Spot offers are not created yet: an offer ending in `@spot` is `UNSUPPORTED` (`reason` `spot`).
+  awaited.
+- **Images.** An image is a slug, a numeric image id, or a catalog `name@version`. A catalog image is imported as a
+  DigitalOcean custom image from a short-lived URL the host's `digitaloceanProvider({ catalogImages })` source hands
+  over, tagged with its digest so retries and racing creates reuse one import, and copied to other regions on demand.
+  A catalog ref is unique only within a tenant: vps resolves it for the instance's tenant (`vps({ images })`), refuses one
+  the tenant can't see (`NOT_FOUND`), and passes the resolution (`catalogImage: { tenantId, sha256 }`) to the provider,
+  whose source must look the image up by it. While it imports or copies, the create is `UNAVAILABLE` (`imageImporting`,
+  `imageTransferring`) and vps retries it; a copy that errors three times or is still running a day later, or an import
+  still pending a day later, fails it (`INVALID_STATE`). A failed import is deleted before the survivor is chosen, so an
+  available duplicate still boots.
+  An AI/ML image (`gpu-…`) on a size without GPUs or of the other GPU vendor is `INVALID_INPUT` (`gpuImage`).
+- **Spot.** With `allowSpot` (and, while the wire shape is unverified, `previews`), a size that reports a Spot price
+  gets a `region/size@spot` offer at that price; its Droplets carry `better-compute-capacity:spot`. Without `allowSpot`
+  an `@spot` offer is `UNSUPPORTED` (`spot`), without `previews` `UNSUPPORTED` (`spotPreview`), and a Spot create
+  for a size without a Spot price is refused before any request (the size catalog is loaded if need be). The Spot wire
+  shape is not in DigitalOcean's published specification yet, so the provider keeps its assumptions in one place
+  (`spotShape`) for the live suite to settle. The provider declares the `spot-offers` capability: only then does vps
+  read an `@spot` offer as Spot (elsewhere it names a reservation called `spot`). A Spot instance whose machine
+  vanishes is `lost` with a `Preempted` condition and `instance.preempted`; a pool policy `replacePreempted: true`
+  recreates it on a new machine (its provider calls then carry the key `<id>:r<generation>`), at most three times in a
+  row without reaching `running`, backing off from the second.
+- **Bare Metal GPUs.** `digitaloceanMetalProvider({ machines, ssh })` (id `digitalocean-metal`, `provides: ['metal']`,
+  platform accounts only) claims operator-listed machines over SSH with an atomic claim file, bootstraps bcd with the
+  join token over SSH stdin, and reboots them (a detached `systemd-run` timer, so the exit status comes back; a
+  non-zero exit or a dropped connection is `PROVIDER_ERROR`, never a retry); DigitalOcean's API has no Bare Metal
+  resource. Every machine pins its
+  SSH host key (`hostKeySha256`, required); calls act only on the caller's own claim; a login other than `root` runs
+  each command through `sudo -n`; a release removes bcd's install and state before the claim.
+- **Droplet metadata.** On a Droplet, bcd reads the metadata service into the inventory system section's `cloud`
+  (Droplet id, region, tags, interfaces; never user data, keys or tokens). It is inventory only: the service is
+  unsigned, so Droplets join with tokens, and the control plane reads it with `cloudInstanceOf`. A read that fails
+  (a timeout, a non-200) reuses `bcd node`'s last good answer for up to six hours, so one blip does not change the
+  section's hash and upload a spurious inventory change.
 - **Rate budget.** DigitalOcean allows 250 requests a minute and 5,000 an hour per token, shared by every reconciler
   that uses it. The provider keeps each token under both limits: discovery and listing may spend at most 20% of a
   window, single reads 30%, and writes whatever is left, so discovery defers first. Over its share a call is

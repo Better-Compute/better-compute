@@ -104,6 +104,12 @@ export interface PoolPolicy {
   tenantRoot?: boolean;
   /** (v0.3) The vps runtime driver this pool's hosted instances run on (default: vps()'s first runtime). */
   runtime?: string;
+  /**
+   * (DO P3) Provider pools: a Spot instance the provider reclaimed is recreated in place on a new
+   * machine (same id), at most three times in a row without reaching `running`. Default false: it
+   * stays `lost` with a `Preempted` condition.
+   */
+  replacePreempted?: boolean;
   /** (v0.3) Only one tenant besides the owner may be offered this pool; set for container runtimes (§13). */
   singleTenant?: boolean;
   /**

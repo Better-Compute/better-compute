@@ -9,6 +9,7 @@ export { defineProvider } from './provider.js';
 export { vps, type VpsApi, type VpsOptions, type ProviderAccountView } from './module.js';
 export * from './migrations.js';
 export * from './instances.js';
+export { declaresSpotOffers, isSpotOffer, spotOffersCapability } from './spot.js';
 export * from './budget-suspend.js';
 export * from './budget-admission.js';
 export * from './pricing.js';

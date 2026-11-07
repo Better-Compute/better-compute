@@ -3,6 +3,7 @@ import type { DoClient } from '../client/http.js';
 import type { DoConfig } from '../config.js';
 import { offerId } from '../ids.js';
 import { untilAborted } from './abort.js';
+import { spotEnabled, spotPriceOf } from './spot.js';
 import type { DoRegion, DoSize } from './types.js';
 
 // Offers: one per (size, region) the account is configured for. The size and region lists change
@@ -75,6 +76,18 @@ export function cachedSize(client: DoClient, slug: string): DoSize | undefined {
 }
 
 /**
+ * The size `slug` from the catalog, loading it (once per ten minutes, shared) when the client holds
+ * none: undefined when DigitalOcean has no such size.
+ */
+export async function sizeOf(
+  client: DoClient,
+  slug: string,
+  signal: AbortSignal,
+): Promise<DoSize | undefined> {
+  return (await catalogOf(client, signal)).sizes.find((size) => size.slug === slug);
+}
+
+/**
  * The inventory's name for a size's GPU: a leading `nvidia_` or `amd_` is dropped, the rest is
  * upper-cased with `_` as `-` (`nvidia_h100` is `H100`, `nvidia_rtx_6000_ada` is `RTX-6000-ADA`).
  */
@@ -109,7 +122,7 @@ export async function listOffers(
       if (!config.regions.includes(slug)) continue;
       if (query.region !== undefined && query.region !== slug) continue;
       const region = catalog.regions.get(slug);
-      offers.push({
+      const offer: Offer = {
         id: offerId(slug, size.slug),
         kind: 'vps',
         region: slug,
@@ -120,7 +133,13 @@ export async function listOffers(
         pricePerHour: size.price_hourly,
         currency: 'USD',
         available: size.available && !!region?.available && region.sizes.includes(size.slug),
-      });
+      };
+      offers.push(offer);
+      // Spot capacity is its own offer (DO-D8), only when the account allows it (DO-D14; previews
+      // too while the wire shape is unverified) and the size reports a Spot price (today's).
+      const spotPrice = spotEnabled(config) ? spotPriceOf(size) : undefined;
+      if (spotPrice !== undefined)
+        offers.push({ ...offer, id: offerId(slug, size.slug, true), pricePerHour: spotPrice });
     }
   }
   return offers;

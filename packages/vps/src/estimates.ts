@@ -96,6 +96,8 @@ export interface EstimateDeps {
   currency: string;
   /** The GPU models the meter catalog names (default `defaultMeterGpuModels`). */
   gpuModels?: readonly string[] | undefined;
+  /** (P3) The providers that declare the `@spot` offer convention (`spotOffersCapability`). */
+  spotProviders?: ReadonlySet<string> | undefined;
 }
 
 interface PoolBilling {
@@ -104,6 +106,7 @@ interface PoolBilling {
   policy: PoolPolicy;
   gpuModel: string | null;
   accountTenant: string | null;
+  provider: string | null;
 }
 
 async function readPool(tx: SqlTx, poolId: string): Promise<PoolBilling | undefined> {
@@ -113,10 +116,11 @@ async function readPool(tx: SqlTx, poolId: string): Promise<PoolBilling | undefi
     policy: PoolPolicy | string;
     gpu_model: string | null;
     account_tenant: string | null;
+    provider: string | null;
   }>(
     // The account counts only when it is the pool owner's (ruling R1), as billing resolves the pool's mode.
     `SELECT p.class, p.owner_tenant_id, p.policy, p.gpu_model,
-            ${poolAccountTenantSql} AS account_tenant
+            ${poolAccountTenantSql} AS account_tenant, a.provider
        FROM pools p LEFT JOIN provider_accounts a ON a.id = p.provider_account_id
       WHERE p.id = $1`,
     [poolId],
@@ -129,6 +133,7 @@ async function readPool(tx: SqlTx, poolId: string): Promise<PoolBilling | undefi
     policy: (typeof row.policy === 'string' ? JSON.parse(row.policy) : row.policy) ?? {},
     gpuModel: row.gpu_model,
     accountTenant: row.account_tenant,
+    provider: row.provider,
   };
 }
 
@@ -137,7 +142,12 @@ function shapeOfFlavor(
   flavor: FlavorRecord,
   pool: PoolBilling,
   gpuModels: readonly string[],
+  spotProviders: ReadonlySet<string> | undefined,
 ): BillableShape {
+  const spotOffer =
+    flavor.offerId?.endsWith('@spot') === true &&
+    pool.provider !== null &&
+    spotProviders?.has(pool.provider) === true;
   const model =
     flavor.gpus > 0 && pool.gpuModel ? canonicalGpuModel(pool.gpuModel, gpuModels) : 'other';
   return {
@@ -146,7 +156,8 @@ function shapeOfFlavor(
     ...(flavor.gpus > 0 ? { gpus: { model, count: flavor.gpus } } : {}),
     // No flavor or offer says Spot yet (ruling F6-2); an offer on a reservation is metered as reserved.
     spot: false,
-    reserved: flavor.offerId?.includes('@') === true,
+    // (P3) An `@spot` offer is Spot capacity, not a reservation's (its Spot meter is the billing owner's follow-up).
+    reserved: flavor.offerId?.includes('@') === true && !spotOffer,
     granted: false,
     ...(flavor.billing?.meter !== undefined ? { flavorMeter: flavor.billing.meter } : {}),
   };
@@ -191,7 +202,7 @@ export async function flavorEstimates(
   );
   const wanted = missing.map((flavor) => ({
     flavor,
-    lines: meterLinesFor(shapeOfFlavor(flavor, pool, gpuModels), mode, 'running', { gpuModels }),
+    lines: meterLinesFor(shapeOfFlavor(flavor, pool, gpuModels, deps.spotProviders), mode, 'running', { gpuModels }),
   }));
   const asked = wanted.flatMap((item) =>
     item.lines.map((line) => ({ meter: line.meter, quantity: line.perHour })),

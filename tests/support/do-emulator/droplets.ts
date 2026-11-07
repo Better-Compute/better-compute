@@ -1,6 +1,7 @@
 import type { DoEmulator, RouteContext } from './index.js';
 import { isoSeconds, settleAction, startAction } from './actions.js';
 import { fixture, type DoState, type Json } from './state.js';
+import { imageMissingInRegion } from './images.js';
 import { hasTag, touchTags } from './tags.js';
 import { unassignAll } from './addresses.js';
 import { detachAll } from './volumes.js';
@@ -179,6 +180,7 @@ function create(emulator: DoEmulator, context: RouteContext) {
   const image = body.image;
   if (!(typeof image === 'string' && image !== '') && !Number.isInteger(image))
     return emulator.error('422-invalid-image');
+  if (imageMissingInRegion(state, image, region.slug)) return emulator.error('422-invalid-image');
   const keys = (body.ssh_keys ?? []) as unknown[];
   const known = [...state.sshKeys.values()];
   if (

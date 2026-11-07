@@ -9,10 +9,12 @@ import {
   networkDescription,
   networkMemberTag,
   resetBudgets,
+  imageTag,
   tagFor,
+  type CatalogImageSource,
 } from '@better-compute/provider-digitalocean';
 import { closeFixtures, computeFixture, type ComputeFixture } from '@better-compute/testing';
-import { networkTag, providerResourceName, vps } from '@better-compute/vps';
+import { networkTag, providerResourceName, vps, type ImageResolver } from '@better-compute/vps';
 import { failAction } from './support/do-emulator/actions.js';
 import { seedDroplet } from './support/do-emulator/droplets.js';
 import { DoEmulator, type Json } from './support/do-emulator/index.js';
@@ -22,8 +24,9 @@ import { seedSshKey } from './support/do-emulator/keys.js';
 // tests use inline fakes, this one proves the two packages agree). One root DO account, its token
 // in the fixture's sealed secret store, backs a provider pool offered to acme; discovery runs every
 // minute and auto-attaches machines tagged for a tenant and its pool. Covers create/stop/delete,
-// attach/detach, auto-attach, a tenant network, a create DO accepts and then fails, and (P2) Block
-// Storage volumes, snapshots and Reserved IPs on an instance through its delete.
+// attach/detach, auto-attach, a tenant network, a create DO accepts and then fails, (P2) Block Storage
+// volumes, snapshots and Reserved IPs on an instance through its delete, and a create from a catalog
+// image (imported as a DO custom image while vps retries).
 
 afterEach(closeFixtures);
 // The provider's request budgets are per token and process-wide.
@@ -58,7 +61,10 @@ interface World {
   view(instanceId: string): Promise<any>;
 }
 
-async function world(): Promise<World> {
+async function world(
+  provider: { catalogImages?: CatalogImageSource } = {},
+  images?: ImageResolver,
+): Promise<World> {
   const emu = new DoEmulator();
   emu.validTokens = new Set(['root-do-token']);
   const fingerprint = seedSshKey(emu.state, 'platform', testKey).fingerprint as string;
@@ -66,7 +72,8 @@ async function world(): Promise<World> {
     clock: 'sim',
     modules: [
       vps({
-        providers: [digitaloceanProvider({ fetch: emu.fetch })],
+        providers: [digitaloceanProvider({ fetch: emu.fetch, ...provider })],
+        ...(images ? { images } : {}),
         discovery: { every: '1m', autoAttach: { ownerIdentityId: PLATFORM } },
       }),
     ],
@@ -512,5 +519,102 @@ describe('provider-digitalocean through vps, end to end', () => {
     expect(w.emu.state.reservedIps.get(reserved.address)?.droplet_id).toBeUndefined();
     // No delete of a volume by tag or of a volume vps did not delete.
     expect(requests(w, 'DELETE', /^\/v2\/volumes/)).toHaveLength(0);
+  });
+
+  it('creates from a catalog image: DO imports it while vps retries, and the URL stays out of every row', async () => {
+    const digest = 'cd'.repeat(32);
+    const presigned = 'https://blobs.example.test/images/ubuntu.qcow2?X-Amz-Signature=E2ESECRET&X-Amz-Expires=21600';
+    const asked: { ref: string; tenantId: string; sha256: string }[] = [];
+    const tenants: { acme?: string } = {};
+    const w = await world(
+      {
+        catalogImages: {
+          async locate(ref, { tenantId, sha256 }) {
+            asked.push({ ref, tenantId, sha256 });
+            return { url: presigned, sha256: digest, format: 'qcow2' };
+          },
+        },
+      },
+      {
+        // acme's catalog has the image; vps stores this resolution (no presigned URL in it).
+        async resolve(_tx, tenantId, imageId) {
+          if (tenantId !== tenants.acme || imageId !== 'ubuntu-24.04-server@2026.09') return undefined;
+          return { url: 'blob://images/ubuntu.qcow2', sha256: digest, format: 'qcow2', verified: true };
+        },
+      },
+    );
+    tenants.acme = w.acmeTenant;
+    w.emu.importReads = 2;
+    const catalogRef = 'ubuntu-24.04-server@2026.09';
+    const created = await w.api.instances.create(
+      w.acme,
+      createInput(w, { imageId: catalogRef, idempotencyKey: 'vm-catalog' }),
+    );
+    // The first pass starts the import and waits (UNAVAILABLE, retryAfterMs 30 s); a later one creates.
+    await w.tick('vps.instances', 1_000);
+    expect(requests(w, 'POST', /^\/v2\/images$/)).toHaveLength(1);
+    expect(requests(w, 'POST', /^\/v2\/droplets$/)).toHaveLength(0);
+    expect((await w.view(created.id)).state).not.toBe('error');
+    const running = await settle(w, created.id, 'running', 20);
+    expect(running).toMatchObject({ state: 'running' });
+
+    const imports = requests(w, 'POST', /^\/v2\/images$/);
+    expect(imports).toHaveLength(1);
+    expect(imports[0]!.body).toMatchObject({ url: presigned, region: REGION });
+    expect(imports[0]!.body).toMatchObject({ tags: expect.arrayContaining([managed, deployment, imageTag(digest)]) });
+    const image = [...w.emu.state.images.values()].find((i) => (i.tags as string[]).includes(imageTag(digest)))!;
+    expect(image.status).toBe('available');
+    const posts = requests(w, 'POST', /^\/v2\/droplets$/);
+    expect(posts).toHaveLength(1);
+    expect((posts[0]!.body as Json).image).toBe(image.id);
+    expect(asked.length).toBeGreaterThan(0);
+    for (const call of asked) expect(call).toEqual({ ref: catalogRef, tenantId: w.acmeTenant, sha256: digest });
+
+    // A second instance of the image reuses the import.
+    const second = await w.api.instances.create(
+      w.acme,
+      createInput(w, { imageId: catalogRef, idempotencyKey: 'vm-catalog-2' }),
+    );
+    expect(await settle(w, second.id, 'running', 20)).toMatchObject({ state: 'running' });
+    expect(requests(w, 'POST', /^\/v2\/images$/)).toHaveLength(1);
+
+    // The presigned URL went to DO only: not into the instance, its conditions or its events.
+    for (const id of [created.id, second.id])
+      expect(JSON.stringify(await w.view(id))).not.toContain('E2ESECRET');
+    const { rows } = await w.fixture.database.query(
+      'SELECT row_to_json(i)::text AS row FROM instances i',
+    );
+    for (const row of rows as { row: string }[]) expect(row.row).not.toContain('E2ESECRET');
+  });
+
+  it("refuses a catalog ref the tenant can't see (another tenant's private image): nothing is imported", async () => {
+    const asked: string[] = [];
+    const tenants: { root?: string } = {};
+    const w = await world(
+      {
+        catalogImages: {
+          async locate(ref) {
+            asked.push(ref);
+            return { url: 'https://blobs.example.test/private.qcow2?sig=x', sha256: 'ef'.repeat(32), format: 'qcow2' };
+          },
+        },
+      },
+      {
+        // Only root's catalog holds the private image.
+        async resolve(_tx, tenantId, imageId) {
+          if (tenantId !== tenants.root || imageId !== 'private-tool@1') return undefined;
+          return { url: 'blob://images/private.qcow2', sha256: 'ef'.repeat(32), format: 'qcow2', verified: true };
+        },
+      },
+    );
+    tenants.root = w.rootTenant;
+    await expect(
+      w.api.instances.create(w.acme, createInput(w, { imageId: 'private-tool@1', idempotencyKey: 'vm-steal' })),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await w.tick('vps.instances', 1_000);
+    await w.tick('vps.instances', 60_000);
+    expect(asked).toEqual([]);
+    expect(requests(w, 'POST', /^\/v2\/images$/)).toHaveLength(0);
+    expect(requests(w, 'POST', /^\/v2\/droplets$/)).toHaveLength(0);
   });
 });

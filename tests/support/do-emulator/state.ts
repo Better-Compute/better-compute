@@ -45,6 +45,8 @@ export class DoState {
   actions = new Map<number, Json>();
   /** Keyed by name. DO tag resources. */
   tags = new Map<string, Json>();
+  /** Keyed by id. DO image resources (public ones seeded from the fixture). */
+  images = new Map<number, Json>();
   /** Keyed by uuid. DO autoscale pool resources. */
   autoscalePools = new Map<string, Json>();
   /** The members of each autoscale pool, keyed by the pool's uuid. */

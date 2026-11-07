@@ -2,17 +2,27 @@ import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runConformance } from '@better-compute/core/conformance';
 import { providerConformanceCases } from '@better-compute/vps';
-import { systemClock, type CallContext, type ProviderContext } from '@better-compute/core';
+import {
+  isComputeError,
+  systemClock,
+  type CallContext,
+  type ProviderContext,
+} from '@better-compute/core';
 import {
   baseFirewallName,
   deploymentTag,
   digitaloceanProvider,
+  imageTag,
   labels,
   networkHash,
   networkMemberTag,
   probeAccount,
+  spotPriceOf,
+  spotShape,
   type DoCompute,
+  type CatalogImageSource,
   type DoConfig,
+  type DoSize,
 } from '@better-compute/provider-digitalocean';
 
 // provider-digitalocean against a real DigitalOcean account. It is OFF unless BC_DO_LIVE and
@@ -23,7 +33,9 @@ import {
 //
 // Optional: BC_DO_REGION (nyc3), BC_DO_SIZE (s-1vcpu-512mb-10gb), BC_DO_IMAGE (ubuntu-24-04-x64),
 // BC_DO_ATTACHABLE (the id of a hand-made Droplet that the claim and discover cases may tag and
-// untag; without it they are skipped).
+// untag; without it they are skipped). BC_DO_IMPORT_URL and BC_DO_IMPORT_SHA256 (an HTTPS URL DO can
+// fetch, and its hex digest; optional BC_DO_IMPORT_FORMAT, default qcow2, and BC_DO_IMPORT_COMPRESSION)
+// turn on the catalog import case, which keeps a custom image (billed storage) until the sweep.
 //
 // Every resource carries this run's identity: Droplets the deployment tag of `live-<hex>`,
 // networks, VPCs and rules the name prefix `bc-live-<hex>-`. The sweeper deletes only what carries
@@ -45,6 +57,8 @@ const region = env.BC_DO_REGION || 'nyc3';
 const size = env.BC_DO_SIZE || 's-1vcpu-512mb-10gb';
 const image = env.BC_DO_IMAGE || 'ubuntu-24-04-x64';
 const attachable = env.BC_DO_ATTACHABLE || undefined;
+const importUrl = env.BC_DO_IMPORT_URL || undefined;
+const importSha256 = env.BC_DO_IMPORT_SHA256?.toLowerCase() || undefined;
 
 const networkName = `${prefix}-net`;
 const subnetName = `${prefix}-sub`;
@@ -199,6 +213,21 @@ interface Droplet {
   name: string;
   tags?: string[];
 }
+interface Image {
+  id: number;
+  name: string;
+  tags?: string[];
+}
+
+/** The run's custom images (catalog imports), by this deployment's tag on the image itself. */
+async function runImages(): Promise<Image[]> {
+  const tagged = await listAll<Image>(
+    `/images?private=true&tag_name=${encodeURIComponent(deployTag)}`,
+    'images',
+  );
+  return tagged.filter((image) => lower(image.tags).includes(deployTag));
+}
+
 interface Firewall {
   id: string;
   name: string;
@@ -303,7 +332,7 @@ async function deleteIfEmpty(name: string): Promise<void> {
  */
 async function sweep(): Promise<{
   left: Record<
-    'droplets' | 'firewalls' | 'vpcs' | 'tags' | 'volumes' | 'snapshots' | 'addresses',
+    'droplets' | 'images' | 'firewalls' | 'vpcs' | 'tags' | 'volumes' | 'snapshots' | 'addresses',
     string[]
   >;
   errors: string[];
@@ -372,6 +401,9 @@ async function sweep(): Promise<{
         5_000,
       ),
     );
+  // Imported images go once no Droplet of the run is left that boots from them.
+  for (const image of (await attempt('list the run images', runImages)) ?? [])
+    await attempt(`delete image ${image.id}`, () => api('DELETE', `/images/${image.id}`, [204, 404]));
 
   for (const firewall of (await attempt('list the run firewalls', runFirewalls)) ?? [])
     await attempt(`delete firewall ${firewall.name}`, () =>
@@ -405,6 +437,7 @@ async function sweep(): Promise<{
     droplets: ((await attempt('re-list Droplets', runDroplets)) ?? []).map(
       (d) => `${d.id} ${d.name}`,
     ),
+    images: ((await attempt('re-list images', runImages)) ?? []).map((i) => `${i.id} ${i.name}`),
     firewalls: ((await attempt('re-list firewalls', runFirewalls)) ?? []).map((f) => f.name),
     vpcs: ((await attempt('re-list VPCs', runVpcs)) ?? []).map((v) => v.name),
     tags: (await attempt('re-list tags', () => runTags(ownTags))) ?? [],
@@ -438,7 +471,16 @@ describe.skipIf(!enabled)('provider-digitalocean live', () => {
       outcome = await sweep();
     } catch (error) {
       outcome = {
-        left: { droplets: [], firewalls: [], vpcs: [], tags: [] },
+        left: {
+          droplets: [],
+          images: [],
+          firewalls: [],
+          vpcs: [],
+          tags: [],
+          volumes: [],
+          snapshots: [],
+          addresses: [],
+        },
         errors: [`sweep: ${String(error)}`],
       };
     }
@@ -467,6 +509,93 @@ describe.skipIf(!enabled)('provider-digitalocean live', () => {
     });
     expect(report.missing).toEqual([]);
   });
+
+  // P3's Spot wire shape is a guess (spotShape.verified is false): DO's public OpenAPI has no Spot
+  // member. This read-only case reports what the live size catalog carries, and checks the safety
+  // property the guess relies on: with allowSpot, Spot offers exist exactly for the sizes that carry
+  // the assumed price member, so a wrong guess offers nothing. Spot creates are not tried here (a
+  // Spot GPU Droplet is billable); settle createBody by hand, then set spotShape.verified.
+  it('reports whether live sizes carry the assumed Spot price member', { timeout: 120_000 }, async () => {
+    const sizes = await listAll<DoSize & { slug: string; regions?: string[] }>('/sizes', 'sizes');
+    expect(sizes.length).toBeGreaterThan(0);
+    const priced = sizes.filter((size) => spotPriceOf(size) !== undefined);
+    console.info(
+      `spotShape: ${priced.length} of ${sizes.length} sizes carry ${spotShape.sizePriceField}` +
+        (priced.length ? ` (${priced.slice(0, 10).map((size) => size.slug).join(', ')})` : ''),
+    );
+    const parsed = await provider.config['~standard'].validate({ ...config, allowSpot: true, previews: true });
+    if ('issues' in parsed && parsed.issues) throw new Error(parsed.issues[0]!.message);
+    const impl = (await provider.create(
+      (parsed as { value: DoConfig }).value,
+      providerContext,
+    )) as DoCompute;
+    const spotOffers = (await impl.listOffers({})).filter((offer) => offer.id.endsWith('@spot'));
+    const pricedHere = new Set(
+      priced.filter((size) => size.regions?.includes(region)).map((size) => `${region}/${size.slug}@spot`),
+    );
+    for (const offer of spotOffers) expect(pricedHere.has(offer.id), offer.id).toBe(true);
+  });
+
+  // P3 catalog images: imported once from the URL as a tagged custom image, which the create waits
+  // for (UNAVAILABLE while it imports), then reused by a second create.
+  it.skipIf(!importUrl || !importSha256)(
+    'imports a catalog image, creates from it and reuses the import',
+    { timeout: 2_400_000 },
+    async () => {
+      const catalogImages: CatalogImageSource = {
+        async locate() {
+          return {
+            url: importUrl!,
+            sha256: importSha256!,
+            format: env.BC_DO_IMPORT_FORMAT || 'qcow2',
+            ...(env.BC_DO_IMPORT_COMPRESSION ? { compression: env.BC_DO_IMPORT_COMPRESSION } : {}),
+          };
+        },
+      };
+      const importing = digitaloceanProvider({ fetch: observedFetch, deployment, catalogImages });
+      const parsed = await importing.config['~standard'].validate(config);
+      if ('issues' in parsed && parsed.issues) throw new Error(parsed.issues[0]!.message);
+      const impl = (await importing.create(
+        (parsed as { value: DoConfig }).value,
+        providerContext,
+      )) as DoCompute;
+      const input = (name: string) => ({
+        offerId: `${region}/${size}`,
+        image: 'live-image@1',
+        // As vps resolves it for the instance's tenant.
+        catalogImage: { tenantId: 'live', sha256: importSha256!.toLowerCase() },
+        userData: '#cloud-config\n',
+        name,
+      });
+      const createFrom = (name: string) => () =>
+        impl.create(input(name), call(name)).catch((error: unknown) => {
+          if (isComputeError(error, 'UNAVAILABLE')) return undefined;
+          throw error;
+        });
+      const first = await until(
+        'the import and the first create',
+        createFrom(`${prefix}-img-1`),
+        Boolean,
+        1_800_000,
+        30_000,
+      );
+      const images = await runImages();
+      expect(images).toHaveLength(1);
+      expect(lower(images[0]!.tags)).toEqual(
+        expect.arrayContaining([managedTag, deployTag, imageTag(importSha256!)]),
+      );
+      const second = await until(
+        'the second create',
+        createFrom(`${prefix}-img-2`),
+        Boolean,
+        300_000,
+        10_000,
+      );
+      expect(await runImages()).toHaveLength(1);
+      for (const machine of [first!, second!])
+        await impl.delete(machine.id, call(`${machine.id}-del`));
+    },
+  );
 
   it('passes every case of the ProviderImpl contract', { timeout: 900_000 }, async () => {
     const report = await runConformance(providerConformanceCases(), {

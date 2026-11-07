@@ -6,13 +6,17 @@
 export * from './client/errors.js';
 export * from './client/http.js';
 export { RateBudget, budgetFor, budgetShares, resetBudgets, tokenHash } from './client/budget.js';
+export * from './compute/catalog.js';
 export * from './compute/droplets.js';
+export * from './compute/images.js';
 export * from './compute/keys.js';
 export * from './compute/offers.js';
+export * from './compute/spot.js';
 export * from './compute/types.js';
 export * from './config.js';
 export * from './edge/addresses.js';
 export * from './ids.js';
+export * from './metal/bare-metal.js';
 export * from './networks/index.js';
 export * from './probe.js';
 export * from './provider.js';

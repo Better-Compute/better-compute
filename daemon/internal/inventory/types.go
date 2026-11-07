@@ -128,6 +128,43 @@ type SystemSection struct {
 	SecureBoot *bool
 	// Absent when no TPM is present.
 	Tpm *Tpm
+	// (v0.3) The cloud instance this system is, from the provider's metadata service: absent off a
+	// cloud, and when the service did not answer. Inventory only: it is not signed, so nothing ever
+	// uses it as an identity (hardware_key and node join ignore it).
+	Cloud *CloudInstance
+}
+
+// CloudInstance mirrors bettercompute.agent.v1.CloudInstance.
+//
+// What a cloud's instance metadata service reports about the instance (DigitalOcean:
+// 169.254.169.254/metadata/v1.json, read only on a Droplet). Never user data, vendor data, keys
+// or tokens.
+type CloudInstance struct {
+	// "digitalocean".
+	Provider string
+	// The provider's instance id (the Droplet id, in decimal).
+	InstanceId string
+	// Region slug, e.g. "nyc3".
+	Region string
+	// Sorted, without duplicates.
+	Tags []string
+	// Sorted by network, then MAC.
+	Interfaces []*CloudInterface
+}
+
+// CloudInterface mirrors bettercompute.agent.v1.CloudInterface.
+type CloudInterface struct {
+	// "public" or "private" (the VPC).
+	Network string
+	// Lowercase.
+	Mac         string
+	Ipv4Address string
+	Ipv4Netmask string
+	Ipv4Gateway string
+	Ipv6Address string
+	// 0 = no IPv6.
+	Ipv6PrefixLength uint32
+	Ipv6Gateway      string
 }
 
 // Tpm mirrors bettercompute.agent.v1.Tpm.

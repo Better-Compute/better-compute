@@ -1287,9 +1287,9 @@ describe('compute', () => {
     expect(emu.requests).toHaveLength(0);
   });
 
-  it('a spot offer is UNSUPPORTED until P3, even with allowSpot', async () => {
+  it('a spot offer is UNSUPPORTED without allowSpot', async () => {
     const emu = emulator();
-    const compute = await build(emu, { ...doAccount, allowSpot: true });
+    const compute = await build(emu, doAccount);
     const error = await failure(
       compute.create(request({ offerId: 'nyc3/s-2vcpu-4gb@spot' }), ctx()),
     );
@@ -1636,6 +1636,7 @@ describe('compute', () => {
         'networks',
         'volumes',
         'addresses',
+        'spot-offers',
       ],
     });
     const emu = emulator();
@@ -2224,6 +2225,7 @@ describe('definition', () => {
         provider: digitaloceanProvider({ fetch: emu.fetch }),
         config: { ...doAccount, regions: ['nyc3', 'sfo3'], sshKeyFingerprint: key.fingerprint },
         attachable: String(hand.id),
+        reinstallable: true,
         offerId: 'nyc3/s-1vcpu-1gb',
         // The volume and address cases attach and assign across regions too (INVALID_INPUT).
         otherRegionOfferId: 'sfo3/s-1vcpu-1gb',
@@ -2251,6 +2253,7 @@ describe('definition', () => {
       'networks',
       'volumes',
       'addresses',
+      'spot-offers',
     ]);
     const parsed = await digitalocean.config['~standard'].validate(doAccount);
     expect(parsed).toMatchObject({

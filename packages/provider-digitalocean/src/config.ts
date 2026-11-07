@@ -1,4 +1,5 @@
 import { field, manifest, type SecretRef } from '@better-compute/core';
+import type { CatalogImageSource } from './compute/catalog.js';
 
 /** A DigitalOcean account's configuration: the token is a SecretRef, never a value. */
 export const doConfig = manifest({
@@ -28,7 +29,9 @@ export const doConfig = manifest({
   allowSpot: field
     .boolean()
     .default(false)
-    .describe('Offer Spot capacity where DigitalOcean has it'),
+    .describe(
+      'Offer Spot capacity where DigitalOcean has it; while its API shape is unverified, previews must be on too',
+    ),
   discoverTag: field
     .string()
     .optional()
@@ -66,6 +69,11 @@ export interface DoProviderOptions {
    * checked, but it has no effect yet: every call starts its action and returns.
    */
   inCallWaitMs?: number;
+  /**
+   * Where catalog images (`name@version`) come from: the host wires provision's catalog and a
+   * BlobStore that presigns GETs. Absent: a catalog image is `UNSUPPORTED`.
+   */
+  catalogImages?: CatalogImageSource;
   /** Request budget per token. Defaults 250 per minute and 5000 per hour (DigitalOcean's limits). */
   budget?: { perMinute?: number; perHour?: number };
 }
