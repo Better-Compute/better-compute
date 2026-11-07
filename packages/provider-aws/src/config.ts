@@ -168,6 +168,17 @@ export function validateAwsConfig(config: AwsConfig): void {
         'zones',
       );
   roleArnOf(config);
+  // Cost Explorer: GovCloud has no endpoint (its costs are read from the linked commercial account), and the
+  // China endpoint (cn-northwest-1) is not the one aws-core's global host names. Refused, not left to fail later.
+  if (
+    config.costs !== undefined &&
+    config.costs !== 'off' &&
+    partitionOf(config.region).partition !== 'aws'
+  )
+    throw invalid(
+      `costs reads Cost Explorer in partition aws only; region ${config.region} is in ${partitionOf(config.region).partition}`,
+      'costs-partition',
+    );
   if (config.discoverTag !== undefined) parseDiscoverTag(config.discoverTag);
   if (config.instanceProfile !== undefined) {
     let arn;

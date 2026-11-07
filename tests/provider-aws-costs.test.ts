@@ -12,6 +12,7 @@ import {
   costMicros,
   usageTypeRegion,
   usageTypeService,
+  validateAwsConfig,
   type AwsConfig,
 } from '@better-compute/provider-aws';
 import { AwsEmulator, platformAccount } from './support/aws-emulator/index.js';
@@ -73,6 +74,30 @@ describe('provider-aws costs (Cost Explorer)', () => {
     expect(() =>
       awsConfig.parse({ region: 'us-east-1', zones: ['us-east-1a'], costs: 'all' }),
     ).toThrow();
+  });
+
+  it('costs are refused outside the commercial partition', () => {
+    for (const [region, zone] of [
+      ['us-gov-west-1', 'us-gov-west-1a'],
+      ['cn-north-1', 'cn-north-1a'],
+    ] as const) {
+      for (const costs of ['region', 'account'] as const) {
+        const config = awsConfig.parse({ region, zones: [zone], costs }) as AwsConfig;
+        let refused: unknown;
+        try {
+          validateAwsConfig(config);
+        } catch (error) {
+          refused = error;
+        }
+        expect(isComputeError(refused, 'INVALID_CONFIG')).toBe(true);
+        expect((refused as { details?: { reason?: string } }).details?.reason).toBe(
+          'costs-partition',
+        );
+      }
+      expect(() =>
+        validateAwsConfig(awsConfig.parse({ region, zones: [zone], costs: 'off' }) as AwsConfig),
+      ).not.toThrow();
+    }
   });
 
   it('reads daily rows by instance tag, then tenant tag, with the labels vps reads', async () => {

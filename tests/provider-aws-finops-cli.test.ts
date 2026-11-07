@@ -43,6 +43,9 @@ describe('provider-aws FinOps CLI', () => {
     expect(finops.Statement.length).toBe(plain.Statement.length + 2);
     // the Price List serves the commercial partition only
     expect(() => iamPolicy({ partition: 'aws-us-gov', prices: true })).toThrow(/--prices/);
+    // Cost Explorer is read from the commercial partition only (GovCloud has none; China is not wired)
+    expect(() => iamPolicy({ partition: 'aws-us-gov', costs: true })).toThrow(/--costs/);
+    expect(() => iamPolicy({ partition: 'aws-cn', costs: true })).toThrow(/--costs/);
     const { out, context } = harness({ costs: true });
     await awsIamPolicyCommand().run(context);
     expect(JSON.parse(out[0]!).Statement.map((s: IamStatement) => s.Sid)).toContain('CostExplorer');

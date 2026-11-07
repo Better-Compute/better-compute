@@ -163,13 +163,18 @@ export function iamPolicy(
     },
     { Sid: 'Identity', Effect: 'Allow', Action: 'sts:GetCallerIdentity', Resource: '*' },
   ];
-  if (options.costs === true)
+  if (options.costs === true) {
+    if (partition !== 'aws')
+      throw usage(
+        '--costs needs partition aws: provider-aws reads Cost Explorer in no other partition',
+      );
     statements.push({
       Sid: 'CostExplorer',
       Effect: 'Allow',
       Action: ['ce:GetCostAndUsage'],
       Resource: '*',
     });
+  }
   if (options.prices === true) {
     if (partition !== 'aws')
       throw usage('--prices needs partition aws: the AWS Price List serves no other partition');
@@ -353,7 +358,8 @@ export function awsIamPolicyCommand() {
       },
       costs: {
         type: 'boolean' as const,
-        description: 'Add ce:GetCostAndUsage, for accounts that read costs (config costs)',
+        description:
+          'Add ce:GetCostAndUsage, for accounts that read costs (config costs; partition aws only)',
       },
       prices: {
         type: 'boolean' as const,
