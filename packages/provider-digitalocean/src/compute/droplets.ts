@@ -10,6 +10,7 @@ import {
   type ProviderContext,
   type ProviderDeleteOptions,
   type ProviderImpl,
+  type ProviderKubernetes,
 } from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
 import type { DoConfig, DoProviderOptions } from '../config.js';
@@ -37,7 +38,15 @@ import { DoCatalogImages } from './catalog.js';
 import { checkGpuImage, classifyImage, imageParam, type ImageChoice } from './images.js';
 import { cachedSize, gpuModelOf, listOffers, sizeOf } from './offers.js';
 import { spotEnabled, spotPriceOf, spotShape } from './spot.js';
-import { assignTag, ensureTag, hasTag, spelled, unassignTag } from './tags.js';
+import {
+  assignTag,
+  doksTagKeys,
+  ensureTag,
+  hasTag,
+  isKubernetesNode,
+  spelled,
+  unassignTag,
+} from './tags.js';
 import type { DoAction, DoDroplet, DoVpc } from './types.js';
 
 // Droplets as machines. DO has no idempotency key, so a create carries its key as a tag
@@ -179,6 +188,8 @@ export class DoCompute implements ProviderImpl {
   readonly addresses: DoAddresses;
   /** Catalog images imported as custom images; absent without `catalogImages`. */
   protected readonly catalog: DoCatalogImages | undefined;
+  /** Managed Kubernetes (DOKS clusters and node pools); the provider sets it. */
+  kubernetes?: ProviderKubernetes;
 
   constructor(
     config: DoConfig,
@@ -204,9 +215,16 @@ export class DoCompute implements ProviderImpl {
       : undefined;
   }
 
-  /** Whether better-compute may delete the Droplet: managed, and in this deployment (R3). */
+  /**
+   * Whether better-compute may delete the Droplet: managed, and in this deployment (R3). A DOKS
+   * worker never is, whatever tags it carries: DOKS owns its nodes.
+   */
   protected owned(droplet: DoDroplet): boolean {
-    return hasTag(droplet, managedTag) && hasTag(droplet, this.deploymentTag);
+    return (
+      hasTag(droplet, managedTag) &&
+      hasTag(droplet, this.deploymentTag) &&
+      !isKubernetesNode(droplet)
+    );
   }
 
   /**
@@ -349,6 +367,13 @@ export class DoCompute implements ProviderImpl {
         throw fail(
           'INVALID_INPUT',
           `label ${JSON.stringify(key)} can't be a DigitalOcean tag key: it has a colon`,
+          'label',
+        );
+      // DOKS's own tag keys would make the Droplet read as a cluster worker, never ours to delete.
+      if (doksTagKeys.has(key.toLowerCase()))
+        throw fail(
+          'INVALID_INPUT',
+          `label ${JSON.stringify(key)} is DigitalOcean Kubernetes's own tag key (k8s, k8s-worker)`,
           'label',
         );
       if (reservedKeys.has(key.toLowerCase())) continue;
@@ -684,6 +709,7 @@ export class DoCompute implements ProviderImpl {
    * so the `type=gpus` list is read too (research S2). `discoverTag` narrows the first query; the
    * GPU list can't be combined with `tag_name`, so it is filtered by the tag here. Droplets that
    * belong to a DO autoscale pool carry the pool's id in `labels['better-compute-autoscale-pool']`.
+   * DOKS worker nodes are left out: DOKS owns them, so they are never up for a claim.
    */
   async *discover(ctx: CallContext): AsyncIterable<ExternalMachine> {
     const regions = new Set(this.config.regions);
@@ -702,6 +728,7 @@ export class DoCompute implements ProviderImpl {
         budget: 'sweep',
       })) {
         if (seen.has(droplet.id) || !regions.has(droplet.region.slug)) continue;
+        if (isKubernetesNode(droplet)) continue;
         if (query.type === 'gpus' && wanted !== undefined && !hasTag(droplet, wanted)) continue;
         seen.add(droplet.id);
         const machine = await named(toMachine(droplet));
@@ -750,6 +777,14 @@ export class DoCompute implements ProviderImpl {
       if (hasTag(droplet, ours)) await this.backOut(droplet, ours, signal);
       throw claimedByAnother(droplet);
     }
+    // A DOKS worker carries the pool's tags (this deployment's among them): a managed claim would
+    // let a vps delete destroy a cluster node behind DOKS's back.
+    if (isKubernetesNode(droplet))
+      throw fail(
+        'INVALID_STATE',
+        `Droplet ${droplet.id} is a DigitalOcean Kubernetes node, which DOKS manages itself`,
+        'kubernetesNode',
+      );
     if ((await poolMembers(this.client, signal)).has(droplet.id))
       throw fail(
         'INVALID_STATE',
@@ -834,7 +869,13 @@ export class DoCompute implements ProviderImpl {
     // when another deployment claims it. A retry of a release that failed before this finishes
     // it (no instance tag, no managed tag). A managed tag that this call did not remove (a rival
     // kept it, or the instance tag was already gone) keeps the deployment tag next to it.
-    if (!rivals && (claimed || !hasTag(droplet, managedTag)) && hasTag(droplet, this.deploymentTag))
+    // A DOKS worker keeps it: there it is its node pool's ownership tag, not a claim's.
+    if (
+      !rivals &&
+      (claimed || !hasTag(droplet, managedTag)) &&
+      hasTag(droplet, this.deploymentTag) &&
+      !isKubernetesNode(droplet)
+    )
       await this.unassignTag(spelled(droplet, this.deploymentTag), droplet.id, signal);
   }
 }
