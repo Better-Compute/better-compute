@@ -2435,7 +2435,7 @@ describe('exec trust', () => {
   });
 
   it('gives each guest a host key certified by the sandbox CA, sealed with its user data', async () => {
-    const ca = createSshCertificateAuthority();
+    const ca = createSshCertificateAuthority({ clock });
     const certifying = vps({
       runtimes: ['cloud-hypervisor'],
       images,
@@ -2510,7 +2510,7 @@ describe('exec trust', () => {
   });
 
   it('gives a memory restore its own identity, which exec signs for once the host installed it', async () => {
-    const ca = createSshCertificateAuthority();
+    const ca = createSshCertificateAuthority({ clock });
     const rebinding = vps({
       runtimes: ['cloud-hypervisor'],
       images,
