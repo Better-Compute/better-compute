@@ -193,9 +193,13 @@ and joined, and a drain's upgrade. It never returns a token or a credential.
 Use `"cluster": { "adopt": "<provider cluster id>" }` instead of `create`. The cluster is read and never created,
 changed or deleted. Each flavor adds a node pool named `bc-<last 6 of the pool id>-<flavor>`, so it can never take
 over a node pool of your own with the same name. On teardown only those node pools and bcd's labelled objects go;
-the cluster and its own node pools stay. If bcd cannot be removed from an adopted cluster (a refused credential, a
-failed delete), the substrate stays `deleting` and retries every 2 minutes. It never leaves a privileged DaemonSet
-behind unannounced.
+the cluster and its own node pools stay. Last, the substrate revokes its own access (`revokeCredentials`): the
+`bc-substrate` service account in `bc-access`, its cluster-admin binding, and the `bc-access` namespace once no
+subject is left in it (only if better-compute made it). GKE, EKS and DOKS all implement this; the cluster-wide
+`better-compute:edit` ClusterRoles and the access-guard admission policy stay, since they grant nothing on their own
+(an EKS access entry the tenant made stays too). If bcd or that access cannot be removed from an adopted cluster (a
+refused credential, a failed delete), the substrate stays `deleting` and retries every 2 minutes. It never leaves a
+privileged DaemonSet or a cluster-admin identity behind unannounced.
 
 | Provider | Adopt id                    | What the cluster needs                                                                                                                                  |
 | -------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |

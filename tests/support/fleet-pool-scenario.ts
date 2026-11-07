@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Logger } from '@better-compute/core';
 import { fleetModule, type FleetConfig } from '@better-compute/fleet';
-import { kubernetes, substrateNodePoolName, substratePoolLabel } from '@better-compute/kubernetes';
+import { kubernetes, substrateNodePoolName, substratePoolLabel, substrateSubject } from '@better-compute/kubernetes';
 import { kubernetesSubstrateAgent } from '@better-compute/provider-kubernetes';
 import { cdiSpecPath, createDevStack, type DevStack } from '@better-compute/testing';
 import { vps } from '@better-compute/vps';
@@ -385,6 +385,8 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
       expect(profile.nodePools(adopted).sort()).toEqual([...ownPools, substrateNodePoolName(poolId, 'h100')].sort());
       const ids = await runKubelets(poolId, server);
       expect(ids).toHaveLength(profile.zones);
+      // The substrate reaches the cluster as its own cluster-admin subject (DOKS names its service account per role).
+      expect(profile.accessObjects(server).some((object) => object.startsWith(`ServiceAccount/bc-access/${substrateSubject}`))).toBe(true);
       await dev.waitFor(ids, { timeoutMs: 60_000 });
       await until('the token to be revoked', async () => {
         await kick(poolId);
@@ -402,6 +404,9 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
       expect(profile.clusters()).toContain(adopted);
       expect(profile.nodePools(adopted)).toEqual(ownPools);
       expect(kube.kinds(server)).toEqual([]);
+      // Nor the substrate's own cluster-admin identity: no service account, binding or bc-access namespace stays.
+      expect(profile.accessObjects(server)).toEqual([]);
+      expect((await substrate(poolId))?.message ?? null).toBeNull();
       expect(await liveAllocations(poolId)).toEqual([]);
     }, 120_000);
 

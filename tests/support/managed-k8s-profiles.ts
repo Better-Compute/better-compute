@@ -48,6 +48,11 @@ export interface ManagedKubernetesProfile {
   seedCluster(): string;
   /** Secrets the provider side holds (account tokens): never in a row, an event or a log line. */
   secrets(): string[];
+  /**
+   * The access objects credentials left in the cluster whose API is at this origin: subject namespaces, service
+   * accounts and the bindings that name them (`Kind/name`, kube-access.ts subjectObjects).
+   */
+  accessObjects(server: string): string[];
 }
 
 const origin = (url: string) => new URL(url).origin;
@@ -104,6 +109,7 @@ export function gkeProfile(): ManagedKubernetesProfile {
       return 'us-central1/tenant-own';
     },
     secrets: () => [...gke.gce.mintedTokens],
+    accessObjects: (server) => api.clusters.find(server)?.subjectObjects() ?? [],
   };
 }
 
@@ -185,6 +191,7 @@ export function eksProfile(): ManagedKubernetesProfile {
       return providerId('tenant-own');
     },
     secrets: () => [],
+    accessObjects: (server) => kube.clusters.find(server)?.subjectObjects() ?? [],
   };
 }
 
@@ -219,5 +226,6 @@ export function doksProfile(): ManagedKubernetesProfile {
     nodePools: (cluster) => ((doks.clusters.get(cluster)?.node_pools ?? []) as Json[]).map((pool) => pool.name as string),
     seedCluster: () => doks.seedCluster({ name: 'tenant-own', region: 'tor1' }).id as string,
     secrets: () => ['do-token', ...doks.adminTokens.keys()],
+    accessObjects: (server) => doks.kube.clusters.find(server)?.subjectObjects() ?? [],
   };
 }
