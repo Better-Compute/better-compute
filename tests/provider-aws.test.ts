@@ -34,6 +34,7 @@ import {
 import { AwsEmulator } from './support/aws-emulator/index.js';
 import { Ec2Emulator } from './support/aws-emulator/ec2.js';
 import { EbsEmulator } from './support/aws-emulator/ebs.js';
+import { instanceProduct, PricingEmulator } from './support/aws-emulator/pricing.js';
 
 const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 const signal = new AbortController().signal;
@@ -1028,6 +1029,10 @@ describe('conformance', () => {
       // (A5) The volume cases: EBS settles as the contract reads it again.
       const ebsemu = new EbsEmulator(emu, ec2emu);
       ebsemu.settleOnRead = true;
+      // (DO P9 conformance) listPrices reads the Price List Query API: one on-demand t3.micro price.
+      new PricingEmulator(emu).products.push(
+        instanceProduct('SKU-T3MICRO', 't3.micro', { vcpu: 2, memoryGiB: 1 }, '0.0104000000'),
+      );
       const attachable = ec2emu.addInstance({ tags: { Name: 'legacy' } });
       // (do-volumes conformance) The account owner's own volume and snapshot, which the ownership
       // case checks a delete refuses and leaves. A runner without that case ignores the field.
