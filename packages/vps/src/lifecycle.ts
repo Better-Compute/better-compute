@@ -48,6 +48,7 @@ import {
 import { closeOpenInterval, openInterval } from './instance-usage.js';
 import { releaseAddress } from './ipam.js';
 import { networkTag, providerResourceName } from './networks.js';
+import { convergeProviderMarks } from './provider-events.js';
 import { specPlacement, type HostPlacement } from './placement.js';
 import { markSandboxReady, sandboxWork } from './sandboxes.js';
 import { instanceVolumeSpecs, volumePlacement } from './volumes.js';
@@ -733,10 +734,20 @@ async function reconcileProvider(
     }
     const reported = machineStates[machine.state];
     const machineKnown = current.externalId !== undefined;
+    // (A4) Polling settles the provider-event marks: a machine read running well past a pending
+    // interruption's deadline loses them even when the running event never came.
+    const settled = await convergeProviderMarks(
+      deps,
+      tx,
+      account,
+      { id: machine.id, running: reported === 'running' },
+      conditions,
+      now,
+    );
     await tx.query('SAVEPOINT vps_external_id');
     try {
       current = await updateInstance(tx, current, {
-        conditions,
+        conditions: settled,
         externalId: machine.id,
         addresses: machine.addresses,
         reportedState: reported ?? null,

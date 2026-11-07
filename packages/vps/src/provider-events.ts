@@ -38,11 +38,18 @@ import {
 // | machine-changed, api-call | the instance's reconcile is enqueued |
 // | interruption-warning | `InterruptionPending` condition, `instance.interruption`; the node the machine backs (a joined provider bootstrap) gets the NoSchedule taint `<provider>.spot/interruption` and its reservations the spot notice up to the deadline. Past its deadline: only the reconcile |
 // | machine-changed, state running, after a pending interruption's deadline | both conditions cleared, the taint removed (`node.tainted` with it in `removed`) |
-// | rebalance-recommended | `RebalanceRecommended` condition, `instance.rebalance-recommended` |
+// | rebalance-recommended | `RebalanceRecommended` condition (renewed by each one), `instance.rebalance-recommended` |
 // | maintenance-scheduled | `MaintenanceScheduled` condition (cleared when completed or canceled), `instance.maintenance` |
 // | reservation-changed | the account's `vps.reservations` scan is enqueued |
 // | health | `instance.health` |
 // Machines that are no live instance (or joined bootstrap) are ignored.
+//
+// Polling converges the marks without events too (a lost running event, a DLQ, a stale drop, the
+// queue switched off): the instance reconcile that reads the machine running more than
+// `interruptionGraceMs` past a pending interruption's deadline clears it like the running event, and
+// the `all` sweep does the same for a joined node whose session is seen that late. The reconcile
+// also drops a `RebalanceRecommended` older than `rebalanceExpiryMs` (EC2 often recommends a
+// rebalance and never interrupts).
 
 /** The work kind of the provider events reconciler (keys: `all`, or a provider account id). */
 export const providerEventsWork = 'vps.provider-events';
@@ -50,6 +57,15 @@ export const providerEventsWork = 'vps.provider-events';
 export const interruptionCondition = 'InterruptionPending';
 export const rebalanceCondition = 'RebalanceRecommended';
 export const maintenanceCondition = 'MaintenanceScheduled';
+
+/**
+ * How long past a pending interruption's deadline a machine must still be seen running (by the
+ * instance reconcile, or a joined node's session) before polling clears its marks: a stop or
+ * hibernate may land a little late.
+ */
+export const interruptionGraceMs = 10 * 60_000;
+/** How long a `RebalanceRecommended` condition stays without a newer recommendation. */
+export const rebalanceExpiryMs = 4 * 3_600_000;
 
 /** The NoSchedule taint key a node backed by an interrupted machine gets (`aws.spot/interruption`). */
 export const interruptionTaintKey = (provider: string): string => `${provider}.spot/interruption`;
@@ -177,7 +193,93 @@ async function seedAccounts(
     if (context.work.enqueueMany) await context.work.enqueueMany(tx, providerEventsWork, polling);
     else for (const id of polling) await context.work.enqueue(tx, providerEventsWork, id);
   });
+  await convergeNodes(deps, context);
 }
+
+/**
+ * Joined nodes whose machine had an interruption pending and whose session was seen (connected)
+ * more than `interruptionGraceMs` past its deadline: the machine runs again (or never stopped), so
+ * the taint comes off. A machine that is also a live instance is left to the instance reconcile,
+ * which clears both. One transaction per node, at most 100 a pass.
+ */
+async function convergeNodes(deps: InstanceDeps, context: ReconcileContext): Promise<void> {
+  const grace = interruptionGraceMs / 1000;
+  const { rows } = await context.sql.query<{
+    account_id: string;
+    machine_id: string;
+    node_id: string;
+    provider: string;
+  }>(
+    `SELECT p.account_id, p.machine_id, b.node_id, a.provider
+       FROM provider_interruptions p
+       JOIN provider_accounts a ON a.id = p.account_id
+       JOIN provider_bootstraps b ON b.account_id = p.account_id AND b.machine_id = p.machine_id
+                                 AND b.state = 'joined' AND b.node_id IS NOT NULL
+       JOIN nodes n ON n.id = b.node_id AND n.connectivity = 'connected' AND n.deleted_at IS NULL
+       JOIN node_sessions s ON s.node_id = n.id
+      WHERE s.last_seen > p.deadline + make_interval(secs => $1::float8)
+        AND NOT EXISTS (SELECT 1 FROM instances i
+                         WHERE i.provider_account_id = p.account_id AND i.external_id = p.machine_id
+                           AND NOT i.draft AND i.state <> 'deleted')
+      ORDER BY p.account_id, p.machine_id
+      LIMIT 100`,
+    [grace],
+  );
+  for (const row of rows)
+    await context.sql.transaction(async (tx) => {
+      // Checked again in the transaction: a newer warning may have moved the deadline.
+      const { rowCount } = await tx.query(
+        `DELETE FROM provider_interruptions p
+          WHERE p.account_id = $1 AND p.machine_id = $2
+            AND EXISTS (SELECT 1 FROM node_sessions s JOIN nodes n ON n.id = s.node_id
+                         WHERE s.node_id = $3 AND n.connectivity = 'connected'
+                           AND s.last_seen > p.deadline + make_interval(secs => $4::float8))`,
+        [row.account_id, row.machine_id, row.node_id, grace],
+      );
+      if (rowCount) await untaintNode(deps, tx, row.provider, row.node_id);
+    });
+}
+
+/**
+ * The instance reconcile read its machine (running or not) at `observedAt` and holds the instance
+ * lock: returns its conditions with the provider marks polling settles. Running more than
+ * `interruptionGraceMs` past a pending interruption's deadline clears that interruption (the
+ * pending row, `InterruptionPending`, `RebalanceRecommended`, and the taint of a joined node of the
+ * same machine: instance, then node, as everywhere); a `RebalanceRecommended` older than
+ * `rebalanceExpiryMs` goes either way. The caller writes the conditions.
+ */
+export async function convergeProviderMarks(
+  deps: InstanceDeps,
+  tx: SqlTx,
+  account: Pick<ProviderAccount, 'id' | 'provider'>,
+  machine: { id: string; running: boolean },
+  conditions: readonly Condition[],
+  observedAt: number,
+): Promise<Condition[]> {
+  let out = conditions.filter(
+    (entry) => entry.type !== rebalanceCondition || !(entry.since < observedAt - rebalanceExpiryMs),
+  );
+  if (!machine.running) return out;
+  const { rowCount } = await tx.query(
+    `DELETE FROM provider_interruptions
+      WHERE account_id = $1 AND machine_id = $2 AND deadline < $3::timestamptz`,
+    [account.id, machine.id, iso(observedAt - interruptionGraceMs)],
+  );
+  if (!rowCount) return out;
+  out = withoutInterruptionMarks(out);
+  const { rows } = await tx.query<{ node_id: string }>(
+    `SELECT node_id FROM provider_bootstraps
+      WHERE account_id = $1 AND machine_id = $2 AND state = 'joined' AND node_id IS NOT NULL
+      ORDER BY id`,
+    [account.id, machine.id],
+  );
+  for (const row of rows) await untaintNode(deps, tx, account.provider, row.node_id);
+  return out;
+}
+
+/** Conditions without `InterruptionPending` and `RebalanceRecommended`. */
+const withoutInterruptionMarks = (conditions: readonly Condition[]): Condition[] =>
+  withoutCondition(withoutCondition(conditions, interruptionCondition), rebalanceCondition);
 
 async function pollAccount(
   deps: InstanceDeps,
@@ -346,6 +448,7 @@ export async function handleEvents(
       case 'rebalance-recommended':
         if (target.instanceId)
           await conditionEvent(deps, tx, target.instanceId, event, {
+            renew: true,
             set: {
               type: rebalanceCondition,
               status: 'true',
@@ -410,6 +513,8 @@ async function conditionEvent(
   event: ProviderEvent,
   change: {
     set?: Omit<Condition, 'since'>;
+    /** `set` starts a new `since` even when the condition is already there. */
+    renew?: boolean;
     clear?: string;
     type: string;
   },
@@ -418,7 +523,12 @@ async function conditionEvent(
   const row = await readInstance(tx, instanceId, { lock: true });
   if (!row || row.state === 'deleted') return;
   let conditions = row.conditions;
-  if (change.set) conditions = withCondition(conditions, change.set, deps.clock.now());
+  if (change.set)
+    conditions = withCondition(
+      change.renew ? withoutCondition(conditions, change.set.type) : conditions,
+      change.set,
+      deps.clock.now(),
+    );
   if (change.clear) conditions = withoutCondition(conditions, change.clear);
   if (change.set || change.clear)
     // No version bump (like DiskTypeUnknown): the row is locked and nothing a tenant edits changes.
@@ -555,7 +665,7 @@ async function interruptionOver(
   if (target.instanceId) {
     const row = await readInstance(tx, target.instanceId, { lock: true });
     if (row && row.state !== 'deleted') {
-      const conditions = withoutCondition(withoutCondition(row.conditions, interruptionCondition), rebalanceCondition);
+      const conditions = withoutInterruptionMarks(row.conditions);
       if (conditions.length !== row.conditions.length)
         // No version bump, as when the conditions were set.
         await tx.query(`UPDATE instances SET conditions = $2::jsonb WHERE id = $1`, [
@@ -564,22 +674,26 @@ async function interruptionOver(
         ]);
     }
   }
-  if (!target.nodeId) return;
-  const key = interruptionTaintKey(account.provider);
+  if (target.nodeId) await untaintNode(deps, tx, account.provider, target.nodeId);
+}
+
+/** Removes the interruption taint from a node (locked here) and publishes `node.tainted`. */
+async function untaintNode(deps: InstanceDeps, tx: SqlTx, provider: string, nodeId: string): Promise<void> {
+  const key = interruptionTaintKey(provider);
   const { rows } = await tx.query<{ owner_tenant_id: string; no_schedule_reasons: string[] }>(
     `SELECT owner_tenant_id, no_schedule_reasons FROM nodes WHERE id = $1 FOR UPDATE`,
-    [target.nodeId],
+    [nodeId],
   );
   const node = rows[0];
   if (!node || !node.no_schedule_reasons.includes(`taint:${key}`)) return;
   await tx.query(
     `UPDATE nodes SET no_schedule_reasons = $2::text[], version = version + 1 WHERE id = $1`,
-    [target.nodeId, node.no_schedule_reasons.filter((reason) => reason !== `taint:${key}`)],
+    [nodeId, node.no_schedule_reasons.filter((reason) => reason !== `taint:${key}`)],
   );
   await deps.events.publish(tx, {
     type: 'node.tainted',
     tenantId: node.owner_tenant_id,
-    subject: `node/${target.nodeId}`,
-    data: { nodeId: target.nodeId, added: [], removed: [key], reason: 'interruption-over' },
+    subject: `node/${nodeId}`,
+    data: { nodeId, added: [], removed: [key], reason: 'interruption-over' },
   });
 }

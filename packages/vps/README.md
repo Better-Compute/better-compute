@@ -134,13 +134,16 @@ has passed only wakes the instance reconcile. Events never write machine state:
 | `machine-changed`, `api-call` | The instance's reconcile is enqueued now. |
 | `interruption-warning` | `InterruptionPending` condition and `instance.interruption { deadline }`. When the machine backs a node (a joined provider bootstrap), the node's reservations get the spot notice up to the deadline (cut back, or re-queued when not started) and the node the NoSchedule taint `<provider>.spot/interruption` (`node.tainted`). The machine is remembered in `provider_interruptions` until it is seen running again. |
 | `machine-changed` with state `running`, after a pending interruption's deadline | A Spot machine stopped or hibernated by the interruption runs again: `InterruptionPending` and `RebalanceRecommended` are cleared and the taint removed (`node.tainted` with the key in `removed`, reason `interruption-over`). A running change from before the deadline clears nothing. |
-| `rebalance-recommended` | `RebalanceRecommended` condition and `instance.rebalance-recommended`. |
+| `rebalance-recommended` | `RebalanceRecommended` condition and `instance.rebalance-recommended`. Each recommendation renews the condition; the instance reconcile drops it 4 hours after the last one (EC2 often recommends a rebalance and never interrupts). |
 | `maintenance-scheduled` | `MaintenanceScheduled` condition (cleared when the event completes or is canceled) and `instance.maintenance`. |
 | `reservation-changed` | The account's `vps.reservations` scan is enqueued. |
 | `health` | `instance.health`. |
 
 Machines that are not a live instance or joined node are ignored. Without intake, polling alone
-converges as before.
+converges as before, and polling also clears what the events set when an event is lost (the DLQ,
+a stale drop, the queue switched off): the instance reconcile that reads the machine running more than
+10 minutes past a pending interruption's deadline clears it as the running event would, and the
+15 s sweep does the same for a joined node whose session is connected and seen that late.
 
 ## Sandboxes (§3.7, v0.5)
 

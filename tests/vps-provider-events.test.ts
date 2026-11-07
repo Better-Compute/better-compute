@@ -367,6 +367,98 @@ describe('vps.provider-events', () => {
     expect(await world.events('node.tainted')).toHaveLength(2);
   });
 
+  it('interruption marks clear from polling when the running event never arrives', async () => {
+    // EventBridge lost the running state change (or it went to the DLQ, or came too late): the
+    // instance reconcile reads the machine running past the deadline and clears the marks, and the
+    // node clears once its session is seen after the deadline.
+    const world = await eventsWorld();
+    const { nodeId } = await spotNode(world);
+    const vm = await world.instance('vm-1');
+    const db = world.fixture.database;
+    const now = world.fixture.clock.now();
+    const deadline = now + 120_000;
+    world.intake.pending.push(
+      { id: 'w-host', kind: 'interruption-warning', machineId: 'us-central1-a/spot-host', at: now, deadline, details: { action: 'stop' } },
+      { id: 'w-vm', kind: 'interruption-warning', machineId: vm.machineId, at: now, deadline, details: { action: 'hibernate' } },
+    );
+    await world.poll();
+    const types = async () => (await instanceRow(world, vm.id)).conditions.map((c) => c.type);
+    expect(await types()).toContain(interruptionCondition);
+    expect(await nodeTaints(world, nodeId)).toContain('taint:fake-events.spot/interruption');
+    await db.query(
+      `INSERT INTO node_sessions (node_id, session_epoch, last_seen, connected_at) VALUES ($1, 1, compute_now(), compute_now())`,
+      [nodeId],
+    );
+
+    // Inside the grace after the deadline, running reads clear nothing (the stop may still be on its way).
+    await world.fixture.advance(5 * 60_000);
+    await db.query(`UPDATE node_sessions SET last_seen = compute_now() WHERE node_id = $1`, [nodeId]);
+    await world.tick('vps.instances', 1);
+    await world.poll();
+    expect(await types()).toContain(interruptionCondition);
+    expect(await nodeTaints(world, nodeId)).toContain('taint:fake-events.spot/interruption');
+
+    // Well past the deadline and its grace, the machine reads running: the marks come off.
+    await world.fixture.advance(10 * 60_000);
+    await world.tick('vps.instances', 1);
+    expect(await types()).not.toContain(interruptionCondition);
+    // The node's session was last seen inside the grace: still tainted until it is seen later.
+    await world.poll();
+    expect(await nodeTaints(world, nodeId)).toContain('taint:fake-events.spot/interruption');
+    await db.query(`UPDATE node_sessions SET last_seen = compute_now() WHERE node_id = $1`, [nodeId]);
+    await world.fixture.advance(15_000);
+    await world.poll();
+    expect(await nodeTaints(world, nodeId)).not.toContain('taint:fake-events.spot/interruption');
+    expect((await world.events('node.tainted')).map((event) => event.data)).toEqual([
+      expect.objectContaining({ nodeId, added: ['fake-events.spot/interruption'], removed: [] }),
+      expect.objectContaining({ nodeId, added: [], removed: ['fake-events.spot/interruption'], reason: 'interruption-over' }),
+    ]);
+    const { rows } = await db.query(`SELECT machine_id FROM provider_interruptions`);
+    expect(rows).toEqual([]);
+  });
+
+  it('a disconnected node keeps its interruption taint', async () => {
+    const world = await eventsWorld();
+    const { nodeId } = await spotNode(world);
+    const db = world.fixture.database;
+    const now = world.fixture.clock.now();
+    world.intake.pending.push({
+      id: 'w-host',
+      kind: 'interruption-warning',
+      machineId: 'us-central1-a/spot-host',
+      at: now,
+      deadline: now + 120_000,
+    });
+    await world.poll();
+    await world.fixture.advance(30 * 60_000);
+    await db.query(
+      `INSERT INTO node_sessions (node_id, session_epoch, last_seen) VALUES ($1, 1, compute_now())`,
+      [nodeId],
+    );
+    await db.query(`UPDATE nodes SET connectivity = 'disconnected' WHERE id = $1`, [nodeId]);
+    await world.poll();
+    expect(await nodeTaints(world, nodeId)).toContain('taint:fake-events.spot/interruption');
+  });
+
+  it('a rebalance recommendation that no interruption follows expires', async () => {
+    const world = await eventsWorld();
+    const vm = await world.instance('vm-1');
+    const types = async () => (await instanceRow(world, vm.id)).conditions.map((c) => c.type);
+    world.intake.pending.push({ id: 'r-1', kind: 'rebalance-recommended', machineId: vm.machineId, at: world.fixture.clock.now() });
+    await world.poll();
+    expect(await types()).toContain(rebalanceCondition);
+    // A later recommendation renews it.
+    await world.fixture.advance(3 * 3_600_000);
+    world.intake.pending.push({ id: 'r-2', kind: 'rebalance-recommended', machineId: vm.machineId, at: world.fixture.clock.now() });
+    await world.poll();
+    await world.fixture.advance(3 * 3_600_000);
+    await world.tick('vps.instances', 1);
+    expect(await types()).toContain(rebalanceCondition);
+    await world.fixture.advance(1.5 * 3_600_000);
+    await world.tick('vps.instances', 1);
+    expect(await types()).not.toContain(rebalanceCondition);
+  });
+
   it('duplicate event ids are processed once', async () => {
     const world = await eventsWorld();
     const vm = await world.instance('vm-1');
