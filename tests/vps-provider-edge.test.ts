@@ -239,6 +239,8 @@ const events: { type: string; subject: string; data: Record<string, unknown> }[]
 const projected = new Map<string, string>();
 const queue = new Map<string, number>();
 const required: string[] = [];
+/** Actions the stand-in IAM denies (the caller lacks them). */
+const deniedActions = new Set<string>();
 const resolvedRefs: string[] = [];
 
 function moduleContext(sql: SqlExecutor): ModuleContext {
@@ -276,6 +278,8 @@ function moduleContext(sql: SqlExecutor): ModuleContext {
       rootTenantId: 'root',
       async require(_credential: unknown, request: { action: string; resource: { type: string; id: string } }) {
         required.push(`${request.action} ${request.resource.type}/${request.resource.id}`);
+        if (deniedActions.has(request.action))
+          throw new ComputeError('ACCESS_DENIED', `${request.action} denied on ${request.resource.type}/${request.resource.id}`);
       },
     },
   } as unknown as ModuleContext;
@@ -490,6 +494,7 @@ beforeEach(async () => {
   });
   projected.clear();
   required.length = 0;
+  deniedActions.clear();
   events.length = 0;
   resolvedRefs.length = 0;
   queue.clear();
@@ -572,6 +577,29 @@ describe('certificates', () => {
     await drain();
     expect(resolvedRefs).toEqual(['secret://root/leaf', 'secret://root/key']);
     expect((await call('certificates', 'get', { tenantId: 'root', certificateId: created.id })).state).toBe('error');
+  });
+
+  it('a custom certificate takes compute:secrets:manage on the tenant and the fleet (root); a managed one does not', async () => {
+    const custom = { kind: 'custom', domains: undefined, certificate: 'secret://root/leaf', privateKey: 'secret://root/key' };
+    deniedActions.add('compute:secrets:manage');
+    expect(await codeOf(createCertificate(custom))).toBe('ACCESS_DENIED');
+    const managed = await createCertificate();
+    expect(required.filter((entry) => entry.startsWith('compute:secrets:manage'))).toEqual([
+      'compute:secrets:manage compute-tenant/root',
+    ]);
+    // The refused custom certificate left no row, and nothing was resolved or uploaded.
+    expect((await call('certificates', 'list', { tenantId: 'root' })).items.map((item: { id: string }) => item.id)).toEqual([
+      managed.id,
+    ]);
+    await drain();
+    expect(resolvedRefs).toEqual([]);
+    deniedActions.clear();
+    required.length = 0;
+    await createCertificate(custom);
+    expect(required.filter((entry) => entry.startsWith('compute:secrets:manage'))).toEqual([
+      'compute:secrets:manage compute-tenant/root',
+      'compute:secrets:manage compute-fleet/global',
+    ]);
   });
 
   it("another tenant's certificate is not found, and delete removes it at the provider", async () => {

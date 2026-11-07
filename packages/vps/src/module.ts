@@ -1090,11 +1090,15 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
    * also hold `compute:secrets:manage` on the tenant (and on the fleet in the root tenant, whose
    * store also holds fleet secrets). Decided outside any transaction, on the caller's credential.
    */
-  const userDataSecretCheck = async (context: MethodContext, tenantId: string): Promise<void> => {
+  const userDataSecretCheck = async (
+    context: MethodContext,
+    tenantId: string,
+    what = 'An instance whose user data is a secret',
+  ): Promise<void> => {
     if (!context.credential)
       throw new ComputeError(
         'ACCESS_DENIED',
-        'An instance whose user data is a secret is decided on the caller’s own credential',
+        `${what} is decided on the caller’s own credential`,
         undefined,
         { reason: 'credential-required' },
       );
@@ -2405,6 +2409,13 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             prepareCreateProviderCertificate(networkDeps(context), context, input, tx),
           denied: (context, input, tx) => clearStagedProviderCertificate(context, input, tx),
           abandoned: (context, input, tx) => clearStagedProviderCertificate(context, input, tx),
+          // A custom certificate's PEMs are the tenant's secrets, which the control plane resolves and uploads to the
+          // provider account: handing a secret outside the store takes `compute:secrets:manage` on the tenant (and
+          // on the fleet in the root tenant), as user data and template env do.
+          check: async (context, input) => {
+            if (input.kind === 'custom')
+              await userDataSecretCheck(context, input.tenantId, 'A custom certificate (it uploads secrets)');
+          },
         },
         handler: (context, input) =>
           createProviderCertificate(networkDeps(context), context, input),
