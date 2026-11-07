@@ -37,6 +37,8 @@ interface Intake {
   received?: number[];
   /** The waitMs of each poll. */
   waits?: number[];
+  /** The one provider account this intake feeds (set once created); other accounts read nothing. */
+  account?: string;
 }
 
 function eventsProvider(cloud: FakeGce, intake: Intake): ProviderDefinition {
@@ -48,9 +50,12 @@ function eventsProvider(cloud: FakeGce, intake: Intake): ProviderDefinition {
     config: manifest({}) as never,
     create: async (config, context) => {
       const impl = (await inner.create(config, context)) as ProviderImpl;
+      const accountId = context.account?.id;
       return {
         ...impl,
         async pollEvents(_context: unknown, options: { waitMs: number }) {
+          if (intake.account !== undefined && accountId !== intake.account)
+            return { events: [], received: 0, async ack() {} };
           intake.polls += 1;
           (intake.waits ??= []).push(options.waitMs);
           const events = [...intake.pending];
@@ -95,6 +100,7 @@ async function eventsWorld(): Promise<EventsWorld> {
     name: 'events-main',
     config: {},
   });
+  intake.account = account.id;
   const site = await api.sites.create(root, {
     tenantId: world.rootTenant,
     kind: 'shared',
@@ -557,6 +563,84 @@ describe('vps.provider-events', () => {
     await world.fixture.advance(15_000);
     await world.poll();
     expect(await types()).toContain(maintenanceCondition);
+  });
+
+  it("an event from one account never touches another account's machine", async () => {
+    // Account B (another tenant) holds an instance and a joined node whose machine ids an event
+    // polled from account A names: only account A's machines are A's events' targets.
+    const world = await eventsWorld();
+    const { api, root } = world;
+    const db = world.fixture.database;
+    const { nodeId } = await spotNode(world);
+    const vm = await world.instance('vm-1');
+    const other = await api.providerAccounts.create(root, {
+      tenantId: world.acmeTenant,
+      provider: 'fake-events',
+      name: 'events-b',
+      config: {},
+    });
+    await db.query(`UPDATE instances SET provider_account_id = $2 WHERE id = $1`, [vm.id, other.id]);
+    await db.query(`UPDATE provider_bootstraps SET account_id = $1 WHERE id = 'pbs_test'`, [other.id]);
+    await db.query(`DELETE FROM work_queue WHERE kind = $1`, [instanceWork]);
+    const before = (await world.events('instance.')).length;
+    const now = world.fixture.clock.now();
+    for (const machineId of [vm.machineId, 'us-central1-a/spot-host'])
+      world.intake.pending.push(
+        { id: `w-${machineId}`, kind: 'interruption-warning', machineId, at: now, deadline: now + 120_000 },
+        { id: `r-${machineId}`, kind: 'rebalance-recommended', machineId, at: now },
+        { id: `m-${machineId}`, kind: 'maintenance-scheduled', machineId, at: now, details: { status: 'scheduled' } },
+        { id: `s-${machineId}`, kind: 'machine-changed', machineId, at: now, details: { state: 'stopped' } },
+      );
+    await world.poll();
+    expect(world.intake.acked).toHaveLength(8);
+    expect((await instanceRow(world, vm.id)).conditions).toEqual([]);
+    expect(await nodeTaints(world, nodeId)).toEqual([]);
+    const { rows } = await db.query(`SELECT * FROM provider_interruptions`);
+    expect(rows).toEqual([]);
+    expect(await dueKeys(world, instanceWork)).toEqual([]);
+    expect(await world.events('instance.')).toHaveLength(before);
+    expect(await world.events('node.tainted')).toEqual([]);
+  });
+
+  it('a failing chunk leaves the batch unacked, and the retry handles only the rest', async () => {
+    const world = await eventsWorld();
+    const vm = await world.instance('vm-1');
+    const db = world.fixture.database;
+    await db.query(`CREATE FUNCTION fail_chunk() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.event_id = 'c-130' THEN RAISE EXCEPTION 'emulated chunk failure'; END IF; RETURN NEW; END $$`);
+    await db.query(
+      `CREATE TRIGGER fail_chunk BEFORE INSERT ON provider_event_seen FOR EACH ROW EXECUTE FUNCTION fail_chunk()`,
+    );
+    const at = world.fixture.clock.now();
+    for (let index = 0; index < 150; index++)
+      world.intake.pending.push({
+        id: `c-${index}`,
+        kind: 'maintenance-scheduled',
+        // One event of each chunk names the instance.
+        machineId: index === 50 || index === 130 ? vm.machineId : `us-central1-a/other-${index}`,
+        at,
+        details: { code: 'system-reboot', status: 'scheduled' },
+      });
+    await world.poll().catch(() => {});
+    expect(world.intake.acked).toEqual([]);
+    const seen = async () =>
+      (
+        await db.query<{ event_id: string }>(
+          `SELECT event_id FROM provider_event_seen WHERE account_id = $1 ORDER BY event_id`,
+          [world.eventsAccountId],
+        )
+      ).rows.map((row) => row.event_id);
+    expect(await seen()).toEqual(Array.from({ length: 100 }, (_, index) => `c-${index}`).sort());
+    expect(await world.events('instance.maintenance')).toHaveLength(1);
+
+    await db.query(`DROP TRIGGER fail_chunk ON provider_event_seen`);
+    await world.fixture.advance(60_000);
+    await world.poll();
+    expect(world.intake.acked).toHaveLength(150);
+    expect(world.intake.pending).toEqual([]);
+    expect(await seen()).toHaveLength(150);
+    // c-50 was handled once, by the first run; c-130 by the retry.
+    expect(await world.events('instance.maintenance')).toHaveLength(2);
   });
 
   it('polling alone still converges with intake disabled', async () => {
