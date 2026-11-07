@@ -482,10 +482,47 @@ describe('filesystems: aws iam-policy --phases A10', () => {
       Action: 'elasticfilesystem:TagResource',
       Condition: { StringEquals: { 'elasticfilesystem:CreateAction': 'CreateFileSystem' } },
     });
-    // Mount target interfaces only through EFS itself.
-    expect(sid('FilesystemMountTargetInterfaces')).toMatchObject({
-      Condition: { 'ForAnyValue:StringEquals': { 'aws:CalledVia': ['elasticfilesystem.amazonaws.com'] } },
+    // EC2 describes have no resource-level permissions: Resource '*' or they never match.
+    expect(sid('FilesystemEc2Read')).toEqual({
+      Sid: 'FilesystemEc2Read',
+      Effect: 'Allow',
+      Action: ['ec2:DescribeSubnets', 'ec2:DescribeNetworkInterfaces', 'ec2:DescribeSecurityGroups'],
+      Resource: '*',
     });
+    // CreateMountTarget needs the caller's ec2:CreateNetworkInterface (as EFS documents), in this
+    // account and region only, with no aws:CalledVia (EFS is not among the services that set it).
+    expect(sid('FilesystemMountTargetInterfaces')).toEqual({
+      Sid: 'FilesystemMountTargetInterfaces',
+      Effect: 'Allow',
+      Action: ['ec2:CreateNetworkInterface', 'ec2:DeleteNetworkInterface'],
+      Resource: [
+        'arn:aws:ec2:us-east-1:222222222222:network-interface/*',
+        'arn:aws:ec2:us-east-1:222222222222:subnet/*',
+        'arn:aws:ec2:us-east-1:222222222222:security-group/*',
+      ],
+    });
+    expect(JSON.stringify(iamPolicy({ ml: true }))).not.toContain('aws:CalledVia');
+    // A fresh account's first EFS or FSx create makes the service-linked role.
+    expect(sid('FilesystemServiceRoles')).toEqual({
+      Sid: 'FilesystemServiceRoles',
+      Effect: 'Allow',
+      Action: 'iam:CreateServiceLinkedRole',
+      Resource: [
+        'arn:aws:iam::222222222222:role/aws-service-role/elasticfilesystem.amazonaws.com/*',
+        'arn:aws:iam::222222222222:role/aws-service-role/fsx.amazonaws.com/*',
+      ],
+      Condition: {
+        StringEquals: {
+          'iam:AWSServiceName': ['elasticfilesystem.amazonaws.com', 'fsx.amazonaws.com'],
+        },
+      },
+    });
+    // Describes never sit in a statement scoped to resource ARNs.
+    for (const statement of iamPolicy({ ml: true, region: 'us-east-1', account: '222222222222' })
+      .Statement)
+      if (statement.Resource !== '*')
+        for (const action of [statement.Action].flat())
+          expect(action, statement.Sid).not.toMatch(/^ec2:Describe/);
     expect(JSON.stringify(iamPolicy())).not.toContain('elasticfilesystem');
   });
 

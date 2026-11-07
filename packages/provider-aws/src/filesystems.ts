@@ -425,10 +425,13 @@ export class AwsFilesystems implements ProviderFilesystems {
  * (A10) The IAM statements shared filesystems need (`aws iam-policy --phases A10`; their groups and
  * rules come from the A2 network statements). Creates must carry `better-compute:managed=true`,
  * tags go on only as part of a create, and mount targets, deletes and FSx deletes need the tag on
- * the file system. EFS creates a mount target's interface with the caller's EC2 permissions, so
- * those are granted only when EFS makes the call (`aws:CalledVia`). FSx makes its interfaces
- * through its service-linked role. (verify) against the live suite: the `fsx:CreateAction`
- * condition key on tag-on-create.
+ * the file system. EC2 describes have no resource-level permissions, so they are on `*`.
+ * CreateMountTarget needs the caller's `ec2:CreateNetworkInterface` (and DeleteMountTarget its
+ * `ec2:DeleteNetworkInterface`), as EFS documents; EFS is not among the services that set
+ * `aws:CalledVia`, and the interfaces it makes carry no tag of ours, so these are scoped to the
+ * account and region only. FSx makes its interfaces through its service-linked role. The first EFS
+ * or FSx create of an account makes that service's service-linked role. (verify) against the live
+ * suite: the `fsx:CreateAction` condition key on tag-on-create, and the mount target statements.
  */
 export function filesystemsIamStatements(arn: {
   partition: string;
@@ -483,17 +486,31 @@ export function filesystemsIamStatements(arn: {
       Condition: { StringEquals: { [`aws:ResourceTag/${tags.managed}`]: 'true' } },
     },
     {
+      // EC2 describes have no resource-level permissions.
+      Sid: 'FilesystemEc2Read',
+      Effect: 'Allow',
+      Action: ['ec2:DescribeSubnets', 'ec2:DescribeNetworkInterfaces', 'ec2:DescribeSecurityGroups'],
+      Resource: '*',
+    },
+    {
       Sid: 'FilesystemMountTargetInterfaces',
       Effect: 'Allow',
-      Action: [
-        'ec2:CreateNetworkInterface',
-        'ec2:DeleteNetworkInterface',
-        'ec2:DescribeNetworkInterfaces',
-        'ec2:DescribeSubnets',
-      ],
+      Action: ['ec2:CreateNetworkInterface', 'ec2:DeleteNetworkInterface'],
       Resource: [ec2('network-interface/*'), ec2('subnet/*'), ec2('security-group/*')],
+    },
+    {
+      // EFS and FSx make their service-linked roles on an account's first create.
+      Sid: 'FilesystemServiceRoles',
+      Effect: 'Allow',
+      Action: 'iam:CreateServiceLinkedRole',
+      Resource: [
+        `arn:${arn.partition}:iam::${arn.account}:role/aws-service-role/elasticfilesystem.amazonaws.com/*`,
+        `arn:${arn.partition}:iam::${arn.account}:role/aws-service-role/fsx.amazonaws.com/*`,
+      ],
       Condition: {
-        'ForAnyValue:StringEquals': { 'aws:CalledVia': ['elasticfilesystem.amazonaws.com'] },
+        StringEquals: {
+          'iam:AWSServiceName': ['elasticfilesystem.amazonaws.com', 'fsx.amazonaws.com'],
+        },
       },
     },
   ];
