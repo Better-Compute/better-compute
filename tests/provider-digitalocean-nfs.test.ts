@@ -665,6 +665,31 @@ describe('provider-digitalocean NFS shares: attach and detach', () => {
     expect(shareOf(emu, id).vpc_ids).toEqual([vpc.id]);
   });
 
+  it('a FAILED share reached from two subnets detaches once untagged, then deletes', async () => {
+    const { emu, impl, vpc } = await setup();
+    const other = subnet(emu, 'net-a-nyc3-b');
+    const share = seedShare(emu.state, {
+      name: provName,
+      vpc_ids: [vpc.id, other.id],
+      status: 'FAILED',
+    });
+    const id = shareId('nyc3', share.id);
+    const holds = [deployment, tagFor(labels.instance, 'ins_1'), shareTag(share.id)];
+    const droplet = host(emu, other, { tags: holds });
+    const gone = host(emu, other, { tags: holds, instance: 'ins_2' });
+    expect(await impl.volumes.detachVolume(id, String(droplet.id), ctx())).toEqual({
+      id,
+      state: 'deleted',
+    });
+    expect(tagged(emu.state.droplets.get(droplet.id)!, id)).toBe(false);
+    // A Droplet gone off a FAILED share: nothing to prune that DO would take.
+    emu.state.droplets.delete(gone.id);
+    expect((await impl.volumes.detachVolume(id, String(gone.id), ctx())).state).toBe('deleted');
+    expect(shareActions(emu)).toHaveLength(0);
+    expect((await impl.volumes.deleteVolume(id, ctx())).state).toBe('deleted');
+    expect(emu.state.nfsShares.has(share.id)).toBe(false);
+  });
+
   it('never deletes a share a Droplet still has attached', async () => {
     const { emu, impl, vpc } = await setup();
     const droplet = host(emu, vpc);

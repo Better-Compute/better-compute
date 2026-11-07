@@ -729,6 +729,8 @@ export class DoShares {
     if (!this.owned(share)) return state(sid, 'deleted');
     const [home, ...rest] = share.vpc_ids ?? [];
     if (home === undefined || rest.length === 0) return state(sid, 'deleted');
+    // A FAILED share takes no action and never turns ACTIVE: its VPCs are not taken off (it is deleted, not used).
+    if (share.status === 'FAILED') return state(sid, 'deleted');
     const held = new Set((await this.holders(share, signal)).map((droplet) => droplet.vpc_uuid));
     const lookup = vpcLookup(this.client, signal);
     const stale: string[] = [];
@@ -766,6 +768,9 @@ export class DoShares {
     const vpcId = droplet.vpc_uuid;
     if (vpcId === undefined || !vpcIds.includes(vpcId) || vpcIds.length <= 1)
       return state(sid, 'deleted');
+    // A FAILED share never turns ACTIVE to take the VPC off: untagged, the Droplet is detached (else the share could
+    // never be deleted, and would be billed all the while).
+    if (share.status === 'FAILED') return state(sid, 'deleted');
     if (share.status !== 'ACTIVE') return state(sid, 'deleting', shareOutputs(share));
     const others = (await this.holders(share, signal)).filter(
       (d) => d.id !== droplet.id && d.vpc_uuid === vpcId,
