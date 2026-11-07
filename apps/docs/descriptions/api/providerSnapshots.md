@@ -14,4 +14,4 @@ Marks the snapshot for deletion and returns it `deleting`; the reconciler delete
 
 ## restore
 
-Creates a new volume from a `ready` snapshot (`INVALID_STATE` otherwise), in the snapshot's pool and region, and returns it `pending`, as [`providerVolumes.create`](/docs/reference/api/provider-volumes) does: `sizeGiB` is at least the snapshot's (`INVALID_INPUT`; absent, the snapshot's size) and books `diskGiB`, the name is unique in the tenant, and the same `idempotencyKey` returns the same volume. Decided on the snapshot.
+Creates a new volume from a `ready` snapshot (`INVALID_STATE` otherwise), in the snapshot's pool and region, and returns it `pending`, as [`providerVolumes.create`](/docs/reference/api/provider-volumes) does: `sizeGiB` is at least the snapshot's (`INVALID_INPUT`; absent, the snapshot's size) and books `diskGiB`, the name is unique in the tenant, and the same `idempotencyKey` returns the same volume. The volume keeps the snapshot's filesystem: `filesystem` is `INVALID_INPUT` (a format could wipe the restored data). Only a volume snapshot this deployment made restores (the provider refuses any other, `INVALID_STATE`). Decided on the snapshot.

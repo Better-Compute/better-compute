@@ -12,7 +12,8 @@ import { touchTags } from './tags.js';
 // Droplet detaches its volumes, as DO does. A volume name is unique per region; a duplicate is
 // the 422 `already exists`. Attaching a volume that is attached elsewhere, to a Droplet in
 // another region or to a Droplet that has 7 volumes, and shrinking one, are the 422s DO clients
-// report; deleting an attached volume is a 409.
+// report; deleting an attached volume is a 409. A volume restored from a snapshot reports the
+// filesystem of the volume the snapshot was taken of.
 
 const templates = fixture('volumes');
 const volumeTemplate = templates.volume as Json;
@@ -27,6 +28,11 @@ const tagPattern = /^[a-zA-Z0-9_:-]{1,255}$/;
 
 /** What a volume action does to the volume once it completes, per in-progress action id. */
 const effects = new WeakMap<DoState, Map<number, { reads: number; apply: () => void }>>();
+/**
+ * The filesystem each volume snapshot carries (its volume's when it was taken): a volume restored from it reports
+ * that `filesystem_type`, as DO does. Not part of the snapshot DO shows.
+ */
+const snapshotFilesystems = new WeakMap<Json, string>();
 /** Armed failures per state: the next volume action of the type ends `errored`. */
 const armed = new WeakMap<DoState, string[]>();
 
@@ -183,12 +189,14 @@ function create(emulator: DoEmulator, context: RouteContext) {
   const tags = (body.tags ?? []) as unknown[];
   if (!Array.isArray(tags) || !tags.every((t) => typeof t === 'string' && tagPattern.test(t)))
     return emulator.error('422-unknown');
+  let inherited: string | undefined;
   if (body.snapshot_id !== undefined) {
     const snapshot = state.snapshots.get(body.snapshot_id);
     if (!snapshot || snapshot.resource_type !== 'volume') return emulator.error('422-unknown');
     if (!(snapshot.regions as string[]).includes(region.slug))
       return emulator.error('422-volume-region');
     if (size < snapshot.min_disk_size) return emulator.error('422-unknown');
+    inherited = snapshotFilesystems.get(snapshot) ?? '';
   }
   for (const volume of state.volumes.values())
     if (volume.name === name && volume.region.slug === region.slug)
@@ -199,7 +207,8 @@ function create(emulator: DoEmulator, context: RouteContext) {
     region: region.slug,
     size_gigabytes: size,
     tags: tags as string[],
-    ...(fs !== undefined ? { filesystem_type: fs } : {}),
+    // A restore carries the snapshot's filesystem.
+    ...(inherited !== undefined ? { filesystem_type: inherited } : fs !== undefined ? { filesystem_type: fs } : {}),
   });
   if (typeof body.description === 'string') volume.description = body.description;
   if (body.snapshot_id !== undefined) volume.snapshot_id = body.snapshot_id;
@@ -355,5 +364,6 @@ export function seedSnapshot(
   };
   touchTags(state, snapshot.tags);
   state.snapshots.set(snapshot.id, snapshot);
+  snapshotFilesystems.set(snapshot, String(seed.volume.filesystem_type ?? ''));
   return snapshot;
 }

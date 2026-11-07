@@ -480,6 +480,52 @@ describe('provider-digitalocean volumes: snapshots', () => {
     expect(calls(emu, 'POST', /^\/v2\/volumes$/).at(-1)!.body.snapshot_id).toBe(snap.id);
   });
 
+  it('restores a snapshot of an ext4 volume without asking for a format, and keeps the inherited ext4', async () => {
+    const { emu, impl } = await setup();
+    const { id } = await impl.volumes.ensureVolume({ ...spec, filesystem: 'ext4' }, ctx());
+    const snap = await impl.volumes.snapshotVolume(id, 'base', ctx());
+    for (const filesystem of [undefined, 'xfs' as const]) {
+      const name = filesystem ? 'bc-v3' : 'bc-v2';
+      const restore = {
+        ...spec,
+        name,
+        snapshotId: snap.id,
+        ...(filesystem ? { filesystem } : {}),
+      };
+      const restored = await impl.volumes.ensureVolume(restore, ctx());
+      const post = calls(emu, 'POST', /^\/v2\/volumes$/).at(-1)!;
+      expect(post.body.snapshot_id).toBe(snap.id);
+      expect(post.body).not.toHaveProperty('filesystem_type');
+      // DO reports the filesystem the snapshot carries; every later ensure accepts it.
+      expect(restored.outputs?.filesystem).toBe('ext4');
+      const again = await impl.volumes.ensureVolume(restore, ctx());
+      expect(again).toMatchObject({ id: restored.id, state: 'ready' });
+    }
+  });
+
+  it('never restores from a snapshot that is not ours', async () => {
+    const { emu, impl } = await setup();
+    const volume = seedVolume(emu.state, { name: 'theirs', tags: [deployment] });
+    const foreign = seedSnapshot(emu.state, { volume, name: 'x', tags: [deployment] });
+    const error = await failure(
+      impl.volumes.ensureVolume({ ...spec, name: 'bc-v9', snapshotId: foreign.id }, ctx()),
+    );
+    expect([error.code, error.details?.reason]).toEqual(['INVALID_STATE', 'notManaged']);
+    const missing = await failure(
+      impl.volumes.ensureVolume(
+        { ...spec, name: 'bc-v9', snapshotId: '00000000-0000-4000-8000-000000000000' },
+        ctx(),
+      ),
+    );
+    expect(missing.code).toBe('NOT_FOUND');
+    expect(calls(emu, 'POST', /^\/v2\/volumes$/)).toHaveLength(0);
+    // Ours restores.
+    const own = seedSnapshot(emu.state, { volume, name: 'y', tags: ours });
+    expect((await impl.volumes.ensureVolume({ ...spec, name: 'bc-v9', snapshotId: own.id }, ctx())).state).toBe(
+      'ready',
+    );
+  });
+
   it('two racing snapshot calls converge on the oldest; a foreign one of the name is CONFLICT', async () => {
     const { emu, impl } = await setup();
     const { id } = await impl.volumes.ensureVolume(spec, ctx());

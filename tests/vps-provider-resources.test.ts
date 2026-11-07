@@ -1075,6 +1075,34 @@ describe('providerSnapshots', () => {
   });
 });
 
+describe('providerSnapshots: restore keeps the snapshot filesystem', () => {
+  it('a restore takes no filesystem, and asks the provider for none (a format could wipe the restored data)', async () => {
+    const volume = await createVolume({ filesystem: 'ext4' });
+    await drain();
+    const snapshot: ProviderSnapshotView = await call('providerVolumes', 'snapshot', {
+      tenantId: 'root',
+      volumeId: volume.id,
+      name: 'base',
+      idempotencyKey: 'snap-fs',
+    });
+    await drain();
+    const restoreRaw = { tenantId: 'root', snapshotId: snapshot.id, name: 'copy-fs', idempotencyKey: 'r-fs' };
+    expect(await codeOf(call('providerSnapshots', 'restore', { ...restoreRaw, filesystem: 'xfs' }))).toBe(
+      'INVALID_INPUT',
+    );
+    const restored: ProviderVolumeView = await call('providerSnapshots', 'restore', restoreRaw);
+    // It shows the filesystem it inherits from the snapshot's volume.
+    expect(restored.filesystem).toBe('ext4');
+    await drain();
+    expect((await getVolume(restored.id)).state).toBe('ready');
+    const made = [...cloud.volumes.values()].find(
+      (entry) => entry.spec.name === providerResourceName(restored.id),
+    )!;
+    expect(made.spec.snapshotId).toBeDefined();
+    expect(made.spec.filesystem).toBeUndefined();
+  });
+});
+
 describe('providerAddresses', () => {
   it('reserves, assigns, refuses a second instance and another tenant, unassigns and deletes', async () => {
     const instanceId = await insertInstance();

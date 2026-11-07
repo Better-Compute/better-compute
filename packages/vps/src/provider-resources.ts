@@ -301,9 +301,8 @@ export interface ListProviderSnapshotsInput {
 export interface RestoreProviderSnapshotInput extends ProviderSnapshotRef {
   name: string;
   description?: string;
-  /** At least the snapshot's size; absent: the snapshot's size. */
+  /** At least the snapshot's size; absent: the snapshot's size. The filesystem is the snapshot's (no field). */
   sizeGiB?: number;
-  filesystem?: 'ext4' | 'xfs' | 'none';
   deleteWithInstance?: boolean;
   idempotencyKey: string;
 }
@@ -452,13 +451,15 @@ export function parseListProviderSnapshots(raw: unknown): ListProviderSnapshotsI
   return out;
 }
 export function parseRestoreProviderSnapshot(raw: unknown): RestoreProviderSnapshotInput {
+  // A restore keeps the snapshot's filesystem: asking the provider for one could format the restored data away.
+  if (raw !== null && typeof raw === 'object' && 'filesystem' in raw)
+    fail("filesystem: a restored volume keeps its snapshot's filesystem; leave it out");
   const input = object(raw, [
     'tenantId',
     'snapshotId',
     'name',
     'description',
     'sizeGiB',
-    'filesystem',
     'deleteWithInstance',
     'idempotencyKey',
   ]);
@@ -472,8 +473,6 @@ export function parseRestoreProviderSnapshot(raw: unknown): RestoreProviderSnaps
   if (description !== undefined) out.description = description;
   const sizeGiB = optional(input.sizeGiB, sizeOf);
   if (sizeGiB !== undefined) out.sizeGiB = sizeGiB;
-  const filesystem = optional(input.filesystem, filesystemOf);
-  if (filesystem !== undefined) out.filesystem = filesystem;
   if (input.deleteWithInstance !== undefined)
     out.deleteWithInstance = bool(input.deleteWithInstance, 'deleteWithInstance');
   return out;
@@ -646,7 +645,6 @@ export const providerResourceSchemas = {
       name: nameSchema('The new volume name, unique in the tenant'),
       description: descriptionSchema,
       sizeGiB: sizeSchema("The new volume's size in GiB: at least the snapshot's (the default)"),
-      filesystem: filesystemSchema,
       deleteWithInstance: deleteWithInstanceSchema,
       idempotencyKey: keySchema,
     },
@@ -1652,7 +1650,6 @@ export async function restoreProviderSnapshot(
       name: input.name,
       description: input.description,
       sizeGiB: input.sizeGiB,
-      filesystem: input.filesystem,
       deleteWithInstance: input.deleteWithInstance === true,
     }),
   );
@@ -1668,6 +1665,7 @@ export async function restoreProviderSnapshot(
       'INVALID_STATE',
       `Snapshot ${snapshot.id} is ${snapshot.desired_state === 'deleted' ? 'being deleted' : snapshot.state}; only a ready snapshot restores`,
     );
+  const source = await readVolume(tx, snapshot.volume_id);
   const minimum = snapshot.size_gib === null ? 1 : Number(snapshot.size_gib);
   const sizeGiB = input.sizeGiB ?? minimum;
   if (sizeGiB < minimum)
@@ -1697,7 +1695,8 @@ export async function restoreProviderSnapshot(
     ...(input.description !== undefined ? { description: input.description } : {}),
     region: snapshot.region,
     sizeGiB,
-    ...(input.filesystem !== undefined ? { filesystem: input.filesystem } : {}),
+    // Shown as the snapshot's volume's (the restore keeps it); never sent to the provider (volumeSpec).
+    ...(source?.filesystem ? { filesystem: source.filesystem } : {}),
     sourceSnapshotId: snapshot.id,
     deleteWithInstance: input.deleteWithInstance === true,
     createdBy: identity,
@@ -2420,7 +2419,8 @@ function volumeSpec(volume: VolumeRow, snapshotId: string | undefined): Provider
     region: volume.region,
     sizeGiB: Number(volume.size_gib),
     kind: 'block',
-    ...(volume.filesystem ? { filesystem: volume.filesystem } : {}),
+    // A restore keeps its snapshot's filesystem: none is asked for (a format could wipe the restored data).
+    ...(volume.filesystem && snapshotId === undefined ? { filesystem: volume.filesystem } : {}),
     ...(snapshotId !== undefined ? { snapshotId } : {}),
   };
 }

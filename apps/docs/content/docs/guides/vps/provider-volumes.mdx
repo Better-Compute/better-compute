@@ -102,12 +102,14 @@ const copy = await compute.api.providerSnapshots.restore(token, {
   snapshotId: 'psnap_01jz…',
   name: 'pg-data-copy',
   idempotencyKey: 'restore-1',
-  // optional: sizeGiB (not below the snapshot's), filesystem, description, deleteWithInstance
+  // optional: sizeGiB (not below the snapshot's), description, deleteWithInstance
 });
 // → a new provider volume, created from the snapshot
 ```
 
-A restore waits until the snapshot is `ready`, and fails if the snapshot is deleted first.
+A restore waits until the snapshot is `ready`, and fails if the snapshot is deleted first. The restored volume keeps the
+filesystem of the volume the snapshot was taken of: a restore takes no `filesystem` (`INVALID_INPUT`), since asking the
+provider to format it could wipe the restored data.
 
 ## Addresses
 
