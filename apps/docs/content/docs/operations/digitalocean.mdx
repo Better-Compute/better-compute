@@ -95,7 +95,9 @@ The app's client secret is the platform's, held by the provider definition, neve
 
 With `costs: true` on a platform account, the `vps.costs` worker reads DigitalOcean invoices (the month-to-date
 preview, and final invoices of closed months) and attributes each Droplet item to the instance and tenant that own
-it. An invoice item is a Droplet's month so far, so the leak check compares its hours with the hours the instance's
+it. Invoices carry no tags, so an item is matched by its Droplet id: to the live Droplet's labels, and after the
+Droplet is deleted to the instance that held that id (instance rows keep it). A later read of the month, the final
+invoice included, never takes an attribution away. An invoice item is a Droplet's month so far, so the leak check compares its hours with the hours the instance's
 running and stopped intervals cover of its span (DigitalOcean bills a powered-off Droplet until it is destroyed). A
 gap over `max(leakToleranceHours, 5%)` of the billed hours raises `billing.leak` once per instance and month, and
 `billing.leaks` lists the raised ones for root. A leak usually means a Droplet compute no longer tracks: find it

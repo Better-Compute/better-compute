@@ -147,6 +147,33 @@ interface StoredCost {
   cost_micros: string | number;
   credits_micros: string | number;
   passed: boolean;
+  instance_id: string | null;
+  tenant_id: string | null;
+  attribution: CostAttribution;
+}
+
+/**
+ * A later export of a stored row that attributes it to nobody, when the stored row was attributed to an instance or
+ * by tenant label: the attribution already made is kept, with the labels it was made from. A provider whose labels
+ * come from the live resource (DigitalOcean reads a Droplet's tags; a deleted Droplet has none) would otherwise move
+ * a deleted VM's month off its tenant on the next read of that month. A label is never taken away by a later read;
+ * a different label still replaces it.
+ */
+function keepAttribution(cost: AttributedCost, before: StoredCost): AttributedCost {
+  if (cost.attribution !== 'unattributed') return cost;
+  if (before.attribution !== 'instance' && before.attribution !== 'tenant-label') return cost;
+  const previous = json(before.record);
+  const kept: Record<string, string> = {};
+  for (const key of [costLabels.instance, costLabels.tenant])
+    if (previous.labels[key] !== undefined && cost.record.labels[key] === undefined)
+      kept[key] = previous.labels[key]!;
+  return {
+    ...cost,
+    record: { ...cost.record, labels: Object.freeze({ ...cost.record.labels, ...kept }) },
+    instanceId: before.instance_id,
+    tenantId: before.tenant_id,
+    attribution: before.attribution,
+  };
 }
 
 const json = <T>(value: T | string): T =>
@@ -166,7 +193,9 @@ export const isPlatformAccount = (
 
 /**
  * Attributes records of one account (D10): the `better-compute-instance` label when it names an instance of this
- * account (its tenant), then the `better-compute-tenant` label, then the account's tenant when the account is a
+ * account (its tenant), then the record's `instanceExternalId` when exactly one instance of this account has that
+ * external id (deleted instances keep theirs, so a VM's cost read after the VM is gone stays its own; an id two
+ * instances held is ambiguous and attributes nothing), then the `better-compute-tenant` label, then the account's tenant when the account is a
  * tenant's own (BYO), else `unattributed`. On a tenant's own account the tenant wrote the labels, so a label never
  * moves a cost to another tenant: an instance label must name an instance of this account, and a tenant label is
  * ignored there (the account's tenant pays).
@@ -192,6 +221,23 @@ async function attribute(
       [account.id, labelled],
     );
     for (const row of rows) instances.set(row.id, row.tenant_id);
+  }
+  const externalIds = [
+    ...new Set(
+      records
+        .map((record) => record.instanceExternalId)
+        .filter((value): value is string => typeof value === 'string' && value.length > 0),
+    ),
+  ];
+  const byExternal = new Map<string, { id: string; tenantId: string }>();
+  if (externalIds.length > 0) {
+    const { rows } = await tx.query<{ external_id: string; id: string; tenant_id: string }>(
+      `SELECT external_id, min(id) AS id, min(tenant_id) AS tenant_id FROM instances
+        WHERE provider_account_id = $1 AND external_id = ANY($2::text[])
+        GROUP BY external_id HAVING count(*) = 1`,
+      [account.id, externalIds],
+    );
+    for (const row of rows) byExternal.set(row.external_id, { id: row.id, tenantId: row.tenant_id });
   }
   // A tenant label names a tenant compute knows (it owns or is offered a pool, or holds instances, accounts or
   // projects); any other is unattributed, never billed to a name nobody checked.
@@ -222,8 +268,18 @@ async function attribute(
   return records.map((record) => {
     const conditions =
       record.currency.toUpperCase() === currency.toUpperCase() ? [] : [currencyMismatch];
-    const instanceId = record.labels[costLabels.instance];
-    const instanceTenant = instanceId !== undefined ? instances.get(instanceId) : undefined;
+    const labelled = record.labels[costLabels.instance];
+    const external =
+      record.instanceExternalId !== undefined
+        ? byExternal.get(record.instanceExternalId)
+        : undefined;
+    // The label first; the provider's id of the VM when the label names no instance of this account.
+    const [instanceId, instanceTenant] =
+      labelled !== undefined && instances.has(labelled)
+        ? [labelled, instances.get(labelled)]
+        : external !== undefined
+          ? [external.id, external.tenantId]
+          : [labelled, undefined];
     if (!platform)
       // A tenant's own account: the tenant pays the provider for every row, whoever runs on it (its pool may be
       // offered to another tenant); the instance is kept only when it is the account tenant's own.
@@ -311,15 +367,17 @@ async function writeBatch(
   const judge = passableJudge(deps, account);
   const asJson = (cost: AttributedCost) => rowJson(cost, judge(cost));
   const { rows } = await tx.query<StoredCost>(
-    `SELECT source_row_id, record, cost_micros, credits_micros, passed_through_at IS NOT NULL AS passed
+    `SELECT source_row_id, record, cost_micros, credits_micros, passed_through_at IS NOT NULL AS passed,
+            instance_id, tenant_id, attribution
        FROM provider_costs WHERE account_id = $1 AND source_row_id = ANY($2::text[]) FOR UPDATE`,
     [account.id, batch.map((cost) => cost.record.sourceRowId)],
   );
   const stored = new Map(rows.map((row) => [row.source_row_id, row]));
   const inserts: AttributedCost[] = [];
   const updates: { cost: AttributedCost; before: StoredCost }[] = [];
-  for (const cost of batch) {
-    const before = stored.get(cost.record.sourceRowId);
+  for (const exported of batch) {
+    const before = stored.get(exported.record.sourceRowId);
+    const cost = before ? keepAttribution(exported, before) : exported;
     if (!before) inserts.push(cost);
     else {
       const previous = json(before.record);

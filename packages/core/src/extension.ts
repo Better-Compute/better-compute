@@ -916,6 +916,12 @@ export interface ProviderCostRecord {
   zone?: string;
   project?: string;
   resourceName?: string;
+  /**
+   * (additive) The provider's own id of the VM the row is for (a DigitalOcean Droplet id), when the provider can
+   * name it but may not label it (its invoice carries no tags, and a deleted VM has none to read). vps attributes
+   * the row to the account's instance with that external id when no instance label does.
+   */
+  instanceExternalId?: string;
   usageStart: number;
   usageEnd: number;
   /** Usage in the pricing unit (`unit`). */

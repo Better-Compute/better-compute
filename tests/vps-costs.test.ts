@@ -456,6 +456,46 @@ describe('ingestion and attribution', () => {
     expect(await world.events('billing.unattributed')).toHaveLength(1);
   });
 
+  it('a later export without the labels keeps the attribution already made, and corrects the cost', async () => {
+    const world = await costWorld();
+    const vm = await createVm(world);
+    const at = world.now() - DAY;
+    world.ledger.rows.push(
+      costRow({ sourceRowId: 'vm', usageStart: at, exportTime: at + HOUR, labels: { [instanceLabel]: vm.id } }),
+      costRow({ sourceRowId: 'tl', usageStart: at, exportTime: at + HOUR, labels: { [tenantLabel]: world.acmeTenant } }),
+    );
+    await world.scan();
+    // The VM is gone at the provider: its later export carries no labels (and a larger amount).
+    await world.fixture.advance(6 * HOUR);
+    world.ledger.rows = [
+      costRow({ sourceRowId: 'vm', usageStart: at, exportTime: at + 7 * HOUR, costMicros: 900_000, labels: {} }),
+      costRow({ sourceRowId: 'tl', usageStart: at, exportTime: at + 7 * HOUR, costMicros: 800_000, labels: {} }),
+    ];
+    await world.scan();
+    const byId = new Map((await world.costs()).map((cost) => [cost.sourceRowId, cost]));
+    expect(byId.get('vm')).toMatchObject({
+      attribution: 'instance',
+      instanceId: vm.id,
+      tenantId: world.acmeTenant,
+      costMicros: 900_000,
+    });
+    expect(byId.get('tl')).toMatchObject({
+      attribution: 'tenant-label',
+      instanceId: null,
+      tenantId: world.acmeTenant,
+      costMicros: 800_000,
+    });
+    expect(await world.events('billing.cost-corrected')).toHaveLength(2);
+    expect(await world.events('billing.unattributed')).toEqual([]);
+    // The kept attribution is stable: the same export again is unchanged, not rewritten every pass.
+    await world.fixture.advance(6 * HOUR);
+    await world.scan();
+    const passes = (await world.events('billing.cost-ingested')).filter(
+      (event) => event.data.accountId === world.accountId,
+    );
+    expect(passes.at(-1)!.data).toMatchObject({ rows: 2, inserted: 0, corrected: 0, unchanged: 2 });
+  });
+
   it('rate limits defer the account', async () => {
     const world = await costWorld();
     const at = world.now() - DAY;

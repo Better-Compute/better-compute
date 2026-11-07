@@ -249,4 +249,132 @@ describe('DigitalOcean invoices through vps.costs', () => {
       { service: 'Droplets', instance_id: created.id, passed: false },
     ]);
   });
+
+  it('keeps a deleted Droplet’s month on its instance: later reads of the month do not drop the attribution', async () => {
+    const { emu, fixture, compute, tenants, api, root, acme, account, config, created, droplet } = await doWorld();
+    const backupsMeter = 'do.backups.usd';
+    Object.assign(fixture.iam, { listMeters: async () => [{ key: backupsMeter, pricing: 'reported' }] });
+    const billing = billingOf(emu);
+    billing.preview = {
+      invoice_uuid: 'preview-jan',
+      invoice_period: '2026-01',
+      updated_at: '2026-01-01T00:00:30Z',
+    };
+    const items = (compute: string, backups: string) => [
+      invoiceItem({
+        resource_id: String(droplet.id),
+        amount: compute,
+        duration: '1',
+        start_time: '2026-01-01T00:00:00Z',
+        end_time: '2026-02-01T00:00:00Z',
+      }),
+      invoiceItem({
+        product: 'Droplet Backups',
+        resource_id: String(droplet.id),
+        description: 'Weekly backups',
+        amount: backups,
+        duration: '1',
+        start_time: '2026-01-01T00:00:00Z',
+        end_time: '2026-02-01T00:00:00Z',
+      }),
+    ];
+    // The month to date is ingested while the Droplet is live (no pass-through rule yet).
+    billing.items.set('preview-jan', items('0.01', '0.40'));
+    await fixture.advance(60_000);
+    for (let round = 0; round < 2; round++) await compute.jobs['vps.costs']!.tick();
+
+    // The instance is deleted: its Droplet is gone from DigitalOcean, the instance row keeps its external id.
+    await api.instances.delete(acme, { tenantId: tenants.acme.id, instanceId: created.id });
+    for (let round = 0; round < 6; round++) {
+      await fixture.advance(5_000);
+      for (let pass = 0; pass < 2; pass++) await compute.jobs['vps.instances']!.tick();
+    }
+    expect(emu.state.droplets.has(droplet.id)).toBe(false);
+    await api.providerAccounts.update(root, {
+      tenantId: tenants.root.id,
+      accountId: account.id,
+      config,
+      billing: { passThrough: [{ skuPattern: 'backup', meter: backupsMeter, multiplier: 1 }] },
+    });
+
+    // A later read of the month (larger amounts) corrects the rows and keeps them on the instance and tenant.
+    billing.items.set('preview-jan', items('0.05', '0.80'));
+    billing.preview.updated_at = '2026-01-01T06:00:00Z';
+    await fixture.advance(6 * 3_600_000 + 60_000);
+    for (let round = 0; round < 2; round++) await compute.jobs['vps.costs']!.tick();
+    const { rows } = await fixture.database.query<any>(
+      `SELECT record->>'service' AS service, cost_micros, instance_id, tenant_id, attribution,
+              passed_through_at IS NOT NULL AS passed
+         FROM provider_costs WHERE account_id = $1 ORDER BY service`,
+      [account.id],
+    );
+    expect(rows.map((row: any) => ({ ...row, cost_micros: Number(row.cost_micros) }))).toEqual([
+      {
+        service: 'Droplet Backups',
+        cost_micros: 800_000,
+        instance_id: created.id,
+        tenant_id: tenants.acme.id,
+        attribution: 'instance',
+        passed: true,
+      },
+      {
+        service: 'Droplets',
+        cost_micros: 50_000,
+        instance_id: created.id,
+        tenant_id: tenants.acme.id,
+        attribution: 'instance',
+        passed: false,
+      },
+    ]);
+    const { rows: usage } = await fixture.database.query<any>(
+      `SELECT tenant_id, meter, cost_micros FROM usage_windows WHERE source_kind = 'cost'`,
+    );
+    expect(usage.map((row: any) => ({ ...row, cost_micros: Number(row.cost_micros) }))).toEqual([
+      { tenant_id: tenants.acme.id, meter: backupsMeter, cost_micros: 800_000 },
+    ]);
+  });
+
+  it('attributes a month first read after its Droplet was deleted, by the instance’s DigitalOcean id', async () => {
+    const { emu, fixture, compute, tenants, api, acme, account, created, droplet } = await doWorld();
+    await api.instances.delete(acme, { tenantId: tenants.acme.id, instanceId: created.id });
+    for (let round = 0; round < 6; round++) {
+      await fixture.advance(5_000);
+      for (let pass = 0; pass < 2; pass++) await compute.jobs['vps.instances']!.tick();
+    }
+    expect(emu.state.droplets.has(droplet.id)).toBe(false);
+    const billing = billingOf(emu);
+    billing.preview = {
+      invoice_uuid: 'preview-jan',
+      invoice_period: '2026-01',
+      updated_at: '2026-01-01T00:01:30Z',
+    };
+    billing.items.set('preview-jan', [
+      invoiceItem({
+        resource_id: String(droplet.id),
+        amount: '0.01',
+        duration: '1',
+        start_time: '2026-01-01T00:00:00Z',
+        end_time: '2026-02-01T00:00:00Z',
+      }),
+      // A Droplet id no instance of this account ever had stays the platform's to explain.
+      invoiceItem({
+        resource_id: '987654321',
+        amount: '0.02',
+        duration: '1',
+        start_time: '2026-01-01T00:00:00Z',
+        end_time: '2026-02-01T00:00:00Z',
+      }),
+    ]);
+    await fixture.advance(60_000);
+    for (let round = 0; round < 2; round++) await compute.jobs['vps.costs']!.tick();
+    const { rows } = await fixture.database.query<any>(
+      `SELECT cost_micros, instance_id, tenant_id, attribution FROM provider_costs
+        WHERE account_id = $1 ORDER BY cost_micros`,
+      [account.id],
+    );
+    expect(rows.map((row: any) => ({ ...row, cost_micros: Number(row.cost_micros) }))).toEqual([
+      { cost_micros: 10_000, instance_id: created.id, tenant_id: tenants.acme.id, attribution: 'instance' },
+      { cost_micros: 20_000, instance_id: null, tenant_id: null, attribution: 'unattributed' },
+    ]);
+  });
 });

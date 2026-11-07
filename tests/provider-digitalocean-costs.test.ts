@@ -274,7 +274,7 @@ describe('costs', () => {
     });
   });
 
-  it('labels only Droplet items of this deployment: a deleted or foreign Droplet stays account-level', async () => {
+  it('labels only Droplet items of this deployment; a deleted or foreign Droplet is named by id, for vps to resolve', async () => {
     const { emu, billing, ours } = world();
     const foreign = seedDroplet(emu.state, {
       tags: ['better-compute-instance:inst_x', 'better-compute-tenant:evil'],
@@ -291,6 +291,13 @@ describe('costs', () => {
     const compute = await build(emu, account);
     const records = await collect(compute.costs!(october, at(now)));
     expect(records.map((record) => record.labels)).toEqual([{}, {}, {}]);
+    // vps attributes by the Droplet id only against its own account's instances (a foreign one has none there);
+    // a Snapshot's resource id is not a Droplet's.
+    expect(records.map((record) => record.instanceExternalId)).toEqual([
+      String(foreign.id),
+      '999999',
+      undefined,
+    ]);
   });
 
   it('fails as PROVIDER_ERROR on an item it cannot read, rather than guessing', async () => {

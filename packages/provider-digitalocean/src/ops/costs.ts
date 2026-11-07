@@ -19,8 +19,10 @@ import { labels, labelsFromTags } from '../ids.js';
 //   resource's items of one product). The preview's `end_time` (the month's end) is clamped to the read: usage that has
 //   not happened is never reported. `exportTime` is the invoice's `updated_at` (the read time when absent).
 // - Items carry no tags: a Droplet item is labelled from this deployment's Droplet with that id, read once per pass
-//   (the managed and the claimed ones). A Droplet already deleted, or not this deployment's, labels nothing, and its
-//   cost stays with the account.
+//   (the managed and the claimed ones). A Droplet already deleted, or not this deployment's, labels nothing; its
+//   item still names the Droplet id (`instanceExternalId`), which vps resolves against the account's instances
+//   (deleted ones keep their external id), so a month read after the Droplet is gone stays on its instance. An id
+//   no instance of the account had stays with the account.
 // Every request spends the `sweep` budget. Every shape here is the spec's (`billing`); item fields beyond it are
 // ignored. An item without times or with an amount that is not a decimal fails the read (`malformedRow`).
 
@@ -129,6 +131,9 @@ export function costRecordOfItem(
     skuDescription: text(item.description),
     project: text(item.project_name),
     resourceName: resource,
+    // The Droplet id, so vps can attribute the row to its instance after the Droplet (and its tags) are gone.
+    instanceExternalId:
+      dropletId !== undefined && dropletProduct(item.product) ? dropletId : undefined,
   };
   return {
     sourceRowId: createHash('sha256').update(JSON.stringify(identity)).digest('hex'),
