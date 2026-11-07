@@ -674,7 +674,8 @@ export async function liveKubernetesClusters(
  * Deletes an account that no live pool, no live instance, no live Kubernetes cluster and no network that is
  * not deleted uses.
  * Archived pools do not pin it, deleted instances keep their history but drop the reference, and
- * deleted networks (with their subnets and rules, all gone at the provider) are removed with it.
+ * deleted networks (with their subnets and rules, all gone at the provider) are removed with it. A provider
+ * volume row, live or deleted, keeps it (`INVALID_STATE`, `volumeIds`).
  */
 export async function deleteAccount(
   tx: SqlTx,
@@ -734,6 +735,26 @@ export async function deleteAccount(
       undefined,
       { networkIds: networks.rows.map((row) => row.id) },
     );
+  // Provider volumes (DO P2, P6) name the account, and a shared one its network, with no ON DELETE: a deleted volume's
+  // row is the history its metering and snapshots point at, so the account stays while any row names it (a refusal
+  // here, never a foreign-key error from the deletes below).
+  const volumes = await tx.query<{ id: string; state: string }>(
+    `SELECT id, state FROM provider_volumes WHERE provider_account_id = $1 ORDER BY id LIMIT 50`,
+    [account.id],
+  );
+  if (volumes.rows.length > 0) {
+    const live = volumes.rows.filter((row) => row.state !== 'deleted');
+    throw new ComputeError(
+      'INVALID_STATE',
+      live.length > 0
+        ? `Provider account ${account.name} has provider volumes ${live.map((row) => row.id).join(', ')}: delete them first`
+        : `Provider account ${account.name} is named by the history of deleted provider volumes ${volumes.rows
+            .map((row) => row.id)
+            .join(', ')}, and is kept with it`,
+      undefined,
+      { volumeIds: volumes.rows.map((row) => row.id) },
+    );
+  }
   await tx.query(`UPDATE instances SET provider_account_id = NULL WHERE provider_account_id = $1`, [
     account.id,
   ]);
