@@ -275,6 +275,8 @@ export interface ProviderAddressView {
   description?: string;
   region: string;
   family: 'ipv4' | 'ipv6';
+  /** (DO P4) The BYOIP prefix the address is drawn from; absent: the provider's own pool. */
+  prefix?: string;
   /** The reserved address, once the provider reserved it. */
   address?: string;
   instanceId?: string;
@@ -341,6 +343,11 @@ export interface CreateProviderAddressInput {
   description?: string;
   region: string;
   family: 'ipv4' | 'ipv6';
+  /**
+   * (DO P4) Draw the address from this BYOIP prefix of the provider account (its CIDR, or the provider's id for it):
+   * IPv4 only, and only for the account's owner tenant.
+   */
+  prefix?: string;
   idempotencyKey: string;
 }
 export type ProviderAddressRef = { tenantId: string; addressId: string };
@@ -492,10 +499,18 @@ export function parseCreateProviderAddress(raw: unknown): CreateProviderAddressI
     'description',
     'region',
     'family',
+    'prefix',
     'idempotencyKey',
   ]);
   if (input.family !== undefined && input.family !== 'ipv4' && input.family !== 'ipv6')
     fail('family must be ipv4 or ipv6');
+  if (
+    input.prefix !== undefined &&
+    (typeof input.prefix !== 'string' || !byoipPrefixPattern.test(input.prefix))
+  )
+    fail('prefix must be a BYOIP prefix of the account: its IPv4 CIDR (198.51.100.0/24) or its id');
+  if (input.prefix !== undefined && input.family === 'ipv6')
+    fail('a BYOIP prefix draws IPv4 addresses only');
   const out: CreateProviderAddressInput = {
     tenantId: tenant(input.tenantId),
     poolId: id(input.poolId, 'pool', 'poolId'),
@@ -508,7 +523,33 @@ export function parseCreateProviderAddress(raw: unknown): CreateProviderAddressI
   if (projectId !== undefined) out.projectId = projectId;
   const description = optional(input.description, descriptionOf);
   if (description !== undefined) out.description = description;
+  if (input.prefix !== undefined) out.prefix = (input.prefix as string).toLowerCase();
   return out;
+}
+
+/** A BYOIP prefix as a tenant names it: an IPv4 CIDR, or the provider's id for the prefix (a uuid). */
+const byoipPrefixPattern =
+  /^(?:\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+
+/** (DO P4) The column BYOIP addresses record their prefix in (vps/0104, the lane's migration slot). */
+export const providerAddressByoipSql = `
+ALTER TABLE provider_addresses ADD COLUMN byoip_prefix text;
+ALTER TABLE provider_addresses ADD CONSTRAINT provider_addresses_byoip_ipv4
+  CHECK (byoip_prefix IS NULL OR family = 'ipv4');
+`;
+
+/**
+ * A BYOIP prefix is the provider account owner's own address space: only the owner tenant draws from it
+ * (ACCESS_DENIED, reason `byoipNotOwner`, for any tenant the pool is merely offered to).
+ */
+function assertPrefixOwner(provider: { account: { tenantId: string } }, input: CreateProviderAddressInput): void {
+  if (input.prefix !== undefined && provider.account.tenantId !== input.tenantId)
+    throw new ComputeError(
+      'ACCESS_DENIED',
+      "Only the provider account's owner tenant draws addresses from its BYOIP prefixes",
+      undefined,
+      { reason: 'byoipNotOwner' },
+    );
 }
 export function parseProviderAddressRef(raw: unknown): ProviderAddressRef {
   const input = object(raw, ['tenantId', 'addressId']);
@@ -625,6 +666,12 @@ export const providerResourceSchemas = {
       description: descriptionSchema,
       region: regionSchema,
       family: { enum: ['ipv4', 'ipv6'], default: 'ipv4', description: 'The address family' },
+      prefix: {
+        type: 'string',
+        maxLength: 43,
+        description:
+          "A BYOIP prefix of the account to draw from (its IPv4 CIDR or id); only the account's owner tenant",
+      },
       idempotencyKey: keySchema,
     },
     ['tenantId', 'poolId', 'name', 'region', 'idempotencyKey'],
@@ -708,6 +755,7 @@ interface AddressRow {
   description: string | null;
   region: string;
   family: 'ipv4' | 'ipv6';
+  byoip_prefix: string | null;
   external_id: string | null;
   address: string | null;
   fingerprint: string | null;
@@ -732,7 +780,7 @@ const volumeColumns = `id, tenant_id, project_id, pool_id, provider_account_id, 
 const snapshotColumns = `id, tenant_id, project_id, pool_id, provider_account_id, volume_id, name, region, size_gib,
   external_id, ${common}`;
 const addressColumns = `id, tenant_id, project_id, pool_id, provider_account_id, name, description, region, family,
-  external_id, address, fingerprint, instance_id, assigned_machine, assignment_state, assignment_message, charged, ${common}`;
+  byoip_prefix, external_id, address, fingerprint, instance_id, assigned_machine, assignment_state, assignment_message, charged, ${common}`;
 const attachmentColumns = `id, volume_id, instance_id, machine_id, state, desired_state, message`;
 
 const iso = (value: Date | string) => new Date(value).toISOString();
@@ -807,6 +855,7 @@ export function providerAddressView(row: AddressRow): ProviderAddressView {
   };
   if (row.project_id) view.projectId = row.project_id;
   if (row.description) view.description = row.description;
+  if (row.byoip_prefix) view.prefix = row.byoip_prefix;
   if (row.address) view.address = row.address;
   if (row.instance_id) view.instanceId = row.instance_id;
   if (row.assignment_message) view.assignmentMessage = row.assignment_message;
@@ -1483,6 +1532,7 @@ const addressHash = (input: CreateProviderAddressInput) =>
       description: input.description,
       region: input.region,
       family: input.family,
+      prefix: input.prefix,
     }),
   );
 
@@ -1502,6 +1552,7 @@ export async function prepareCreateProviderAddress(
   }
   const provider = await resourceProvider(deps, tx, input.tenantId, input.poolId, 'addresses');
   assertRegion(provider, input.region);
+  assertPrefixOwner(provider, input);
   await assertNameFree(tx, 'provider_addresses', input.tenantId, input.name);
   await context.authz.upsert(
     tx,
@@ -1562,6 +1613,7 @@ export async function createProviderAddress(
   }
   const provider = await resourceProvider(deps, tx, input.tenantId, input.poolId, 'addresses');
   assertRegion(provider, input.region);
+  assertPrefixOwner(provider, input);
   await lockTenant(tx, input.tenantId);
   await assertNameFree(tx, 'provider_addresses', input.tenantId, input.name);
   await chargeQuota(tx, input.tenantId, input.poolId, { [addressQuotaResource]: 1 });
@@ -1569,8 +1621,8 @@ export async function createProviderAddress(
     await tx.query(
       `INSERT INTO provider_addresses (id, tenant_id, project_id, pool_id, provider_account_id, name, description,
                                        region, family, charged, state, desired_state, created_by, idempotency_key,
-                                       request_hash, version)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, 'pending', 'present', $10, $11, decode($12, 'hex'), 1)`,
+                                       request_hash, version, byoip_prefix)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, 'pending', 'present', $10, $11, decode($12, 'hex'), 1, $13)`,
       [
         addressId,
         input.tenantId,
@@ -1584,6 +1636,7 @@ export async function createProviderAddress(
         identity,
         input.idempotencyKey,
         hash,
+        input.prefix ?? null,
       ],
     );
   } catch (error) {
@@ -1614,6 +1667,7 @@ export async function createProviderAddress(
     name: input.name,
     region: input.region,
     family: input.family,
+    ...(input.prefix !== undefined ? { prefix: input.prefix } : {}),
   });
   return providerAddressView((await readAddress(tx, addressId))!);
 }
@@ -2388,6 +2442,7 @@ async function convergeAddress(
     name: providerResourceName(address.id),
     region: address.region,
     family: address.family,
+    ...(address.byoip_prefix ? { source: 'byoip' as const, prefix: address.byoip_prefix } : {}),
     ...(address.external_id ? { id: address.external_id } : {}),
     ...(address.external_id && address.fingerprint ? { fingerprint: address.fingerprint } : {}),
   };

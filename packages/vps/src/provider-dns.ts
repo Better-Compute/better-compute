@@ -13,7 +13,6 @@ import {
 } from '@better-compute/core';
 import { readAccount } from './accounts.js';
 import { canonical, fail, id, int, key, object, optional, sha256Hex, tenant } from './input.js';
-import { networkEdgesSql } from './network-edge.js';
 import { domainOf } from './provider-certificates.js';
 import {
   caller,
@@ -50,13 +49,8 @@ export const maxDnsRecordsPerZone = 500;
 const recordTypes = ['A', 'AAAA', 'CNAME', 'TXT', 'MX', 'SRV', 'CAA', 'NS'] as const;
 type RecordType = (typeof recordTypes)[number];
 
-/**
- * (DO P4) DNS zones and records on a provider account, and the edge of tenant networks (NAT gateways, peerings and
- * routes: network-edge.ts), which share the lane's last migration slot.
- */
-export const providerDnsMigration: Migration = {
-  name: 'vps/0104_provider_dns_network_edges',
-  sql: `
+/** (DO P4) DNS zones and records on a provider account: part of vps/0104_provider_edge (migrations.ts). */
+export const providerDnsSql = `
 CREATE TABLE provider_dns_zones (
   id text PRIMARY KEY,
   tenant_id text NOT NULL,
@@ -103,8 +97,7 @@ CREATE INDEX provider_dns_records_zone ON provider_dns_records (zone_id) WHERE s
 CREATE INDEX provider_dns_records_instance ON provider_dns_records (instance_id) WHERE instance_id IS NOT NULL;
 CREATE TRIGGER provider_dns_records_stamp_deleted BEFORE UPDATE ON provider_dns_records
   FOR EACH ROW EXECUTE FUNCTION vps_stamp_deleted_at();
-${networkEdgesSql}`,
-};
+`;
 
 // --- Views and input ---------------------------------------------------------------------------
 

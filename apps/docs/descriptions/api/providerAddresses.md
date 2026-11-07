@@ -2,7 +2,7 @@ Reserved public addresses on a provider account (DigitalOcean reserved IPv4 and 
 
 ## create
 
-Reserves an address (`family` `ipv4` or `ipv6`) in a region the account uses and returns it `pending`, booking one `addresses`. The name is unique in the tenant (`CONFLICT`); no room, or no quota row, is `QUOTA_EXCEEDED`. The same `idempotencyKey` returns the same address. A reserve whose answer was lost is never sent again (it could reserve a second address): the address goes to `error` saying so, and an operator checks the account. Publishes `providerAddress.created`, then `providerAddress.ready` with its `address`, or `providerAddress.error`.
+Reserves an address (`family` `ipv4` or `ipv6`) in a region the account uses and returns it `pending`, booking one `addresses`. The name is unique in the tenant (`CONFLICT`); no room, or no quota row, is `QUOTA_EXCEEDED`. The same `idempotencyKey` returns the same address. With `prefix` (an IPv4 CIDR or the provider's id of a BYOIP prefix on the account) the address is drawn from the account's own address space instead of the provider's pool: IPv4 only (`INVALID_INPUT`), only for the provider account's owner tenant (`ACCESS_DENIED`, reason `byoipNotOwner`), and on DigitalOcean only with the account's `previews` enabled; a prefix that is not the account's, not active or in another region sends the address to `error`. A reserve whose answer was lost is never sent again (it could reserve a second address): the address goes to `error` saying so, and an operator checks the account. Publishes `providerAddress.created`, then `providerAddress.ready` with its `address`, or `providerAddress.error`.
 
 ## list
 
