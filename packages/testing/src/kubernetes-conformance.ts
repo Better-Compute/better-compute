@@ -74,6 +74,11 @@ export interface KubernetesProviderConformanceSubject {
    * location with fewer than two minors fails that case (it would test nothing).
    */
   upgrade?: boolean;
+  /**
+   * `true` when the driver must implement `revokeCredentials` (a pool substrate's adopt teardown fails closed on it):
+   * a driver without it then fails the revoke case instead of skipping it.
+   */
+  revoke?: boolean;
 }
 
 /** The pool substrate's node pool label (`@better-compute/kubernetes` substratePoolLabel). */
@@ -510,19 +515,27 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
       },
     },
     {
-      name: 'revokeCredentials removes the access of a subject, and is idempotent',
+      name: 'revokeCredentials removes the access of a subject only, and is idempotent',
       async run(subject) {
         const c = await client(subject);
-        if (!c.k8s.revokeCredentials || !subject.can) return;
+        if (!c.k8s.revokeCredentials) {
+          if (subject.revoke) throw new ConformanceFailure('the driver implements revokeCredentials');
+          return;
+        }
+        if (!subject.can) return;
         const { spec } = names(subject, 'forget');
         let id: string | undefined;
         try {
           id = (await readyCluster(subject, c, spec())).id;
           const minted = await c.k8s.credentials(id, { subject: 'bc-conf-forget', role: 'admin', ttlSeconds: 600 }, c.call('forget'));
-          const reads = () => subject.can!(minted, { verb: 'get', resource: 'pods', namespace: 'default' });
-          check(await reads(), 'the credential works before revokeCredentials');
+          // Another subject on the same cluster: revoking one must leave it (and bc-access, where it lives) alone.
+          const kept = await c.k8s.credentials(id, { subject: 'bc-conf-keep', role: 'view', ttlSeconds: 600 }, c.call('keep'));
+          const reads = (credentials: KubernetesCredentials) =>
+            subject.can!(credentials, { verb: 'get', resource: 'pods', namespace: 'default' });
+          check(await reads(minted), 'the credential works before revokeCredentials');
           await c.k8s.revokeCredentials(id, 'bc-conf-forget', c.call('forget-1'));
-          check(!(await reads()), 'the credential stops working once its subject is revoked');
+          check(!(await reads(minted)), 'the credential stops working once its subject is revoked');
+          check(await reads(kept), "another subject's credential still works once one subject is revoked");
           await c.k8s.revokeCredentials(id, 'bc-conf-forget', c.call('forget-2'));
           if (subject.missingCluster !== undefined)
             await c.k8s.revokeCredentials(subject.missingCluster, 'bc-conf-forget', c.call('forget-missing'));

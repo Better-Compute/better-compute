@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import type { CallContext, ProviderKubernetes } from '@better-compute/core';
 import { runConformance } from '@better-compute/core/conformance';
 import { awsProvider } from '@better-compute/provider-aws';
 import { digitaloceanProvider, resetBudgets } from '@better-compute/provider-digitalocean';
@@ -59,6 +60,7 @@ function gkeSubject(): KubernetesProviderConformanceSubject {
     adoptable: 'us-central1/tenant-own',
     accepts: (credentials) => kube.issued.includes(credentials.token),
     can: (credentials, check) => kube.can(credentials.server, credentials.token, check),
+    revoke: true,
   };
 }
 
@@ -113,6 +115,7 @@ function eksSubject(): KubernetesProviderConformanceSubject {
     adoptable: 'us-east-1/tenant-own',
     accepts: (credentials) => kube.issued.includes(credentials.token),
     can: (credentials, check) => kube.can(credentials.server, credentials.token, check),
+    revoke: true,
   };
 }
 
@@ -148,6 +151,7 @@ function doksSubject(): KubernetesProviderConformanceSubject {
     adoptable: own.id as string,
     accepts: (credentials) => doks.kube.issued.includes(credentials.token),
     can: (credentials, check) => doks.kube.can(credentials.server, credentials.token, check),
+    revoke: true,
   };
 }
 
@@ -180,6 +184,34 @@ function singleMinor(subject: KubernetesProviderConformanceSubject): KubernetesP
   };
 }
 
+/** The subject's provider with its kubernetes driver's members replaced by `override` (undefined removes one). */
+function withDriver(
+  subject: KubernetesProviderConformanceSubject,
+  override: (k8s: ProviderKubernetes) => Partial<Record<keyof ProviderKubernetes, unknown>>,
+): KubernetesProviderConformanceSubject {
+  const { provider } = subject;
+  return {
+    ...subject,
+    provider: {
+      ...provider,
+      async create(config, context) {
+        const impl = await provider.create(config, context);
+        const k8s = impl.kubernetes!;
+        const replaced = override(k8s);
+        const kubernetes = new Proxy(k8s, {
+          get(target, property) {
+            if (property in replaced) return replaced[property as keyof ProviderKubernetes];
+            const value = Reflect.get(target, property, target);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+          has: (target, property) => (property in replaced ? replaced[property as keyof ProviderKubernetes] !== undefined : property in target),
+        });
+        return { ...impl, kubernetes };
+      },
+    },
+  };
+}
+
 beforeEach(() => resetBudgets());
 
 describe('kubernetesProviderConformanceCases', () => {
@@ -201,8 +233,38 @@ describe('kubernetesProviderConformanceCases', () => {
         'ConformanceFailure: a view credential cannot create pods',
       ],
       [
-        'revokeCredentials removes the access of a subject, and is idempotent',
+        'revokeCredentials removes the access of a subject only, and is idempotent',
         'ConformanceFailure: the credential stops working once its subject is revoked',
+      ],
+    ]);
+  });
+
+  it('fails a driver without revokeCredentials when the subject requires it, and nothing else', async () => {
+    const report = await runConformance(kubernetesProviderConformanceCases(), () =>
+      withDriver(gkeSubject(), () => ({ revokeCredentials: undefined })),
+    );
+    expect(report.failed.map(({ name, error }) => [name, String(error)])).toEqual([
+      [
+        'revokeCredentials removes the access of a subject only, and is idempotent',
+        'ConformanceFailure: the driver implements revokeCredentials',
+      ],
+    ]);
+  });
+
+  it("fails a driver whose revokeCredentials takes every subject's access, and nothing else", async () => {
+    const report = await runConformance(kubernetesProviderConformanceCases(), () =>
+      withDriver(gkeSubject(), (k8s) => ({
+        // As if it deleted the whole bc-access namespace.
+        revokeCredentials: async (cluster: string, subjectName: string, call: CallContext) => {
+          await k8s.revokeCredentials!(cluster, subjectName, call);
+          await k8s.revokeCredentials!(cluster, 'bc-conf-keep', call);
+        },
+      })),
+    );
+    expect(report.failed.map(({ name, error }) => [name, String(error)])).toEqual([
+      [
+        'revokeCredentials removes the access of a subject only, and is idempotent',
+        "ConformanceFailure: another subject's credential still works once one subject is revoked",
       ],
     ]);
   });
