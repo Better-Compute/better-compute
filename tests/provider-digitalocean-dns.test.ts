@@ -114,6 +114,33 @@ describe('provider-digitalocean dns: zones', () => {
     expect(writes(emu)).toHaveLength(0);
   });
 
+  it("never makes a zone inside or above a zone on the account that is not this deployment's", async () => {
+    const { emu, impl } = await setup();
+    // The operator's own domain on the account (no marker) and another deployment's.
+    seedDomain(emu.state, 'example.com');
+    seedDomain(emu.state, 'other.example', [
+      { type: 'TXT', name: dnsMarkerName, data: `deployment=${deploymentHash('other')}` },
+    ]);
+    for (const name of ['a.example.com', 'deep.a.example.com', 'b.other.example']) {
+      const error = await failure(impl.dns.ensureZone({ name }, ctx()));
+      expect([error.code, error.details?.reason], name).toEqual(['CONFLICT', 'zoneNested']);
+    }
+    seedDomain(emu.state, 'shop.operator.example');
+    const above = await failure(impl.dns.ensureZone({ name: 'operator.example' }, ctx()));
+    expect([above.code, above.details?.reason]).toEqual(['CONFLICT', 'zoneNested']);
+    expect(writes(emu)).toHaveLength(0);
+    // A zone of this deployment's may hold one nested in it (vps arbitrates between tenants), and a
+    // name that only ends alike is no parent.
+    await impl.dns.ensureZone({ name: 'tenant.example' }, ctx());
+    await impl.dns.ensureZone({ name: 'a.tenant.example' }, ctx());
+    await impl.dns.ensureZone({ name: 'notexample.com' }, ctx());
+    expect(calls(emu, 'POST', /^\/v2\/domains$/).map((r) => r.body)).toEqual([
+      { name: 'tenant.example' },
+      { name: 'a.tenant.example' },
+      { name: 'notexample.com' },
+    ]);
+  });
+
   it('deletes a zone of ours once only its own records are left', async () => {
     const { emu, impl } = await setup();
     await impl.dns.ensureZone({ name: 'example.com' }, ctx());

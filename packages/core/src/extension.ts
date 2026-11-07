@@ -1081,7 +1081,8 @@ export interface ProviderDnsZoneSpec {
   /**
    * Takes over a zone that already exists on the account and was not made by this deployment. An adopted zone's
    * records are changed only where vps made them, and the zone itself is never deleted by `deleteZone`. Without it, a
-   * foreign zone is `CONFLICT` (reason `zoneExists`).
+   * foreign zone is `CONFLICT` (reason `zoneExists`). A new zone inside or above a foreign zone of the account is
+   * `CONFLICT` (reason `zoneNested`): it would publish records under a domain this deployment does not own.
    */
   adopt?: boolean;
 }

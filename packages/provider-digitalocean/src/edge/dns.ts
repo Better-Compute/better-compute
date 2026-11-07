@@ -17,7 +17,9 @@ import { deploymentHash } from '../ids.js';
 // `_better-compute.<zone>` = `deployment=<hash12>`, written right after the create. A zone without
 // a marker is someone else's: `ensureZone` refuses it (`CONFLICT`, fail closed) unless asked to
 // `adopt` it, and `deleteZone` never deletes it. A zone with another deployment's marker is never
-// taken, adopted or deleted. `deleteZone` also refuses a zone of ours that still holds records other
+// taken, adopted or deleted. A new zone is never made inside or above an account domain without
+// this deployment's marker (`CONFLICT`, `zoneNested`): DO's name servers serve every zone of the
+// account, and that domain may be the operator's own. `deleteZone` also refuses a zone of ours that still holds records other
 // than DO's apex NS and SOA and the marker: deleting a domain deletes every record in it, and those
 // may be a tenant's own.
 //
@@ -248,6 +250,32 @@ export class DoDns implements ProviderDns {
 
   // ------------------------------------------------------------------------------------- zones
 
+  /**
+   * Refuses (`CONFLICT`, reason `zoneNested`) a new zone inside or above a domain of the account that is not this
+   * deployment's: DO's name servers serve every zone of the account, so a zone nested in the operator's own domain (a
+   * shared, root-issued account) would publish records under it. vps arbitrates nesting between its own (marked)
+   * zones; anything unmarked, or marked by another deployment, is never nested in or wrapped.
+   */
+  protected async refuseNested(zone: string, signal: AbortSignal): Promise<void> {
+    const related: string[] = [];
+    for await (const domain of this.client.pages<{ name: string }>('/domains', 'domains', {
+      signal,
+      budget: 'observe',
+    })) {
+      const name =
+        typeof domain.name === 'string' ? domain.name.toLowerCase().replace(/\.$/, '') : '';
+      if (name && name !== zone && (zone.endsWith(`.${name}`) || name.endsWith(`.${zone}`)))
+        related.push(name);
+    }
+    for (const name of related)
+      if ((await this.markerOf(name, signal)) !== 'ours')
+        throw fail(
+          'CONFLICT',
+          `DNS zone ${zone} would nest ${zone.endsWith(`.${name}`) ? 'inside' : 'above'} ${name}, a zone on the account that this better-compute deployment did not make`,
+          'zoneNested',
+        );
+  }
+
   async ensureZone(spec: ProviderDnsZoneSpec, ctx: CallContext): Promise<ProviderResourceState> {
     const zone = parseZoneName(spec.name);
     const { signal } = ctx;
@@ -267,6 +295,7 @@ export class DoDns implements ProviderDns {
         );
       return this.zoneState(zone, marker, signal);
     }
+    await this.refuseNested(zone, signal);
     try {
       await this.client.request('POST', '/domains', {
         body: { name: zone },
