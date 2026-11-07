@@ -787,6 +787,81 @@ export interface NetworkRef {
   tags?: readonly string[];
 }
 
+/**
+ * (AWS A10) Where a created machine lands relative to its siblings: a provider placement group the
+ * provider makes on first use (an EC2 placement group). `group` is the provider's name for it, chosen
+ * by the module (tenant-scoped); every machine of one group asks for the same `strategy`.
+ */
+export interface ProviderPlacement {
+  group: string;
+  /** `cluster`: one low-latency network segment; `spread`: distinct hardware; `partition`: disjoint racks. */
+  strategy: 'cluster' | 'spread' | 'partition';
+  /** `partition` only: the partition (1-based) to launch into; absent: the provider picks. */
+  partition?: number;
+}
+
+/**
+ * (AWS A10) A shared filesystem on one of the account's networks, as the module asks for it: `nfs`
+ * (Amazon EFS) or `lustre` (Amazon FSx for Lustre). `name` is the provider-side name the module
+ * derives (tenant-scoped); it is also the provider's idempotency token. Always encrypted at rest.
+ */
+export interface ProviderFilesystemSpec {
+  name: string;
+  kind: 'nfs' | 'lustre';
+  /** The network (a `ProviderNetworks` name) whose machines reach the filesystem. */
+  network: string;
+  /** `lustre`: the one zone it lives in; absent: the provider's default. `nfs` spans every zone of the network. */
+  zone?: string;
+  /** `lustre`: the capacity; the provider refuses sizes it cannot make. `nfs` is elastic and ignores it. */
+  sizeGiB?: number;
+  /** `lustre`: scratch (default) or persistent storage. */
+  deployment?: 'scratch' | 'persistent';
+  labels?: Readonly<Record<string, string>>;
+}
+
+/** (AWS A10) A filesystem mount a created machine performs at boot (rendered by the provider into its user data). */
+export interface ProviderMount {
+  fstype: 'nfs4' | 'lustre';
+  /** What the provider's `ProviderFilesystemState.mount` said: never a secret. */
+  source: string;
+  /** Absolute path on the machine. */
+  path: string;
+  /** Mount options, comma separated. */
+  options: string;
+}
+
+/** (AWS A10) A filesystem's state; `mount` (how a machine mounts it) once it is ready. */
+export interface ProviderFilesystemState extends ProviderResourceState {
+  mount?: Omit<ProviderMount, 'path'>;
+  /**
+   * The size the provider bills for, in GiB, once it is ready: the provisioned capacity (FSx for
+   * Lustre) or the metered size, which grows and shrinks with use (EFS). Absent when unknown; the
+   * module then bills the size asked for, if any.
+   */
+  sizeGiB?: number;
+}
+
+/**
+ * (AWS A10) Shared filesystems on this account. `ensure*` and `delete*` are idempotent and
+ * non-blocking, like `ProviderNetworks`: `pending` or `deleting` while the provider works, and the
+ * reconciler calls again.
+ */
+export interface ProviderFilesystems {
+  /** The kinds this provider makes. */
+  readonly kinds: readonly ProviderFilesystemSpec['kind'][];
+  /**
+   * Refuses a spec this provider can never make (`INVALID_INPUT`), before anything is recorded:
+   * the module calls it at create, so a bad size or zone is the caller's error, not a filesystem in
+   * `error`. Optional: `ensureFilesystem` checks again.
+   */
+  validate?(spec: ProviderFilesystemSpec): void;
+  ensureFilesystem(
+    spec: ProviderFilesystemSpec,
+    context: CallContext,
+  ): Promise<ProviderFilesystemState>;
+  deleteFilesystem(name: string, context: CallContext): Promise<ProviderFilesystemState>;
+}
+
 export interface ProviderNetworkSpec {
   name: string;
   description?: string;
@@ -1283,6 +1358,13 @@ export interface ProviderImpl {
       userData: string;
       name: string;
       network?: NetworkRef;
+      /**
+       * (AWS A10) The placement group to launch into. Only sent with a strategy the provider lists in
+       * `placementStrategies` (vps refuses the rest); a provider without placement groups ignores it.
+       */
+      placement?: ProviderPlacement;
+      /** (AWS A10) Filesystems the machine mounts at boot; a provider without filesystems ignores it. */
+      mounts?: readonly ProviderMount[];
       labels?: Readonly<Record<string, string>>;
       /**
        * The instance's OpenSSH public keys, also rendered into `userData` when it has none. A
@@ -1367,6 +1449,13 @@ export interface ProviderImpl {
     context: CallContext,
   ): Promise<ProviderListPrice[]>;
   networks?: ProviderNetworks;
+  /**
+   * (AWS A10) The placement group strategies `create({ placement })` honors. Absent or empty: the
+   * provider has no placement groups, and a placement asked of it is refused rather than ignored.
+   */
+  readonly placementStrategies?: readonly ProviderPlacement['strategy'][];
+  /** (AWS A10) Shared filesystems (EFS, FSx for Lustre) on this account's networks. */
+  filesystems?: ProviderFilesystems;
   /** The region a zone is in, when the zone's name does not end in `-<letter>` (AWS `us-east-1a`, `us-west-2-lax-1a`). */
   zoneRegion?(zone: string): string;
   /** (kubernetes) Managed Kubernetes clusters and node pools on this account. */

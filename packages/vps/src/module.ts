@@ -87,6 +87,15 @@ import {
   type ReservationOfferingsInput,
 } from './provider-purchases.js';
 import {
+  listPurchaseProposals,
+  parseListPurchaseProposals,
+  purchaseProposalSchemas,
+  purchaseProposalsReconciler,
+  type ListPurchaseProposalsInput,
+  type PurchaseProposalsOptions,
+  type PurchaseProposalView,
+} from './purchase-proposals.js';
+import {
   billingApi,
   defaultCurrency,
   flavorMeterSpec,
@@ -333,6 +342,21 @@ import {
   type UpdateRuleInput,
 } from './networks.js';
 import {
+  createFilesystem,
+  deleteFilesystem,
+  filesystemSchemas,
+  filesystemsReconciler,
+  getFilesystem,
+  listFilesystems,
+  parseCreateFilesystem,
+  parseFilesystemList,
+  parseFilesystemRef,
+  type CreateFilesystemInput,
+  type FilesystemListInput,
+  type FilesystemRef,
+  type FilesystemView,
+} from './filesystems.js';
+import {
   deleteSnapshot,
   getSnapshot,
   instanceSnapshotKind,
@@ -387,6 +411,11 @@ export interface VpsOptions {
    * (default `5m`). Accounts whose provider has no `listReservations` are skipped.
    */
   reservations?: ReservationsOptions;
+  /**
+   * (AWS A10) The `vps.purchase-proposals` worker: how often pending calendar reservations of provider
+   * pools are looked at for capacity to propose 48 hours ahead (default `15m`).
+   */
+  purchaseProposals?: PurchaseProposalsOptions;
   /**
    * The `vps.discovery` worker (R5): how often provider accounts whose provider can `discover` are
    * listed into `provider_machines` (default `5m`), and opt-in label-driven auto-attach.
@@ -491,6 +520,11 @@ export type VpsApi = {
     purchases: MethodDefinition<ListPurchasesInput, { items: ProviderPurchaseView[] }>;
     /** (AWS A9) The account's managed Kubernetes clusters, with the nodeadm settings to join one. */
     clusters: MethodDefinition<AccountRef, { items: ProviderKubernetesCluster[] }>;
+    /** (AWS A10) Capacity proposed ahead of pending calendar reservations (root-only). */
+    purchaseProposals: MethodDefinition<
+      ListPurchaseProposalsInput,
+      { items: PurchaseProposalView[] }
+    >;
   };
   /** Discovered provider machines bound to provider pools (discovery.ts); the rest of the group is capacity's. */
   pools: {
@@ -545,6 +579,13 @@ export type VpsApi = {
     list: MethodDefinition<NetworkRef, { items: FirewallRuleView[] }>;
     update: MethodDefinition<UpdateRuleInput, FirewallRuleView>;
     delete: MethodDefinition<RuleRef, FirewallRuleView>;
+  };
+  /** (AWS A10) Shared filesystems (EFS, FSx for Lustre) on a tenant network (filesystems.ts). */
+  filesystems: {
+    create: MethodDefinition<CreateFilesystemInput, FilesystemView>;
+    list: MethodDefinition<FilesystemListInput, { items: FilesystemView[] }>;
+    get: MethodDefinition<FilesystemRef, FilesystemView>;
+    delete: MethodDefinition<FilesystemRef, FilesystemView>;
   };
 };
 
@@ -1639,6 +1680,24 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           });
         },
       }),
+      // (AWS A10) Capacity Blocks proposed ahead of pending calendar reservations (root-only).
+      purchaseProposals: defineMethod({
+        action: 'compute:providers:read',
+        kind: 'read',
+        resource: accountResource,
+        validate: describedBy(
+          purchaseProposalSchemas.purchaseProposals,
+          parseListPurchaseProposals,
+        ),
+        handler: (context, input) =>
+          listPurchaseProposals(
+            rootOf(context),
+            context.sql,
+            input,
+            context.caller,
+            providers.values(),
+          ),
+      }),
     },
     // Pool membership: the platform or the account's tenant binds discovered machines to a provider
     // pool; tenants the pool is offered to list them (pools.machines) and attach them.
@@ -1982,6 +2041,37 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         handler: (context, input) => deleteRule(networkDeps(context), context.sql, input),
       }),
     },
+    // (AWS A10) Shared filesystems belong to a network and are decided on it, like firewall rules.
+    filesystems: {
+      create: defineMethod({
+        action: 'compute:networks:update',
+        kind: 'mutation',
+        resource: networkResource,
+        validate: describedBy(filesystemSchemas.create, parseCreateFilesystem),
+        handler: (context, input) => createFilesystem(networkDeps(context), context, input),
+      }),
+      list: defineMethod({
+        action: 'compute:networks:read',
+        kind: 'read',
+        resource: networkResource,
+        validate: describedBy(filesystemSchemas.list, parseFilesystemList),
+        handler: (context, input) => listFilesystems(context.sql, input),
+      }),
+      get: defineMethod({
+        action: 'compute:networks:read',
+        kind: 'read',
+        resource: networkResource,
+        validate: describedBy(filesystemSchemas.filesystem, parseFilesystemRef),
+        handler: (context, input) => getFilesystem(context.sql, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:networks:update',
+        kind: 'mutation',
+        resource: networkResource,
+        validate: describedBy(filesystemSchemas.filesystem, parseFilesystemRef),
+        handler: (context, input) => deleteFilesystem(networkDeps(context), context.sql, input),
+      }),
+    },
   });
 
   return defineModule({
@@ -2042,6 +2132,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       providerReservationsReconciler(options.reservations ?? {}, reservationDeps),
       // AWS A3: provider capacity purchases, bought outside any transaction, exactly once.
       providerPurchasesReconciler(purchaseDeps),
+      // (AWS A10) Capacity proposed 48 h ahead of pending calendar reservations of provider pools.
+      purchaseProposalsReconciler(options.purchaseProposals ?? {}, purchaseDeps),
       // R5: provider_machines, listed per provider account (key `all` periodic, then per account).
       discoveryReconciler(options.discovery ?? {}, depsOf),
       // A4: provider event intake (EventBridge → SQS for EC2): early wakes, interruptions, maintenance.
@@ -2120,7 +2212,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       grantsReconciler(grantDeps),
       {
         // Platform compute billing (D9): tenant networks' hours (and snapshots' GiB-hours) as `network` and
-        // `snapshot` sources. A public address and a disk are lines of the instance's own intervals instead.
+        // `snapshot` sources, and shared filesystems' GiB-hours (AWS A10) as `network` sources of their own. A public address and a disk are lines of the instance's own intervals instead.
         name: 'vps.ancillary-usage',
         shardBy: 'none',
         periodic: [{ key: 'all', every: '5m' }],
@@ -2154,6 +2246,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       },
       // Tenant networks: VPCs, subnets, firewall rules and instance tags converged through the provider.
       networksReconciler(networkDeps),
+      // (AWS A10) Shared filesystems converged through the provider once their network is.
+      filesystemsReconciler(networkDeps),
     ],
     selfCheck: async (context) => [
       ...(await vpsSelfCheck(context.sql, runtimeTable, runtimes[0]!)),

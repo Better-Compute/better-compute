@@ -11,13 +11,21 @@ import {
   type Offer,
   type OfferQuery,
   type PowerAction,
+  type ProviderMount,
+  type ProviderPlacement,
   type ProviderContext,
   type ProviderEventBatch,
   type ProviderImpl,
   type PurchaseAttempt,
   type ProviderKubernetes,
 } from '@better-compute/core';
-import type { JsonClient, QueryClient, QueryParams, XmlElement } from '@better-compute/aws-core';
+import type {
+  JsonClient,
+  QueryClient,
+  QueryParams,
+  RestClient,
+  XmlElement,
+} from '@better-compute/aws-core';
 import type { AccountCredentials } from './account.js';
 import { parseDiscoverTag, type AwsConfig, type AwsProviderOptions } from './config.js';
 import { clientToken, offerId, parseInstanceId, parseOfferId, tags, tagValue } from './ids.js';
@@ -36,7 +44,10 @@ import {
   resolveImage,
   ssmImagePrefixes,
 } from './images.js';
+import { AwsFilesystems } from './filesystems.js';
 import { AwsNetworks } from './networks.js';
+import { checkPlacement, PlacementGroups, placementParams } from './placement.js';
+import { InstanceTopology } from './topology.js';
 import {
   toMachine,
   type InstanceTypeCache,
@@ -81,6 +92,9 @@ export interface AwsComputeDeps {
   sqs?: JsonClient;
   /** SSM Parameter Store; reinstall of a `resolve:ssm:` image needs it (UNSUPPORTED without). */
   ssm?: JsonClient;
+  /** (A10) Amazon EFS (rest-json) and FSx (JSON 1.1); absent: no `filesystems`. */
+  efs?: RestClient;
+  fsx?: JsonClient;
   account: AccountCredentials;
   types: InstanceTypeCache;
   zones: ZoneCache;
@@ -92,6 +106,10 @@ export interface AwsCreateRequest {
   userData: string;
   name: string;
   network?: NetworkRef;
+  /** (A10) The placement group to launch into, made on first use. */
+  placement?: ProviderPlacement;
+  /** (A10) Filesystems mounted at boot, through a cloud-config part of the user data. */
+  mounts?: readonly ProviderMount[];
   labels?: Readonly<Record<string, string>>;
   sshKeys?: readonly string[];
   /** (A9) A node of an EKS cluster: launched with `eksNodeInstanceProfile`, never `instanceProfile`. */
@@ -221,10 +239,13 @@ export class AwsCompute implements ProviderImpl {
   readonly #managedClaims = new Map<string, number>();
   /** Instance id → when this client last wrote or saw its own ownership tag on it in `claim`. */
   readonly #claims = new Map<string, number>();
-  /** AMI id → its root device and whether a tenant may launch it (DescribeImages, cached a day). */
+  /**
+   * AMI id → its root device, (A10) architecture and whether a tenant may launch it (DescribeImages,
+   * cached a day).
+   */
   readonly #images = new Map<
     string,
-    { device: string | undefined; allowed: boolean; at: number }
+    { device: string | undefined; arch?: string; allowed: boolean; at: number }
   >();
   readonly #loggedSsm = new Set<string>();
   /** Error codes already logged once (an unreadable market read is warned once per code). */
@@ -243,6 +264,14 @@ export class AwsCompute implements ProviderImpl {
   /** (A4) The scheduled events the last complete scan listed (a vanished one is completed). */
   #scheduled: ReadonlyMap<string, ScheduledEvent> = new Map();
   readonly #imageOwners: readonly string[];
+  /** (A10) Shared filesystems (EFS, FSx for Lustre) on those networks. */
+  readonly filesystems?: AwsFilesystems;
+  /** (A10) EC2 placement group strategies `create({ placement })` launches into. */
+  readonly placementStrategies = ['cluster', 'spread', 'partition'] as const;
+  /** (A10) Placement groups made on first use. */
+  readonly #placementGroups: PlacementGroups;
+  /** (A10) Network nodes of running EFA machines. */
+  readonly #topology: InstanceTopology;
 
   constructor(
     readonly config: AwsConfig,
@@ -283,6 +312,23 @@ export class AwsCompute implements ProviderImpl {
       ready: (signal) => this.ready(signal),
       onError: (topic, error) => this.warnOnce(topic, error),
     });
+    this.#placementGroups = new PlacementGroups(
+      (action, params, signal) => this.call(action, params, signal),
+      context.clock,
+    );
+    this.#topology = new InstanceTopology(
+      (action, params, signal) => this.call(action, params, signal),
+      context.clock,
+      context.log,
+    );
+    if (deps.efs && deps.fsx)
+      this.filesystems = new AwsFilesystems({
+        config,
+        context,
+        efs: deps.efs,
+        fsx: deps.fsx,
+        networks: this.networks,
+      });
   }
 
   /** `us-east-1a` and the Local Zone `us-west-2-lax-1a` are in `us-east-1` and `us-west-2`. */
@@ -1100,7 +1146,7 @@ export class AwsCompute implements ProviderImpl {
   async #describeImage(
     imageId: string,
     signal: AbortSignal,
-  ): Promise<{ device: string | undefined; allowed: boolean; at: number }> {
+  ): Promise<{ device: string | undefined; arch?: string; allowed: boolean; at: number }> {
     const now = this.context.clock.now();
     let doc: XmlElement;
     try {
@@ -1134,7 +1180,8 @@ export class AwsCompute implements ProviderImpl {
       },
       this.#imageOwners,
     );
-    return { device: item.textOf('rootDeviceName'), allowed, at: now };
+    const arch = item.textOf('architecture');
+    return { device: item.textOf('rootDeviceName'), ...(arch ? { arch } : {}), allowed, at: now };
   }
 
   /**
@@ -1239,6 +1286,17 @@ export class AwsCompute implements ProviderImpl {
           reason: 'zone',
         },
       );
+    if (request.placement) {
+      checkPlacement(request.placement);
+      // An ODCR or Capacity Block pins where its capacity is; a placement group cannot move it.
+      if (offer.reservation !== undefined)
+        throw new ComputeError(
+          'INVALID_INPUT',
+          'a launch into a capacity reservation takes no placement group',
+          undefined,
+          { provider: 'aws', reason: 'placement-reservation' },
+        );
+    }
     const { signal } = context;
     let target: CapacityReservationInfo | undefined;
     if (offer.reservation !== undefined)
@@ -1265,19 +1323,63 @@ export class AwsCompute implements ProviderImpl {
       );
     const imageId = resolveImage(request.image, info.arch[0] ?? 'x86_64', this.#ssmPrefixes);
     const rootDevice = await this.#rootDevice(request.image, imageId, signal);
-    const userData = packUserData(request.userData, request.sshKeys);
+    // (A10) An AMI of the other architecture (x86_64 on Graviton) fails at launch: refuse it first.
+    const imageArch = this.#images.get(imageId)?.arch;
+    if (imageArch && !(info.arch as readonly string[]).includes(imageArch))
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `image ${imageId} is built for ${imageArch.slice(0, 16)}, not ${info.arch.join(' or ')} (${offer.instanceType})`,
+        undefined,
+        { provider: 'aws', reason: 'image-arch' },
+      );
+    const userData = packUserData(request.userData, request.sshKeys, request.mounts);
     // On a tenant network: its subnet in the offer's zone and the groups of its firewall rules.
     const placement = request.network
       ? await this.networks.placement(request.network, offer.zone, signal)
       : undefined;
+    // (A10) The placement group first: made on first use, refused when it is not ours.
+    if (request.placement) await this.#placementGroups.ensure(request.placement, signal);
     const subnet = placement?.subnetId ?? this.config.subnetId;
     const groups = placement?.groupIds ?? this.config.securityGroupIds ?? [];
+    // (A10) EFA: one EFA interface per network card, up to the type's EFA maximum. EFA needs
+    // explicit interfaces, so a subnet; launching an EFA type without EFA would hide a slow fabric.
+    const efaInterfaces =
+      this.config.efa === 'auto' && info.efa
+        ? Math.max(1, Math.min(info.maxEfaInterfaces ?? 1, info.networkCards ?? 1))
+        : 0;
+    if (efaInterfaces > 0 && !subnet)
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        `${offer.instanceType} launches with EFA (config efa: auto), which needs subnetId or a network`,
+        undefined,
+        { provider: 'aws', reason: 'efa-subnet' },
+      );
+    // EC2 takes a public address only on a launch with one interface: a multi-card EFA machine has
+    // none even with associatePublicIp. Said once per account and type, never silently.
+    if (
+      efaInterfaces > 1 &&
+      this.config.associatePublicIp &&
+      !this.#warned.has(`efa-public-ip:${offer.instanceType}`)
+    ) {
+      this.#warned.add(`efa-public-ip:${offer.instanceType}`);
+      this.context.log.warn(
+        'aws: EFA machines with several interfaces get no public IPv4 address',
+        {
+          instanceType: offer.instanceType,
+          interfaces: efaInterfaces,
+          reason: 'efa-public-ip',
+        },
+      );
+    }
     const params: QueryParams = {
       ClientToken: clientToken(context.idempotencyKey),
       MinCount: 1,
       MaxCount: 1,
       InstanceType: offer.instanceType,
-      Placement: { AvailabilityZone: offer.zone },
+      Placement: {
+        AvailabilityZone: offer.zone,
+        ...(request.placement ? placementParams(request.placement) : {}),
+      },
       ImageId: imageId,
       UserData: userData.base64 === '' ? undefined : userData.base64,
       MetadataOptions: {
@@ -1301,15 +1403,28 @@ export class AwsCompute implements ProviderImpl {
           ]
         : undefined,
       NetworkInterface: subnet
-        ? [
-            {
-              DeviceIndex: 0,
+        ? efaInterfaces > 0
+          ? Array.from({ length: efaInterfaces }, (_, card) => ({
+              // The primary interface is device 0 on card 0; each other card's is device 1.
+              NetworkCardIndex: card,
+              DeviceIndex: card === 0 ? 0 : 1,
+              InterfaceType: 'efa',
               SubnetId: subnet,
               SecurityGroupId: groups.length ? groups : undefined,
-              AssociatePublicIpAddress: this.config.associatePublicIp,
+              // EC2 takes a public address only on a launch with one interface.
+              AssociatePublicIpAddress:
+                efaInterfaces === 1 ? this.config.associatePublicIp : undefined,
               DeleteOnTermination: true,
-            },
-          ]
+            }))
+          : [
+              {
+                DeviceIndex: 0,
+                SubnetId: subnet,
+                SecurityGroupId: groups.length ? groups : undefined,
+                AssociatePublicIpAddress: this.config.associatePublicIp,
+                DeleteOnTermination: true,
+              },
+            ]
         : undefined,
       SecurityGroupId: !subnet && groups.length ? groups : undefined,
       IamInstanceProfile: instanceProfile ? { Arn: instanceProfile } : undefined,
@@ -1457,7 +1572,31 @@ export class AwsCompute implements ProviderImpl {
       if (failure instanceof ComputeError) throw failure;
       if (failure === 'error') return { ...machine, state: 'error' };
     }
-    return machine;
+    return (await this.#withTopology([machine], context.signal))[0]!;
+  }
+
+  /**
+   * (A10) Running machines of an EFA family carry the network nodes above them; get, list and
+   * discover all label this way (list and discover read up to 100 machines at once).
+   */
+  async #withTopology(
+    machines: readonly ExternalMachine[],
+    signal: AbortSignal,
+  ): Promise<ExternalMachine[]> {
+    const running = machines.filter(
+      (machine) => machine.state === 'running' && machine.machineType,
+    );
+    if (running.length === 0) return [...machines];
+    const types = await this.#types(
+      [...new Set(running.map((machine) => machine.machineType!))],
+      signal,
+    ).catch(() => undefined);
+    const efa = running.filter((machine) => types?.get(machine.machineType!)?.efa);
+    if (efa.length === 0) return [...machines];
+    const labelled = new Map(
+      (await this.#topology.labelAll(efa, signal)).map((machine) => [machine.id, machine]),
+    );
+    return machines.map((machine) => labelled.get(machine.id) ?? machine);
   }
 
   async delete(id: string, context: CallContext): Promise<void> {
@@ -1615,6 +1754,16 @@ export class AwsCompute implements ProviderImpl {
       await this.#checkedAmi(resolved, context.signal);
       imageId = resolved;
     }
+    // (A10) As at create: an AMI the machine's architecture cannot boot is refused before the root
+    // volume is replaced (EC2 would fail the task with the old volume already detached).
+    const imageArch = this.#images.get(imageId)?.arch;
+    if (imageArch && imageArch !== arch)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `image ${imageId} is built for ${imageArch.slice(0, 16)}, not ${arch}${type ? ` (${type.slice(0, 64)})` : ''}`,
+        undefined,
+        { provider: 'aws', reason: 'image-arch' },
+      );
     // The token covers retries of one reinstall: they see the same root volume. Once the task has
     // replaced it, the same reinstall again is a new task (a new wipe), not the finished one.
     const rootVolume = rootVolumeOf(instance);
@@ -1645,9 +1794,11 @@ export class AwsCompute implements ProviderImpl {
         { Filter: filters, MaxResults: 1000, NextToken: token },
         context.signal,
       );
+      const page: ExternalMachine[] = [];
       for (const reservation of doc.items('reservationSet'))
         for (const instance of reservation.items('instancesSet'))
-          yield await this.machine(instance, context.signal);
+          page.push(await this.machine(instance, context.signal));
+      yield* await this.#withTopology(page, context.signal);
       token = doc.textOf('nextToken') || undefined;
       if (token && seen.has(token))
         throw new ComputeError(

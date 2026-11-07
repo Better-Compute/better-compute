@@ -256,17 +256,126 @@ export async function meterSnapshots(
   return { snapshots: rows.length, windows };
 }
 
-/** The `vps.ancillary-usage` pass: networks (Task 12) and sandbox snapshots (Task 13). */
+interface DueFilesystem {
+  id: string;
+  tenant_id: string;
+  network_id: string;
+  project_id: string | null;
+  kind: string;
+  gib: number | null;
+  pool_id: string;
+  pool_class: string;
+  pool_owner: string;
+  policy: PoolPolicy | string;
+  account_tenant: string | null;
+  provider: string | null;
+  region: string | null;
+  metered: number;
+  ended: number | null;
+}
+
+/** The meter of a shared filesystem of `kind` (AWS A10): `filesystem.nfs.gib.hours` or `filesystem.lustre.gib.hours`. */
+export const filesystemMeterOf = (kind: string): string => `filesystem.${kind}.gib.hours`;
+
+/** The filesystem kinds that have a meter. */
+export const meteredFilesystemKinds: readonly string[] = ['nfs', 'lustre'];
+
+/**
+ * One pass over the shared filesystems with unbilled whole hours (AWS A10): at most `limit`, oldest first. A
+ * filesystem bills `filesystem.<kind>.gib.hours` x its billed size from its first `ready` (`provisioned_at`)
+ * until it is deleted, like a network: one that is `deleting` or in `error` after it was ready still exists at
+ * the provider and still bills. The size is what the provider last reported (`billed_gib`: EFS's metered size,
+ * FSx's provisioned capacity), else the size asked for; with neither, nothing bills but the watermark advances.
+ * The mode is that of the filesystem's network's pool; the bill goes to the filesystem's tenant. Windows are
+ * `network` sources keyed by the filesystem id (a filesystem belongs to its network, and the usage source kinds
+ * are a CHECK other modules redefine), tagged `source: filesystem`.
+ */
+export async function meterFilesystems(
+  tx: SqlTx,
+  now: number,
+  deps: AncillaryDeps = {},
+  options: { limit?: number } = {},
+): Promise<{ filesystems: number; windows: number }> {
+  const grace = Math.max(0, deps.meterGraceMs ?? defaultAncillaryGraceMs);
+  const floorNow = Math.floor((now - grace) / hourMs) * hourMs;
+  const { rows } = await tx.query<DueFilesystem>(
+    `SELECT f.id, f.tenant_id, f.network_id, n.project_id, f.kind,
+            coalesce(f.billed_gib, f.size_gib::float8) AS gib,
+            p.id AS pool_id, p.class AS pool_class, p.owner_tenant_id AS pool_owner, p.policy,
+            ${poolAccountTenantSql} AS account_tenant,
+            a.provider, s.region,
+            (extract(epoch FROM coalesce(f.metered_until, f.provisioned_at)) * 1000)::float8 AS metered,
+            (extract(epoch FROM f.deleted_at) * 1000)::float8 AS ended
+       FROM filesystems f
+       JOIN networks n ON n.id = f.network_id
+       JOIN pools p ON p.id = n.pool_id
+       LEFT JOIN sites s ON s.id = p.site_id
+       LEFT JOIN provider_accounts a ON a.id = f.provider_account_id
+      WHERE f.provisioned_at IS NOT NULL
+        AND (f.state <> 'deleted' OR (f.deleted_at IS NOT NULL AND f.metered_until IS DISTINCT FROM f.deleted_at))
+        AND coalesce(f.metered_until, f.provisioned_at) < to_timestamp($1::float8 / 1000)
+        AND (f.deleted_at IS NULL OR coalesce(f.metered_until, f.provisioned_at) < f.deleted_at)
+      ORDER BY coalesce(f.metered_until, f.provisioned_at), f.id
+      LIMIT $2
+        FOR UPDATE OF f`,
+    [floorNow, options.limit ?? 5000],
+  );
+  const advance: { id: string; until: number }[] = [];
+  let windows = 0;
+  for (const row of rows) {
+    const from = Math.round(Number(row.metered));
+    const ended = row.ended === null ? null : Math.round(Number(row.ended));
+    const until = Math.min(ended ?? floorNow, floorNow);
+    advance.push({ id: row.id, until });
+    const gib = row.gib === null ? 0 : Number(row.gib);
+    if (!(until > from) || !(gib > 0) || !meteredFilesystemKinds.includes(row.kind)) continue;
+    const mode = billingModeOf(
+      { ownerTenantId: row.pool_owner, class: row.pool_class, policy: json(row.policy) ?? {} },
+      row.account_tenant !== null ? { tenantId: row.account_tenant } : undefined,
+      deps.rootTenantId ?? '',
+    );
+    if (mode !== 'metered') continue;
+    const tags: UsageTags = { pool: row.pool_id, source: 'filesystem' };
+    if (row.provider) tags.provider = row.provider;
+    if (row.region) tags.region = row.region;
+    if (row.project_id) tags.project = row.project_id;
+    windows += await meterSource(
+      tx,
+      {
+        sourceKind: 'network',
+        sourceId: row.id,
+        tenantId: row.tenant_id,
+        lines: [{ meter: filesystemMeterOf(row.kind), perHour: gib }],
+        from,
+        to: until,
+        tags,
+      },
+      now,
+    );
+  }
+  if (advance.length > 0)
+    await tx.query(
+      `UPDATE filesystems f SET metered_until = to_timestamp(v.until / 1000)
+         FROM unnest($1::text[], $2::float8[]) AS v(id, until)
+        WHERE f.id = v.id`,
+      [advance.map((a) => a.id), advance.map((a) => a.until)],
+    );
+  return { filesystems: rows.length, windows };
+}
+
+/** The `vps.ancillary-usage` pass: networks (Task 12), sandbox snapshots (Task 13) and shared filesystems (A10). */
 export async function meterAncillaries(
   tx: SqlTx,
   now: number,
   deps: AncillaryDeps = {},
-): Promise<{ networks: number; snapshots: number; windows: number }> {
+): Promise<{ networks: number; snapshots: number; filesystems: number; windows: number }> {
   const networks = await meterNetworks(tx, now, deps);
   const snapshots = await meterSnapshots(tx, now, deps);
+  const filesystems = await meterFilesystems(tx, now, deps);
   return {
     networks: networks.networks,
     snapshots: snapshots.snapshots,
-    windows: networks.windows + snapshots.windows,
+    filesystems: filesystems.filesystems,
+    windows: networks.windows + snapshots.windows + filesystems.windows,
   };
 }

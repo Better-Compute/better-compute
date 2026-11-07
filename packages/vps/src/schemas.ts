@@ -251,6 +251,43 @@ export const schemas = {
         description:
           'Provider labels for the machine (provider pools): GCE label rules, at most 62; keys starting with better-compute- are reserved',
       },
+      placement: strictObject(
+        {
+          group: {
+            type: 'string',
+            pattern: '^[a-z][a-z0-9-]{0,62}$',
+            maxLength: 63,
+            description:
+              'The placement group: instances of one group in a pool share one provider placement group',
+          },
+          strategy: {
+            enum: ['cluster', 'spread', 'partition'],
+            description:
+              'cluster: one low-latency network segment; spread: distinct hardware; partition: disjoint racks',
+          },
+          partition: integer(1, 7, 'partition only: the partition to launch into'),
+        },
+        ['group', 'strategy'],
+      ),
+      filesystems: {
+        type: 'array',
+        maxItems: 16,
+        items: strictObject(
+          {
+            filesystem: idOf('fs', 'A ready filesystem of the instance network (filesystems.create)'),
+            path: {
+              type: 'string',
+              pattern: '^(/[A-Za-z0-9._-]+)+$',
+              maxLength: 200,
+              description:
+                'Where the machine mounts it: an absolute path of plain segments outside the system directories',
+            },
+          },
+          ['filesystem', 'path'],
+        ),
+        description:
+          '(provider pools on a network) Shared filesystems of the network the machine mounts at boot; needs networkId',
+      },
       ownerIdentityId: {
         type: 'string',
         pattern: '^[A-Za-z0-9._:@-]{1,128}$',

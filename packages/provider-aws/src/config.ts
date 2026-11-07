@@ -79,6 +79,12 @@ export const awsConfig = manifest({
     .boolean()
     .default(true)
     .describe('Give instances a public IPv4 address (needs a subnet)'),
+  efa: field
+    .option(['off', 'auto'])
+    .default('off')
+    .describe(
+      'EFA (Elastic Fabric Adapter): auto launches an EFA-capable type with one EFA interface per network card (needs subnetId or a network); a type with several cards then gets no public IPv4 address, whatever associatePublicIp says',
+    ),
   discoverTag: field
     .string({ maxLength: 512 })
     .optional()
@@ -170,6 +176,8 @@ export interface AwsConfig {
   metadataHopLimit: number;
   associatePublicIp: boolean;
   discoverTag?: string;
+  /** (A10) EFA interfaces on EFA-capable types. */
+  efa: 'off' | 'auto';
   ipamPoolId?: string;
   securityGroupsPerInterface?: number;
   /** (A3) Offer and launch Spot capacity. */
@@ -192,7 +200,21 @@ export interface AwsConfig {
 export interface AwsProviderOptions {
   fetch?: typeof fetch;
   /** Tests and VPC endpoints; host options, never account config. */
-  endpoints?: Partial<Record<'ec2' | 'sts' | 'servicequotas' | 'pricing' | 'ssm' | 'eks' | 'sqs' | 'ce', string>>;
+  endpoints?: Partial<
+    Record<
+      | 'ec2'
+      | 'sts'
+      | 'servicequotas'
+      | 'pricing'
+      | 'ssm'
+      | 'eks'
+      | 'sqs'
+      | 'ce'
+      | 'elasticfilesystem'
+      | 'fsx',
+      string
+    >
+  >;
   /**
    * (kubernetes) The transport to an EKS cluster's own Kubernetes API (`kubernetes.credentials`). Default:
    * `node:https` trusting only the cluster's CA.

@@ -19,6 +19,7 @@ import {
   type EventPublisher,
   type ImageFormat,
   type Instance,
+  type InstancePlacementGroup,
   type InstanceDesiredState,
   type InstanceState,
   type InstanceVerb,
@@ -31,7 +32,7 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { chargeQuota, refundQuota, resizeAllocation } from '@better-compute/capacity';
-import type { ClientDeps, ProviderClients } from './accounts.js';
+import { readAccount, type ClientDeps, type ProviderClients } from './accounts.js';
 import { readFlavorByName, type FlavorRecord } from './flavors.js';
 import { claimReservationSlot } from './provider-reservations.js';
 import {
@@ -49,6 +50,13 @@ import {
 } from './input.js';
 import { leaseAddress } from './ipam.js';
 import { placeOnNetwork } from './networks.js';
+import {
+  checkInstanceFilesystems,
+  recordInstanceFilesystems,
+  parseInstanceFilesystems,
+  type InstanceFilesystemInput,
+  type InstanceMountRow,
+} from './filesystems.js';
 import {
   chooseHostPlacement,
   placementResources,
@@ -157,6 +165,10 @@ export interface CreateInstanceInput {
    * provider's own ownership labels are written over them.
    */
   labels?: Record<string, string>;
+  /** (AWS A10) The placement group to launch into (provider pools). */
+  placement?: InstancePlacementGroup;
+  /** (AWS A10) Ready filesystems of the instance's network it mounts at boot. */
+  filesystems?: InstanceFilesystemInput[];
   /**
    * (v1.0) Who owns the instance in the tenant (default: the caller), so it shows in their
    * `scope: 'mine'` list and owner policies apply to them. Only the platform (a root caller
@@ -282,6 +294,41 @@ export function instanceLabels(value: unknown): Record<string, string> {
 export const isSecretRef = (userData: string | undefined): userData is `secret://${string}` =>
   userData !== undefined && secretRefPattern.test(userData);
 
+const placementStrategies: ReadonlySet<string> = new Set(['cluster', 'spread', 'partition']);
+
+/** `instances.create` placement (AWS A10): a group name, a strategy, and a partition for partition groups. */
+export function instancePlacement(raw: unknown): InstancePlacementGroup {
+  const input = object(raw, ['group', 'strategy', 'partition']);
+  if (typeof input.group !== 'string' || !/^[a-z][a-z0-9-]{0,62}$/.test(input.group))
+    fail(
+      'placement.group is a lower-case letter, then lower-case letters, digits or - (at most 63)',
+    );
+  if (typeof input.strategy !== 'string' || !placementStrategies.has(input.strategy))
+    fail('placement.strategy is cluster, spread or partition');
+  const placement: InstancePlacementGroup = {
+    group: input.group,
+    strategy: input.strategy as InstancePlacementGroup['strategy'],
+  };
+  if (input.partition !== undefined) {
+    if (placement.strategy !== 'partition')
+      fail('placement.partition is for a partition strategy only');
+    placement.partition = int(input.partition, 'placement.partition', 1, 7);
+  }
+  return placement;
+}
+
+/**
+ * The provider's name for an instance's placement group: one per tenant, pool and group, so two
+ * tenants (or pools) with the same group name never share a provider placement group.
+ */
+export async function providerPlacementGroup(
+  row: Pick<InstanceRow, 'tenantId' | 'poolId'>,
+  placement: InstancePlacementGroup,
+): Promise<string> {
+  const digest = await sha256Hex(`${row.tenantId}/${row.poolId}/${placement.group}`);
+  return `bc-pg-${digest.slice(0, 32)}`;
+}
+
 export function parseCreateInstance(raw: unknown): CreateInstanceInput {
   const input = object(raw, [
     'tenantId',
@@ -295,6 +342,8 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
     'networkId',
     'subnetId',
     'labels',
+    'placement',
+    'filesystems',
     'ownerIdentityId',
     'workloadIdentity',
     'idempotencyKey',
@@ -345,6 +394,15 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
   if (input.labels !== undefined) {
     const labels = instanceLabels(input.labels);
     if (Object.keys(labels).length > 0) result.labels = labels;
+  }
+  if (input.placement !== undefined) result.placement = instancePlacement(input.placement);
+  if (input.filesystems !== undefined) {
+    const filesystems = parseInstanceFilesystems(input.filesystems);
+    if (filesystems.length > 0) {
+      if (networkId === undefined)
+        fail('filesystems need a networkId: an instance mounts filesystems of its own network only');
+      result.filesystems = filesystems;
+    }
   }
   if (input.ownerIdentityId !== undefined) {
     if (
@@ -497,6 +555,8 @@ interface RawInstance {
   network_id: string | null;
   subnet_id: string | null;
   labels: Record<string, string> | string | null;
+  placement: InstancePlacementGroup | string | null;
+  filesystems?: InstanceMountRow[] | string | null;
   network_external_name: string | null;
   aws_role_arn?: string | null;
 }
@@ -630,6 +690,10 @@ export interface InstanceRow {
   labels?: Record<string, string>;
   /** (AWS A7) The IAM role its workloads assume (`instances.create`, vps/0096). */
   awsRoleArn?: string;
+  /** (AWS A10) The tenant's placement group (`instances.create`, vps/0111). */
+  placement?: InstancePlacementGroup;
+  /** (AWS A10) The filesystems it mounts, with how (`instances.create`, vps/0112). */
+  filesystems?: InstanceMountRow[];
 }
 
 const json = <T>(value: T | string): T =>
@@ -690,6 +754,9 @@ function toRow(raw: RawInstance): InstanceRow {
     row.networkExternalName = raw.network_external_name;
   if (raw.labels !== null && raw.labels !== undefined) row.labels = json(raw.labels);
   if (raw.aws_role_arn !== null && raw.aws_role_arn !== undefined) row.awsRoleArn = raw.aws_role_arn;
+  if (raw.placement !== null && raw.placement !== undefined) row.placement = json(raw.placement);
+  if (raw.filesystems !== null && raw.filesystems !== undefined)
+    row.filesystems = json(raw.filesystems);
   return row;
 }
 
@@ -702,7 +769,11 @@ const columns = `i.id, i.tenant_id, i.pool_id, i.project_id, i.flavor_id, i.flav
   (extract(epoch FROM i.host_cert_valid_before) * 1000)::float8 AS host_cert_valid_ms, i.network_policy,
   i.identity_rebind_ref, i.origin, i.on_delete, i.provider_claimed_at IS NOT NULL AS claimed,
   coalesce(i.reboot_requested_at > coalesce(i.rebooted_at, '-infinity'), false) AS reboot_pending,
-  i.reboot_hard, i.network_id, i.subnet_id, i.labels, i.aws_role_arn,
+  i.reboot_hard, i.network_id, i.subnet_id, i.labels, i.aws_role_arn, i.placement,
+  (SELECT jsonb_agg(jsonb_build_object('filesystemId', x.filesystem_id, 'path', x.path, 'mount', f.mount)
+                    ORDER BY x.path)
+     FROM instance_filesystems x JOIN filesystems f ON f.id = x.filesystem_id
+    WHERE x.instance_id = i.id) AS filesystems,
   (SELECT n.external_name FROM networks n WHERE n.id = i.network_id) AS network_external_name`;
 
 export async function readInstance(
@@ -745,6 +816,12 @@ export function instanceView(row: InstanceRow): Instance {
   if (row.subnetId !== undefined) view.subnetId = row.subnetId;
   if (row.labels !== undefined) view.labels = { ...row.labels };
   if (row.awsRoleArn !== undefined) view.workloadIdentity = { awsRoleArn: row.awsRoleArn };
+  if (row.placement !== undefined) view.placement = { ...row.placement };
+  if (row.filesystems !== undefined)
+    view.filesystems = row.filesystems.map((mount) => ({
+      filesystemId: mount.filesystemId,
+      path: mount.path,
+    }));
   return view;
 }
 
@@ -1271,7 +1348,18 @@ async function assertTenantPutSecret(tx: SqlTx, tenantId: string, ref: string): 
 }
 
 export async function prepareCreateInstance(
-  deps: Pick<InstanceDeps, 'images' | 'runtime' | 'runtimes' | 'rootTenantId'>,
+  deps: Pick<
+    InstanceDeps,
+    | 'images'
+    | 'runtime'
+    | 'runtimes'
+    | 'rootTenantId'
+    | 'clients'
+    | 'clock'
+    | 'secrets'
+    | 'log'
+    | 'workload'
+  >,
   context: MethodContext,
   input: CreateInstanceInput,
   tx: SqlTx,
@@ -1312,6 +1400,47 @@ export async function prepareCreateInstance(
       'INVALID_INPUT',
       `Pool ${pool.id} is not a provider pool; labels are written on provider machines only`,
     );
+  if (input.placement !== undefined) {
+    if (pool.class !== 'provider')
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `Pool ${pool.id} is not a provider pool; placement groups are the provider's`,
+      );
+    // Only a strategy the provider declares: one without placement groups would ignore it, and
+    // the instance would claim a placement it never got.
+    if (pool.providerAccountId) {
+      const account = await readAccount(tx, pool.providerAccountId);
+      const strategies = account
+        ? (await deps.clients.client(account, deps)).placementStrategies
+        : undefined;
+      if (!strategies?.includes(input.placement.strategy))
+        throw new ComputeError(
+          'INVALID_INPUT',
+          `Provider ${account?.provider ?? 'of this pool'} has no ${input.placement.strategy} placement groups`,
+          undefined,
+          { reason: 'placement-unsupported' },
+        );
+    }
+    // One strategy per group: a provider placement group has one, so another is refused here
+    // rather than failing the machine later. Creates naming the group take turns until commit, so
+    // two concurrent creates with different strategies cannot both pass the check.
+    await tx.query(`SELECT pg_advisory_xact_lock(hashtext('better-compute:placement:' || $1))`, [
+      `${input.tenantId}/${input.poolId}/${input.placement.group}`,
+    ]);
+    const { rows: clash } = await tx.query<{ strategy: string }>(
+      `SELECT placement->>'strategy' AS strategy FROM instances
+        WHERE tenant_id = $1 AND pool_id = $2 AND placement IS NOT NULL
+          AND placement->>'group' = $3 AND placement->>'strategy' <> $4
+          AND state <> 'deleted' AND id <> $5
+        LIMIT 1`,
+      [input.tenantId, input.poolId, input.placement.group, input.placement.strategy, instanceId],
+    );
+    if (clash[0])
+      throw new ComputeError(
+        'CONFLICT',
+        `Placement group ${input.placement.group} is a ${clash[0].strategy} group in pool ${input.poolId}`,
+      );
+  }
   const flavor = await readFlavorByName(tx, input.poolId, input.flavor);
   if (!flavor || flavor.archived)
     throw new ComputeError('NOT_FOUND', `Flavor ${input.flavor} not found in pool ${input.poolId}`);
@@ -1359,6 +1488,16 @@ export async function prepareCreateInstance(
     });
   }
 
+  // (AWS A10) Its filesystems: the tenant's, on its network, ready; locked until this commits.
+  if (input.filesystems !== undefined) {
+    if (!placement) throw new ComputeError('INVALID_INPUT', 'filesystems need a networkId');
+    await checkInstanceFilesystems(
+      tx,
+      { tenantId: input.tenantId, networkId: placement.networkId },
+      input.filesystems,
+    );
+  }
+
   const shape = shapeOf(flavor);
   // Ruling F6-3: a provider instance bills the meter its flavor had when it was admitted, even if root changes the
   // flavor later; `{}` says "no meter" (a snapshot without the key is a row from before, which reads the live flavor).
@@ -1377,9 +1516,9 @@ export async function prepareCreateInstance(
                               ssh_keys, user_data, runtime, draft, state, desired_state,
                               provider_account_id, owner_identity_id, agent_id, delegation_id,
                               idempotency_key, request_hash, version, network_id, subnet_id, labels,
-                              aws_role_arn)
+                              aws_role_arn, placement)
        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::text[], $10, $11, true, 'pending', $12,
-               $13, $14, $15, $16, $17, decode($18, 'hex'), 1, $19, $20, $21::jsonb, $22)`,
+               $13, $14, $15, $16, $17, decode($18, 'hex'), 1, $19, $20, $21::jsonb, $22, $23::jsonb)`,
       [
         instanceId,
         input.tenantId,
@@ -1403,8 +1542,11 @@ export async function prepareCreateInstance(
         placement?.subnetId ?? null,
         input.labels ? JSON.stringify(input.labels) : null,
         input.workloadIdentity?.awsRoleArn ?? null,
+        input.placement ? JSON.stringify(input.placement) : null,
       ],
     );
+  if (!existing && input.filesystems !== undefined)
+    await recordInstanceFilesystems(tx, instanceId, input.filesystems);
   await context.authz.upsert(tx, {
     type: 'instance',
     id: instanceId,

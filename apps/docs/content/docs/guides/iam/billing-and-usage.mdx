@@ -126,6 +126,7 @@ defines one catalog, `meterCatalog`, on the root tenant. Every meter is a `rate-
 | `ip.public.hours` | One per running provider VM with a public address |
 | `disk.<type>.gib.hours` | A provider VM's disks in GiB, running or stopped: `pd-standard`, `pd-balanced`, `pd-ssd`, `hyperdisk-balanced`, `local-ssd` |
 | `snapshot.gib.hours` | A sandbox snapshot's size in GiB |
+| `filesystem.<kind>.gib.hours` | A shared filesystem's billed size in GiB: `nfs` (EFS, its metered size) and `lustre` (FSx for Lustre, its provisioned capacity) |
 | `flavor.<name>.hours` | One per running VM of a flavor root gave a whole-shape meter (see [Flavor meters](#flavor-meters)) |
 
 A fractional atom bills its share of a GPU: a MIG instance its compute slices over 7 (`3g.40gb` is 3/7), a
@@ -392,6 +393,9 @@ disks are lines of the VM's own intervals.
   `pd-balanced` and the instance shows a `DiskTypeUnknown` condition.
 - **Snapshots.** `snapshot.gib.hours` × `sizeBytes / 2^30` per sandbox snapshot from `ready` until it is deleted,
   billed to the snapshot's tenant, unless its pool's mode is `none` or `platform-fee`.
+- **Shared filesystems.** `filesystem.<kind>.gib.hours` × the size the provider last reported (EFS's metered
+  size, FSx for Lustre's provisioned capacity; else the `sizeGiB` asked for) from the filesystem's first `ready`
+  until it is deleted, billed to its tenant unless its network's pool's mode is `none` or `platform-fee`.
 
 ## Provider costs
 

@@ -150,7 +150,7 @@ export interface MeterCatalogOptions {
  * hosted and node-lease GPU (every known family, on-demand and spot), CPU, memory and volume hours (the old root
  * meters stay, first and in order), provider
  * VM compute (`vm.*`, D4), reserved variants (D8), reservation grants and managed VMs (D7), and the ancillary
- * network, address, disk and snapshot meters (D9). Throws when the list would pass better-iam's 100 meters.
+ * network, address, disk and snapshot meters (D9) and shared filesystem meters (AWS A10). Throws when the list would pass better-iam's 100 meters.
  */
 export function meterCatalog(options: MeterCatalogOptions): MeterSpec[] {
   // Slugs as canonicalGpuModel names them, so the meters priced are the ones provider usage records.
@@ -200,6 +200,9 @@ export function meterCatalog(options: MeterCatalogOptions): MeterSpec[] {
   add('ip.public.hours', 'Public IP hours', 'hour');
   for (const type of diskTypes) add(`disk.${type}.gib.hours`, `${type} disk GiB hours`, 'gib-hour');
   add('snapshot.gib.hours', 'Snapshot GiB hours', 'gib-hour');
+  // (AWS A10) Shared filesystems on a tenant network: EFS (nfs) and FSx for Lustre (lustre).
+  add('filesystem.nfs.gib.hours', 'NFS filesystem GiB hours', 'gib-hour');
+  add('filesystem.lustre.gib.hours', 'Lustre filesystem GiB hours', 'gib-hour');
 
   for (const key of options.flavorMeters ?? []) {
     if (!key.startsWith('flavor.'))

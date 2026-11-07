@@ -1337,6 +1337,63 @@ describe('networks: machines', () => {
     expect(claimed.groups.map((g) => g.id)).toEqual([groupId('bc-net-bc-net-1'), groupId(tagB)]);
   });
 
+  it('setTags swaps the groups on every EFA interface of a multi-card machine', async () => {
+    const { create, networks, ec2, vpc, emu, groupId, call } = await onNetwork({ efa: 'auto' });
+    ec2.types.set('p4d.24xlarge', {
+      type: 'p4d.24xlarge',
+      vcpu: 96,
+      memoryMiB: 1_179_648,
+      arch: ['x86_64'],
+      gpus: { name: 'A100', manufacturer: 'NVIDIA', count: 8 },
+      efa: 4,
+      networkCards: 4,
+    });
+    ec2.offerings.get('us-east-1a')!.add('p4d.24xlarge');
+    const machine = await create('ins_1', {}, 'us-east-1a/p4d.24xlarge');
+    const instance = ec2.instances.get(machine.id)!;
+    expect(instance.interfaces).toBe(4);
+    const all = () => [instance.groups, ...instance.secondary!.map((eni) => eni.groups)];
+    for (const groups of all())
+      expect(groups.map((g) => g.id)).toEqual([groupId('bc-net-bc-net-1'), groupId(tagA)]);
+    // RunInstances tagged every interface: no tag writes on them.
+    for (const eni of instance.secondary!)
+      expect(eni.tags.get('better-compute:instance')).toBe('ins_1');
+
+    await networks.setTags(machine.id, [tagB], call('ins_1'), 'ins_1');
+    expect(emu.calls('ModifyNetworkInterfaceAttribute')).toHaveLength(4);
+    for (const groups of all())
+      expect(groups.map((g) => g.id)).toEqual([groupId('bc-net-bc-net-1'), groupId(tagB)]);
+    expect(
+      emu.calls('CreateTags').filter((r) => r.params.get('ResourceId.1')?.startsWith('eni-')),
+    ).toHaveLength(0);
+    // No interface carries the old tag group any more, so a sweep may remove it.
+    const old = groupId(tagA)!;
+    expect(all().some((groups) => groups.some((g) => g.id === old))).toBe(false);
+    emu.clock.advance(24 * 3_600_000);
+    await networks.setTags(machine.id, [tagB], call('ins_1'), 'ins_1');
+    emu.clock.advance(24 * 3_600_000);
+    await networks.setTags(machine.id, [tagB], call('ins_1'), 'ins_1');
+    expect(vpc.groups.has(old)).toBe(false);
+    // Current on every interface: no more writes.
+    expect(emu.calls('ModifyNetworkInterfaceAttribute')).toHaveLength(4);
+  });
+
+  it('setTags leaves a claimed machine’s own extra interface alone', async () => {
+    const { networks, ec2, vpcId, subnetId, groupId, call } = await onNetwork();
+    const claimed = ec2.addInstance({ tags: { 'better-compute:instance': 'ins_9' } });
+    claimed.vpcId = vpcId;
+    claimed.subnetId = subnetId;
+    claimed.groups = [];
+    claimed.interfaces = 2;
+    claimed.secondary = [
+      { groups: [{ id: groupId('default')!, name: 'default' }], tags: new Map() },
+    ];
+    await networks.setTags(claimed.id, [tagB], call('ins_9'), 'ins_9');
+    expect(claimed.groups.map((g) => g.id)).toEqual([groupId('bc-net-bc-net-1'), groupId(tagB)]);
+    expect(claimed.secondary[0]!.groups.map((g) => g.name)).toEqual(['default']);
+    expect(claimed.secondary[0]!.tags.size).toBe(0);
+  });
+
   it('setTags checks the interface limit before it creates any group', async () => {
     const { create, networks, call, vpc } = await onNetwork({ securityGroupsPerInterface: 2 });
     const machine = await create('ins_1');
@@ -1822,5 +1879,98 @@ describe('networks: a rule that changes action', () => {
     await w.networks.ensureFirewall(spec, w.call());
     expect([ruleCount(), denies()]).toEqual([1, 0]);
     expect([...acl.tags.keys()].some((k) => k.startsWith('better-compute:deny:'))).toBe(false);
+  });
+});
+
+describe('networks: EFA self rule (AWS A10)', () => {
+  const groupOf = (w: Awaited<ReturnType<typeof world>>, network: string) =>
+    [...w.vpc.groups.values()].find(
+      (g) => g.name === `bc-net-${network}` && g.vpcId === w.vpc.vpcByName(network)!.id,
+    );
+  const selfRules = (w: Awaited<ReturnType<typeof world>>, groupId: string) =>
+    [...w.vpc.rules.values()].filter(
+      (r) => r.groupId === groupId && r.referencedGroupId === groupId,
+    );
+
+  it("efa auto gives the network's group all traffic from and to itself, tagged as EFA's", async () => {
+    const w = await world({ efa: 'auto' });
+    const ready = await w.settle(() => w.networks.ensureNetwork({ name: 'bc-net-1' }, w.call()));
+    expect(ready.state).toBe('ready');
+    const group = groupOf(w, 'bc-net-1')!;
+    expect(group).toBeDefined();
+    const rules = selfRules(w, group.id);
+    expect(rules.map((r) => [r.egress, r.protocol]).sort()).toEqual([
+      [false, '-1'],
+      [true, '-1'],
+    ]);
+    for (const rule of rules) {
+      expect(rule.tags.get('better-compute:efa')).toBe('true');
+      expect(rule.tags.get('better-compute:network')).toBe('bc-net-1');
+      expect([...rule.tags.keys()].some((k) => k.startsWith('better-compute:firewall:'))).toBe(
+        false,
+      );
+    }
+    // Ensuring again authorizes nothing.
+    const before =
+      w.emu.calls('AuthorizeSecurityGroupIngress').length +
+      w.emu.calls('AuthorizeSecurityGroupEgress').length;
+    await w.networks.ensureNetwork({ name: 'bc-net-1' }, w.call());
+    expect(
+      w.emu.calls('AuthorizeSecurityGroupIngress').length +
+        w.emu.calls('AuthorizeSecurityGroupEgress').length,
+    ).toBe(before);
+  });
+
+  it('firewall changes on the network never revoke the self rule', async () => {
+    const w = await world({ efa: 'auto' });
+    await w.settle(() => w.networks.ensureNetwork({ name: 'bc-net-1' }, w.call()));
+    const spec: ProviderFirewallSpec = {
+      network: 'bc-net-1',
+      name: 'bc-fw-1',
+      direction: 'ingress',
+      action: 'allow',
+      priority: 1000,
+      rules: [{ protocol: 'all' }],
+      sources: ['10.64.0.0/16'],
+    };
+    await w.networks.ensureFirewall(spec, w.call());
+    await w.networks.ensureFirewall({ ...spec, disabled: true }, w.call());
+    await w.networks.ensureFirewall({ ...spec, action: 'deny' }, w.call());
+    await w.networks.deleteFirewall('bc-fw-1', w.call());
+    expect(selfRules(w, groupOf(w, 'bc-net-1')!.id)).toHaveLength(2);
+  });
+
+  it('efa off revokes the self rule it made, and makes none', async () => {
+    const auto = await world({ efa: 'auto' });
+    await auto.settle(() => auto.networks.ensureNetwork({ name: 'bc-net-1' }, auto.call()));
+    const group = groupOf(auto, 'bc-net-1')!;
+    // The same account, now configured efa off.
+    const provider = awsProvider({ fetch: auto.emu.fetch, credentials: auto.emu.ambient });
+    const off = (await provider.create(
+      awsConfig.parse({ region: 'us-east-1', zones: ['us-east-1a', 'us-east-1b'] }) as AwsConfig,
+      {
+        clock: auto.emu.clock,
+        log: quiet,
+        secrets: { resolve: async () => '' },
+        account: { id: 'pa_platform', tenantId: 'root', platform: true },
+      },
+    )) as AwsCompute;
+    const ready = await auto.settle(() =>
+      off.networks!.ensureNetwork({ name: 'bc-net-1' }, auto.call()),
+    );
+    expect(ready.state).toBe('ready');
+    expect(selfRules(auto, group.id)).toHaveLength(0);
+
+    const plain = await world();
+    await plain.settle(() => plain.networks.ensureNetwork({ name: 'bc-net-1' }, plain.call()));
+    expect([...plain.vpc.rules.values()].some((r) => r.referencedGroupId)).toBe(false);
+  });
+
+  it('a group referenced only by itself is still deleted with its network', async () => {
+    const w = await world({ efa: 'auto' });
+    await w.settle(() => w.networks.ensureNetwork({ name: 'bc-net-1' }, w.call()));
+    const deleted = await w.settle(() => w.networks.deleteNetwork('bc-net-1', w.call()));
+    expect(deleted.state).toBe('deleted');
+    expect([...w.vpc.groups.values()].some((g) => g.name === 'bc-net-bc-net-1')).toBe(false);
   });
 });

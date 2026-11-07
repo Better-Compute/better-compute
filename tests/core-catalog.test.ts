@@ -464,6 +464,7 @@ describe('apiSurface (§9.2)', () => {
       'providerAccounts.purchaseReservation': 'v1.0',
       'providerAccounts.purchases': 'v1.0',
       'providerAccounts.clusters': 'v1.0',
+      'providerAccounts.purchaseProposals': 'v1.0',
       'instances.attach': 'v1.0',
       'instances.detach': 'v1.0',
       'instances.reboot': 'v1.0',

@@ -1674,6 +1674,18 @@ export async function deleteNetwork(
       undefined,
       { clusterIds },
     );
+  // (AWS A10) Its shared filesystems go first: their mount targets sit in its subnets.
+  const filesystems = await tx.query<{ id: string }>(
+    `SELECT id FROM filesystems WHERE network_id = $1 AND state <> 'deleted' ORDER BY id`,
+    [row.id],
+  );
+  if (filesystems.rows.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Network ${row.name} has ${filesystems.rows.length} filesystem(s) on it`,
+      undefined,
+      { filesystemIds: filesystems.rows.map((fs) => fs.id) },
+    );
   await tx.query(
     `UPDATE network_firewall_rules SET desired_state = 'deleted', state = CASE WHEN state = 'deleted' THEN state ELSE 'deleting' END,
             version = version + 1 WHERE network_id = $1`,

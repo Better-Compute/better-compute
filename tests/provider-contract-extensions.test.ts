@@ -6,7 +6,11 @@ import {
   type ExternalMachine,
   type ExternalReservation,
   type Offer,
+  type ProviderFilesystems,
+  type ProviderFilesystemSpec,
+  type ProviderFilesystemState,
   type ProviderImpl,
+  type ProviderMount,
   type ProviderNetworks,
   type ReservationOffering,
   type ReservationOfferingQuery,
@@ -280,5 +284,54 @@ describe('provider contract extensions', () => {
     expect(found).toEqual([offering]);
     expect(queries).toEqual([{ instanceType: 'p5.48xlarge', count: 2, durationHours: 24 }]);
     expect((await impl.purchaseReservation!(offering.id, context)).id).toBe(`cb:${offering.id}`);
+  });
+});
+
+describe('provider contract extensions: filesystems (AWS A10)', () => {
+  it('a provider may offer filesystems and take mounts on create; one without them still works', async () => {
+    const filesystems: ProviderFilesystems = {
+      kinds: ['nfs'],
+      ensureFilesystem: async (spec: ProviderFilesystemSpec): Promise<ProviderFilesystemState> => ({
+        id: `fs-${spec.name}`,
+        state: 'ready',
+        mount: { fstype: 'nfs4', source: 'fs.example:/', options: '_netdev' },
+      }),
+      deleteFilesystem: async (name) => ({ id: name, state: 'deleted' }),
+    };
+    const seen: (readonly ProviderMount[] | undefined)[] = [];
+    const def = defineProvider({
+      id: 'fs-fake',
+      version: '1.0.0',
+      provides: ['vps'],
+      config: manifest({}),
+      create: () => ({
+        ...full(),
+        create: async (request) => {
+          seen.push(request.mounts);
+          return machine('vm-3');
+        },
+        filesystems,
+      }),
+    });
+    const impl = await def.create({}, { clock, secrets: context.secrets, log: context.log });
+    const state = await impl.filesystems!.ensureFilesystem(
+      { name: 'bc-fs-1', kind: 'nfs', network: 'net' },
+      context,
+    );
+    expect(state.mount?.fstype).toBe('nfs4');
+    await impl.create(
+      {
+        offerId: 'o',
+        image: 'i',
+        userData: '',
+        name: 'n',
+        mounts: [{ ...state.mount!, path: '/mnt/shared' }],
+      },
+      context,
+    );
+    expect(seen[0]).toEqual([
+      { fstype: 'nfs4', source: 'fs.example:/', options: '_netdev', path: '/mnt/shared' },
+    ]);
+    expect(full().filesystems).toBeUndefined();
   });
 });

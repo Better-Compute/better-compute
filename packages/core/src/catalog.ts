@@ -616,6 +616,8 @@ group('providerAccounts', 'vps', [
   ['purchaseReservation', 'mutation', 'providers:purchase', 'provider-account', 'v1.0'],
   ['purchases', 'read', 'providers:read', 'provider-account', 'v1.0'],
   ['clusters', 'read', 'providers:read', 'provider-account', 'v1.0'],
+  // (AWS A10) Capacity Blocks proposed ahead of pending calendar reservations; root-only.
+  ['purchaseProposals', 'read', 'providers:read', 'provider-account', 'v1.0'],
 ]);
 group('reservationGrants', 'vps', [
   ['create', 'mutation', 'providers:manage', 'provider-account', 'v1.0'],
@@ -671,6 +673,13 @@ group('firewallRules', 'vps', [
   ['create', 'mutation', 'networks:update', 'network', 'v1.0'],
   ['list', 'read', 'networks:read', 'network', 'v1.0'],
   ['update', 'mutation', 'networks:update', 'network', 'v1.0'],
+  ['delete', 'mutation', 'networks:update', 'network', 'v1.0'],
+]);
+// (AWS A10) Shared filesystems (EFS, FSx for Lustre) on a network, decided on it like firewall rules.
+group('filesystems', 'vps', [
+  ['create', 'mutation', 'networks:update', 'network', 'v1.0'],
+  ['list', 'read', 'networks:read', 'network', 'v1.0'],
+  ['get', 'read', 'networks:read', 'network', 'v1.0'],
   ['delete', 'mutation', 'networks:update', 'network', 'v1.0'],
 ]);
 // Managed Kubernetes (GKE, …) on a provider account; the provider runs the control plane (kubernetes module).

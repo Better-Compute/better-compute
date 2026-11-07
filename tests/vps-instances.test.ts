@@ -467,6 +467,9 @@ describe('vps() API surface', () => {
       'vps/0090_provider_events',
       'vps/0091_provider_interruptions',
       'vps/0096_instance_aws_role',
+      'vps/0111_instance_placement',
+      'vps/0112_filesystems',
+      'vps/0113_purchase_proposals',
     ]);
     expect(module.requires).toEqual(['capacity']);
     expect(() => vps({ runtimes: [] })).toThrow(ComputeError);
@@ -1369,6 +1372,19 @@ describe('provider instances', () => {
     sshKeys: [KEY],
     idempotencyKey: 'cloud-1',
     ...extra,
+  });
+
+  it('refuses a placement group on a provider that declares no placement strategies', async () => {
+    await expect(
+      call(
+        'instances',
+        'create',
+        createProvider({ placement: { group: 'train', strategy: 'cluster' } }),
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT', message: expect.stringMatching(/placement/) });
+    expect(cloud.calls.filter((entry) => entry.startsWith('create'))).toEqual([]);
+    const { rows } = await db.query(`SELECT id FROM instances WHERE placement IS NOT NULL`);
+    expect(rows).toEqual([]);
   });
 
   it('creates idempotently through the provider, then follows it to running', async () => {

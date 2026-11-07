@@ -1,5 +1,6 @@
 import { ComputeError, type Clock, type ExternalMachine } from '@better-compute/core';
 import type { QueryClient, XmlElement } from '@better-compute/aws-core';
+import { withoutTopology } from './topology.js';
 
 /** One EC2 instance type, as `DescribeInstanceTypes` reports it. */
 export interface InstanceTypeInfo {
@@ -12,6 +13,8 @@ export interface InstanceTypeInfo {
   instanceStorageGiB?: number;
   efa: boolean;
   maxEfaInterfaces?: number;
+  /** (A10) Network cards (EFA interfaces go one per card); absent: 1. */
+  networkCards?: number;
 }
 
 const gpuNames: Readonly<Record<string, string>> = {
@@ -25,6 +28,19 @@ const gpuNames: Readonly<Record<string, string>> = {
   T4: 'T4',
   T4G: 'T4',
 };
+
+/** (A10) AWS Neuron devices (`NeuronInfo`) by name, as accelerator model strings. */
+const neuronNames: Readonly<Record<string, string>> = {
+  TRAINIUM: 'TRN1',
+  TRAINIUM2: 'TRN2',
+  INFERENTIA: 'INF1',
+  INFERENTIA2: 'INF2',
+};
+
+/** A `NeuronInfo` device name as the pool `gpuModel` string; unknown → 'other'. */
+export function neuronModel(name: string): string {
+  return neuronNames[name.trim().toUpperCase()] ?? 'other';
+}
 
 /** A `GpuInfo` manufacturer and name as the pool `gpuModel` string; unknown → 'other'. */
 export function gpuModel(manufacturer: string, name: string): string {
@@ -56,10 +72,18 @@ export function parseInstanceTypes(items: readonly XmlElement[]): InstanceTypeIn
       );
       gpus = { model: models.size === 1 ? [...models][0]! : 'other', count };
     }
+    // (A10) Trainium and Inferentia are accelerators the way GPUs are: TRN1, TRN2, INF1, INF2.
+    const neuronItems = item.child('neuronInfo')?.items('neuronDevices') ?? [];
+    if (!gpus && neuronItems.length) {
+      const count = neuronItems.reduce((sum, device) => sum + number(device.textOf('count')), 0);
+      const models = new Set(neuronItems.map((device) => neuronModel(device.textOf('name') ?? '')));
+      if (count > 0) gpus = { model: models.size === 1 ? [...models][0]! : 'other', count };
+    }
     const storage = item.child('instanceStorageInfo')?.textOf('totalSizeInGB');
     const network = item.child('networkInfo');
     const efa = network?.textOf('efaSupported') === 'true';
     const maxEfa = network?.child('efaInfo')?.textOf('maximumEfaInterfaces');
+    const cards = network?.textOf('maximumNetworkCards');
     out.push({
       type,
       vcpu: number(item.child('vCpuInfo')?.textOf('defaultVCpus')),
@@ -70,6 +94,7 @@ export function parseInstanceTypes(items: readonly XmlElement[]): InstanceTypeIn
       ...(storage !== undefined ? { instanceStorageGiB: number(storage) } : {}),
       efa,
       ...(maxEfa !== undefined ? { maxEfaInterfaces: number(maxEfa) } : {}),
+      ...(cards !== undefined ? { networkCards: number(cards) } : {}),
     });
   }
   return out;
@@ -233,7 +258,8 @@ export function toMachine(
     if (key !== undefined && !Object.hasOwn(tags, key) && key !== '__proto__')
       tags[key] = item.textOf('value') ?? '';
   }
-  const labels: Record<string, string> = { ...tags };
+  // Provider topology labels come from EC2's reads, never from a tag.
+  const labels: Record<string, string> = withoutTopology(tags);
   const zoneId = zone ? info.zoneIds.get(zone) : undefined;
   if (zoneId) labels['topology.aws/zone-id'] = zoneId;
   const addresses: string[] = [];

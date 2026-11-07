@@ -511,6 +511,25 @@ export interface Flavor {
   placement?: { numaAffine?: boolean; pinned?: boolean; hugepages?: '2Mi' | '1Gi' };
 }
 
+/**
+ * (AWS A10) Where an instance's machine lands relative to its siblings: every instance of one
+ * tenant's `group` in a pool shares one provider placement group with one `strategy`.
+ */
+export interface InstancePlacementGroup {
+  /** A lower-case name, unique per tenant and pool. */
+  group: string;
+  strategy: 'cluster' | 'spread' | 'partition';
+  /** `partition` only: the partition (1–7) to launch into. */
+  partition?: number;
+}
+
+/** (AWS A10) A shared filesystem (vps `filesystems`) an instance mounts at boot, and where. */
+export interface InstanceFilesystem {
+  filesystemId: string;
+  /** Absolute path on the machine. */
+  path: string;
+}
+
 export interface Instance {
   id: string;
   tenantId: string;
@@ -537,6 +556,10 @@ export interface Instance {
   labels?: Record<string, string>;
   /** (AWS A7) The cloud role the instance's workloads assume through its host's metadata endpoint. */
   workloadIdentity?: { awsRoleArn: string };
+  /** (AWS A10) The tenant's placement group for the machine (provider pools), as asked at create. */
+  placement?: InstancePlacementGroup;
+  /** (AWS A10) The shared filesystems the machine mounts at boot (provider pools on a network), as asked at create. */
+  filesystems?: InstanceFilesystem[];
   addresses: string[];
   ownerIdentityId: string;
   idempotencyKey: string;

@@ -19,6 +19,24 @@ export interface EmuType {
   bareMetal?: boolean;
   instanceStorageGB?: number;
   efa?: number;
+  /** (A10) NetworkInfo.MaximumNetworkCards (absent: 1). */
+  networkCards?: number;
+  /** (A10) NeuronInfo: AWS Trainium or Inferentia devices. */
+  neuron?: { name: string; count: number };
+}
+
+export interface EmuInterface {
+  groups: { id: string; name: string }[];
+  tags: Map<string, string>;
+}
+
+/** The instance's interfaces after the primary, `interfaces - 1` of them (new ones: no groups). */
+export function secondaryInterfaces(instance: EmuInstance): EmuInterface[] {
+  const want = Math.max(0, (instance.interfaces ?? 1) - 1);
+  const list = (instance.secondary ??= []);
+  while (list.length < want) list.push({ groups: [], tags: new Map() });
+  list.length = want;
+  return list;
 }
 
 export interface EmuImage {
@@ -53,6 +71,12 @@ export interface EmuInstance {
   eniTags: Map<string, string>;
   /** Network interfaces attached (1 unless a test adds more); the first is the primary. */
   interfaces?: number;
+  /**
+   * The interfaces after the primary (secondaryInterfaces() keeps it `interfaces - 1` long), each
+   * with its own groups and tags. RunInstances with several NetworkInterface.N (EFA, one per
+   * network card) gives each the launch groups and the 'network-interface' tags.
+   */
+  secondary?: EmuInterface[];
   terminationProtected: boolean;
   capacityReservationId?: string;
   lifecycle?: 'spot' | 'capacity-block';
@@ -85,6 +109,7 @@ const defaultTypes: EmuType[] = [
     gpus: { name: 'H100', manufacturer: 'NVIDIA', count: 8 },
     instanceStorageGB: 30_400,
     efa: 32,
+    networkCards: 32,
   },
   { type: 'm7g.large', vcpu: 2, memoryMiB: 8192, arch: ['arm64'] },
   { type: 'c7i.metal-24xl', vcpu: 96, memoryMiB: 196_608, arch: ['x86_64'], bareMetal: true },
@@ -315,10 +340,12 @@ export class Ec2Emulator {
       tagSet,
       items('networkInterfaceSet', [
         eni,
-        ...Array.from(
-          { length: (instance.interfaces ?? 1) - 1 },
-          (_, n) =>
-            `${el('networkInterfaceId', `eni-${instance.id.slice(2)}-${n + 1}`)}<attachment>${el('deviceIndex', n + 1)}</attachment>${el('subnetId', instance.subnetId)}${el('vpcId', instance.vpcId)}`,
+        ...secondaryInterfaces(instance).map(
+          (eni, n) =>
+            `${el('networkInterfaceId', `eni-${instance.id.slice(2)}-${n + 1}`)}<attachment>${el('deviceIndex', n + 1)}</attachment>${el('subnetId', instance.subnetId)}${el('vpcId', instance.vpcId)}${items(
+              'groupSet',
+              eni.groups.map((g) => `${el('groupId', g.id)}${el('groupName', g.name)}`),
+            )}`,
         ),
       ]),
     ].join('');
@@ -396,7 +423,7 @@ export class Ec2Emulator {
                 `${el('instanceType', t.type)}${el('bareMetal', t.bareMetal ?? false)}<processorInfo>${items(
                   'supportedArchitectures',
                   t.arch.map((a) => a),
-                )}</processorInfo><vCpuInfo>${el('defaultVCpus', t.vcpu)}</vCpuInfo><memoryInfo>${el('sizeInMiB', t.memoryMiB)}</memoryInfo>${t.instanceStorageGB ? `<instanceStorageInfo>${el('totalSizeInGB', t.instanceStorageGB)}</instanceStorageInfo>` : ''}${t.gpus ? `<gpuInfo>${items('gpus', [`${el('name', t.gpus.name)}${el('manufacturer', t.gpus.manufacturer)}${el('count', t.gpus.count)}`])}</gpuInfo>` : ''}<networkInfo>${el('efaSupported', t.efa !== undefined)}${t.efa ? `<efaInfo>${el('maximumEfaInterfaces', t.efa)}</efaInfo>` : ''}</networkInfo>`,
+                )}</processorInfo><vCpuInfo>${el('defaultVCpus', t.vcpu)}</vCpuInfo><memoryInfo>${el('sizeInMiB', t.memoryMiB)}</memoryInfo>${t.instanceStorageGB ? `<instanceStorageInfo>${el('totalSizeInGB', t.instanceStorageGB)}</instanceStorageInfo>` : ''}${t.neuron ? `<neuronInfo>${items('neuronDevices', [`${el('count', t.neuron.count)}${el('name', t.neuron.name)}`])}</neuronInfo>` : ''}${t.gpus ? `<gpuInfo>${items('gpus', [`${el('name', t.gpus.name)}${el('manufacturer', t.gpus.manufacturer)}${el('count', t.gpus.count)}`])}</gpuInfo>` : ''}<networkInfo>${el('efaSupported', t.efa !== undefined)}${el('maximumNetworkCards', t.networkCards)}${t.efa ? `<efaInfo>${el('maximumEfaInterfaces', t.efa)}</efaInfo>` : ''}</networkInfo>`,
             ),
           ) + el('nextToken', next),
         );

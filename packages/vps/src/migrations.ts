@@ -22,6 +22,8 @@ import {
   vpsNetworkZonesMigration,
   vpsSubnetPrivateAccessMigration,
 } from './networks.js';
+import { vpsFilesystemsMigration } from './filesystems.js';
+import { purchaseProposalsMigration } from './purchase-proposals.js';
 import {
   vpsIdentityRebindMigration,
   vpsSandboxExpiringMigration,
@@ -182,6 +184,14 @@ export const vpsInstanceLabelsMigration: Migration = {
   sql: `ALTER TABLE instances ADD COLUMN labels jsonb;`,
 };
 
+/** (AWS A10) The tenant's placement group of an instance (`instances.create({ placement })`). */
+export const vpsInstancePlacementMigration: Migration = {
+  name: 'vps/0111_instance_placement',
+  sql: `ALTER TABLE instances ADD COLUMN placement jsonb;
+CREATE INDEX instances_placement_group ON instances (tenant_id, pool_id, (placement->>'group'))
+  WHERE placement IS NOT NULL;`,
+};
+
 /** The VPS module's migrations, in ledger order. */
 export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsBaseMigration,
@@ -226,4 +236,7 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   providerEventsMigration,
   providerInterruptionsMigration,
   vpsInstanceAwsRoleMigration,
+  vpsInstancePlacementMigration,
+  vpsFilesystemsMigration,
+  purchaseProposalsMigration,
 ]);
