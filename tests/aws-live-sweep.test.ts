@@ -160,6 +160,20 @@ describe('sweepTestRuns', () => {
     expect(call('ScheduleKeyDeletion')).toEqual({ KeyId: arn('kms', 'key/1234abcd-12ab-34cd-56ef-1234567890ab'), PendingWindowInDays: 7 });
   });
 
+  it('deletes the EBS snapshots and key pairs a run made, snapshot ARNs naming no account included', async () => {
+    // EC2 snapshot ARNs carry no account; DeleteSnapshot refuses another account's snapshot by itself.
+    const snapshot = `arn:aws:ec2:us-east-1::snapshot/snap-1`;
+    const { sweep, log } = world([tagged(snapshot), tagged(arn('ec2', 'snapshot/snap-2')), tagged(arn('ec2', 'key-pair/key-1'))]);
+    const report = await sweep(true);
+    expect(report.skipped).toEqual([]);
+    expect(report.deleted.sort()).toEqual([snapshot, arn('ec2', 'snapshot/snap-2'), arn('ec2', 'key-pair/key-1')].sort());
+    expect(log.filter((entry) => entry.operation === 'DeleteSnapshot').map((entry) => entry.params)).toEqual([expect.objectContaining({ SnapshotId: 'snap-1' }), expect.objectContaining({ SnapshotId: 'snap-2' })]);
+    expect(log.find((entry) => entry.operation === 'DeleteKeyPair')?.params).toMatchObject({ KeyPairId: 'key-1' });
+    // Only snapshots go without an account: any other EC2 resource of no account is left alone.
+    const { sweep: other } = world([tagged('arn:aws:ec2:us-east-1::volume/vol-1')]);
+    expect((await other(true)).skipped).toEqual([{ arn: 'arn:aws:ec2:us-east-1::volume/vol-1', reason: expect.stringContaining('another account') }]);
+  });
+
   it('reads DeleteVpcEndpoints failures from its unsuccessful set: gone is deleted, in use is pending', async () => {
     const unsuccessful = (code: string) =>
       `<DeleteVpcEndpointsResponse><unsuccessful><item><resourceId>vpce-x</resourceId><error><code>${code}</code><message>m</message></error></item></unsuccessful></DeleteVpcEndpointsResponse>`;

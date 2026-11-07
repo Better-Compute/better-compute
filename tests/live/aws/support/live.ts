@@ -178,6 +178,8 @@ export interface LiveCreated {
     | 'network-acl'
     | 'vpc-endpoint'
     | 'volume'
+    | 'snapshot'
+    | 'key-pair'
     | 'elastic-ip';
   id: string;
 }
@@ -278,6 +280,10 @@ const createdBy: Record<string, (root: XmlElement) => LiveCreated[]> = {
   // provider-aws (A2) adds S3 and DynamoDB gateway endpoints for a subnet's private service access.
   CreateVpcEndpoint: (root) => one('vpc-endpoint', root.child('vpcEndpoint')?.textOf('vpcEndpointId')),
   CreateVolume: (root) => one('volume', root.textOf('volumeId')),
+  CreateSnapshot: (root) => one('snapshot', root.textOf('snapshotId')),
+  // CreateKeyPair's answer also holds the private key: only the id is read from it, and it is never kept.
+  CreateKeyPair: (root) => one('key-pair', root.textOf('keyPairId')),
+  ImportKeyPair: (root) => one('key-pair', root.textOf('keyPairId')),
   AllocateAddress: (root) => one('elastic-ip', root.textOf('allocationId')),
 };
 
@@ -319,6 +325,22 @@ function isEc2Host(input: RequestInfo | URL): boolean {
   return /(^|\.)ec2(-fips)?\.[a-z0-9-]+\.(amazonaws\.com(\.cn)?|api\.aws)$/.test(host);
 }
 
+/**
+ * Shared tenancy only: dedicated instances (and a VPC whose instance tenancy is dedicated) pass the
+ * instance-type allow-list but carry a per-region dedicated fee, and dedicated hosts bill by the
+ * host. A launch template's tenancy is not in the request, so a launch from one is refused too.
+ */
+function checkTenancy(action: string, params: URLSearchParams): void {
+  for (const [key, value] of params) {
+    if (/(^|\.)(Instance)?Tenancy$/.test(key) && value !== 'default')
+      throw new ComputeError('INVALID_INPUT', `${key}=${value}: a live run uses default (shared) tenancy only`);
+    if (/(^|\.)(HostId|HostResourceGroupArn|Affinity)$/.test(key))
+      throw new ComputeError('INVALID_INPUT', `${key}: a live run never places instances on a dedicated host`);
+    if (action === 'RunInstances' && /^LaunchTemplate\./.test(key))
+      throw new ComputeError('INVALID_INPUT', 'a live run never launches from a launch template (its tenancy and types are not in the request)');
+  }
+}
+
 function checkVolumes(action: string, params: URLSearchParams): void {
   const limits = liveVolumeLimits;
   const number = (key: string, value: string) => {
@@ -346,7 +368,8 @@ function checkVolumes(action: string, params: URLSearchParams): void {
  * allow-list (reads, and the instance, network, address, volume and tag mutations provider-aws
  * makes). Instance types must be on the instance allow-list (every `…InstanceType` parameter),
  * RunInstances launches exactly one instance and at most `budget.launches` per run (shared by every
- * fetch that is given the same budget), and volumes stay within `liveVolumeLimits`. After a
+ * fetch that is given the same budget), volumes stay within `liveVolumeLimits`, and tenancy stays
+ * shared (no dedicated instances or hosts, no launch templates). After a
  * successful create, `onCreated` hears what it made, so the run can tag it and delete it. Request
  * bodies are signed, so they are read, never changed.
  */
@@ -371,6 +394,7 @@ export function liveEc2Fetch(
         throw new ComputeError('ACCESS_DENIED', `the live suite never calls EC2 ${action}`);
       for (const [key, value] of params) if (/(^|\.)InstanceType(\.Value)?$/.test(key)) assertLiveInstanceType(value);
       checkVolumes(action, params);
+      checkTenancy(action, params);
       if (action === 'RunInstances') {
         assertLiveInstanceType(params.get('InstanceType') ?? '');
         if (params.get('MinCount') !== '1' || params.get('MaxCount') !== '1')

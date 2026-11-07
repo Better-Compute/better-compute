@@ -29,8 +29,8 @@ Enabled but misconfigured is an error, not a skip.
 - **Tags:** everything a run creates carries `better-compute:test-run=r<unix seconds>-<hex>` and
   `better-compute:managed=true` (`liveTags`). Files clean up in `afterAll`.
 - **Sweeper:** `scripts/aws-live-sweep.mjs` deletes what carries a test-run tag older than two hours, for runs that
-  crashed before their `afterAll`. Run it on a schedule in the sandbox account. It knows EC2 networking, instances
-  and volumes, CloudFormation stacks, S3 buckets (every version and delete marker first; S3 requests name the sandbox
+  crashed before their `afterAll`. Run it on a schedule in the sandbox account. It knows EC2 networking, instances,
+  volumes, snapshots and key pairs, CloudFormation stacks, S3 buckets (every version and delete marker first; S3 requests name the sandbox
   as the expected bucket owner), SQS, SNS, EventBridge rules and buses, Secrets Manager, log groups, KMS keys and FIS
   experiment templates. Anything else it reports as skipped, to delete by hand.
 - **Account-level backstop:** give the sandbox account an AWS Budget with an action that denies
@@ -65,10 +65,13 @@ way EC2 would (403 `UnauthorizedOperation`), so nothing is sent:
   transit gateways, VPNs and anything new are refused until added on purpose;
 - an instance type off the allow-list in any `…InstanceType` parameter, a launch of more than one instance, or more
   than `liveMaxLaunches` (20) launches in one run;
-- a volume over 16 GiB, 3000 IOPS or 125 MiB/s, of a type other than gp3 or gp2, or created without a `Size`.
+- a volume over 16 GiB, 3000 IOPS or 125 MiB/s, of a type other than gp3 or gp2, or created without a `Size`;
+- any tenancy but `default` (`Placement.Tenancy`, a VPC's `InstanceTenancy`): a dedicated `t3.micro` passes the
+  type allow-list but carries the per-region dedicated fee. Dedicated host placement (`HostId`, `Affinity`,
+  `HostResourceGroupArn`) and a launch from a launch template, whose tenancy is not in the request, are refused too.
 
-Every instance, VPC, subnet, security group, internet gateway, gateway endpoint, route table, network ACL, volume and
-Elastic IP that EC2 creates is recorded at once and tagged with the run's tags.
+Every instance, VPC, subnet, security group, internet gateway, gateway endpoint, route table, network ACL, volume,
+snapshot, key pair and Elastic IP that EC2 creates is recorded at once and tagged with the run's tags.
 
 Files create their fixtures through `support/resources.ts` (`liveAws`): each is tagged with the run's tags and its
 ARN is recorded as soon as it exists, so `afterAll` (`cleanUp`, the sweeper's deleters by ARN) deletes it even when

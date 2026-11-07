@@ -258,6 +258,24 @@ describe('liveEc2Fetch', () => {
     expect((await post(form('RunInstances', { InstanceType: 't3.micro', MinCount: '1', MaxCount: '1', 'BlockDeviceMapping.1.Ebs.VolumeSize': '8' }))).status).toBe(200);
   });
 
+  it('refuses dedicated tenancy, dedicated hosts and launch templates it cannot see into', async () => {
+    // A t3.micro on dedicated tenancy passes the instance allow-list but incurs the per-region dedicated fee.
+    const { sent, refused, post } = guarded();
+    const launch = { InstanceType: 't3.micro', MinCount: '1', MaxCount: '1' };
+    await expect(refused(form('RunInstances', { ...launch, 'Placement.Tenancy': 'dedicated' }))).resolves.toMatch(/tenancy/);
+    await expect(refused(form('RunInstances', { ...launch, 'Placement.Tenancy': 'host' }))).resolves.toMatch(/tenancy/);
+    await expect(refused(form('RunInstances', { ...launch, 'Placement.HostId': 'h-0123456789abcdef0' }))).resolves.toMatch(/host/);
+    await expect(refused(form('RunInstances', { ...launch, 'Placement.HostResourceGroupArn': 'arn:aws:resource-groups:us-east-1:1:group/x' }))).resolves.toMatch(/host/);
+    await expect(refused(form('RunInstances', { ...launch, 'Placement.Affinity': 'host' }))).resolves.toMatch(/host/);
+    // A VPC with dedicated instance tenancy makes every instance in it dedicated.
+    await expect(refused(form('CreateVpc', { CidrBlock: '10.0.0.0/16', InstanceTenancy: 'dedicated' }))).resolves.toMatch(/tenancy/);
+    // A launch template's tenancy is not in the request, so a launch from one is refused.
+    await expect(refused(form('RunInstances', { ...launch, 'LaunchTemplate.LaunchTemplateId': 'lt-0123456789abcdef0' }))).resolves.toMatch(/launch template/);
+    expect(sent).toEqual([]);
+    expect((await post(form('RunInstances', { ...launch, 'Placement.Tenancy': 'default', 'Placement.AvailabilityZone': 'us-east-1a' }))).status).toBe(200);
+    expect((await post(form('CreateVpc', { CidrBlock: '10.0.0.0/16', InstanceTenancy: 'default' }))).status).toBe(200);
+  });
+
   it('caps the launches of a run, across every fetch that shares its budget', async () => {
     const sent: string[] = [];
     const base: typeof fetch = async (_input, init) => {
@@ -296,6 +314,10 @@ describe('liveEc2Fetch', () => {
       ['CreateVolume', '<CreateVolumeResponse><volumeId>vol-01</volumeId></CreateVolumeResponse>', { kind: 'volume', id: 'vol-01' }],
       ['CreateVpcEndpoint', '<CreateVpcEndpointResponse><vpcEndpoint><vpcEndpointId>vpce-01</vpcEndpointId><vpcId>vpc-01</vpcId></vpcEndpoint></CreateVpcEndpointResponse>', { kind: 'vpc-endpoint', id: 'vpce-01' }],
       ['AllocateAddress', '<AllocateAddressResponse><publicIp>192.0.2.1</publicIp><allocationId>eipalloc-01</allocationId></AllocateAddressResponse>', { kind: 'elastic-ip', id: 'eipalloc-01' }],
+      // Snapshots and key pairs a run makes are tagged and cleaned up like everything else.
+      ['CreateSnapshot', '<CreateSnapshotResponse><snapshotId>snap-01</snapshotId><volumeId>vol-01</volumeId><status>pending</status></CreateSnapshotResponse>', { kind: 'snapshot', id: 'snap-01' }],
+      ['CreateKeyPair', '<CreateKeyPairResponse><keyName>live</keyName><keyFingerprint>aa:bb</keyFingerprint><keyMaterial>not-a-real-key</keyMaterial><keyPairId>key-01</keyPairId></CreateKeyPairResponse>', { kind: 'key-pair', id: 'key-01' }],
+      ['ImportKeyPair', '<ImportKeyPairResponse><keyName>live</keyName><keyFingerprint>aa:bb</keyFingerprint><keyPairId>key-02</keyPairId></ImportKeyPairResponse>', { kind: 'key-pair', id: 'key-02' }],
     ];
     for (const [action, answer, expected] of cases) {
       const { created, post } = guarded(answer);

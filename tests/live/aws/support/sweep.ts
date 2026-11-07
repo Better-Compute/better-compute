@@ -126,6 +126,8 @@ interface Deleter {
 const ec2Deleters: Record<string, Deleter> = {
   instance: { rank: 1, remove: (c, a) => c.ec2('TerminateInstances', { InstanceId: [id(a)] }).then(() => {}) },
   volume: { rank: 2, remove: (c, a) => c.ec2('DeleteVolume', { VolumeId: id(a) }).then(() => {}) },
+  snapshot: { rank: 2, remove: (c, a) => c.ec2('DeleteSnapshot', { SnapshotId: id(a) }).then(() => {}) },
+  'key-pair': { rank: 2, remove: (c, a) => c.ec2('DeleteKeyPair', { KeyPairId: id(a) }).then(() => {}) },
   'elastic-ip': { rank: 2, remove: (c, a) => c.ec2('ReleaseAddress', { AllocationId: id(a) }).then(() => {}) },
   'security-group': { rank: 3, remove: (c, a) => c.ec2('DeleteSecurityGroup', { GroupId: id(a) }).then(() => {}) },
   'internet-gateway': {
@@ -308,8 +310,10 @@ function place(text: string, config: LiveConfig): { arn: Arn; deleter: Deleter }
   const deleter = arn ? serviceDeleters[arn.service]?.(arn) : undefined;
   if (!arn || !deleter)
     return { reason: `no sweeper for ${arn ? `${arn.service}:${arn.resource.split(/[/:]/)[0]}` : 'this ARN'}; delete it by hand` };
-  // S3 ARNs carry no account; S3 enforces the owner instead (x-amz-expected-bucket-owner).
-  if (arn.account !== config.account && !(arn.service === 's3' && arn.account === ''))
+  // S3 ARNs carry no account; S3 enforces the owner instead (x-amz-expected-bucket-owner). EC2 snapshot
+  // ARNs carry none either, and DeleteSnapshot refuses a snapshot the caller's account does not own.
+  const accountless = arn.account === '' && (arn.service === 's3' || (arn.service === 'ec2' && arn.resource.startsWith('snapshot/')));
+  if (arn.account !== config.account && !accountless)
     return { reason: `belongs to another account (${arn.account || 'none'})` };
   return { arn, deleter };
 }
