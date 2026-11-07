@@ -2,6 +2,7 @@ import { strictObject, type InputSchema } from '@better-compute/core';
 import { bool, fail, id, int, key, object, optional, tenant } from './input.js';
 import type {
   ClusterRef,
+  SubstrateRef,
   CreateClusterInput,
   CreateNodePoolInput,
   CredentialsInput,
@@ -37,9 +38,9 @@ const resourceName = /^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$/;
 const locationName = /^[a-z][a-z0-9-]{1,38}[a-z0-9]$/;
 const versionPattern = /^[0-9]{1,3}\.[0-9]{1,3}(\.[0-9]{1,3})?(-[a-z0-9.]{1,40})?$/;
 /** GCE (`e2-standard-4`), DigitalOcean (`s-2vcpu-4gb`) and EC2 (`m7i.large`) machine types. */
-const machineTypePattern = /^[a-z0-9][a-z0-9.-]{0,62}$/;
+export const machineTypePattern = /^[a-z0-9][a-z0-9.-]{0,62}$/;
 const diskTypePattern = /^[a-z][a-z0-9-]{1,40}$/;
-const acceleratorPattern = /^[a-z0-9][a-z0-9-]{0,62}$/;
+export const acceleratorPattern = /^[a-z0-9][a-z0-9-]{0,62}$/;
 /** A Kubernetes label key: an optional DNS-subdomain prefix and `/`, then a name of at most 63 characters. */
 const labelKeyPattern =
   /^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?\/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$/;
@@ -48,7 +49,7 @@ const maxLabels = 32;
 const maxTaints = 32;
 const maxZones = 10;
 
-function resource(value: unknown, what = 'name'): string {
+export function resource(value: unknown, what = 'name'): string {
   if (typeof value !== 'string' || !resourceName.test(value))
     fail(
       `${what} must be 1-40 lower-case letters, digits or '-', start with a letter and not end with '-'`,
@@ -68,13 +69,13 @@ function description(value: unknown): string {
   return value;
 }
 
-function oneOf<T extends string>(value: unknown, options: readonly T[], what: string): T {
+export function oneOf<T extends string>(value: unknown, options: readonly T[], what: string): T {
   if (typeof value !== 'string' || !(options as readonly string[]).includes(value))
     fail(`${what} must be one of ${options.join(', ')}`);
   return value as T;
 }
 
-function kubernetesVersion(value: unknown): string {
+export function kubernetesVersion(value: unknown): string {
   if (typeof value !== 'string' || !versionPattern.test(value))
     fail('version must be a Kubernetes version such as 1.33 or 1.33.2-gke.1000');
   return value;
@@ -98,13 +99,13 @@ export function ipv4Cidr(value: unknown, what: string): string {
   return value as string;
 }
 
-function authorizedNetworks(value: unknown): string[] {
+export function authorizedNetworks(value: unknown): string[] {
   if (!Array.isArray(value) || value.length > maxAuthorizedNetworks)
     return fail(`authorizedNetworks must list at most ${maxAuthorizedNetworks} IPv4 CIDRs`);
   return [...new Set(value.map((entry, index) => ipv4Cidr(entry, `authorizedNetworks[${index}]`)))];
 }
 
-function autoscaling(value: unknown, what: string): { minNodes: number; maxNodes: number } {
+export function autoscaling(value: unknown, what: string): { minNodes: number; maxNodes: number } {
   const input = object(value, ['minNodes', 'maxNodes']);
   const minNodes = int(input.minNodes, `${what}.minNodes`, 0, 1000);
   const maxNodes = int(input.maxNodes, `${what}.maxNodes`, 1, 1000);
@@ -146,7 +147,7 @@ function taints(value: unknown, what: string): KubernetesTaint[] {
   });
 }
 
-function zones(value: unknown, what: string): string[] {
+export function zones(value: unknown, what: string): string[] {
   if (!Array.isArray(value) || value.length > maxZones)
     return fail(`${what} must list at most ${maxZones} zones`);
   return [...new Set(value.map((entry, index) => location(entry, `${what}[${index}]`)))];
@@ -275,6 +276,11 @@ export function parseCreateCluster(raw: unknown): CreateClusterInput {
 export function parseClusterRef(raw: unknown): ClusterRef {
   const input = object(raw, ['tenantId', 'clusterId']);
   return { tenantId: tenant(input.tenantId), clusterId: id(input.clusterId, 'kcl', 'clusterId') };
+}
+
+export function parseSubstrateRef(raw: unknown): SubstrateRef {
+  const input = object(raw, ['tenantId', 'poolId']);
+  return { tenantId: tenant(input.tenantId), poolId: id(input.poolId, 'pool', 'poolId') };
 }
 
 export function parseListClusters(raw: unknown): ListClustersInput {
@@ -562,6 +568,13 @@ export const kubernetesSchemas = {
     'tenantId',
     'clusterId',
   ]),
+  substrate: strictObject(
+    {
+      tenantId: tenantIdSchema,
+      poolId: idOf('pool', 'A pool of the tenant with policy.substrate'),
+    },
+    ['tenantId', 'poolId'],
+  ),
   updateCluster: strictObject(
     {
       tenantId: tenantIdSchema,

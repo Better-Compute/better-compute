@@ -28,6 +28,17 @@ writeFileSync('bcd.json', renderKubernetesManifests(manifests)); // kubectl appl
 4. Configure the GPU stack as [GPU isolation](#gpu-isolation) says, then apply the manifests.
 5. **When every node has joined, revoke the token and delete the Secret.** A DaemonSet cannot use one single-use token per node, so the token is multi-use; anyone who reads the Secret while it is live can join a machine to the pool. A node that has joined keeps its identity in `/var/lib/bcd` and joins again without a token. The token volume is optional, so its pods still start after the Secret is gone. For nodes added later, mint a new token and Secret, and remove both again.
 
+## As a pool substrate
+
+`kubernetesSubstrateAgent({ image, gatewayUrl, pins, controlPlaneUrl | joinEncryptionJwk })` is what
+`@better-compute/kubernetes`'s `kubernetes({ substrate: { agent } })` takes: it renders these manifests for a pool (device
+plugin only, the substrate node selector, the join-token Secret when a token is given) and returns a
+`kubernetesApiClient` per short-lived credential. The client server-side applies (PATCH `application/apply-patch+yaml`,
+field manager `better-compute`, forced), deletes (a missing object is gone) and lists Nodes, trusting only the
+cluster CA. The bearer token is never in an error, a log or `JSON.stringify` of the client, and Secret values are
+scrubbed from API messages. The module then does steps 2 to 5 above on its own: a token only while nodes are still to
+join, revoked and its Secret deleted once they have.
+
 ## GPU isolation
 
 bcd hands a pod exactly the GPUs its reservation holds, and it can only enforce that when nothing else hands out GPUs on the node. With the NVIDIA GPU operator, its defaults are unsafe here: its own device plugin advertises every GPU, and its container runtime gives an unprivileged pod any GPU it names in `NVIDIA_VISIBLE_DEVICES`. Required:

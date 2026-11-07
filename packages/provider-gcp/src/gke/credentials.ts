@@ -261,3 +261,43 @@ export async function mintCredentials(options: {
     expiresAt: Number.isFinite(expiry) ? expiry : options.clock.now() + ttlSeconds * 1000,
   };
 }
+
+/**
+ * Removes what `mintCredentials` created for `subject`: its ClusterRoleBinding (`bc-access:<subject>`) first, then
+ * its service account in `bc-access` (which invalidates every token bound to it). Either one already gone is fine;
+ * the shared namespace stays (other subjects may use it). Neither token is ever logged or put in an error.
+ */
+export async function revokeCredentials(options: {
+  id: string;
+  cluster: GkeCluster;
+  subject: string;
+  googleToken: string;
+  transport: KubeTransport;
+  signal: AbortSignal;
+}): Promise<void> {
+  const { id, subject, transport, signal } = options;
+  if (typeof subject !== 'string' || !subjectPattern.test(subject))
+    throw invalid(`The subject ${JSON.stringify(subject)} is not a DNS-1123 label`);
+  const { server, caPem } = endpointOf(id, options.cluster);
+  const remove = async (path: string, what: string): Promise<void> => {
+    let response: KubeResponse;
+    try {
+      response = await transport({ url: `${server}${path}`, method: 'DELETE', caPem, token: options.googleToken, signal });
+    } catch (error) {
+      if (signal.aborted) throw error;
+      throw new ComputeError('UNAVAILABLE', `${what} on cluster ${id}: the Kubernetes API is unreachable`, undefined, {
+        provider: 'gcp',
+        status: 0,
+        reason: 'network',
+      });
+    }
+    if ((response.status >= 200 && response.status < 300) || response.status === 404) return;
+    throw kubeError(id, what, response);
+  };
+  const bindingName = `${accessNamespace}:${subject}`;
+  await remove(`/apis/${rbacGroup}/v1/clusterrolebindings/${bindingName}`, `Deleting binding ${bindingName}`);
+  await remove(
+    `/api/v1/namespaces/${accessNamespace}/serviceaccounts/${subject}`,
+    `Deleting service account ${subject}`,
+  );
+}

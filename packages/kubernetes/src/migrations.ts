@@ -126,6 +126,129 @@ END $$;
 `,
 };
 
+/**
+ * Pool substrates (`policy.substrate`): a pool whose machines are the nodes of a managed cluster. The
+ * `kubernetes.substrates` reconciler records here what it made of the pool's policy; the cluster and its node pools
+ * are ordinary `kubernetes_clusters` / `kubernetes_node_pools` rows marked with `substrate_pool_id`, so the cluster
+ * reconciler, the events, metering and `kubernetesClusters.update` (upgrades) apply to them.
+ *
+ * - `kubernetes_clusters.adopted`: a cluster that existed before (`cluster: { adopt }`). The cluster reconciler reads
+ *   it (`getCluster`) and never creates, changes or deletes it; only its substrate node pools are converged.
+ * - `kubernetes_pool_substrates`: one row per pool that ever had a substrate. `identity` is the canonical account and
+ *   cluster the row was made for (immutable, K-D8); `create_spec` the create-time settings last pushed to the cluster
+ *   row (so a `kubernetesClusters.update` made meanwhile is not reverted); `join_token_id` the live hosted token, if
+ *   any (never the secret); `manifests_sha256` what was last applied (without the token). No credential is stored.
+ */
+export const kubernetesSubstratesMigration: Migration = {
+  name: 'kubernetes/0002_substrates',
+  sql: `
+ALTER TABLE kubernetes_clusters ADD COLUMN adopted bool NOT NULL DEFAULT false;
+ALTER TABLE kubernetes_clusters ADD COLUMN substrate_pool_id text;
+ALTER TABLE kubernetes_node_pools ADD COLUMN substrate_pool_id text;
+CREATE INDEX kubernetes_node_pools_substrate ON kubernetes_node_pools (substrate_pool_id)
+  WHERE substrate_pool_id IS NOT NULL AND state <> 'deleted';
+
+CREATE TABLE kubernetes_pool_substrates (
+  pool_id text PRIMARY KEY,
+  tenant_id text NOT NULL,
+  provider_account_id text NOT NULL,
+  mode text NOT NULL CHECK (mode IN ('create', 'adopt')),
+  -- The provider id of the adopted cluster (mode adopt).
+  adopt_id text,
+  identity text NOT NULL,
+  -- pools.version this row last converged from: a pools.update wakes the substrate at the next sweep.
+  pool_version bigint,
+  -- The kubernetes_clusters row (created, or the adopted cluster's row).
+  cluster_id text,
+  create_spec jsonb,
+  state text NOT NULL
+    CHECK (state IN ('pending', 'provisioning', 'ready', 'updating', 'error', 'deleting', 'deleted')),
+  desired_state text NOT NULL CHECK (desired_state IN ('present', 'deleted')),
+  message text,
+  join_token_id text,
+  -- The live token's Secret reached the cluster (a token minted in a run whose apply failed is replaced).
+  token_applied bool NOT NULL DEFAULT false,
+  manifests_sha256 text,
+  applied_at timestamptz,
+  -- Nodes of the substrate's node pools the cluster last listed, and of them the ones whose bcd joined the pool.
+  nodes_listed integer,
+  nodes_joined integer,
+  -- upgrades: 'drain': the version being drained for, and since when (the pool's nodes are NoSchedule
+  -- substrate-upgrade until the cluster is ready on it).
+  upgrade_version text,
+  upgrade_since timestamptz,
+  created_at timestamptz NOT NULL DEFAULT compute_now(),
+  updated_at timestamptz NOT NULL DEFAULT compute_now(),
+  deleted_at timestamptz,
+  version bigint NOT NULL
+);
+-- One live substrate per cluster.
+CREATE UNIQUE INDEX kubernetes_pool_substrates_cluster ON kubernetes_pool_substrates (cluster_id)
+  WHERE state <> 'deleted' AND cluster_id IS NOT NULL;
+CREATE INDEX kubernetes_pool_substrates_live ON kubernetes_pool_substrates (pool_id) WHERE state <> 'deleted';
+`,
+};
+
+/**
+ * Which Kubernetes Node each substrate pool node runs on. A pool node is matched once, while its bcd is connected, by
+ * the Node name bcd reports (inventory `kubernetes.nodeName`, else `os.hostname`) when it is exactly a listed Node's;
+ * `kubernetes_node` stays NULL for one that matched no Node (never taken for gone: fail closed). `kubernetes_uid` is
+ * the Node's `metadata.uid`, so a later Node of the same name (EKS reuses IP-based names) is not taken for it.
+ * `learned_at` is when the match was made or last tried, `checked_at` when the node was last checked for a gone Node
+ * (the oldest are checked first). A retired node's row is deleted.
+ */
+export const kubernetesSubstrateNodesMigration: Migration = {
+  name: 'kubernetes/0003_substrate_nodes',
+  sql: `
+CREATE TABLE kubernetes_substrate_nodes (
+  node_id text PRIMARY KEY,
+  pool_id text NOT NULL,
+  kubernetes_node text,
+  kubernetes_uid text,
+  learned_at timestamptz NOT NULL DEFAULT compute_now(),
+  checked_at timestamptz
+);
+CREATE INDEX kubernetes_substrate_nodes_pool ON kubernetes_substrate_nodes (pool_id);
+`,
+};
+
+/**
+ * Which pool nodes a substrate owns. A substrate pool may also hold machines joined some other way (a join token
+ * the tenant made, another attestor, a pool that gained `policy.substrate` later): those are never counted as the
+ * cluster's joined Nodes, cordoned, drained for or retired by the substrate.
+ *
+ * - `kubernetes_substrate_tokens`: every hosted join token a substrate minted for its pool (the id, never the secret).
+ * - `kubernetes_substrate_nodes` gains a row for every pool node the substrate has looked at: `owned` when the join
+ *   that admitted it (JoinService's `node.joined` / `node.reclaimed` audit row) used one of those tokens, with that
+ *   token and when it joined (`joined_at`: a node that never connects counts as joined only for a grace window, then
+ *   is retired). `learned_at` is NULL until its Kubernetes Node was looked for. Rows made before this migration
+ *   (connected nodes of the old pool-wide model) stay owned; the substrates' live tokens are recorded.
+ */
+export const kubernetesSubstrateOwnershipMigration: Migration = {
+  name: 'kubernetes/0004_substrate_ownership',
+  sql: `
+CREATE TABLE kubernetes_substrate_tokens (
+  token_id text PRIMARY KEY,
+  pool_id text NOT NULL,
+  issued_at timestamptz NOT NULL DEFAULT compute_now()
+);
+CREATE INDEX kubernetes_substrate_tokens_pool ON kubernetes_substrate_tokens (pool_id);
+INSERT INTO kubernetes_substrate_tokens (token_id, pool_id)
+  SELECT join_token_id, pool_id FROM kubernetes_pool_substrates WHERE join_token_id IS NOT NULL
+  ON CONFLICT DO NOTHING;
+
+ALTER TABLE kubernetes_substrate_nodes ADD COLUMN owned bool NOT NULL DEFAULT true;
+ALTER TABLE kubernetes_substrate_nodes ADD COLUMN join_token_id text;
+ALTER TABLE kubernetes_substrate_nodes ADD COLUMN joined_at timestamptz;
+ALTER TABLE kubernetes_substrate_nodes ALTER COLUMN learned_at DROP NOT NULL;
+ALTER TABLE kubernetes_substrate_nodes ALTER COLUMN learned_at DROP DEFAULT;
+CREATE INDEX kubernetes_substrate_nodes_owned ON kubernetes_substrate_nodes (pool_id) WHERE owned;
+`,
+};
+
 export const kubernetesMigrations: readonly Migration[] = Object.freeze([
   kubernetesClustersMigration,
+  kubernetesSubstratesMigration,
+  kubernetesSubstrateNodesMigration,
+  kubernetesSubstrateOwnershipMigration,
 ]);

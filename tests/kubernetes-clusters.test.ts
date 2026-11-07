@@ -411,9 +411,13 @@ describe('kubernetes()', () => {
     expect(module.requires).toEqual(['vps']);
     expect(module.migrations!.map((migration) => migration.name)).toEqual([
       'kubernetes/0001_clusters',
+      'kubernetes/0002_substrates',
+      'kubernetes/0003_substrate_nodes',
+      'kubernetes/0004_substrate_ownership',
     ]);
     expect(module.reconcilers!.map((reconciler) => reconciler.name)).toEqual([
       'kubernetes.clusters',
+      'kubernetes.substrates',
       'kubernetes.usage',
     ]);
     const api = module.api!({} as never);

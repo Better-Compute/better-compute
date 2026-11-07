@@ -69,6 +69,11 @@ export function pkiPort(
         input.ttlSeconds > 86_400
       )
         throw new ComputeError('INVALID_INPUT', 'ttlSeconds must be between 60 and 86400');
+      if (input.hosted !== undefined && (input.hosted !== 'kubernetes' || input.role !== 'node'))
+        throw new ComputeError(
+          'INVALID_INPUT',
+          "hosted must be 'kubernetes', and only on a node token",
+        );
       const maxUses = input.maxUses ?? 1;
       if (!Number.isSafeInteger(maxUses) || maxUses < 1 || maxUses > 10_000)
         throw new ComputeError('INVALID_INPUT', 'maxUses must be between 1 and 10000');
@@ -91,8 +96,8 @@ export function pkiPort(
       const { token, secretHash } = minter.mint(id);
       await tx.query(
         `INSERT INTO join_tokens (id, tenant_id, role, pool_id, site_id, secret_hash, uses_left, expect,
-           allow_reclaim, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, false, compute_now() + make_interval(secs => $9::int))`,
+           allow_reclaim, expires_at, hosted)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, false, compute_now() + make_interval(secs => $9::int), $10)`,
         [
           id,
           input.tenantId,
@@ -103,6 +108,7 @@ export function pkiPort(
           maxUses,
           expect ? JSON.stringify(expect) : null,
           input.ttlSeconds,
+          input.hosted ?? null,
         ],
       );
       return { id, token };

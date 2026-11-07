@@ -173,6 +173,13 @@ export interface DevJoinOptions {
    * hosts under bcd helper beside root ones. A `FakeHypervisor` instance here would be shared by every machine.
    */
   daemon?: Partial<Omit<FakeDaemonOptions, 'nodeId' | 'scheduler' | 'dial' | 'hardware' | 'tunnels'>>;
+  /**
+   * Join with this token instead of minting one (e.g. the token a Kubernetes Secret holds, as bcd's DaemonSet
+   * join container reads it). `count` machines spend one use each.
+   */
+  token?: string;
+  /** Machine `i`'s OS hostname (default `fakehw`), e.g. its Kubernetes Node name. */
+  hostnames?: readonly string[];
 }
 
 export interface DevSiteJoinOptions {
@@ -714,16 +721,24 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
         throw new ComputeError('INVALID_INPUT', 'count must be a whole number from 1 to 10000');
       const variant = joinOptions.variant ?? 'hgx-h100';
       const seed = joinOptions.seed ?? Math.random().toString(36).slice(2, 10);
-      const minted = await api.joinTokens.create(root, {
-        tenantId,
-        poolId: joinOptions.poolId,
-        ttlSeconds: 3600,
-        maxUses: count,
-        idempotencyKey: `dev-join-${seed}-${count}`,
-      });
+      const minted =
+        joinOptions.token !== undefined
+          ? { token: joinOptions.token }
+          : await api.joinTokens.create(root, {
+              tenantId,
+              poolId: joinOptions.poolId,
+              ttlSeconds: 3600,
+              maxUses: count,
+              idempotencyKey: `dev-join-${seed}-${count}`,
+            });
       const ids: string[] = [];
       for (let index = 0; index < count; index++) {
-        const hardware = fakeHardware({ seed: `${seed}-${index}`, variant });
+        const hostname = joinOptions.hostnames?.[index];
+        const hardware = fakeHardware({
+          seed: `${seed}-${index}`,
+          variant,
+          ...(hostname !== undefined ? { hostname } : {}),
+        });
         const { nodeId, siteId, serial, privateKey } = await joinOne(minted.token, hardware);
         joined.set(nodeId, { siteId, serial });
         const daemon = new FakeDaemon({

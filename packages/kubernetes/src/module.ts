@@ -4,6 +4,7 @@ import {
   defineModule,
   describedBy,
   type ComputeModule,
+  type Finding,
   type KubernetesVersions,
   type MethodContext,
   type MethodDefinition,
@@ -45,14 +46,25 @@ import {
   parseCredentials,
   parseListClusters,
   parseNodePoolRef,
+  parseSubstrateRef,
   parseUpdateCluster,
   parseUpdateNodePool,
   parseVersions,
 } from './parse.js';
 import { clustersReconciler } from './reconciler.js';
 import { clustersWork, type KubernetesDeps } from './store.js';
+import { substratePolicyValidator } from './substrate-policy.js';
+import {
+  getSubstrate,
+  substratesReconciler,
+  substratesWork,
+  type SubstrateDeps,
+  type SubstrateOptions,
+  type SubstrateView,
+} from './substrates.js';
 import type {
   ClusterRef,
+  SubstrateRef,
   CreateClusterInput,
   CreateNodePoolInput,
   CredentialsInput,
@@ -85,6 +97,12 @@ export interface KubernetesOptions {
   meterGraceMs?: number;
   /** The IAM resource-type prefix when the host does not name it (`ComputeOptions.typePrefix`, default `compute-`). */
   typePrefix?: string;
+  /**
+   * Pool substrates (`policy.substrate`): the agent that runs bcd on a substrate's cluster, provider-kubernetes'
+   * `kubernetesSubstrateAgent({ image, gatewayUrl, pins, … })`. Without it a pool with a substrate stays in
+   * `error` (nothing is created at the provider).
+   */
+  substrate?: SubstrateOptions;
 }
 
 /** The API groups of the kubernetes module. */
@@ -105,6 +123,10 @@ export type KubernetesApi = {
     list: MethodDefinition<ClusterRef, { items: KubernetesNodePoolView[] }>;
     update: MethodDefinition<UpdateNodePoolInput, KubernetesNodePoolView>;
     delete: MethodDefinition<NodePoolRef, KubernetesNodePoolView>;
+  };
+  /** Pool substrates (`policy.substrate`): the managed cluster behind a pool, as the substrate reconciler sees it. */
+  kubernetesSubstrates: {
+    get: MethodDefinition<SubstrateRef, SubstrateView>;
   };
 };
 
@@ -177,6 +199,20 @@ export function kubernetes(
     );
   const typePrefix = options.typePrefix ?? 'compute-';
   const clients = new ProviderClients(providers, tenantVaultPaths);
+  const substrate = options.substrate;
+  if (substrate !== undefined) {
+    if (typeof substrate?.agent?.manifests !== 'function' || typeof substrate.agent.connect !== 'function')
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'kubernetes({ substrate: { agent } }) takes a substrate agent (provider-kubernetes kubernetesSubstrateAgent)',
+      );
+    const tokenTtl = substrate.tokenTtlSeconds ?? 3600;
+    if (!Number.isSafeInteger(tokenTtl) || tokenTtl < 60 || tokenTtl > 86_400)
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'kubernetes({ substrate: { tokenTtlSeconds } }) must be an integer from 60 to 86400',
+      );
+  }
 
   const depsOf = (context: ModuleContext): KubernetesDeps => {
     const rootTenantId = (context.iam as ModuleContext['iam'] | undefined)?.rootTenantId;
@@ -194,6 +230,13 @@ export function kubernetes(
       ...(workload ? { workload } : {}),
     };
   };
+  const substrateDepsOf = (context: ModuleContext): SubstrateDeps => ({
+    ...depsOf(context),
+    ...(substrate ? { substrate } : {}),
+    ...(context.pki ? { pki: context.pki } : {}),
+    ...(context.desired ? { desired: context.desired } : {}),
+    ...(context.inventory ? { inventory: context.inventory } : {}),
+  });
   const credentialOptions = { ttlSeconds: ttl, typePrefix };
 
   const api = (): KubernetesApi => ({
@@ -294,16 +337,29 @@ export function kubernetes(
         handler: (context, input) => deleteNodePool(depsOf(context), context.sql, input),
       }),
     },
+    kubernetesSubstrates: {
+      get: defineMethod({
+        action: 'compute:kubernetes:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(kubernetesSchemas.substrate, parseSubstrateRef),
+        handler: (context, input) => getSubstrate(context.sql, input),
+      }),
+    },
   });
 
   return defineModule({
     name: 'kubernetes',
     requires: ['vps'],
     migrations: [...kubernetesMigrations],
+    // pools.create/update refuse a policy.substrate the substrate reconciler could not converge.
+    extensions: [substratePolicyValidator],
     api,
     reconcilers: [
       // Clusters and node pools converged through the provider.
       clustersReconciler(depsOf),
+      // Pool substrates: the cluster behind a pool, and bcd on it.
+      substratesReconciler(substrateDepsOf),
       {
         // kubernetes.cluster.hours for clusters that exist at the provider.
         name: 'kubernetes.usage',
@@ -328,7 +384,7 @@ export function kubernetes(
            JOIN provider_accounts a ON a.id = k.provider_account_id
           WHERE k.state <> 'deleted' GROUP BY a.provider ORDER BY a.provider`,
       );
-      return rows
+      const findings: Finding[] = rows
         .filter((row) => !providers.has(row.provider))
         .map((row) => ({
           check: 'kubernetes.provider-missing',
@@ -337,17 +393,76 @@ export function kubernetes(
           fix: `Pass the ${row.provider} provider definition to kubernetes({ providers }), as to vps({ providers })`,
           count: Number(row.clusters),
         }));
+      // Pool substrates: pools that declare one while the module has no agent to run bcd with.
+      if (substrate === undefined) {
+        const { rows: declared } = await context.sql.query<{ pools: string }>(
+          `SELECT count(*)::text AS pools FROM pools WHERE archived_at IS NULL AND policy ? 'substrate'`,
+        );
+        const pools = Number(declared[0]?.pools ?? 0);
+        if (pools > 0)
+          findings.push({
+            check: 'kubernetes.substrate-agent-missing',
+            severity: 'error',
+            message: `${pools} pool(s) declare policy.substrate, but kubernetes({ substrate }) is not configured: their clusters are never created and no bcd joins`,
+            fix: 'Pass kubernetes({ substrate: { agent: kubernetesSubstrateAgent({ image, gatewayUrl, pins, … }) } }) from @better-compute/provider-kubernetes',
+            count: pools,
+          });
+      }
+      // Substrates in error (the message is on the substrate; the pools are named here).
+      const { rows: failing } = await context.sql.query<{ pool_id: string }>(
+        `SELECT pool_id FROM kubernetes_pool_substrates WHERE state = 'error' ORDER BY pool_id LIMIT 101`,
+      );
+      if (failing.length > 0) {
+        const shown = failing.slice(0, 5).map((row) => row.pool_id);
+        const count = failing.length > 100 ? '100+' : String(failing.length);
+        findings.push({
+          check: 'kubernetes.substrate-error',
+          severity: 'warning',
+          message: `${count} pool substrate(s) are in error: ${shown.join(', ')}${failing.length > shown.length ? ', …' : ''}`,
+          fix: 'Read the substrate message (kubernetes.substrate.error events); fix policy.substrate, the provider account or the cluster, or archive the pool',
+          count: Math.min(failing.length, 100),
+        });
+      }
+      // Torn-down substrates whose adopted cluster keeps the substrate's credential identity (the provider cannot
+      // revoke credentials): a cluster-admin service account better-compute no longer manages.
+      const { rows: left } = await context.sql.query<{ pool_id: string }>(
+        `SELECT pool_id FROM kubernetes_pool_substrates WHERE state = 'deleted' AND message IS NOT NULL
+          ORDER BY pool_id LIMIT 101`,
+      );
+      if (left.length > 0) {
+        const shown = left.slice(0, 5).map((row) => row.pool_id);
+        findings.push({
+          check: 'kubernetes.substrate-credentials-left',
+          severity: 'warning',
+          message: `${left.length > 100 ? '100+' : left.length} torn-down substrate(s) left the service account bc-substrate (cluster-admin) on their adopted cluster: ${shown.join(', ')}${left.length > shown.length ? ', …' : ''}`,
+          fix: 'Delete ServiceAccount bc-access/bc-substrate and ClusterRoleBinding bc-access:bc-substrate on each adopted cluster (kubernetesSubstrates.get names it), or use a provider whose kubernetes driver implements revokeCredentials',
+          count: Math.min(left.length, 100),
+        });
+      }
+      return findings;
     },
-    // §12.8: a deleted tenant's clusters are deleted at the provider; DONE once all are gone.
+    // §12.8: a deleted tenant's clusters are deleted at the provider; DONE once all are gone. A pool substrate's
+    // cluster goes through its substrate (capacity's part of the teardown archives the pool): marked deleted here, the
+    // substrate's teardown would skip removing bcd, and an adopted cluster (never deleted) would keep bcd's privileged
+    // DaemonSet, its token Secret and the substrate's credential identity. The substrate is woken instead.
     async tenantDeleted(context, tenantId) {
       const deps = depsOf(context);
       return context.sql.transaction(async (tx) => {
-        const { rows } = await tx.query<{ id: string; tenant_id: string; desired_state: string }>(
-          `SELECT id, tenant_id, desired_state FROM kubernetes_clusters
+        const { rows } = await tx.query<{
+          id: string;
+          tenant_id: string;
+          desired_state: string;
+          substrate_pool_id: string | null;
+        }>(
+          `SELECT id, tenant_id, desired_state, substrate_pool_id FROM kubernetes_clusters
             WHERE tenant_id = $1 AND state <> 'deleted' ORDER BY id FOR UPDATE`,
           [tenantId],
         );
         for (const row of rows) {
+          if (row.substrate_pool_id !== null) {
+            await deps.work.enqueue(tx, substratesWork, row.substrate_pool_id);
+            continue;
+          }
           if (row.desired_state !== 'deleted') {
             await markDeleted(tx, row.id);
             await deps.events.publish(tx, {
@@ -359,7 +474,13 @@ export function kubernetes(
           }
           await deps.work.enqueue(tx, clustersWork, row.id);
         }
-        return rows.length > 0 ? 'SYNC_AGAIN' : 'DONE';
+        // Substrates still tearing down (their cluster may be gone already: the nodes are retired after it).
+        const { rows: substrates } = await tx.query<{ pool_id: string }>(
+          `SELECT pool_id FROM kubernetes_pool_substrates WHERE tenant_id = $1 AND state <> 'deleted' ORDER BY pool_id`,
+          [tenantId],
+        );
+        for (const substrate of substrates) await deps.work.enqueue(tx, substratesWork, substrate.pool_id);
+        return rows.length > 0 || substrates.length > 0 ? 'SYNC_AGAIN' : 'DONE';
       });
     },
   });

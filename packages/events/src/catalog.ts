@@ -324,6 +324,13 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
       'Managed data and platform services (databases, apps, functions, …): created { poolId, providerAccountId, family, name, region? }, ready the first time { outputs, secretOutputs } (output names only, never a value), updating { fields }, updated when ready again after a change, failed { message }, deleting { reason: requested | parent-deleted | tenant-deleted }, deleted; adopted { poolId, providerAccountId, family, name, providerId } (cloudResources.adopt), releasing and released (cloudResources.release: left running, unmanaged); data { resourceId, kind, ... }',
   },
   {
+    type: 'kubernetes.substrate.*',
+    subject: 'pool/{id}',
+    module: 'kubernetes',
+    description:
+      'Pool substrates (policy.substrate: the managed Kubernetes cluster behind a pool): created { providerAccountId, mode }, ready { clusterId, nodes }, error { message }, token-issued { tokenId, maxUses, ttlSeconds } and token-revoked { tokenId, reason } for the hosted join token bcd joins with (never the token itself), node-removed { nodeId, kubernetesNode, released, requeued, retired } when a pool node\'s Kubernetes Node is gone, its reservations ended and the node was retired, draining { version, bookings } and upgrading { version, drained } for upgrades: drain, deleting, deleted { retiredNodes }; data { poolId, ... }',
+  },
+  {
     type: 'fleet.*',
     subject: 'fleet/{id}',
     module: 'fleet',

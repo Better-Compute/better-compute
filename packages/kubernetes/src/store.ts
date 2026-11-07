@@ -82,6 +82,10 @@ export interface ClusterRow {
   provisioned_at: Date | string | null;
   ready_at: Date | string | null;
   deleted_at: Date | string | null;
+  /** (kubernetes/0002) A cluster that existed before: read, never created, changed or deleted. */
+  adopted: boolean;
+  /** (kubernetes/0002) The pool whose substrate this cluster is. */
+  substrate_pool_id: string | null;
 }
 
 export interface NodePoolRow {
@@ -114,7 +118,8 @@ export interface NodePoolRow {
 export const clusterColumns = `id, tenant_id, project_id, pool_id, provider_account_id, network_id, subnet_id, name,
   description, mode, location, region, release_channel, requested_version, authorized_networks, private_nodes,
   provider_name, provider_id, state, desired_state, message, endpoint, kubernetes_version, node_version, created_by,
-  encode(request_hash, 'hex') AS request_hash, version, created_at, provisioned_at, ready_at, deleted_at`;
+  encode(request_hash, 'hex') AS request_hash, version, created_at, provisioned_at, ready_at, deleted_at, adopted,
+  substrate_pool_id`;
 export const nodePoolColumns = `id, cluster_id, tenant_id, name, machine_type, node_count, autoscaling_min,
   autoscaling_max, disk_gib, disk_type, spot, accelerator_type, accelerator_count, zones, labels, taints, initial,
   state, desired_state, message, encode(request_hash, 'hex') AS request_hash, version, created_at, updated_at`;
@@ -184,6 +189,8 @@ export function clusterView(row: ClusterRow, pools: readonly NodePoolRow[]): Kub
     createdAt: ms(row.created_at),
     ...(row.ready_at !== null ? { readyAt: ms(row.ready_at) } : {}),
     ...(row.deleted_at !== null ? { deletedAt: ms(row.deleted_at) } : {}),
+    ...(row.adopted ? { adopted: true as const } : {}),
+    ...(row.substrate_pool_id !== null ? { substratePoolId: row.substrate_pool_id } : {}),
   };
 }
 

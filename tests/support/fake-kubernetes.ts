@@ -47,6 +47,10 @@ export interface FakeKubernetes {
   /** Every credential request, and the tokens minted. */
   credentials: { cluster: string; request: KubernetesCredentialRequest }[];
   tokens: string[];
+  /** The subjects that hold an identity on each cluster (`credentials` adds one, `revokeCredentials` removes it). */
+  subjects: Map<string, Set<string>>;
+  /** A driver without `revokeCredentials`. */
+  noRevoke?: boolean;
   reset(): void;
 }
 
@@ -59,6 +63,7 @@ export function fakeKubernetes(): FakeKubernetes {
     refuse: new Set(),
     credentials: [],
     tokens: [],
+    subjects: new Map(),
     reset() {
       this.clusters.clear();
       this.calls.length = 0;
@@ -68,6 +73,8 @@ export function fakeKubernetes(): FakeKubernetes {
       delete this.failNext;
       this.credentials.length = 0;
       this.tokens.length = 0;
+      this.subjects.clear();
+      delete this.noRevoke;
     },
   };
 }
@@ -180,7 +187,18 @@ export function fakeProviderKubernetes(cloud: FakeKubernetes): ProviderKubernete
     async getCluster(id) {
       cloud.calls.push(`getCluster ${id}`);
       const found = cloud.clusters.get(id);
-      return found ? { id, state: found.ready ? 'ready' : 'pending' } : undefined;
+      if (!found) return undefined;
+      if (!found.ready) return { id, state: 'pending' };
+      return {
+        id,
+        state: 'ready',
+        outputs: {
+          endpoint: found.endpoint,
+          version: found.version,
+          nodeVersion: found.version,
+          location: found.spec.location,
+        },
+      };
     },
     async deleteCluster(id) {
       begin(cloud, `deleteCluster ${id}`);
@@ -236,11 +254,22 @@ export function fakeProviderKubernetes(cloud: FakeKubernetes): ProviderKubernete
       const token = `fake-token-${request.subject}-${cloud.tokens.length + 1}`;
       cloud.tokens.push(token);
       cloud.credentials.push({ cluster: id, request });
+      if (!cloud.subjects.has(id)) cloud.subjects.set(id, new Set());
+      cloud.subjects.get(id)!.add(request.subject);
       return {
         server: found.endpoint,
         certificateAuthorityData: 'LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t',
         token,
         expiresAt: call.clock.now() + request.ttlSeconds * 1000,
+      };
+    },
+    get revokeCredentials() {
+      if (cloud.noRevoke) return undefined;
+      return async (id: string, subject: string) => {
+        begin(cloud, `revokeCredentials ${subject}`);
+        if (cloud.refuse.has('revokeCredentials'))
+          throw new ComputeError('ACCESS_DENIED', 'the account may not delete service accounts');
+        cloud.subjects.get(id)?.delete(subject);
       };
     },
     async versions(location) {

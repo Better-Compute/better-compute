@@ -1746,6 +1746,13 @@ export interface ProviderKubernetes {
     request: KubernetesCredentialRequest,
     context: CallContext,
   ): Promise<KubernetesCredentials>;
+  /**
+   * Optional: removes what `credentials` created on the cluster for `subject` (its service account and role
+   * binding), so no identity better-compute minted for stays on a cluster it no longer manages (an adopted cluster
+   * after its pool substrate is torn down). Idempotent: a subject or a cluster that is gone resolves. A driver
+   * without it leaves the subject in place (the kubernetes module reports that).
+   */
+  revokeCredentials?(cluster: string, subject: string, context: CallContext): Promise<void>;
   versions(location: string, context: CallContext): Promise<KubernetesVersions>;
   /**
    * (AWS A9) The clusters on the account, whoever created them, with what machines need to join one
@@ -2550,6 +2557,12 @@ export interface PkiPort {
        * attestation differ is refused without spending the token.
        */
       expect?: { mac?: string; productUuid?: string; serial?: string; gpuUuid?: string };
+      /**
+       * (kubernetes substrate) `kubernetes`: for bcd running as a DaemonSet the module applies to a cluster, as
+       * `joinTokens.create({ hosted })`: JoinService lands its nodes `tenant-controlled` unless the pool's
+       * `policy.kubernetes.platformOperated` is true. Role `node` only.
+       */
+      hosted?: 'kubernetes';
     },
   ): Promise<{ id: string; token: string }>;
   /**

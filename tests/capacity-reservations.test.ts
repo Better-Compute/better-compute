@@ -29,6 +29,7 @@ import {
   activeRecheckMs,
   cancelPendingReservation,
   capacityTenantDeleted,
+  endNodeReservations,
   finishStaleReleases,
   markAllocationBound,
   placeablePending,
@@ -886,6 +887,105 @@ describe('the reservation lifecycle', () => {
       `SELECT (extract(epoch FROM upper(during)) * 1000)::float8 AS end_ms FROM device_bookings`,
     );
     expect(rows.map((row) => row.end_ms)).toEqual([T0 + 15 * 60_000, T0 + 15 * 60_000]);
+  });
+
+  it('ends what a removed node held: bound ones released once, unbound ones re-placed (endNodeReservations)', async () => {
+    const bound = (await call('reservations', 'create', create())) as Rsv;
+    await reconcile(bound.id); // → binding
+    const { rows } = await db.query<{ id: string; node_id: string }>(
+      `SELECT id, node_id FROM allocations WHERE owner_id = $1`,
+      [bound.id],
+    );
+    const node = rows[0]!.node_id;
+    await db.transaction((tx) =>
+      markAllocationBound(tx, moduleContext(db).work, rows[0]!.id, { cdiDevices: ['a'] }),
+    );
+    await reconcile(bound.id); // → active
+    const later = (await call(
+      'reservations',
+      'create',
+      create({ idempotencyKey: 'key-2', start: T0 + HOUR }),
+    )) as Rsv;
+    const { rows: laterRows } = await db.query<{ node_id: string }>(
+      `SELECT node_id FROM allocations WHERE owner_id = $1`,
+      [later.id],
+    );
+    expect(laterRows[0]!.node_id).toBe(node);
+    expect((await readQuotas(db, 'acme', poolId))[0]!.used).toBe(4);
+    recorded.events = [];
+
+    // The substrate cordons the gone node, then ends what it held.
+    await db.query(`UPDATE nodes SET connectivity = 'unreachable', no_schedule_reasons = '{gone}' WHERE id = $1`, [node]);
+    // Every statement, to check capacity's lock order across both reservations.
+    const statements: string[] = [];
+    const ended = await db.transaction((tx) =>
+      endNodeReservations(
+        moduleContext(db),
+        new Proxy(tx, {
+          get(target, property) {
+            if (property === 'query')
+              return (text: string, params?: unknown[]) => {
+                statements.push(text);
+                return target.query(text, params as never);
+              };
+            const value = (target as any)[property];
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        }),
+        node,
+        'node-removed',
+      ),
+    );
+    expect(ended).toEqual({ requeued: [later.id], released: [bound.id] });
+    // Reservation rows, then quota, before any booking is released (quota_usage → … → devices).
+    const firstRelease = statements.findIndex((text) => /device_bookings|UPDATE allocations/.test(text));
+    const lastEarly = Math.max(
+      ...statements.map((text, index) =>
+        /FROM reservations[\s\S]*FOR UPDATE|quota_usage/.test(text) ? index : -1,
+      ),
+    );
+    expect(firstRelease).toBeGreaterThan(-1);
+    expect(lastEarly).toBeLessThan(firstRelease);
+    const get = async (id: string) =>
+      (await call('reservations', 'get', { tenantId: 'acme', reservationId: id })) as Rsv;
+    expect(await get(bound.id)).toMatchObject({
+      state: 'released',
+      conditions: expect.arrayContaining([expect.objectContaining({ type: 'NodeRemoved' })]),
+    });
+    expect(await get(later.id)).toMatchObject({
+      state: 'pending',
+      conditions: expect.arrayContaining([
+        expect.objectContaining({ type: 'Unschedulable', reason: 'NodeRemoved' }),
+      ]),
+    });
+    // Quota: the released one's refunded once, the re-queued one's kept.
+    expect((await readQuotas(db, 'acme', poolId))[0]!.used).toBe(2);
+    expect(
+      (await db.query(`SELECT 1 FROM allocations WHERE node_id = $1 AND released_at IS NULL`, [node])).rows,
+    ).toEqual([]);
+    expect(recorded.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'reservation.released', data: expect.objectContaining({ reason: 'node-removed', nodeId: node }) }),
+        expect.objectContaining({ type: 'reservation.pending', data: expect.objectContaining({ nodeId: node }) }),
+      ]),
+    );
+    expect(recorded.invalidated).toContain(node);
+
+    // Idempotent; and a release afterwards does not refund the quota again.
+    expect(
+      await db.transaction((tx) => endNodeReservations(moduleContext(db), tx, node)),
+    ).toEqual({ requeued: [], released: [] });
+    await call('reservations', 'release', { tenantId: 'acme', reservationId: bound.id });
+    expect((await readQuotas(db, 'acme', poolId))[0]!.used).toBe(2);
+
+    // The re-queued one lands on a node that is still there.
+    await reconcile(later.id);
+    const { rows: moved } = await db.query<{ node_id: string }>(
+      `SELECT node_id FROM allocations WHERE owner_id = $1 AND released_at IS NULL`,
+      [later.id],
+    );
+    expect(moved.map((row) => row.node_id)).toEqual([expect.not.stringMatching(node)]);
+    expect((await get(later.id)).state).toBe('placed');
   });
 
   it('cancels pending and not-yet-started reservations only', async () => {

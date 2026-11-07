@@ -58,6 +58,8 @@ export async function meterClusters(
        LEFT JOIN pools p ON p.id = k.pool_id
        LEFT JOIN provider_accounts a ON a.id = k.provider_account_id
       WHERE k.provisioned_at IS NOT NULL
+        -- An adopted cluster (a pool substrate's) was not created here: its hours are not ours to bill.
+        AND NOT k.adopted
         AND (k.deleted_at IS NULL OR k.metered_until IS DISTINCT FROM k.deleted_at)
         AND coalesce(k.metered_until, k.provisioned_at) < to_timestamp($1::float8 / 1000)
         AND (k.deleted_at IS NULL OR coalesce(k.metered_until, k.provisioned_at) < k.deleted_at)

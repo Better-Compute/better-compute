@@ -39,6 +39,8 @@ export interface FakeHardwareOptions {
   variant?: FakeHardwareVariant;
   /** `hgx-h100-gpu-missing`: which board position (0–7) is gone (default: derived from the seed). */
   missingGpu?: number;
+  /** The OS hostname the machine reports (default `fakehw`), e.g. its Kubernetes Node name. */
+  hostname?: string;
 }
 
 /** A fake node's hardware. */
@@ -654,6 +656,7 @@ export function fakeHardware(options: FakeHardwareOptions = {}): FakeHardware {
     default:
       throw new RangeError(`unknown fake hardware variant ${String(variant)}`);
   }
+  if (options.hostname !== undefined && inventory.os) inventory.os.hostname = options.hostname;
   canonicalizeInventory(inventory);
   const gpuUuids = (inventory.gpus?.gpus ?? []).map((gpu) => gpu.uuid);
   const system = inventory.system!;

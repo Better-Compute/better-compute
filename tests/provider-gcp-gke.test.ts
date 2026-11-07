@@ -576,6 +576,13 @@ class FakeKube {
       this.serviceAccounts.add(key);
       return ok(201, body);
     }
+    if (
+      (m = /^\/api\/v1\/namespaces\/([^/]+)\/serviceaccounts\/([^/]+)$/.exec(path)) &&
+      request.method === 'DELETE'
+    ) {
+      if (!this.serviceAccounts.delete(`${m[1]}/${m[2]}`)) return ok(404, missing);
+      return ok(200, { kind: 'Status', status: 'Success' });
+    }
     if ((m = /^\/api\/v1\/namespaces\/([^/]+)\/serviceaccounts\/([^/]+)\/token$/.exec(path))) {
       if (!this.serviceAccounts.has(`${m[1]}/${m[2]}`)) return ok(404, missing);
       const token = `kube-sa-token-${this.issued.length + 1}`;
@@ -682,6 +689,38 @@ describe('gke credentials', () => {
       'POST /api/v1/namespaces/bc-access/serviceaccounts/bc-u-bob/token',
     ]);
     expect(s.kube.bindings.get('bc-access:bc-u-bob')!.roleRef.name).toBe('cluster-admin');
+  });
+
+  it('revokes a subject: its binding and service account go, idempotently', async () => {
+    const s = await withKube();
+    await s.k8s.credentials(s.cluster, { subject: 'bc-substrate', role: 'admin', ttlSeconds: 600 }, s.ctx());
+    await s.k8s.credentials(s.cluster, { subject: 'bc-u-alice', role: 'view', ttlSeconds: 600 }, s.ctx());
+    s.kube.calls = [];
+    await s.k8s.revokeCredentials!(s.cluster, 'bc-substrate', s.ctx());
+    expect(s.kube.routes()).toEqual([
+      'DELETE /apis/rbac.authorization.k8s.io/v1/clusterrolebindings/bc-access:bc-substrate',
+      'DELETE /api/v1/namespaces/bc-access/serviceaccounts/bc-substrate',
+    ]);
+    expect(s.kube.bindings.has('bc-access:bc-substrate')).toBe(false);
+    expect(s.kube.serviceAccounts.has('bc-access/bc-substrate')).toBe(false);
+    // Another subject and the shared namespace stay.
+    expect(s.kube.bindings.has('bc-access:bc-u-alice')).toBe(true);
+    expect(s.kube.namespaces.has('bc-access')).toBe(true);
+    for (const call of s.kube.calls) expect(s.gke.gce.mintedTokens).toContain(call.token);
+    // Already gone, and a cluster that is gone: nothing left to revoke.
+    await s.k8s.revokeCredentials!(s.cluster, 'bc-substrate', s.ctx());
+    await s.k8s.revokeCredentials!('us-central1/bc-k-none', 'bc-substrate', s.ctx());
+    expect(s.logs.some((entry) => entry.message === 'gke.credentials.revoked')).toBe(true);
+    // A refusal is an error that names no token; a bad subject calls nothing.
+    s.kube.failWith = 403;
+    const refused = await rejection(s.k8s.revokeCredentials!(s.cluster, 'bc-u-alice', s.ctx()));
+    expect(isComputeError(refused, 'ACCESS_DENIED')).toBe(true);
+    for (const token of s.gke.gce.mintedTokens) expect(String((refused as Error).message)).not.toContain(token);
+    delete s.kube.failWith;
+    s.kube.calls = [];
+    const invalid = await rejection(s.k8s.revokeCredentials!(s.cluster, 'Bad Subject', s.ctx()));
+    expect(isComputeError(invalid, 'INVALID_INPUT')).toBe(true);
+    expect(s.kube.calls).toEqual([]);
   });
 
   it('validates the subject, role and ttl before calling anything', async () => {

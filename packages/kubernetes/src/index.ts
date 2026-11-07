@@ -12,3 +12,43 @@ export { clustersWork, providerClusterName, type KubernetesDeps } from './store.
 export { clustersReconciler, reconcileCluster, clusterLabel, clusterPollMs } from './reconciler.js';
 export { credentialSubject, renderKubeconfig } from './kubeconfig.js';
 export { clusterHoursMeter, meterClusters } from './usage.js';
+export {
+  parsePoolSubstrate,
+  substrateIdentity,
+  substratePolicyValidator,
+  type PoolSubstrate,
+  type SubstrateCreate,
+  type SubstrateFlavor,
+} from './substrate-policy.js';
+export {
+  reconcileSubstrate,
+  readSubstrate,
+  getSubstrate,
+  substrateView,
+  substratesReconciler,
+  substrateClusterName,
+  substrateNodePoolName,
+  adoptedRegion,
+  flavorLabels,
+  substratesWork,
+  substratePoolLabel,
+  substrateCapacityLabel,
+  substrateSubject,
+  substrateCredentialTtlSeconds,
+  substrateCreator,
+  substrateFirstConnectGraceSeconds,
+  substrateNodeRemovedReason,
+  substrateTeardownReason,
+  substrateUpgradeReason,
+  substrateUpgradeRecheckMs,
+  type SubstrateAgent,
+  type SubstrateClusterApi,
+  type SubstrateDeps,
+  type SubstrateNode,
+  type SubstrateObject,
+  type SubstrateObjectRef,
+  type SubstrateOptions,
+  type SubstrateRow,
+  type SubstrateState,
+  type SubstrateView,
+} from './substrates.js';
