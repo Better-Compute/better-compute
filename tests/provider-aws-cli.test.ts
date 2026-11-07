@@ -149,6 +149,31 @@ describe('provider-aws CLI policies', () => {
       );
   });
 
+  it('--ssm-prefix adds GetParameters on the host ssmImagePrefixes', async () => {
+    const plain = iamPolicy();
+    expect(plain.Statement.some((s) => s.Sid === 'PrivateImages')).toBe(false);
+    const policy = iamPolicy({
+      region: 'us-east-1',
+      account: '222222222222',
+      ssmPrefixes: ['/my/team/', '/golden/'],
+    });
+    const statement = policy.Statement.find((s) => s.Sid === 'PrivateImages')!;
+    expect(statement.Action).toBe('ssm:GetParameters');
+    expect(statement.Resource).toEqual([
+      'arn:aws:ssm:us-east-1:222222222222:parameter/my/team/*',
+      'arn:aws:ssm:us-east-1:222222222222:parameter/golden/*',
+    ]);
+    for (const bad of [['/my/team'], ['my/team/'], ['/a/../b/'], ['/*/']])
+      expect(() => iamPolicy({ ssmPrefixes: bad })).toThrow(
+        expect.objectContaining({ code: 'INVALID_INPUT' }),
+      );
+    const printed = harness({ 'ssm-prefix': '/my/team/,/golden/', region: 'us-east-1' });
+    await awsIamPolicyCommand().run(printed.context);
+    expect(JSON.parse(printed.out.join('\n'))).toEqual(
+      iamPolicy({ region: 'us-east-1', ssmPrefixes: ['/my/team/', '/golden/'] }),
+    );
+  });
+
   it('partition flows into ARNs', () => {
     const policy = iamPolicy({
       partition: 'aws-us-gov',
