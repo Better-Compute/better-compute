@@ -53,6 +53,11 @@ function fail(
   return new ComputeError(code, message, undefined, { provider: 'digitalocean', reason });
 }
 
+/** Whether a DO certificate name is one of this deployment's (`suffix` is `-<hash12>`). */
+export function ownedCertificateName(name: string, suffix: string): boolean {
+  return name.endsWith(suffix) && namePattern.test(name.slice(0, -suffix.length));
+}
+
 /** The DO name of a certificate: vps's name plus this deployment's hash. */
 export function certificateName(name: string, deployment: string): string {
   return `${name}-${deploymentHash(deployment)}`;
@@ -126,9 +131,7 @@ export class DoCertificates implements ProviderCertificates {
   }
 
   protected owned(cert: DoCertificate): boolean {
-    return (
-      cert.name.endsWith(this.suffix) && namePattern.test(cert.name.slice(0, -this.suffix.length))
-    );
+    return ownedCertificateName(cert.name, this.suffix);
   }
 
   /** The certificate, or undefined when it does not exist. */

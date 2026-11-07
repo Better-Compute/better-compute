@@ -15,6 +15,7 @@ import type { DoConfig } from '../config.js';
 import { deploymentHash, deploymentTag, labels, parseMachineId } from '../ids.js';
 import { vpcForNetwork } from '../networks/vpcs.js';
 import { carries } from '../storage/volumes.js';
+import { ownedCertificateName } from './certificates.js';
 
 // Load balancers (P4). DO gives a load balancer no tags (unverified) and keeps no name unique, so
 // the name carries the ownership: vps's name plus this deployment's hash (`<name>-<hash12>`). An
@@ -660,6 +661,46 @@ export class DoLoadBalancers implements ProviderLoadBalancers {
     return wanted;
   }
 
+  /**
+   * The certificates a load balancer terminates TLS with, each checked: it exists and is one of this deployment's
+   * (named by `ensureCertificate`). A load balancer never serves a certificate better-compute did not upload.
+   */
+  protected async targetCertificates(
+    spec: ProviderLoadBalancerSpec,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const ids = new Set(
+      [
+        ...spec.forwarding.map((rule) => rule.certificate),
+        ...(spec.domains ?? []).map((domain) => domain.certificate),
+      ]
+        .filter((id): id is string => id !== undefined)
+        .map((id) => id.toLowerCase()),
+    );
+    for (const id of ids) {
+      let cert: { id: string; name: string };
+      try {
+        cert = (
+          await this.client.request<{ certificate: { id: string; name: string } }>(
+            'GET',
+            `/certificates/${encodeURIComponent(id)}`,
+            { signal, budget: 'observe' },
+          )
+        ).certificate;
+      } catch (error) {
+        if (isComputeError(error, 'NOT_FOUND'))
+          throw fail('NOT_FOUND', `certificate ${id} does not exist`, 'certificate');
+        throw error;
+      }
+      if (!ownedCertificateName(cert.name, this.suffix))
+        throw fail(
+          'INVALID_STATE',
+          `certificate ${id} is not managed by this better-compute deployment; a load balancer never serves it`,
+          'notManaged',
+        );
+    }
+  }
+
   // ------------------------------------------------------------------------- ensure, get, find
 
   /**
@@ -695,7 +736,8 @@ export class DoLoadBalancers implements ProviderLoadBalancers {
     const global = spec.scope === 'global';
     const region = spec.region;
     const doName = `${spec.name}${this.suffix}`;
-    // Before any write: the targets, and the VPC a network names.
+    // Before any write: the certificates, the targets, and the VPC a network names.
+    await this.targetCertificates(spec, signal);
     let want: Desired;
     let vpc: string | undefined;
     if (global) {

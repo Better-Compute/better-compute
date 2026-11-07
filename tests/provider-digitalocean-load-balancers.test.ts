@@ -6,6 +6,7 @@ import {
 } from '@better-compute/core';
 import {
   deploymentHash,
+  certificateName,
   deploymentTag,
   labels,
   loadBalancerName,
@@ -132,7 +133,7 @@ describe('provider-digitalocean load balancers: create and find', () => {
 
   it('maps TLS, stickiness, source ranges, redirects and a subnet', async () => {
     const { emu, impl } = await setup();
-    emu.state.certificates.set(certId, { id: certId, name: 'c' });
+    emu.state.certificates.set(certId, { id: certId, name: certificateName('c', 'default') });
     const vpc = seedVpc(emu.state, {
       name: 'bc-sub1',
       region: 'nyc3',
@@ -287,6 +288,26 @@ describe('provider-digitalocean load balancers: create and find', () => {
       ),
     );
     expect([gone.code, gone.details?.reason]).toEqual(['NOT_FOUND', 'machine']);
+    expect(writes(emu)).toHaveLength(0);
+  });
+
+  it('a certificate that is not one of this deployment, or is gone, is refused before any write', async () => {
+    const { emu, impl } = await setup();
+    const ours = host(emu);
+    const foreignId = '2a9d9a3c-0000-4000-8000-00000000f00d';
+    emu.state.certificates.set(foreignId, { id: foreignId, name: 'operator-cert' });
+    const tls = (certificate: string) =>
+      spec([ours], {
+        forwarding: [
+          { entryProtocol: 'https', entryPort: 443, targetProtocol: 'http', targetPort: 80, certificate },
+        ],
+      });
+    const foreign = await failure(impl.loadBalancers.ensureLoadBalancer(tls(foreignId), ctx()));
+    expect([foreign.code, foreign.details?.reason]).toEqual(['INVALID_STATE', 'notManaged']);
+    const gone = await failure(
+      impl.loadBalancers.ensureLoadBalancer(tls('2a9d9a3c-0000-4000-8000-0000000000aa'), ctx()),
+    );
+    expect([gone.code, gone.details?.reason]).toEqual(['NOT_FOUND', 'certificate']);
     expect(writes(emu)).toHaveLength(0);
   });
 
@@ -560,7 +581,7 @@ describe('provider-digitalocean load balancers: global', () => {
 
   it('fronts regional load balancers of ours, with unmanaged domains', async () => {
     const { emu, impl } = await setup();
-    emu.state.certificates.set(certId, { id: certId, name: 'c' });
+    emu.state.certificates.set(certId, { id: certId, name: certificateName('c', 'default') });
     const nyc = await regional(emu, impl);
     const sfo = await regional(emu, impl, 'bc-lb2', 'sfo3');
     emu.requests.length = 0;
