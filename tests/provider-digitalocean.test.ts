@@ -2490,6 +2490,9 @@ describe('definition', () => {
         storage: 'ok',
         addresses: 'ok',
         nfs: 'unavailable',
+        loadBalancers: 'ok',
+        dns: 'ok',
+        certificates: 'ok',
       });
       expect(report.missing).toEqual([]);
     }
