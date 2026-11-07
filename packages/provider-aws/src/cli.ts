@@ -275,7 +275,27 @@ function ebsStatements(
     },
     Null: { [`ec2:ResourceTag/${tags.snapshot}`]: 'false' },
   };
+  // RunTagged and TagOnCreate let RunInstances tag the root volumes it creates with any key: deny
+  // the two name keys there, so a root volume can never look like a data volume or snapshot to
+  // EbsManageOwned (provider-aws also drops them from instance labels; this makes AWS enforce it).
+  const nameKeys = {
+    'ForAnyValue:StringEquals': { 'aws:TagKeys': [tags.volume, tags.snapshot] },
+  };
   return [
+    {
+      Sid: 'EbsRootNeverNamed',
+      Effect: 'Deny',
+      Action: 'ec2:RunInstances',
+      Resource: volumes,
+      Condition: nameKeys,
+    },
+    {
+      Sid: 'EbsRootNeverTagged',
+      Effect: 'Deny',
+      Action: 'ec2:CreateTags',
+      Resource: volumes,
+      Condition: { ...nameKeys, StringEquals: { 'ec2:CreateAction': 'RunInstances' } },
+    },
     {
       Sid: 'EbsCreateTagged',
       Effect: 'Allow',
@@ -411,7 +431,7 @@ export function awsIamPolicyCommand() {
     group: 'Providers' as const,
     summary: 'Print the IAM permissions policy an AWS provider account needs',
     description:
-      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; EBS volumes and snapshots created only tagged better-compute:managed=true and changed, attached, snapshotted or deleted only when they carry it and their better-compute:volume or better-compute:snapshot name, so never a root volume (attach and detach only on instances carrying better-compute:instance); public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; --ssm-prefix /a/,/b/ adds ssm:GetParameters on the host ssmImagePrefixes.',
+      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; EBS volumes and snapshots created only tagged better-compute:managed=true and changed, attached, snapshotted or deleted only when they carry it and their better-compute:volume or better-compute:snapshot name, which RunInstances may never put on a volume, so never a root volume (attach and detach only on instances carrying better-compute:instance); public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; --ssm-prefix /a/,/b/ adds ssm:GetParameters on the host ssmImagePrefixes.',
     target: 'none' as const,
     output: 'text' as const,
     flags: {

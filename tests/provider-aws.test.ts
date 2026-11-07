@@ -377,7 +377,17 @@ describe('compute', () => {
   it('create sends a hardened RunInstances', async () => {
     const { emu, create } = await providerWorld();
     const machine = await create('ins_test1', {
-      labels: { team: 'ml', managed: 'false', tenant: 't_forged', pool: 'p_forged', instance: 'x' },
+      labels: {
+        team: 'ml',
+        managed: 'false',
+        tenant: 't_forged',
+        pool: 'p_forged',
+        instance: 'x',
+        // (A5) A root volume never carries a data volume's or snapshot's name tag: EBS calls and
+        // the iam-policy statements would then manage it as a data volume.
+        volume: 'x',
+        snapshot: 'y',
+      },
     });
     expect(machine.id).toMatch(/^i-[0-9a-f]{17}$/);
     expect(machine.state).toBe('pending');
