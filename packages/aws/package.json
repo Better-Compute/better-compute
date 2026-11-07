@@ -1,6 +1,6 @@
 {
   "name": "@better-compute/aws",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "AWS platform services behind better-compute seams: Secrets Manager, Parameter Store, KMS, S3, EventBridge, SNS, SQS, Kinesis, Firehose, ACM Private CA, RDS IAM auth and CloudWatch EMF. No AWS SDK.",
   "type": "module",
   "license": "Apache-2.0",

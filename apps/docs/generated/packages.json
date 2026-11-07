@@ -13,7 +13,7 @@
     "directory": "packages/aws",
     "description": "AWS platform services behind better-compute seams: Secrets Manager, Parameter Store, KMS, S3, EventBridge, SNS, SQS, Kinesis, Firehose, ACM Private CA, RDS IAM auth and CloudWatch EMF. No AWS SDK.",
     "private": false,
-    "version": "0.1.0",
+    "version": "0.3.0",
     "release": "not released: not ready: the AWS platform services are still in progress",
     "exports": ["."]
   },
