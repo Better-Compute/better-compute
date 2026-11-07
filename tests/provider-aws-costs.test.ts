@@ -180,6 +180,36 @@ describe('provider-aws costs (Cost Explorer)', () => {
     });
   });
 
+  it("region scope also reads the Local Zone groups of the account's zones", async () => {
+    const { ce, read, today } = await world({
+      region: 'us-west-2',
+      zones: ['us-west-2a', 'us-west-2-lax-1a', 'us-west-2-lax-1b'],
+      costs: 'region',
+    });
+    ce.lines.push(
+      line({ region: 'us-west-2', usageType: 'USW2-BoxUsage:m7i.large', cost: '1' }),
+      // Cost Explorer reports Local Zone usage under the zone group's own REGION value
+      line({
+        region: 'us-west-2-lax-1',
+        usageType: 'USW2-LAX1-BoxUsage:t3.medium',
+        cost: '2',
+        tags: { [instanceTag]: 'ins_lz' },
+      }),
+      // a Local Zone group the account does not list stays out
+      line({ region: 'us-west-2-den-1', usageType: 'USW2-DEN1-BoxUsage:t3.medium', cost: '4' }),
+    );
+    const records = await read(today - 3 * DAY, today);
+    expect(records.map((record) => [record.sku, record.region, record.costMicros])).toEqual([
+      ['USW2-LAX1-BoxUsage:t3.medium', 'us-west-2', 2_000_000],
+      ['USW2-BoxUsage:m7i.large', 'us-west-2', 1_000_000],
+    ]);
+    expect(records[0]!.labels).toEqual({ 'better-compute-instance': 'ins_lz' });
+    for (const query of ce.queries)
+      expect(JSON.stringify(query.Filter)).toContain(
+        '"Key":"REGION","Values":["us-west-2","us-west-2-lax-1"]',
+      );
+  });
+
   it('account scope reads every region of the account', async () => {
     const { ce, read, today } = await world({ costs: 'account' });
     ce.lines.push(

@@ -13,7 +13,8 @@ import { tags } from './ids.js';
 
 // Provider costs (A11, D10) from Cost Explorer `GetCostAndUsage`, DAILY. Cost Explorer charges per request and
 // allows two GroupBy keys, so one window is three queries, each filtered to the caller's own linked account
-// (a payer role never reads its member accounts) and, in `region` scope, to the account's region:
+// (a payer role never reads its member accounts) and, in `region` scope, to the account's region and the Local Zone
+// groups of its zones (Cost Explorer reports Local Zone usage under the group's own REGION, `us-west-2-lax-1`):
 //
 // 1. regular usage by the `better-compute:instance` tag and USAGE_TYPE;
 // 2. regular usage without that tag, by the `better-compute:tenant` tag and USAGE_TYPE (provider-aws never writes
@@ -172,6 +173,18 @@ const dayText = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 const floorDay = (ms: number) => Math.floor(ms / DAY) * DAY;
 const ceilDay = (ms: number) => Math.ceil(ms / DAY) * DAY;
 
+/**
+ * The REGION values of a region-scoped account: its region, then the Local Zone groups its zones name
+ * (`us-west-2-lax-1a` → `us-west-2-lax-1`), each once.
+ */
+export function costRegions(config: Pick<AwsConfig, 'region' | 'zones'>): string[] {
+  const localZone = new RegExp(`^${config.region.replace(/-/g, '\\-')}-[a-z]{2,10}-\\d{1,2}[a-z]$`);
+  const out = [config.region];
+  for (const zone of config.zones)
+    if (localZone.test(zone) && !out.includes(zone.slice(0, -1))) out.push(zone.slice(0, -1));
+  return out;
+}
+
 /** `Credit`, `Recurring reservation fee`, `SavingsPlanNegation` → `credit`, `recurring-reservation-fee`, … */
 function costTypeOf(recordType: string): string {
   return (
@@ -243,6 +256,7 @@ export function costExplorerCosts(
   const cacheMs = options.cacheMs ?? DAY;
   const maxPages = options.maxPages ?? 200;
   const region = deps.config.region;
+  const regions = costRegions(deps.config);
   /** Day start → the day's records and when they were read. */
   const days = new Map<number, { readAt: number; records: ProviderCostRecord[] }>();
 
@@ -268,7 +282,7 @@ export function costExplorerCosts(
           },
         );
       const base = [dimension('LINKED_ACCOUNT', [accountId])];
-      if (scope === 'region') base.push(dimension('REGION', [region]));
+      if (scope === 'region') base.push(dimension('REGION', regions));
       let response: CeResponse;
       try {
         response = await deps.ce.call<CeResponse>(
