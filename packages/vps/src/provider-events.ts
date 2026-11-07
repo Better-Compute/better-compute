@@ -39,7 +39,7 @@ import {
 // | interruption-warning | `InterruptionPending` condition, `instance.interruption`; the node the machine backs (a joined provider bootstrap) gets the NoSchedule taint `<provider>.spot/interruption` and its reservations the spot notice up to the deadline. Past its deadline: only the reconcile |
 // | machine-changed, state running, after a pending interruption's deadline | both conditions cleared, the taint removed (`node.tainted` with it in `removed`) |
 // | rebalance-recommended | `RebalanceRecommended` condition (renewed by each one), `instance.rebalance-recommended` |
-// | maintenance-scheduled | `MaintenanceScheduled` condition (cleared when completed or canceled), `instance.maintenance` |
+// | maintenance-scheduled | `MaintenanceScheduled` condition (cleared when completed or canceled; a Health update older than its event's close sets nothing), `instance.maintenance` |
 // | reservation-changed | the account's `vps.reservations` scan is enqueued |
 // | health | `instance.health` |
 // Machines that are no live instance (or joined bootstrap) are ignored.
@@ -459,7 +459,7 @@ export async function handleEvents(
           });
         break;
       case 'maintenance-scheduled':
-        if (target.instanceId) await maintenance(deps, tx, target.instanceId, event);
+        if (target.instanceId) await maintenance(deps, tx, account.id, target.instanceId, event);
         break;
       case 'health':
         if (target.instanceId)
@@ -542,15 +542,38 @@ async function conditionEvent(
   });
 }
 
+/**
+ * `MaintenanceScheduled` set or cleared. An event with a `healthEvent` fact (one AWS Health event,
+ * whose updates come as separate messages in no order) is closed for good: the close is remembered
+ * in `provider_event_seen` as `health-closed/<machine>/<healthEvent>` (refreshed by each close, so
+ * kept as long as an older update could still be processed), and an update after it sets nothing.
+ */
 async function maintenance(
   deps: InstanceDeps,
   tx: SqlTx,
+  accountId: string,
   instanceId: string,
   event: ProviderEvent,
 ): Promise<void> {
   const facts = eventDetails(event.details);
   const status = facts?.status ?? 'scheduled';
   const over = /^(completed|canceled|cancelled|closed|resolved)$/i.test(status);
+  if (facts?.healthEvent !== undefined && event.machineId !== undefined) {
+    const marker = `health-closed/${event.machineId}/${facts.healthEvent}`;
+    if (over)
+      await tx.query(
+        `INSERT INTO provider_event_seen (account_id, event_id) VALUES ($1, $2)
+         ON CONFLICT (account_id, event_id) DO UPDATE SET seen_at = compute_now()`,
+        [accountId, marker],
+      );
+    else {
+      const { rows } = await tx.query(
+        `SELECT 1 FROM provider_event_seen WHERE account_id = $1 AND event_id = $2`,
+        [accountId, marker],
+      );
+      if (rows.length > 0) return;
+    }
+  }
   const when = event.deadline === undefined ? 'soon' : `at ${iso(event.deadline)}`;
   await conditionEvent(
     deps,

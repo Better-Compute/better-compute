@@ -283,6 +283,123 @@ describe('provider-aws event intake', () => {
     ).not.toThrow();
   });
 
+  it('only scheduled-change Health events are maintenance; issues are health per instance', () => {
+    const filter = { account: platformAccount, region: 'us-east-1', sources: new Set(['aws.health']) };
+    const arn =
+      'arn:aws:health:us-east-1::event/EC2/AWS_EC2_INSTANCE_REBOOT_MAINTENANCE_SCHEDULED/AWS_EC2_INSTANCE_REBOOT_MAINTENANCE_SCHEDULED_726c1732-d6f6-4037-b9b8-bec3c2d3ba65';
+    const health = (detail: Record<string, unknown>) =>
+      mapEventBridgeEnvelope(envelope('AWS Health Event', detail, { id: 'h-1', source: 'aws.health' }), filter);
+    expect(
+      health({
+        service: 'EC2',
+        eventArn: arn,
+        eventTypeCode: 'AWS_EC2_INSTANCE_REBOOT_MAINTENANCE_SCHEDULED',
+        eventTypeCategory: 'scheduledChange',
+        statusCode: 'open',
+        affectedEntities: [{ entityValue: 'i-0abc12345678def01' }],
+      }),
+    ).toEqual({
+      events: [
+        {
+          id: 'h-1/i-0abc12345678def01',
+          kind: 'maintenance-scheduled',
+          machineId: 'i-0abc12345678def01',
+          at: T,
+          details: {
+            code: 'AWS_EC2_INSTANCE_REBOOT_MAINTENANCE_SCHEDULED',
+            status: 'open',
+            // The ARN's unique tail (the whole ARN is longer than a fact may be).
+            healthEvent: 'AWS_EC2_INSTANCE_REBOOT_MAINTENANCE_SCHEDULED_726c1732-d6f6-4037-b9b8-bec3c2d3ba65',
+          },
+        },
+      ],
+    });
+    expect(
+      health({
+        service: 'EC2',
+        eventTypeCode: 'AWS_EC2_INSTANCE_STORE_DRIVE_PERFORMANCE_DEGRADED',
+        eventTypeCategory: 'issue',
+        statusCode: 'open',
+        affectedEntities: [{ entityValue: 'i-0abc12345678def01' }, { entityValue: 'i-0abc12345678def02' }],
+      }),
+    ).toEqual({
+      events: ['i-0abc12345678def01', 'i-0abc12345678def02'].map((machineId) => ({
+        id: `h-1/${machineId}`,
+        kind: 'health',
+        machineId,
+        at: T,
+        details: { service: 'EC2', code: 'AWS_EC2_INSTANCE_STORE_DRIVE_PERFORMANCE_DEGRADED', status: 'open', category: 'issue' },
+      })),
+    });
+  });
+
+  it('Capacity Reservation and Capacity Block notices are reservation changes', () => {
+    // Detail types as the EC2 user guide documents them (capacity-blocks-monitor, cr-eventbridge).
+    const filter = { account: platformAccount, region: 'us-east-1', sources: new Set(['aws.ec2', 'aws.health']) };
+    const resources = [`arn:aws:ec2:us-east-1:${platformAccount}:capacity-reservation/cr-0123456789abcdef0`];
+    for (const type of ['Capacity Block Delivered', 'Capacity Block Expiration Warning'])
+      expect(
+        mapEventBridgeEnvelope(
+          envelope(type, { 'capacity-reservation-id': 'cr-0123456789abcdef0', 'end-date': '2026-10-02T11:30:00Z' }, { id: 'cb', resources }),
+          filter,
+        ),
+        type,
+      ).toEqual({ events: [{ id: 'cb', kind: 'reservation-changed', reservationId: 'cr-0123456789abcdef0', at: T }] });
+    // A Capacity Block instance about to be terminated is an interruption.
+    expect(
+      mapEventBridgeEnvelope(
+        envelope(
+          'EC2 Capacity Reservation Instance Interruption Warning',
+          {
+            'instance-id': 'i-0abc12345678def01',
+            'instance-action': 'terminate',
+            'instance-termination-time': iso(T + 600_000),
+            'instance-lifecycle': 'capacity-block',
+          },
+          { id: 'cbi' },
+        ),
+        filter,
+      ),
+    ).toEqual({
+      events: [
+        {
+          id: 'cbi',
+          kind: 'interruption-warning',
+          machineId: 'i-0abc12345678def01',
+          at: T,
+          deadline: T + 600_000,
+          details: { action: 'terminate', lifecycle: 'capacity-block' },
+        },
+      ],
+    });
+    // ODCR underutilization comes from AWS Health, naming the reservations (the summary with extra columns).
+    expect(
+      mapEventBridgeEnvelope(
+        envelope(
+          'AWS Health Event',
+          {
+            service: 'EC2',
+            eventTypeCode: 'AWS_EC2_ODCR_UNDERUTILIZATION_NOTIFICATION_SUMMARY',
+            eventTypeCategory: 'accountNotification',
+            affectedEntities: [
+              { entityValue: 'cr-01234567890abcdef | us-east-1b | t3.medium | Linux/UNIX | 0.0%' },
+              { entityValue: 'cr-09876543210fedcba | us-east-1a | t3.medium | Linux/UNIX | 0.0%' },
+            ],
+          },
+          { id: 'odcr', source: 'aws.health' },
+        ),
+        filter,
+      ),
+    ).toEqual({
+      events: ['cr-01234567890abcdef', 'cr-09876543210fedcba'].map((reservationId) => ({
+        id: `odcr/${reservationId}`,
+        kind: 'reservation-changed',
+        reservationId,
+        at: T,
+      })),
+    });
+  });
+
   it('mapEventBridgeEnvelope is pure and refuses malformed instance ids', () => {
     const filter = { account: platformAccount, region: 'us-east-1', sources: new Set(['aws.ec2']) };
     expect(

@@ -530,6 +530,35 @@ describe('vps.provider-events', () => {
     ]);
   });
 
+  it('a Health update older than its close does not set maintenance again', async () => {
+    // Each Health update is a new message in an unordered queue: the close can come first.
+    const world = await eventsWorld();
+    const vm = await world.instance('vm-1');
+    const at = world.fixture.clock.now();
+    const update = (id: string, status: string, healthEvent: string): ProviderEvent => ({
+      id,
+      kind: 'maintenance-scheduled',
+      machineId: vm.machineId,
+      at,
+      deadline: at + 86_400_000,
+      details: { code: 'AWS_EC2_INSTANCE_REBOOT_MAINTENANCE_SCHEDULED', status, healthEvent },
+    });
+    world.intake.pending.push(update('u-closed', 'closed', 'EV_1'), update('u-open', 'open', 'EV_1'));
+    await world.poll();
+    const types = async () => (await instanceRow(world, vm.id)).conditions.map((c) => c.type);
+    expect(await types()).not.toContain(maintenanceCondition);
+    // A later delivery of the older update, in its own batch: still nothing.
+    world.intake.pending.push(update('u-upcoming', 'upcoming', 'EV_1'));
+    await world.fixture.advance(15_000);
+    await world.poll();
+    expect(await types()).not.toContain(maintenanceCondition);
+    // Another Health event for the same instance still sets it.
+    world.intake.pending.push(update('u-other', 'open', 'EV_2'));
+    await world.fixture.advance(15_000);
+    await world.poll();
+    expect(await types()).toContain(maintenanceCondition);
+  });
+
   it('polling alone still converges with intake disabled', async () => {
     const world = await gceWorld({ discovery: { every: '1m' } });
     const created = await world.api.instances.create(world.acme, {

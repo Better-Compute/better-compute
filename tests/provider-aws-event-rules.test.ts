@@ -131,6 +131,39 @@ describe('aws event-rules', () => {
     });
   });
 
+  it('the Ec2Events rule passes the documented Capacity Block and Capacity Reservation types', () => {
+    // As the EC2 user guide names them (Monitor Capacity Blocks using EventBridge): none starts
+    // with "EC2 Capacity Block", so a rule narrower than the mapper would drop them.
+    const documented = [
+      'Capacity Block Delivered',
+      'Capacity Block Expiration Warning',
+      'EC2 Capacity Reservation Instance Interruption Warning',
+    ];
+    const template = eventRulesTemplate({ queueName: 'bc-events', account: '123456789012' });
+    const pattern = (template.Resources as Record<string, Resource>).Ec2Events!.Properties.EventPattern[
+      'detail-type'
+    ] as (string | { prefix: string })[];
+    const passes = (type: string) =>
+      pattern.some((entry) => (typeof entry === 'string' ? entry === type : type.startsWith(entry.prefix)));
+    const filter = { account: '123456789012', region: 'us-east-1', sources: new Set(['aws.ec2']) };
+    for (const type of documented) {
+      expect(passes(type), type).toBe(true);
+      const mapped = mapEventBridgeEnvelope(
+        {
+          id: 'e',
+          'detail-type': type,
+          source: 'aws.ec2',
+          account: '123456789012',
+          region: 'us-east-1',
+          time: '2026-10-01T12:00:00Z',
+          detail: { 'instance-id': 'i-0abc12345678def01', 'capacity-reservation-id': 'cr-0123456789abcdef0' },
+        },
+        filter,
+      );
+      expect(mapped, type).toMatchObject({ events: [expect.anything()] });
+    }
+  });
+
   it('refuses a bad queue name or account', () => {
     expect(() => eventRulesTemplate({ queueName: 'a b', account: '123456789012' })).toThrow(
       expect.objectContaining({ code: 'INVALID_INPUT' }),

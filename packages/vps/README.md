@@ -135,7 +135,7 @@ has passed only wakes the instance reconcile. Events never write machine state:
 | `interruption-warning` | `InterruptionPending` condition and `instance.interruption { deadline }`. When the machine backs a node (a joined provider bootstrap), the node's reservations get the spot notice up to the deadline (cut back, or re-queued when not started) and the node the NoSchedule taint `<provider>.spot/interruption` (`node.tainted`). The machine is remembered in `provider_interruptions` until it is seen running again. |
 | `machine-changed` with state `running`, after a pending interruption's deadline | A Spot machine stopped or hibernated by the interruption runs again: `InterruptionPending` and `RebalanceRecommended` are cleared and the taint removed (`node.tainted` with the key in `removed`, reason `interruption-over`). A running change from before the deadline clears nothing. |
 | `rebalance-recommended` | `RebalanceRecommended` condition and `instance.rebalance-recommended`. Each recommendation renews the condition; the instance reconcile drops it 4 hours after the last one (EC2 often recommends a rebalance and never interrupts). |
-| `maintenance-scheduled` | `MaintenanceScheduled` condition (cleared when the event completes or is canceled) and `instance.maintenance`. |
+| `maintenance-scheduled` | `MaintenanceScheduled` condition (cleared when the event completes or is canceled) and `instance.maintenance`. An event naming its `healthEvent` (one AWS Health event, whose updates come in no order) stays closed once a close is processed: an older update delivered later sets nothing. |
 | `reservation-changed` | The account's `vps.reservations` scan is enqueued. |
 | `health` | `instance.health`. |
 

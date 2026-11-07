@@ -94,6 +94,17 @@ function event(
   };
 }
 
+/**
+ * A Health event's key: the last segment of its ARN (`<CODE>_<uuid>`), its last 128 characters
+ * when longer. The whole ARN is longer than a fact may be.
+ */
+function healthEventKey(arn: unknown): string | undefined {
+  const found = text(arn, 512);
+  if (!found || !found.startsWith('arn:')) return undefined;
+  const tail = found.slice(found.lastIndexOf('/') + 1);
+  return /^[\w.:-]+$/.test(tail) ? tail.slice(-128) : undefined;
+}
+
 /** `cr-…` from the detail or a capacity-reservation ARN among the resources. */
 function reservationOf(detail: Record<string, unknown>, resources: unknown): string | undefined {
   for (const key of ['capacity-reservation-id', 'capacityReservationId', 'capacity-block-id']) {
@@ -137,9 +148,12 @@ function trailInstances(detail: Record<string, unknown>): string[] {
  * | EC2 Instance State-change Notification | machine-changed |
  * | EC2 Spot Instance Interruption Warning | interruption-warning (deadline = time + 2 min) |
  * | EC2 Instance Rebalance Recommendation | rebalance-recommended |
- * | AWS Health Event (service EC2, naming instances) | maintenance-scheduled per instance (deadline = startTime) |
+ * | EC2 Capacity Reservation Instance Interruption Warning | interruption-warning (deadline = instance-termination-time) |
+ * | AWS Health Event (service EC2, scheduledChange, naming instances) | maintenance-scheduled per instance (deadline = startTime) |
+ * | AWS Health Event (service EC2, another category, naming instances) | health per instance |
+ * | AWS Health Event (naming Capacity Reservations, e.g. ODCR underutilization) | reservation-changed per reservation |
  * | AWS Health Event (otherwise) | health |
- * | any aws.ec2 type naming a Capacity Reservation, Capacity Block or ODCR | reservation-changed |
+ * | any other aws.ec2 type naming a Capacity Reservation, Capacity Block or ODCR | reservation-changed |
  * | AWS API Call via CloudTrail (EC2 instance calls that succeeded) | api-call per instance |
  * | GuardDuty Finding (aws.guardduty, when allowed) | health |
  */
@@ -186,6 +200,22 @@ export function mapEventBridgeEnvelope(
           ],
         };
       }
+      case 'EC2 Capacity Reservation Instance Interruption Warning': {
+        // A Capacity Block instance terminated as its block ends (EC2 user guide, Capacity Blocks).
+        const machineId = instance();
+        if (!machineId) return { dropped: 'malformed' };
+        const ends = Date.parse(text(detail['instance-termination-time'], 64) ?? '');
+        const facts = details({ action: detail['instance-action'], lifecycle: detail['instance-lifecycle'] });
+        return {
+          events: [
+            event(base, 'interruption-warning', {
+              machineId,
+              deadline: Number.isFinite(ends) ? ends : at + spotWarningMs,
+              ...(facts ? { details: facts } : {}),
+            }),
+          ],
+        };
+      }
       case 'EC2 Instance Rebalance Recommendation': {
         const machineId = instance();
         if (!machineId) return { dropped: 'malformed' };
@@ -214,17 +244,38 @@ export function mapEventBridgeEnvelope(
 
   if (source === 'aws.health') {
     if (detailType !== 'AWS Health Event') return { dropped: 'unknownType' };
-    const facts = details({ code: detail.eventTypeCode, status: detail.statusCode });
-    const machines = Array.isArray(detail.affectedEntities)
-      ? detail.affectedEntities
-          .slice(0, 500)
-          .map((entity) => text(record(entity)?.entityValue, 32))
-          .filter((value): value is string => value !== undefined && instancePattern.test(value))
+    const entities = Array.isArray(detail.affectedEntities)
+      ? detail.affectedEntities.slice(0, 500).map((entity) => text(record(entity)?.entityValue, 256))
       : [];
+    const machines = [
+      ...new Set(entities.filter((value): value is string => value !== undefined && instancePattern.test(value))),
+    ];
     if (detail.service === 'EC2' && machines.length > 0) {
+      // Only a scheduled change is maintenance; an issue (degraded hardware, a network problem) or
+      // an account notification is a health fact about the instance.
+      if (detail.eventTypeCategory !== 'scheduledChange') {
+        const facts = details({
+          service: detail.service,
+          code: detail.eventTypeCode,
+          status: detail.statusCode,
+          category: detail.eventTypeCategory,
+        });
+        return {
+          events: machines.map((machineId) =>
+            event(base, 'health', { machineId, idSuffix: machineId, ...(facts ? { details: facts } : {}) }),
+          ),
+        };
+      }
+      // Each update of one Health event is a new envelope, in no order: vps keys a close on the
+      // event (the ARN's unique tail) so an older update coming later does not set it again.
+      const facts = details({
+        code: detail.eventTypeCode,
+        status: detail.statusCode,
+        healthEvent: healthEventKey(detail.eventArn),
+      });
       const start = Date.parse(text(detail.startTime, 64) ?? '');
       return {
-        events: [...new Set(machines)].map((machineId) =>
+        events: machines.map((machineId) =>
           event(base, 'maintenance-scheduled', {
             machineId,
             idSuffix: machineId,
@@ -234,6 +285,21 @@ export function mapEventBridgeEnvelope(
         ),
       };
     }
+    // Capacity Reservation notices (AWS_EC2_ODCR_UNDERUTILIZATION_NOTIFICATION and its summary,
+    // whose entities read "cr-… | zone | type | platform | use").
+    const reservations = [
+      ...new Set(
+        entities
+          .map((value) => /^(cr-[0-9a-f]{8,17})(?:\s|$)/.exec(value ?? '')?.[1])
+          .filter((value): value is string => value !== undefined),
+      ),
+    ];
+    if (reservations.length > 0)
+      return {
+        events: reservations.map((reservationId) =>
+          event(base, 'reservation-changed', { reservationId, idSuffix: reservationId }),
+        ),
+      };
     const general = details({ service: detail.service, code: detail.eventTypeCode, status: detail.statusCode });
     return { events: [event(base, 'health', general ? { details: general } : {})] };
   }

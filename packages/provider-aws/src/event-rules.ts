@@ -13,7 +13,7 @@ import type { AwsCommandContext } from './cli.js';
 
 const usage = (message: string) => new ComputeError('INVALID_INPUT', message);
 
-/** EC2 detail types the Ec2Events rule sends (Capacity Reservation types by prefix: unverified names). */
+/** EC2 detail types the Ec2Events rule sends (Capacity Reservation and Capacity Block types by prefix). */
 export const ec2EventDetailTypes = [
   'EC2 Instance State-change Notification',
   'EC2 Spot Instance Interruption Warning',
@@ -61,6 +61,11 @@ export function eventRulesTemplate(options: EventRulesOptions): Record<string, J
       source: ['aws.ec2'],
       'detail-type': [
         ...ec2EventDetailTypes,
+        // "Capacity Block Delivered", "Capacity Block Expiration Warning" and "EC2 Capacity
+        // Reservation Instance Interruption Warning" as the EC2 user guide names them; the other
+        // prefixes keep the rule as broad as the mapper for types not documented yet.
+        { prefix: 'Capacity Block' },
+        { prefix: 'Capacity Reservation' },
         { prefix: 'EC2 Capacity Reservation' },
         { prefix: 'EC2 ODCR' },
         { prefix: 'EC2 Capacity Block' },
