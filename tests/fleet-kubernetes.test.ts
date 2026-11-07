@@ -580,6 +580,43 @@ describe('fleet.plan for Kubernetes clusters', () => {
     expect((await plan(noCluster, true)).calls).toEqual([]);
   });
 
+  it('blocks archiving a pool that a cluster the document keeps still runs on', async () => {
+    await created('keep');
+    const document = await exported();
+    const poolName = document.kubernetesClusters!.find((item) => item.name === 'keep')!.pool;
+    const dropped: FleetConfig = {
+      ...document,
+      pools: (document.pools ?? []).filter((pool) => pool.name !== poolName),
+    };
+    const message = `pool ${poolName} is archived by this plan while cluster keep stays on it: drop the cluster or keep the pool`;
+    const pruned = await plan(dropped, true);
+    expect(pruned.blocked).toBe(true);
+    expect(changeOf(pruned, 'kubernetesCluster', 'keep')?.blocked).toBe(message);
+    expect(changeOf(pruned, 'pool', poolName)).toMatchObject({ action: 'delete', blocked: message });
+    expect(pruned.calls.map((call) => call.path)).not.toContain('pools/archive');
+    // The cluster naming its pool by id is the same cluster on the same pool.
+    const byId = await plan(
+      {
+        ...dropped,
+        kubernetesClusters: dropped.kubernetesClusters!.map((item) => ({
+          ...item,
+          pool: world.poolId,
+        })),
+      },
+      true,
+    );
+    expect(changeOf(byId, 'kubernetesCluster', 'keep')?.blocked).toBe(message);
+    expect(byId.calls.map((call) => call.path)).not.toContain('pools/archive');
+    await expect(apply(dropped, { prune: true })).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    // Without prune nothing is archived, so nothing is blocked.
+    expect((await plan(dropped)).blocked).toBe(false);
+    // Dropping the cluster too deletes it before the pool is archived.
+    const both = await plan({ ...dropped, kubernetesClusters: [] }, true);
+    expect(both.blocked).toBe(false);
+    const paths = both.calls.map((call) => call.path);
+    expect(paths.indexOf('kubernetesClusters/delete')).toBeLessThan(paths.indexOf('pools/archive'));
+  });
+
   it('defers a cluster on a pool the same plan creates, and reports it as drift until then', async () => {
     const document = await exported();
     const next: FleetConfig = {
@@ -714,6 +751,30 @@ describe('pool substrates in the document', () => {
     const create = planned.calls.find((call) => call.path === 'pools/create')!;
     expect((create.input.policy as { substrate: { account: string } }).substrate.account).toBe(
       world.accountId,
+    );
+    // A well-formed id is taken only for an account of the tenant (or one the plan creates).
+    const unowned = `pacct_${'0'.repeat(world.accountId.length - 'pacct_'.length)}`;
+    const notOurs = await plan(await withPool(substratePool({ account: unowned })));
+    expect(notOurs.blocked).toBe(true);
+    expect(changeOf(notOurs, 'pool', 'gpu-substrate')?.blocked).toBe(
+      `unknown provider account ${unowned} (policy.substrate.account)`,
+    );
+    expect(notOurs.calls.map((call) => call.path)).not.toContain('pools/create');
+    const byId = await plan(await withPool(substratePool({ account: world.accountId })));
+    expect(changeOf(byId, 'pool', 'gpu-substrate')?.blocked).toBeUndefined();
+    // Another tenant's account, by its real id, is not this tenant's to run a substrate on.
+    // (Fleet is the operator's: the root caller plans tenant B by its tenantId.)
+    const foreign = await world.api.fleet.plan(world.root, {
+      tenantId: world.acmeTenant,
+      config: {
+        version: 1,
+        sites: [{ name: 'acme-site', kind: 'dedicated', region: 'us-central' }],
+        pools: [{ ...substratePool({ account: world.accountId }), site: 'acme-site' }],
+      },
+      prune: false,
+    });
+    expect(changeOf(foreign, 'pool', 'gpu-substrate')?.blocked).toBe(
+      `unknown provider account ${world.accountId} (policy.substrate.account)`,
     );
     await apply(document);
     expect((await plan(document)).calls).toEqual([]);

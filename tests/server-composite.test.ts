@@ -18,6 +18,7 @@ import { betterCompute, type BetterCompute } from '@better-compute/server';
 import { fakeIam, type FakeIam } from './support/fake-iam.js';
 import { ACME, BASE_URL, OTHER, ROOT, SECRET, options } from './support/server.js';
 import { countingExecutor, START, type CountingExecutor } from './support/server-api.js';
+import { bindConfirmation } from '../packages/server/src/confirmation-bindings.js';
 
 // Composite methods (PLAN.md §3.4, core `MethodContext.check/invoke`): a `transaction: 'manual'`
 // mutation decides each sub-call for its own caller with no transaction open (`check`), then runs
@@ -224,6 +225,8 @@ const kit = definePlugin({
           async abandoned(_context, input) {
             trace.push(`staged abandoned ${input.label}`);
           },
+          // What a person approving the request reads: the envelope binds an approval to it.
+          describe: (input) => `staged.create ${input.label}`,
           composable: true,
         },
         async handler(_context, input) {
@@ -530,6 +533,71 @@ describe('composite methods: check, then invoke', () => {
       await codeOf(compose(refused, (context) => context.check!(STAGED, item('no', 'k-no')))),
     ).toBe('ACCESS_DENIED');
     expect(trace).toEqual(['staged prepare no', 'staged denied no']);
+    expect(insideTransaction).toEqual([]);
+  });
+
+  it('admits a delegated composable call under an open approval only for the request approved (review 14 M1)', async () => {
+    const token = 'token-composite-delegated-0123456789';
+    iam.addCaller(token, {
+      tenantId: ACME,
+      identityId: 'id-delegated',
+      sessionId: 'ses-delegated',
+      sessionKind: 'delegated',
+      agentId: 'agent-delegated',
+      delegationId: 'dlg-composite',
+    });
+    iam.allow({ token });
+    // No approval open on the decision: IAM's answer stands.
+    await compose(token, (context) => context.check!(STAGED, item('small', 'k-free')));
+    const decision = iam.calls.filter((entry) => entry.method === 'require').at(-1)!.decision!;
+    expect(decision.action).toBe('compute:kit:order');
+    // The person approved "staged.create small" on that decision a moment ago.
+    await bindConfirmation(
+      store,
+      'conf_composite',
+      {
+        tenantId: decision.tenantId,
+        delegationId: 'dlg-composite',
+        action: decision.action,
+        resource: decision.resource,
+      },
+      'staged.create small',
+      START + 60 * 60_000,
+    );
+    trace.length = 0;
+    await compose(token, async (context) => {
+      await context.check!(STAGED, item('small', 'k-small'));
+      return context.sql.transaction((tx) => context.invoke!(tx, STAGED, item('small', 'k-small')));
+    });
+    expect(trace).toEqual(['staged prepare small', 'staged prepare small', 'staged handler small']);
+    // A different request under the same open approval: refused at check, and what prepare staged
+    // is abandoned (not denied: IAM allowed it).
+    trace.length = 0;
+    let refusal: unknown;
+    await compose(token, (context) => context.check!(STAGED, item('large', 'k-large'))).catch(
+      (error: unknown) => (refusal = error),
+    );
+    expect(refusal).toMatchObject({
+      code: 'ACCESS_DENIED',
+      details: { reason: 'approval-mismatch' },
+    });
+    expect(trace).toEqual(['staged prepare large', 'staged abandoned large']);
+    // Another delegation is not bound by it; neither is a person's own session.
+    const peer = 'token-composite-delegated-peer-0123456789';
+    iam.addCaller(peer, {
+      tenantId: ACME,
+      identityId: 'id-delegated',
+      sessionId: 'ses-delegated-peer',
+      sessionKind: 'delegated',
+      agentId: 'agent-delegated',
+      delegationId: 'dlg-other',
+    });
+    iam.allow({ token: peer });
+    iam.allow({ token: USER });
+    for (const as of [peer, USER])
+      expect(
+        await codeOf(compose(as, (context) => context.check!(STAGED, item('large', `k-${as}`)))),
+      ).toBe('ok');
     expect(insideTransaction).toEqual([]);
   });
 

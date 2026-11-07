@@ -13,6 +13,7 @@ import {
   type SecretResolver,
 } from '@better-compute/core';
 import { budgetAdmissionCheck, offerAdmissionCheck } from '@better-compute/capacity';
+import { describeCreateCluster } from './describe.js';
 import {
   parseTenantVaultPaths,
   poolBillingMode,
@@ -256,6 +257,8 @@ export function kubernetes(
           denied: (context, input, tx) => clearStagedCluster(context, input, tx),
           // Transaction 2 threw (CONFLICT on the name, QUOTA_EXCEEDED): the staged projection row goes.
           abandoned: (context, input, tx) => clearStagedCluster(context, input, tx),
+          // What an approval binds to (review 14 M1): the decided id does not carry the spec.
+          describe: (input) => describeCreateCluster(input),
           check: (context, input) => clusterBudgetCheck(context, input),
           // Both hooks only clear the staged projection row: fleet.apply may compose the create.
           composable: true,

@@ -194,6 +194,7 @@ export async function planFleet(
 
   // Pools, owner quotas and offers.
   const poolIds = new Map(state.pools.map((pool) => [pool.name, pool.id]));
+  const knownAccounts = new Set(accountIds.values());
   const wantedPools = new Set<string>();
   const createdPools = new Set<string>();
   /** The provider account each wanted pool's substrate runs on (after name resolution). */
@@ -226,17 +227,22 @@ export async function planFleet(
     }
     // (D25) A substrate may name its provider account by its document name.
     const resolved = resolveSubstrateAccount(pool.policy, accountIds);
-    if (resolved.unknown !== undefined) {
+    const policy = resolved.policy ?? {};
+    const runsOn = substrateAccount(policy);
+    // An id is taken only for an account of the tenant or one this plan creates: the substrate
+    // reconciler reads the account as the pool owner's, so any other id could never converge.
+    const unknownAccount =
+      resolved.unknown ??
+      (runsOn !== undefined && !knownAccounts.has(runsOn) ? runsOn : undefined);
+    if (unknownAccount !== undefined) {
       add({
         kind: 'pool',
         name: pool.name,
         action: current ? 'update' : 'create',
-        blocked: `unknown provider account ${resolved.unknown} (policy.substrate.account)`,
+        blocked: `unknown provider account ${unknownAccount} (policy.substrate.account)`,
       });
       continue;
     }
-    const policy = resolved.policy ?? {};
-    const runsOn = substrateAccount(policy);
     if (runsOn !== undefined) substrateAccounts.set(pool.name, runsOn);
     let poolId: string;
     if (!current) {
@@ -529,10 +535,16 @@ export async function planFleet(
   }
 
   // Kubernetes clusters (D25): after the pools they live on; their deletes before pools are archived.
+  const archivedPools = new Map(
+    options.prune
+      ? state.pools.filter((pool) => !wantedPools.has(pool.name)).map((pool) => [pool.id, pool.name])
+      : [],
+  );
   const kubernetes = planKubernetes(desired, state, {
     prune: options.prune,
     poolIds,
     createdPools,
+    archivedPools,
     add,
   });
 
@@ -562,6 +574,12 @@ export async function planFleet(
       }
     for (const pool of state.pools)
       if (!wantedPools.has(pool.name)) {
+        // A cluster the document keeps on it blocks the archive (planKubernetes blocks the cluster).
+        const inUse = kubernetes.poolsInUse.get(pool.name);
+        if (inUse !== undefined) {
+          add({ kind: 'pool', name: pool.name, action: 'delete', blocked: inUse });
+          continue;
+        }
         add({
           kind: 'pool',
           name: pool.name,

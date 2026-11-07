@@ -23,7 +23,9 @@ import type { RegisteredMethod } from './registry.js';
 //    the envelope would make them. Replay-only admissions (no `denied` hook) and `composable` ones run
 //    `prepare` in a short transaction of their own first; other admissions with a `denied` hook,
 //    list-recipe reads and other composites are `UNSUPPORTED`. A composable admission's `denied` runs
-//    after a refusal and `abandoned` after any other failure of `check`, as in the envelope. An
+//    after a refusal and `abandoned` after any other failure of `check`, as in the envelope, an
+//    approval mismatch included (review 14 M1: a delegated caller's open approval admits only the
+//    request whose `describe` text it was given for). An
 //    allowed call leaves a grant keyed by path + canonical JSON of the raw input; grants are a
 //    multiset (one `invoke` per `check`) and live only for this call.
 // 2. `ctx.invoke(tx, path, input)`, inside the composite's transaction: consumes one grant (else
@@ -68,6 +70,17 @@ export interface CompositeEnvelope {
     error: unknown,
     requestId: string,
   ): Promise<unknown>;
+  /**
+   * Review 14 M1 for an allowed admission: whether an approval still open on a delegated caller's
+   * decision was given for this request (its `describe` text). Always true for other callers.
+   */
+  approvalMatches(
+    entry: RegisteredMethod,
+    admission: MethodAdmission<unknown, unknown>,
+    input: unknown,
+    caller: Caller,
+    decision: Decision,
+  ): Promise<boolean>;
   /** The executor handlers see inside `tx`. */
   within(tx: SqlTx): SqlExecutor;
   /** Records an allowed mutation (`audit_events`) in `tx`. */
@@ -358,6 +371,15 @@ export function createComposites(options: CompositeOptions): Composites {
               await settle(hooks.denied, input, refusal);
               throw refusal;
             }
+            // Review 14 M1, as the envelope admits: an approval open on this decision admits only
+            // the request it was given for. A different one is refused (`abandoned` runs below).
+            if (!(await envelope.approvalMatches(entry, hooks, input, caller, decision)))
+              throw new ComputeError(
+                'ACCESS_DENIED',
+                'The approval given for this resource was for a different request; ask again for this one',
+                undefined,
+                { reason: 'approval-mismatch' },
+              );
             // Budget-style checks that may call IAM; `check` runs with no transaction open.
             if (admission.check) {
               await admission.check(run.contextFor(database, undefined, 'caller'), input, decided);
