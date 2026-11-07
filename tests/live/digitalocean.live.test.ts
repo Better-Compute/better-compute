@@ -10,6 +10,7 @@ import {
 } from '@better-compute/core';
 import {
   baseFirewallName,
+  deploymentHash,
   deploymentTag,
   digitaloceanProvider,
   imageTag,
@@ -259,6 +260,37 @@ interface Share {
 const lower = (tags: readonly string[] | undefined) => (tags ?? []).map((t) => t.toLowerCase());
 
 /**
+ * Edge resources (P4) carry no tags: load balancers, certificates, NAT gateways and peerings are
+ * this run's when their name ends with the run deployment's hash (`<name>-<hash12>`), and a DNS
+ * zone when its `_better-compute` TXT marker names it.
+ */
+const runSuffix = `-${deploymentHash(deployment)}`;
+interface Named {
+  id: string;
+  name: string;
+}
+const runNamed = async (path: string, key: string): Promise<Named[]> =>
+  (await listAll<Named>(path, key)).filter((item) => item.name?.endsWith(runSuffix));
+async function runZones(): Promise<string[]> {
+  const out: string[] = [];
+  for (const domain of await listAll<{ name: string }>('/domains', 'domains')) {
+    const records = await listAll<{ type: string; name: string; data: string }>(
+      `/domains/${encodeURIComponent(domain.name)}/records?type=TXT`,
+      'domain_records',
+    );
+    if (
+      records.some(
+        (r) =>
+          r.name === '_better-compute' &&
+          r.data.replace(/^"|"$/g, '') === `deployment=${deploymentHash(deployment)}`,
+      )
+    )
+      out.push(domain.name);
+  }
+  return out;
+}
+
+/**
  * This run's Droplets: those with its deployment tag, ordinary and GPU alike. `type=gpus` can't be
  * combined with `tag_name` (research S2), so the GPU list is filtered here.
  */
@@ -363,7 +395,12 @@ async function sweep(): Promise<{
     | 'snapshots'
     | 'addresses'
     | 'shares'
-    | 'shareSnapshots',
+    | 'shareSnapshots'
+    | 'loadBalancers'
+    | 'certificates'
+    | 'natGateways'
+    | 'peerings'
+    | 'zones',
     string[]
   >;
   errors: string[];
@@ -466,6 +503,45 @@ async function sweep(): Promise<{
     );
   }
 
+  // Edge (P4): load balancers before their certificates; NAT gateways and peerings before the
+  // VPCs they hold; zones by their marker.
+  for (const lb of (await attempt('list the run load balancers', () =>
+    runNamed('/load_balancers', 'load_balancers'),
+  )) ?? [])
+    await attempt(`delete load balancer ${lb.name}`, () =>
+      api('DELETE', `/load_balancers/${encodeURIComponent(lb.id)}`, [204, 404]),
+    );
+  for (const cert of (await attempt('list the run certificates', () =>
+    runNamed('/certificates', 'certificates'),
+  )) ?? [])
+    await attempt(`delete certificate ${cert.name}`, () =>
+      until(
+        `certificate ${cert.name} to be deleted`,
+        async () =>
+          (await api('DELETE', `/certificates/${encodeURIComponent(cert.id)}`, [204, 404, 409, 422]))
+            .status,
+        (status) => status === 204 || status === 404,
+        120_000,
+        5_000,
+      ),
+    );
+  for (const gateway of (await attempt('list the run NAT gateways', () =>
+    runNamed('/nat_gateways', 'nat_gateways'),
+  )) ?? [])
+    await attempt(`delete NAT gateway ${gateway.name}`, () =>
+      api('DELETE', `/nat_gateways/${encodeURIComponent(gateway.id)}`, [202, 204, 404]),
+    );
+  for (const peering of (await attempt('list the run peerings', () =>
+    runNamed('/vpc_peerings', 'vpc_peerings'),
+  )) ?? [])
+    await attempt(`delete peering ${peering.name}`, () =>
+      api('DELETE', `/vpc_peerings/${encodeURIComponent(peering.id)}`, [202, 204, 404]),
+    );
+  for (const zone of (await attempt('list the run zones', runZones)) ?? [])
+    await attempt(`delete zone ${zone}`, () =>
+      api('DELETE', `/domains/${encodeURIComponent(zone)}`, [204, 404]),
+    );
+
   for (const firewall of (await attempt('list the run firewalls', runFirewalls)) ?? [])
     await attempt(`delete firewall ${firewall.name}`, () =>
       api('DELETE', `/firewalls/${encodeURIComponent(firewall.id)}`, [204, 404]),
@@ -509,6 +585,20 @@ async function sweep(): Promise<{
     shareSnapshots: ((await attempt('re-list share snapshots', runShareSnapshots)) ?? []).map(
       (snapshot) => snapshot.name,
     ),
+    loadBalancers: (
+      (await attempt('re-list load balancers', () => runNamed('/load_balancers', 'load_balancers'))) ??
+      []
+    ).map((x) => x.name),
+    certificates: (
+      (await attempt('re-list certificates', () => runNamed('/certificates', 'certificates'))) ?? []
+    ).map((x) => x.name),
+    natGateways: (
+      (await attempt('re-list NAT gateways', () => runNamed('/nat_gateways', 'nat_gateways'))) ?? []
+    ).map((x) => x.name),
+    peerings: (
+      (await attempt('re-list peerings', () => runNamed('/vpc_peerings', 'vpc_peerings'))) ?? []
+    ).map((x) => x.name),
+    zones: (await attempt('re-list zones', runZones)) ?? [],
   };
   return { left, errors };
 }
@@ -547,6 +637,11 @@ describe.skipIf(!enabled)('provider-digitalocean live', () => {
           addresses: [],
           shares: [],
           shareSnapshots: [],
+          loadBalancers: [],
+          certificates: [],
+          natGateways: [],
+          peerings: [],
+          zones: [],
         },
         errors: [`sweep: ${String(error)}`],
       };
@@ -573,6 +668,11 @@ describe.skipIf(!enabled)('provider-digitalocean live', () => {
       networks: 'ok',
       keys: 'ok',
       tags: 'ok',
+      storage: 'ok',
+      addresses: 'ok',
+      loadBalancers: 'ok',
+      dns: 'ok',
+      certificates: 'ok',
     });
     expect(report.missing).toEqual([]);
   });

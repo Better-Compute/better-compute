@@ -2,18 +2,15 @@ import { chargeQuota, refundQuota } from '@better-compute/capacity';
 import {
   ComputeError,
   draftId,
-  isComputeError,
   newId,
   strictObject,
   type AdmissionPlan,
-  type CallContext,
   type InputSchema,
   type Json,
   type MethodContext,
   type Migration,
   type ModuleContext,
   type ProviderAddresses,
-  type ProviderImpl,
   type ProviderResourceState,
   type ProviderVolumes,
   type ProviderVolumeSpec,
@@ -21,10 +18,69 @@ import {
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
-import { readAccount, type ProviderAccount } from './accounts.js';
-import { visibleVpsPool } from './instances.js';
+import { readAccount } from './accounts.js';
 import { canonical, fail, id, int, key, object, optional, sha256Hex, tenant } from './input.js';
-import { providerResourceName, zoneRegion, type NetworkDeps } from './networks.js';
+import { providerResourceName } from './networks.js';
+import {
+  liveCertificatesSql,
+  reconcileCertificate,
+  unsettledCertificatesSql,
+} from './provider-certificates.js';
+import {
+  liveLoadBalancersSql,
+  onLoadBalancedInstanceGone,
+  reconcileLoadBalancer,
+  unsettledLoadBalancersSql,
+} from './provider-load-balancers.js';
+import {
+  liveDnsSql,
+  onDnsInstanceGone,
+  reconcileDnsRecord,
+  reconcileDnsZone,
+  unsettledDnsSql,
+} from './provider-dns.js';
+import {
+  ambiguousCodes,
+  assignments,
+  columns,
+  assertNameFree,
+  assertRegion,
+  bool,
+  descriptionOf,
+  descriptionSchema,
+  idOf,
+  keySchema,
+  listSchema,
+  nameOf,
+  nameSchema,
+  regionOf,
+  regionSchema,
+  tenantIdSchema,
+  caller,
+  lockTenant,
+  output,
+  outputGiB,
+  publish,
+  refusedCodes,
+  resourceProvider,
+  Run,
+  sameRequest,
+  settled,
+  targetInstance,
+  text,
+  uniqueViolation,
+  volumeAuthz,
+  type Fields,
+  type ResourceProvider,
+  type ProviderResourceDeps,
+  type ProviderResourceStatus,
+} from './provider-resource-kit.js';
+
+export {
+  providerResourcePollMs,
+  type ProviderResourceDeps,
+  type ProviderResourceStatus,
+} from './provider-resource-kit.js';
 
 // Provider volumes, snapshots and addresses (DigitalOcean P2, R5): a tenant's block volumes, their snapshots and its
 // reserved public addresses on a provider account, typed provider resources next to its instances. The API records
@@ -58,28 +114,7 @@ export const addressQuotaResource = 'addresses';
 export const maxProviderVolumeGiB = 16_384;
 /** At most this many snapshots (not deleted) per volume. */
 export const maxSnapshotsPerVolume = 25;
-export const providerResourcePollMs = 5_000;
-/** How soon a rate-limited or unavailable provider is tried again. */
-const retryMs = 30_000;
-/** A run stops starting provider calls after this long (the lease is 60 s); the rest waits for the next run. */
-const runBudgetMs = 40_000;
 
-const columns = `
-  state text NOT NULL CHECK (state IN ('pending', 'ready', 'updating', 'deleting', 'deleted', 'error')),
-  desired_state text NOT NULL CHECK (desired_state IN ('present', 'deleted')),
-  message text,
-  -- Set (in its own transaction) before the first provider create: a create whose answer was lost may have made it.
-  ensure_requested bool NOT NULL DEFAULT false,
-  ready_at timestamptz,
-  deleted_at timestamptz,
-  metered_until timestamptz,
-  -- The caller identity: idempotency keys are scoped to (tenant, caller), as the id derives from them.
-  created_by text NOT NULL,
-  idempotency_key text NOT NULL,
-  request_hash bytea NOT NULL,
-  version bigint NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT compute_now(),
-  UNIQUE (tenant_id, created_by, idempotency_key)`;
 
 /** (DO P2) Tenant block volumes on a provider account, and which instance each is attached to. */
 export const providerVolumesMigration: Migration = {
@@ -224,7 +259,6 @@ CREATE TRIGGER provider_addresses_stamp_deleted BEFORE UPDATE ON provider_addres
 
 // --- Views and input ---------------------------------------------------------------------------
 
-export type ProviderResourceStatus = ProviderResourceState['state'];
 export type AttachmentState = 'pending' | 'ready' | 'deleting' | 'deleted' | 'error';
 type Desired = 'present' | 'deleted';
 
@@ -294,6 +328,8 @@ export interface ProviderAddressView {
   description?: string;
   region: string;
   family: 'ipv4' | 'ipv6';
+  /** (DO P4) The BYOIP prefix the address is drawn from; absent: the provider's own pool. */
+  prefix?: string;
   /** The reserved address, once the provider reserved it. */
   address?: string;
   instanceId?: string;
@@ -367,6 +403,11 @@ export interface CreateProviderAddressInput {
   description?: string;
   region: string;
   family: 'ipv4' | 'ipv6';
+  /**
+   * (DO P4) Draw the address from this BYOIP prefix of the provider account (its CIDR, or the provider's id for it):
+   * IPv4 only, and only for the account's owner tenant.
+   */
+  prefix?: string;
   idempotencyKey: string;
 }
 export type ProviderAddressRef = { tenantId: string; addressId: string };
@@ -380,29 +421,8 @@ export interface AssignProviderAddressInput extends ProviderAddressRef {
   instanceId: string;
 }
 
-const resourceName = /^[a-z]([-a-z0-9]{0,40}[a-z0-9])?$/;
-const regionName = /^[a-z][a-z0-9-]{0,38}[a-z0-9]$/;
 const filesystems = ['ext4', 'xfs', 'none'] as const;
 
-function nameOf(value: unknown): string {
-  if (typeof value !== 'string' || !resourceName.test(value))
-    fail('name must be 1-42 lower-case letters, digits or -, starting with a letter');
-  return value;
-}
-function regionOf(value: unknown): string {
-  if (typeof value !== 'string' || !regionName.test(value))
-    fail('region must be a provider region, e.g. nyc3 or us-central1');
-  return value;
-}
-function descriptionOf(value: unknown): string {
-  if (typeof value !== 'string' || value.length > 256 || /[\u0000-\u001f]/.test(value))
-    return fail('description must be text of at most 256 characters');
-  return value;
-}
-function bool(value: unknown, what: string): boolean {
-  if (typeof value !== 'boolean') fail(`${what} must be true or false`);
-  return value;
-}
 const kinds = ['block', 'shared'] as const;
 function kindOf(value: unknown): ProviderVolumeKind {
   if (!kinds.includes(value as never)) fail('kind must be block or shared');
@@ -568,10 +588,18 @@ export function parseCreateProviderAddress(raw: unknown): CreateProviderAddressI
     'description',
     'region',
     'family',
+    'prefix',
     'idempotencyKey',
   ]);
   if (input.family !== undefined && input.family !== 'ipv4' && input.family !== 'ipv6')
     fail('family must be ipv4 or ipv6');
+  if (
+    input.prefix !== undefined &&
+    (typeof input.prefix !== 'string' || !byoipPrefixPattern.test(input.prefix))
+  )
+    fail('prefix must be a BYOIP prefix of the account: its IPv4 CIDR (198.51.100.0/24) or its id');
+  if (input.prefix !== undefined && input.family === 'ipv6')
+    fail('a BYOIP prefix draws IPv4 addresses only');
   const out: CreateProviderAddressInput = {
     tenantId: tenant(input.tenantId),
     poolId: id(input.poolId, 'pool', 'poolId'),
@@ -584,7 +612,33 @@ export function parseCreateProviderAddress(raw: unknown): CreateProviderAddressI
   if (projectId !== undefined) out.projectId = projectId;
   const description = optional(input.description, descriptionOf);
   if (description !== undefined) out.description = description;
+  if (input.prefix !== undefined) out.prefix = (input.prefix as string).toLowerCase();
   return out;
+}
+
+/** A BYOIP prefix as a tenant names it: an IPv4 CIDR, or the provider's id for the prefix (a uuid). */
+const byoipPrefixPattern =
+  /^(?:\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+
+/** (DO P4) The column BYOIP addresses record their prefix in (vps/0104, the lane's migration slot). */
+export const providerAddressByoipSql = `
+ALTER TABLE provider_addresses ADD COLUMN byoip_prefix text;
+ALTER TABLE provider_addresses ADD CONSTRAINT provider_addresses_byoip_ipv4
+  CHECK (byoip_prefix IS NULL OR family = 'ipv4');
+`;
+
+/**
+ * A BYOIP prefix is the provider account owner's own address space: only the owner tenant draws from it
+ * (ACCESS_DENIED, reason `byoipNotOwner`, for any tenant the pool is merely offered to).
+ */
+function assertPrefixOwner(provider: { account: { tenantId: string } }, input: CreateProviderAddressInput): void {
+  if (input.prefix !== undefined && provider.account.tenantId !== input.tenantId)
+    throw new ComputeError(
+      'ACCESS_DENIED',
+      "Only the provider account's owner tenant draws addresses from its BYOIP prefixes",
+      undefined,
+      { reason: 'byoipNotOwner' },
+    );
 }
 export function parseProviderAddressRef(raw: unknown): ProviderAddressRef {
   const input = object(raw, ['tenantId', 'addressId']);
@@ -600,47 +654,12 @@ export function parseAssignProviderAddress(raw: unknown): AssignProviderAddressI
 }
 
 // JSON Schema descriptions of the inputs, for the generated reference and tool schemas.
-const idOf = (prefix: string, description: string): InputSchema => ({
-  type: 'string',
-  pattern: `^${prefix}_[0-9a-hjkmnp-tv-z]{26,52}$`,
-  maxLength: prefix.length + 53,
-  description,
-});
-const tenantIdSchema: InputSchema = {
-  type: 'string',
-  pattern: '^[A-Za-z0-9._:-]{1,128}$',
-  maxLength: 128,
-  description: 'The tenant the call acts in',
-};
-const keySchema: InputSchema = {
-  type: 'string',
-  pattern: '^[A-Za-z0-9._:-]{1,128}$',
-  maxLength: 128,
-  description: 'Scoped to (tenant, caller identity): a retry with the same key replays',
-};
-const nameSchema = (description: string): InputSchema => ({
-  type: 'string',
-  pattern: resourceName.source,
-  maxLength: 42,
-  description,
-});
-const regionSchema: InputSchema = {
-  type: 'string',
-  pattern: regionName.source,
-  maxLength: 40,
-  description: "A region of the pool's provider account, e.g. nyc3",
-};
 const sizeSchema = (description: string): InputSchema => ({
   type: 'integer',
   minimum: 1,
   maximum: maxProviderVolumeGiB,
   description,
 });
-const descriptionSchema: InputSchema = {
-  type: 'string',
-  maxLength: 256,
-  description: 'What it is for',
-};
 const filesystemSchema: InputSchema = {
   enum: [...filesystems],
   description: 'The filesystem the provider formats the volume with; none (or absent) leaves it raw',
@@ -655,15 +674,6 @@ const volumeIdSchema = idOf('pvol', 'The provider volume');
 const snapshotIdSchema = idOf('psnap', 'The provider volume snapshot');
 const addressIdSchema = idOf('paddr', 'The reserved address');
 const instanceIdSchema = idOf('inst', 'An instance of the tenant on the same provider account and region');
-const listSchema = strictObject(
-  {
-    tenantId: tenantIdSchema,
-    poolId: idOf('pool', 'Only those of this pool'),
-    projectId: idOf('prj', 'Only those of this project'),
-    includeDeleted: { type: 'boolean', default: false, description: 'Include deleted ones' },
-  },
-  ['tenantId'],
-);
 
 export const providerResourceSchemas = {
   createVolume: strictObject(
@@ -765,6 +775,12 @@ export const providerResourceSchemas = {
       description: descriptionSchema,
       region: regionSchema,
       family: { enum: ['ipv4', 'ipv6'], default: 'ipv4', description: 'The address family' },
+      prefix: {
+        type: 'string',
+        maxLength: 43,
+        description:
+          "A BYOIP prefix of the account to draw from (its IPv4 CIDR or id); only the account's owner tenant",
+      },
       idempotencyKey: keySchema,
     },
     ['tenantId', 'poolId', 'name', 'region', 'idempotencyKey'],
@@ -850,6 +866,7 @@ interface AddressRow {
   description: string | null;
   region: string;
   family: 'ipv4' | 'ipv6';
+  byoip_prefix: string | null;
   external_id: string | null;
   address: string | null;
   fingerprint: string | null;
@@ -876,7 +893,7 @@ const volumeColumns = `id, tenant_id, project_id, pool_id, provider_account_id, 
 const snapshotColumns = `id, tenant_id, project_id, pool_id, provider_account_id, volume_id, name, region, size_gib,
   external_id, ${common}`;
 const addressColumns = `id, tenant_id, project_id, pool_id, provider_account_id, name, description, region, family,
-  external_id, address, fingerprint, lost, instance_id, assigned_machine, assignment_state, assignment_message, charged, ${common}`;
+  byoip_prefix, external_id, address, fingerprint, lost, instance_id, assigned_machine, assignment_state, assignment_message, charged, ${common}`;
 const attachmentColumns = `id, volume_id, instance_id, machine_id, state, desired_state, message`;
 
 const iso = (value: Date | string) => new Date(value).toISOString();
@@ -957,6 +974,7 @@ export function providerAddressView(row: AddressRow): ProviderAddressView {
   };
   if (row.project_id) view.projectId = row.project_id;
   if (row.description) view.description = row.description;
+  if (row.byoip_prefix) view.prefix = row.byoip_prefix;
   if (row.address) view.address = row.address;
   if (row.instance_id) view.instanceId = row.instance_id;
   if (row.assignment_message) view.assignmentMessage = row.assignment_message;
@@ -1033,89 +1051,6 @@ async function requireAddress(
   return row;
 }
 
-const code = (error: unknown): string | undefined => (error as { code?: string } | undefined)?.code;
-const uniqueViolation = (error: unknown) => code(error) === '23505';
-
-// --- Dependencies and shared checks ------------------------------------------------------------
-
-/** What the handlers and the reconciler need beyond a transaction (the networks' dependencies). */
-export type ProviderResourceDeps = NetworkDeps;
-
-type Family = 'providerVolume' | 'providerVolume.snapshot' | 'providerAddress';
-const subjectOf: Record<Family, string> = {
-  providerVolume: 'provider-volume',
-  'providerVolume.snapshot': 'provider-snapshot',
-  providerAddress: 'provider-address',
-};
-const idField: Record<Family, string> = {
-  providerVolume: 'volumeId',
-  'providerVolume.snapshot': 'snapshotId',
-  providerAddress: 'addressId',
-};
-
-async function publish(
-  deps: Pick<ProviderResourceDeps, 'events'>,
-  tx: SqlTx,
-  family: Family,
-  row: { id: string; tenant_id: string },
-  verb: string,
-  data: Record<string, Json> = {},
-): Promise<void> {
-  await deps.events.publish(tx, {
-    type: `${family}.${verb}`,
-    tenantId: row.tenant_id,
-    subject: `${subjectOf[family]}/${row.id}`,
-    data: { [idField[family]]: row.id, ...data },
-  });
-}
-
-interface ResourceProvider {
-  accountId: string;
-  account: ProviderAccount;
-  client: ProviderImpl;
-  regions: string[];
-  /** The zones the account configures (zonal providers: GCE, AWS); a resource may name one as its region. */
-  zones: string[];
-}
-
-/** The pool's account and client when its provider implements `need`; otherwise UNSUPPORTED. */
-async function resourceProvider(
-  deps: ProviderResourceDeps,
-  tx: SqlTx,
-  tenantId: string,
-  poolId: string,
-  need: 'volumes' | 'addresses',
-): Promise<ResourceProvider> {
-  const pool = await visibleVpsPool(tx, tenantId, poolId);
-  const what = need === 'volumes' ? 'volumes' : 'reserved addresses';
-  if (pool.class !== 'provider' || pool.providerAccountId === undefined)
-    throw new ComputeError(
-      'UNSUPPORTED',
-      `Pool ${poolId} is not a provider pool; ${what} live on provider accounts`,
-    );
-  // R1: only an account of the pool's owner tenant.
-  const account = await readAccount(tx, pool.providerAccountId, pool.ownerTenantId);
-  if (!account) throw new ComputeError('UNSUPPORTED', `Pool ${poolId} has no provider account`);
-  const client = await deps.clients.client(account, deps);
-  if (typeof client[need] !== 'object' || client[need] === null)
-    throw new ComputeError('UNSUPPORTED', `Provider ${account.provider} does not provide ${what}`);
-  const strings = (value: unknown) =>
-    Array.isArray(value)
-      ? value.filter((entry): entry is string => typeof entry === 'string')
-      : [];
-  // Providers without zones (DigitalOcean) configure regions; zonal ones configure zones (GCE), or a region and its
-  // zones (AWS).
-  const zones = [...new Set(strings(account.config.zones))];
-  const regions = [
-    ...new Set([
-      ...strings(account.config.regions),
-      ...strings([account.config.region]),
-      ...zones.map(zoneRegion),
-    ]),
-  ];
-  return { accountId: account.id, account, client, regions, zones };
-}
-
 /**
  * What the provider would refuse of the volume before any request, refused now, before quota is charged: a shared
  * volume on a provider that makes none (UNSUPPORTED, reason `sharedVolumes`), and whatever its `checkVolume` refuses
@@ -1151,136 +1086,6 @@ function assertVolumeSpec(
       ? { network: { network: providerResourceName(input.networkId) } }
       : {}),
   });
-}
-
-/**
- * The resource's region is one the account uses, or (AWS A5, `ProviderVolumeSpec.zone`) one of its configured zones:
- * a zonal volume names its zone as its region.
- */
-function assertRegion(provider: ResourceProvider, region: string): void {
-  if (provider.regions.length > 0 && !provider.regions.includes(region) && !provider.zones.includes(region))
-    throw new ComputeError(
-      'INVALID_INPUT',
-      `Region ${region} is not one the provider account uses (${provider.regions.join(', ')})`,
-    );
-}
-
-/** The region an offer id names: `nyc3/s-1vcpu-1gb` is in nyc3, `us-central1-a/n2-standard-2` in us-central1. */
-function offerRegion(offerId: string | null): string | undefined {
-  const slash = offerId?.indexOf('/') ?? -1;
-  if (!offerId || slash <= 0) return undefined;
-  return offerId.slice(0, slash);
-}
-
-interface TargetInstance {
-  id: string;
-  tenant_id: string;
-  provider_account_id: string | null;
-  state: string;
-  desired_state: string;
-  offer_id: string | null;
-}
-
-/**
- * The instance a volume is attached to or an address assigned to: ACCESS_DENIED when it is another tenant's,
- * INVALID_INPUT on another provider account or in another region, INVALID_STATE when it is being deleted.
- */
-async function targetInstance(
-  tx: SqlTx,
-  tenantId: string,
-  instanceId: string,
-  resource: { provider_account_id: string; region: string },
-): Promise<TargetInstance> {
-  const { rows } = await tx.query<TargetInstance>(
-    `SELECT i.id, i.tenant_id, i.provider_account_id, i.state, i.desired_state, f.offer_id
-       FROM instances i LEFT JOIN flavors f ON f.id = i.flavor_id
-      WHERE i.id = $1 AND NOT i.draft`,
-    [instanceId],
-  );
-  const row = rows[0];
-  if (!row) throw new ComputeError('NOT_FOUND', `Instance ${instanceId} not found`);
-  if (row.tenant_id !== tenantId)
-    throw new ComputeError('ACCESS_DENIED', `Instance ${instanceId} belongs to another tenant`);
-  if (row.provider_account_id !== resource.provider_account_id)
-    throw new ComputeError(
-      'INVALID_INPUT',
-      `Instance ${instanceId} is not on the provider account ${resource.provider_account_id}`,
-    );
-  if (row.desired_state === 'deleted' || ['deleting', 'deleted'].includes(row.state))
-    throw new ComputeError('INVALID_STATE', `Instance ${instanceId} is being deleted`);
-  const region = offerRegion(row.offer_id);
-  // A zonal offer in the resource's region, or (a resource named by its zone) a regional offer of that zone's region.
-  if (
-    region !== undefined &&
-    region !== resource.region &&
-    zoneRegion(region) !== resource.region &&
-    zoneRegion(resource.region) !== region
-  )
-    throw new ComputeError(
-      'INVALID_INPUT',
-      `Instance ${instanceId} is in ${region}, not in ${resource.region}`,
-    );
-  return row;
-}
-
-async function lockTenant(tx: SqlTx, tenantId: string): Promise<void> {
-  // Concurrent creates of one tenant book quota and take names one after the other.
-  await tx.query(
-    `SELECT pg_advisory_xact_lock(hashtext('better-compute:provider-resources:' || $1))`,
-    [tenantId],
-  );
-}
-
-async function assertNameFree(
-  tx: SqlTx,
-  table: 'provider_volumes' | 'provider_snapshots' | 'provider_addresses',
-  tenantId: string,
-  name: string,
-): Promise<void> {
-  const taken = await tx.query(
-    `SELECT 1 FROM ${table} WHERE tenant_id = $1 AND name = $2 AND state <> 'deleted'`,
-    [tenantId, name],
-  );
-  if (taken.rows.length > 0) throw new ComputeError('CONFLICT', `${name} already exists`);
-}
-
-function caller(context: MethodContext): string {
-  if (!context.caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
-  return context.caller.identityId;
-}
-const sameRequest = (row: { request_hash: string }, hash: string) => {
-  if (row.request_hash !== hash)
-    throw new ComputeError('CONFLICT', 'This idempotency key was used for a different request');
-};
-
-function volumeAuthz(
-  row: {
-    id: string;
-    tenantId: string;
-    accountId: string;
-    poolId: string;
-    region: string;
-    projectId?: string;
-  },
-  type: 'provider-volume' | 'provider-snapshot' | 'provider-address',
-  ownerId: string,
-  extra: Record<string, string> = {},
-) {
-  return {
-    type,
-    id: row.id,
-    tenantId: row.tenantId,
-    attributes: {
-      providerAccountId: row.accountId,
-      poolId: row.poolId,
-      region: row.region,
-      ...(row.projectId !== undefined ? { projectId: row.projectId } : {}),
-      ...extra,
-    },
-    parentType: 'tenant',
-    parentId: row.tenantId,
-    ownerId,
-  };
 }
 
 // --- Volumes API -------------------------------------------------------------------------------
@@ -2023,6 +1828,7 @@ const addressHash = (input: CreateProviderAddressInput) =>
       description: input.description,
       region: input.region,
       family: input.family,
+      prefix: input.prefix,
     }),
   );
 
@@ -2042,6 +1848,7 @@ export async function prepareCreateProviderAddress(
   }
   const provider = await resourceProvider(deps, tx, input.tenantId, input.poolId, 'addresses');
   assertRegion(provider, input.region);
+  assertPrefixOwner(provider, input);
   await assertNameFree(tx, 'provider_addresses', input.tenantId, input.name);
   await context.authz.upsert(
     tx,
@@ -2102,6 +1909,7 @@ export async function createProviderAddress(
   }
   const provider = await resourceProvider(deps, tx, input.tenantId, input.poolId, 'addresses');
   assertRegion(provider, input.region);
+  assertPrefixOwner(provider, input);
   await lockTenant(tx, input.tenantId);
   await assertNameFree(tx, 'provider_addresses', input.tenantId, input.name);
   await chargeQuota(tx, input.tenantId, input.poolId, { [addressQuotaResource]: 1 });
@@ -2109,8 +1917,8 @@ export async function createProviderAddress(
     await tx.query(
       `INSERT INTO provider_addresses (id, tenant_id, project_id, pool_id, provider_account_id, name, description,
                                        region, family, charged, state, desired_state, created_by, idempotency_key,
-                                       request_hash, version)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, 'pending', 'present', $10, $11, decode($12, 'hex'), 1)`,
+                                       request_hash, version, byoip_prefix)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, 'pending', 'present', $10, $11, decode($12, 'hex'), 1, $13)`,
       [
         addressId,
         input.tenantId,
@@ -2124,6 +1932,7 @@ export async function createProviderAddress(
         identity,
         input.idempotencyKey,
         hash,
+        input.prefix ?? null,
       ],
     );
   } catch (error) {
@@ -2154,6 +1963,7 @@ export async function createProviderAddress(
     name: input.name,
     region: input.region,
     family: input.family,
+    ...(input.prefix !== undefined ? { prefix: input.prefix } : {}),
   });
   return providerAddressView((await readAddress(tx, addressId))!);
 }
@@ -2263,189 +2073,6 @@ export async function deleteProviderAddress(
   return providerAddressView((await readAddress(tx, row.id))!);
 }
 
-// --- The reconciler ----------------------------------------------------------------------------
-
-const text = (error: unknown) => String((error as Error)?.message ?? error).slice(0, 500);
-/** Errors after which the provider may be tried again soon. */
-const transientCodes = ['RATE_LIMITED', 'UNAVAILABLE', 'TIMEOUT'];
-/** Of those, the ones after which the provider may have done what was asked (its answer was lost). */
-const ambiguousCodes = ['UNAVAILABLE', 'TIMEOUT'];
-/**
- * Refusals of an `ensureVolume` after which the provider holds no volume of that name for us (an ensure finds an
- * existing one by name before it creates). Any other error (`PROVIDER_ERROR` for an accepted create with no body,
- * `INVALID_STATE` for one of ours formatted otherwise) may mean a volume exists.
- */
-const refusedCodes = [
-  'QUOTA_EXCEEDED',
-  'CONFLICT',
-  'INVALID_INPUT',
-  'UNSUPPORTED',
-  'ACCESS_DENIED',
-  'UNAUTHENTICATED',
-  'NOT_FOUND',
-];
-
-/** The machine an attached volume or an assigned address names (`outputs.attachedTo` / `outputs.assignedTo`). */
-const output = (state: ProviderResourceState | undefined, name: string): string | undefined => {
-  const value = state?.outputs?.[name];
-  return typeof value === 'string' && value !== '' ? value : undefined;
-};
-const outputGiB = (state: ProviderResourceState | undefined): number | undefined => {
-  const value = Number(output(state, 'sizeGiB'));
-  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
-};
-
-type Fields = Record<string, string | number | boolean | null>;
-
-/** `SET a = $3, b = $4` for the fields, numbered after the two guard parameters. */
-function assignments(fields: Fields): { sql: string; params: unknown[] } {
-  const names = Object.keys(fields);
-  return {
-    sql: names.map((name, index) => `${name} = $${index + 3}`).join(', '),
-    params: names.map((name) => fields[name]),
-  };
-}
-
-/** One run of one resource: the provider calls it made and what it decided to do next. */
-class Run {
-  /** Something is in flight at the provider: look again soon. */
-  inFlight = false;
-  /** The provider asked us to slow down. */
-  backoff = false;
-  /** The run ran out of time, or the row changed meanwhile: continue at once. */
-  again = false;
-  /** The code of the last provider error `attempt` caught (a transient one, or the one behind an `error` state). */
-  lastCode: string | undefined;
-  /** That error's `details.reason`, when it had one. */
-  lastReason: string | undefined;
-  /** The last `attempt` called nothing: the run's budget was spent (the provider was not asked). */
-  skipped = false;
-  readonly #started: number;
-
-  constructor(
-    readonly deps: ProviderResourceDeps,
-    readonly sql: SqlExecutor,
-    readonly signal: AbortSignal,
-  ) {
-    this.#started = deps.clock.now();
-  }
-
-  next(): number | undefined {
-    const now = this.deps.clock.now();
-    if (this.backoff) return now + retryMs;
-    if (this.again) return now;
-    return this.inFlight ? now + providerResourcePollMs : undefined;
-  }
-
-  call(idempotencyKey: string): CallContext {
-    return {
-      idempotencyKey,
-      signal: this.signal,
-      clock: this.deps.clock,
-      secrets: this.deps.secrets,
-      log: this.deps.log,
-    };
-  }
-
-  /**
-   * Runs a provider call. A transient failure (or an aborted run) is `undefined` and backs off; any other throw is
-   * an `error` state carrying its message. Past the run's budget nothing is called (`undefined`, continue at once).
-   */
-  async attempt(
-    what: string,
-    op: () => Promise<ProviderResourceState | undefined>,
-  ): Promise<ProviderResourceState | 'missing' | undefined> {
-    this.skipped = false;
-    if (this.deps.clock.now() - this.#started > runBudgetMs) {
-      this.again = true;
-      this.skipped = true;
-      return undefined;
-    }
-    this.lastCode = undefined;
-    this.lastReason = undefined;
-    try {
-      return (await op()) ?? 'missing';
-    } catch (error) {
-      if (this.signal.aborted || (isComputeError(error) && transientCodes.includes(error.code))) {
-        this.lastCode = this.signal.aborted ? 'TIMEOUT' : (error as ComputeError).code;
-        this.deps.log.warn('providerResources: provider busy, retrying', {
-          what,
-          error: text(error),
-        });
-        this.backoff = true;
-        return undefined;
-      }
-      this.lastCode = isComputeError(error) ? error.code : undefined;
-      const reason = isComputeError(error) ? error.details?.reason : undefined;
-      this.lastReason = typeof reason === 'string' ? reason : undefined;
-      return { id: '', state: 'error', message: text(error) };
-    }
-  }
-
-  /** The account's client when its provider still provides `need`; otherwise an error message. */
-  async client<K extends 'volumes' | 'addresses'>(
-    account: ProviderAccount | undefined,
-    accountId: string,
-    need: K,
-  ): Promise<NonNullable<ProviderImpl[K]> | string> {
-    try {
-      if (!account)
-        throw new ComputeError('NOT_FOUND', `Provider account ${accountId} not found`);
-      const client = await this.deps.clients.client(account, this.deps);
-      const impl = client[need];
-      if (!impl)
-        throw new ComputeError(
-          'UNSUPPORTED',
-          `Provider ${account.provider} does not provide ${need === 'volumes' ? 'volumes' : 'reserved addresses'}`,
-        );
-      return impl as NonNullable<ProviderImpl[K]>;
-    } catch (error) {
-      return text(error);
-    }
-  }
-
-  /**
-   * Writes observed fields of one row, guarded by the version the run decided on; publishes `event` when the row
-   * changed. Answers whether it wrote (a row changed meanwhile is left alone and the run continues at once).
-   * `before` runs first in the same transaction, only while the row is still at that version.
-   */
-  async write(
-    table: 'provider_volumes' | 'provider_snapshots' | 'provider_addresses',
-    row: { id: string; version: number | string },
-    fields: Fields,
-    after?: (tx: SqlTx) => Promise<void>,
-    before?: (tx: SqlTx) => Promise<void>,
-  ): Promise<boolean> {
-    const set = assignments(fields);
-    const written = await this.sql.transaction(async (tx) => {
-      if (before) {
-        const current = await tx.query(`SELECT id FROM ${table} WHERE id = $1 AND version = $2 FOR UPDATE`, [
-          row.id,
-          row.version,
-        ]);
-        if (current.rows.length === 0) return false;
-        await before(tx);
-      }
-      const { rows } = await tx.query(
-        `UPDATE ${table} SET ${set.sql} WHERE id = $1 AND version = $2 RETURNING id`,
-        [row.id, row.version, ...set.params],
-      );
-      if (rows.length === 0) return false;
-      await after?.(tx);
-      return true;
-    });
-    if (!written) this.again = true;
-    return written;
-  }
-}
-
-/** A row's state and message (cleared, or the provider's, at most 500 characters). */
-function settled(
-  state: ProviderResourceStatus,
-  message?: string,
-): { state: ProviderResourceStatus; message: string | null } {
-  return { state, message: message ? message.slice(0, 500) : null };
-}
 
 // --- Volumes -----------------------------------------------------------------------------------
 
@@ -3277,6 +2904,7 @@ async function convergeAddress(
     name: providerResourceName(address.id),
     region: address.region,
     family: address.family,
+    ...(address.byoip_prefix ? { source: 'byoip' as const, prefix: address.byoip_prefix } : {}),
     ...(address.external_id ? { id: address.external_id } : {}),
     ...(address.external_id && address.fingerprint ? { fingerprint: address.fingerprint } : {}),
   };
@@ -3557,6 +3185,10 @@ export async function onInstanceDeleted(
   );
   for (const id of [...volumeIds, ...addresses.rows.map((row) => row.id)])
     await deps.work.enqueue(tx, providerResourcesWork, id);
+  // (P4) Its load balancers stop sending it traffic now, not at the periodic pass.
+  await onLoadBalancedInstanceGone(deps, tx, instanceId);
+  // (P4) The DNS records that follow it are deleted.
+  await onDnsInstanceGone(deps, tx, instanceId);
 }
 
 // --- Entry points ------------------------------------------------------------------------------
@@ -3576,6 +3208,10 @@ export async function reconcileProviderResource(
   if (resourceId.startsWith('pvol_')) await reconcileVolume(run, resourceId);
   else if (resourceId.startsWith('psnap_')) await reconcileSnapshot(run, resourceId);
   else if (resourceId.startsWith('paddr_')) await reconcileAddress(run, resourceId);
+  else if (resourceId.startsWith('pcert_')) await reconcileCertificate(run, resourceId);
+  else if (resourceId.startsWith('plb_')) await reconcileLoadBalancer(run, resourceId);
+  else if (resourceId.startsWith('pdz_')) await reconcileDnsZone(run, resourceId);
+  else if (resourceId.startsWith('pdr_')) await reconcileDnsRecord(run, resourceId);
   else return undefined;
   return run.next();
 }
@@ -3600,13 +3236,19 @@ const unsettledIds = `
    WHERE state <> 'deleted'
      AND (state <> 'ready' OR desired_state <> 'present'
           OR (instance_id IS NULL AND assignment_state <> 'none')
-          OR (instance_id IS NOT NULL AND assignment_state <> 'ready'))`;
+          OR (instance_id IS NOT NULL AND assignment_state <> 'ready'))
+  UNION ALL ${unsettledCertificatesSql}
+  UNION ALL ${unsettledLoadBalancersSql}
+  UNION ALL ${unsettledDnsSql}`;
 
 /** Live rows that are settled (the complement of `unsettledIds`). */
 const settledSql = `
   SELECT id FROM (SELECT id FROM provider_volumes WHERE state <> 'deleted'
                   UNION ALL SELECT id FROM provider_snapshots WHERE state <> 'deleted'
-                  UNION ALL SELECT id FROM provider_addresses WHERE state <> 'deleted') live
+                  UNION ALL SELECT id FROM provider_addresses WHERE state <> 'deleted'
+                  UNION ALL ${liveCertificatesSql}
+                  UNION ALL ${liveLoadBalancersSql}
+                  UNION ALL ${liveDnsSql}) live
   EXCEPT SELECT id FROM (${unsettledIds}) unsettled
   ORDER BY id`;
 

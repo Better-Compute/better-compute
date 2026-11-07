@@ -52,6 +52,9 @@ const planActions: Record<string, string[]> = {
     ...a('volumes', 'read'),
     ...a('addresses', 'read'),
     ...a('cloud-resources', 'read'),
+    ...a('certificates', 'read'),
+    ...a('load-balancers', 'read'),
+    ...a('dns', 'read'),
     ...a('batches', 'read', 'create', 'approve'),
   ],
   'compute-project': [...a('projects', 'read', 'manage'), ...a('usage', 'read')],
@@ -95,6 +98,9 @@ const planActions: Record<string, string[]> = {
   'compute-provider-snapshot': a('volumes', 'read', 'manage'),
   'compute-provider-address': a('addresses', 'read', 'manage'),
   'compute-cloud-resource': a('cloud-resources', 'create', 'read', 'update', 'delete'),
+  'compute-provider-certificate': a('certificates', 'read', 'manage'),
+  'compute-provider-load-balancer': a('load-balancers', 'read', 'manage'),
+  'compute-provider-dns-zone': a('dns', 'read', 'manage'),
 };
 
 describe('resource types (§12.3)', () => {
@@ -119,6 +125,9 @@ describe('resource types (§12.3)', () => {
       'compute-provider-snapshot': 'compute-tenant',
       'compute-provider-address': 'compute-tenant',
       'compute-cloud-resource': 'compute-tenant',
+      'compute-provider-certificate': 'compute-tenant',
+      'compute-provider-load-balancer': 'compute-tenant',
+      'compute-provider-dns-zone': 'compute-tenant',
     });
     expect(types['compute-project']?.relations).toEqual(['member', 'admin']);
     expect(types['compute-pool']?.relations).toEqual(['viewer', 'user', 'operator', 'admin']);
@@ -412,6 +421,9 @@ describe('apiSurface (§9.2)', () => {
         'providerVolumes.list',
         'providerSnapshots.list',
         'providerAddresses.list',
+        'certificates.list',
+        'loadBalancers.list',
+        'dnsZones.list',
         'kubernetesClusters.list',
         'cloudResources.list',
       ],

@@ -164,6 +164,30 @@ DO nodes still join with tokens (DO-D12).
 - **Still open:** no sweeper deletes imported custom images no Droplet uses any more (DO bills their storage), there is
   no per-region `provider_images` table (D-P3-1 keeps the image as its own record), Spot estimates still say
   `spot: false` (billing owner), and MicroVMs stay behind the design gate above.
+## S5 — Edge (P4): load balancers, DNS, certificates, NAT, peering, BYOIP, routes
+
+Added with P4 (2026-11-05). Every row marked **unverified** is handled both ways by the provider, and the live
+suite (`tests/live/digitalocean.live.test.ts`, which also sweeps these resources) settles it.
+
+| Fact | Status | Source / value |
+|---|---|---|
+| Load balancers carry no tags | **unverified** | The provider puts ownership in the name (`<name>-<hash12>`) and never relies on tags |
+| Load balancer names are unique per account | **unverified** (not stated) | Assumed not unique: two of ours with one name converge on the oldest, the others are deleted (DO-D4) |
+| The 422 for the account's load balancer limit | **unverified** | `errors.json` `422-load-balancer-limit` (`verified: false`) maps to `QUOTA_EXCEEDED` |
+| Whether a regional load balancer reaches Droplets outside its own VPC | **unverified** | Taken from DO docs: it does not. `ensureLoadBalancer` refuses a target outside the load balancer's VPC (`INVALID_INPUT`, `vpc`); vps puts a load balancer on one subnet (its VPC) and targets only that subnet's instances; the emulator answers such a body with a 422 |
+| The 422 text when a domain already exists in DO DNS (another account or this one) | **unverified** | The zone is read before the create (an existing one without our marker is `CONFLICT`, `zoneExists`, unless adopted); a create that races it gets DO's 422, which the client maps to `CONFLICT` when the message says the name exists or is taken, and the provider reports as `zoneExists`. Any other 422 is `INVALID_INPUT` |
+| Whether DO serves a zone nested in another zone of the same account (`a.example.com` beside `example.com`) | **unverified** | Assumed yes (DO's name servers answer for every domain of the account). `ensureZone` never creates a zone inside or above an account domain without this deployment's marker (`CONFLICT`, `zoneNested`); vps arbitrates nesting between its own tenants' zones |
+| The 422 text when a certificate in use by a load balancer is deleted | **unverified** | The client maps a 422 that says the resource is in use to `CONFLICT`; `deleteCertificate` lets it stand (the certificate stays and the next call retries), and the live sweep deletes load balancers first and retries |
+| Certificate names are unique per account | docs | A racing upload loses with a 422 and reads the winner |
+| Let's Encrypt certificates need every name in a zone hosted in DO DNS | docs | Checked against `GET /domains` before the request (`INVALID_INPUT`) |
+| NAT gateway shape (`nat_gateways`: id, name, type PUBLIC, state NEW/UPDATING/ACTIVE/INVALID, region, size, vpcs[{ vpc_uuid, gateway_ip, default_gateway }], egresses.public_gateways[{ ipv4 }]) | docs, **unverified** response | `tests/fixtures/digitalocean/nat-gateways.json` |
+| NAT gateway names are unique per account; the token scope names for NAT gateways | **unverified** | The provider relies on its own name suffix and keeps the oldest; the README lists `vpc:*` and flags the scope names |
+| A VPC that a NAT gateway serves or a peering joins can't be deleted | **unverified** (assumed, as DO answers `409` for a VPC with members) | `deleteSubnet` deletes ours first and stays `pending` while any is left |
+| VPC peering shape (`vpc_peerings`: id, name, vpc_ids[2], status PROVISIONING/ACTIVE/DELETING, created_at); a delete is asynchronous | docs, **unverified** response | `deletePeering` reports `deleting`, then `deleted` once it is gone |
+| BYOIP prefix shape (`byoip_prefixes`: uuid, prefix, region, status, validations, failure_reason, advertised, locked, project_id) | docs, **unverified** response | `tests/fixtures/digitalocean/byoip-prefixes.json`; prefixes are only read |
+| How a reserved IP is drawn from a BYOIP prefix | **unverified** | The provider sends `POST /reserved_ips { region, byoip_prefix_uuid }` behind `previews: true` and refuses an answer outside the prefix |
+| VPC Routes (preview) shape: `/vpcs/{id}/routes`, `{ name, destination, next_hop { type nat_gateway / droplet / ip } }` | **unverified** | Behind `previews: true`; a route never changes in place |
+| VPC Subnets (preview): subnets inside one VPC | spec, preview | `networkModel: 'vpc-subnets'` is reserved and refused until a response is recorded; moving an account to it is an operator step |
 
 ## Consequences for the plans (applied 2026-10-18)
 

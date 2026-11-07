@@ -1,0 +1,52 @@
+{
+  "_provenance": "Shape: OpenAPI load_balancers/models/load_balancer.yml and load_balancer_base.yml (spec): id, name, project_id, ip, ipv6, size_unit, status (new/active/errored), created_at, forwarding_rules, health_check, sticky_sessions, redirect_http_to_https, enable_proxy_protocol, enable_backend_keepalive, http_idle_timeout_seconds, vpc_uuid, disable_lets_encrypt_dns_records, firewall, network (EXTERNAL/INTERNAL), network_stack, type (REGIONAL/REGIONAL_NETWORK/GLOBAL), domains, glb_settings, target_load_balancer_ids, region, droplet_ids, tag. Values are illustrative. Whether a load balancer can carry tags of its own, and whether names are unique per account, are unverified: the provider relies on neither. The emulator spreads this template and overrides what a request sets.",
+  "load_balancer": {
+    "id": "4de7ac8b-495b-4884-9a69-1050c6793cd6",
+    "name": "example-lb-01",
+    "project_id": "9cc10173-e9ea-4176-9dbc-a4cee4c4ff30",
+    "ip": "104.131.186.241",
+    "ipv6": "",
+    "size_unit": 1,
+    "type": "REGIONAL",
+    "status": "active",
+    "created_at": "2017-02-01T22:22:58Z",
+    "forwarding_rules": [
+      {
+        "entry_protocol": "http",
+        "entry_port": 80,
+        "target_protocol": "http",
+        "target_port": 80,
+        "certificate_id": "",
+        "tls_passthrough": false
+      }
+    ],
+    "health_check": {
+      "protocol": "http",
+      "port": 80,
+      "path": "/",
+      "check_interval_seconds": 10,
+      "response_timeout_seconds": 5,
+      "healthy_threshold": 5,
+      "unhealthy_threshold": 3
+    },
+    "sticky_sessions": { "type": "none" },
+    "redirect_http_to_https": false,
+    "enable_proxy_protocol": false,
+    "enable_backend_keepalive": false,
+    "http_idle_timeout_seconds": 60,
+    "vpc_uuid": "c33931f2-a26a-4e61-b85c-4e95a2ec431b",
+    "disable_lets_encrypt_dns_records": false,
+    "firewall": { "deny": [], "allow": [] },
+    "network": "EXTERNAL",
+    "network_stack": "IPV4",
+    "region": {
+      "name": "New York 3",
+      "slug": "nyc3",
+      "features": ["private_networking", "backups", "ipv6", "metadata"],
+      "available": true,
+      "sizes": ["s-1vcpu-1gb", "s-2vcpu-4gb"]
+    },
+    "droplet_ids": [3164444, 3164445],
+    "tag": ""
+  }
+}

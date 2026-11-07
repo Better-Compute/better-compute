@@ -113,6 +113,7 @@ import {
 } from './reservation-grants.js';
 import {
   completeCreateInstance,
+  instanceDnsRecordName,
   deleteInstance,
   denyCreateInstance,
   assertOwnerMember,
@@ -302,6 +303,15 @@ import {
 } from './volumes.js';
 import { volumeStorageSelfCheck, volumeStorageStatusHandler } from './volume-storage.js';
 import {
+  networkEdgeSchemas,
+  parsePeerNetwork,
+  parseSetNatGateway,
+  parseSetRoutes,
+  type PeerNetworkInput,
+  type SetNatGatewayInput,
+  type SetRoutesInput,
+} from './network-edge.js';
+import {
   addSubnet,
   adoptNetwork,
   clearStagedNetwork,
@@ -324,8 +334,11 @@ import {
   parseRuleRef,
   parseUpdateNetwork,
   parseUpdateRule,
+  peerNetwork,
   prepareCreateNetwork,
   removeSubnet,
+  setNatGateway,
+  setRoutes,
   updateNetwork,
   updateRule,
   type AddSubnetInput,
@@ -414,6 +427,71 @@ import {
   type RestoreProviderSnapshotInput,
   type SnapshotProviderVolumeInput,
 } from './provider-resources.js';
+import {
+  clearStagedProviderCertificate,
+  createProviderCertificate,
+  deleteProviderCertificate,
+  getProviderCertificate,
+  listProviderCertificates,
+  parseCreateProviderCertificate,
+  parseListProviderCertificates,
+  parseProviderCertificateRef,
+  prepareCreateProviderCertificate,
+  providerCertificateSchemas,
+  type CreateProviderCertificateInput,
+  type ListProviderCertificatesInput,
+  type ProviderCertificateRef,
+  type ProviderCertificateView,
+} from './provider-certificates.js';
+import {
+  clearStagedProviderLoadBalancer,
+  createProviderLoadBalancer,
+  deleteProviderLoadBalancer,
+  getProviderLoadBalancer,
+  listProviderLoadBalancers,
+  parseCreateProviderLoadBalancer,
+  parseListProviderLoadBalancers,
+  parseProviderLoadBalancerRef,
+  parseUpdateProviderLoadBalancer,
+  prepareCreateProviderLoadBalancer,
+  providerLoadBalancerSchemas,
+  updateProviderLoadBalancer,
+  type CreateProviderLoadBalancerInput,
+  type ListProviderLoadBalancersInput,
+  type ProviderLoadBalancerRef,
+  type ProviderLoadBalancerView,
+  type UpdateProviderLoadBalancerInput,
+} from './provider-load-balancers.js';
+import {
+  clearStagedProviderDnsZone,
+  createProviderDnsRecord,
+  createProviderDnsZone,
+  deleteProviderDnsRecord,
+  deleteProviderDnsZone,
+  getProviderDnsRecord,
+  getProviderDnsZone,
+  listProviderDnsRecords,
+  listProviderDnsZones,
+  parseCreateProviderDnsRecord,
+  parseCreateProviderDnsZone,
+  parseListProviderDnsRecords,
+  parseListProviderDnsZones,
+  parseProviderDnsRecordRef,
+  parseProviderDnsZoneRef,
+  parseUpdateProviderDnsRecord,
+  prepareCreateProviderDnsZone,
+  providerDnsSchemas,
+  updateProviderDnsRecord,
+  type CreateProviderDnsRecordInput,
+  type CreateProviderDnsZoneInput,
+  type ListProviderDnsRecordsInput,
+  type ListProviderDnsZonesInput,
+  type ProviderDnsRecordRef,
+  type ProviderDnsRecordView,
+  type ProviderDnsZoneRef,
+  type ProviderDnsZoneView,
+  type UpdateProviderDnsRecordInput,
+} from './provider-dns.js';
 import {
   deleteSnapshot,
   getSnapshot,
@@ -631,6 +709,12 @@ export type VpsApi = {
     addSubnet: MethodDefinition<AddSubnetInput, NetworkView>;
     removeSubnet: MethodDefinition<RemoveSubnetInput, NetworkView>;
     adopt: MethodDefinition<AdoptNetworkInput, NetworkView>;
+    /** (DO P4) A subnet's NAT gateway, on or off (network-edge.ts). */
+    natGateway: MethodDefinition<SetNatGatewayInput, NetworkView>;
+    /** (DO P4) Peers two subnets of the tenant's networks, or unpeers them. */
+    peer: MethodDefinition<PeerNetworkInput, NetworkView>;
+    /** (DO P4) Replaces a subnet's static routes. */
+    routes: MethodDefinition<SetRoutesInput, NetworkView>;
   };
   firewallRules: {
     create: MethodDefinition<CreateRuleInput, FirewallRuleView>;
@@ -671,6 +755,36 @@ export type VpsApi = {
     assign: MethodDefinition<AssignProviderAddressInput, ProviderAddressView>;
     unassign: MethodDefinition<ProviderAddressRef, ProviderAddressView>;
     delete: MethodDefinition<ProviderAddressRef, ProviderAddressView>;
+  };
+  /** (DO P4) TLS certificates on a provider account, for load balancers (provider-certificates.ts). */
+  certificates: {
+    create: MethodDefinition<CreateProviderCertificateInput, ProviderCertificateView>;
+    list: MethodDefinition<ListProviderCertificatesInput, { items: ProviderCertificateView[] }>;
+    get: MethodDefinition<ProviderCertificateRef, ProviderCertificateView>;
+    delete: MethodDefinition<ProviderCertificateRef, ProviderCertificateView>;
+  };
+  /** (DO P4) Load balancers on a provider account (provider-load-balancers.ts). */
+  loadBalancers: {
+    create: MethodDefinition<CreateProviderLoadBalancerInput, ProviderLoadBalancerView>;
+    list: MethodDefinition<ListProviderLoadBalancersInput, { items: ProviderLoadBalancerView[] }>;
+    get: MethodDefinition<ProviderLoadBalancerRef, ProviderLoadBalancerView>;
+    update: MethodDefinition<UpdateProviderLoadBalancerInput, ProviderLoadBalancerView>;
+    delete: MethodDefinition<ProviderLoadBalancerRef, ProviderLoadBalancerView>;
+  };
+  /** (DO P4) DNS zones on a provider account (provider-dns.ts). */
+  dnsZones: {
+    create: MethodDefinition<CreateProviderDnsZoneInput, ProviderDnsZoneView>;
+    list: MethodDefinition<ListProviderDnsZonesInput, { items: ProviderDnsZoneView[] }>;
+    get: MethodDefinition<ProviderDnsZoneRef, ProviderDnsZoneView>;
+    delete: MethodDefinition<ProviderDnsZoneRef, ProviderDnsZoneView>;
+  };
+  /** (DO P4) The records of a DNS zone, decided on the zone (provider-dns.ts). */
+  dnsRecords: {
+    create: MethodDefinition<CreateProviderDnsRecordInput, ProviderDnsRecordView>;
+    list: MethodDefinition<ListProviderDnsRecordsInput, { items: ProviderDnsRecordView[] }>;
+    get: MethodDefinition<ProviderDnsRecordRef, ProviderDnsRecordView>;
+    update: MethodDefinition<UpdateProviderDnsRecordInput, ProviderDnsRecordView>;
+    delete: MethodDefinition<ProviderDnsRecordRef, ProviderDnsRecordView>;
   };
 };
 
@@ -746,6 +860,15 @@ function providerSnapshotResource<I extends { snapshotId: string }>(input: I) {
 }
 function providerAddressResource<I extends { addressId: string }>(input: I) {
   return { type: 'provider-address', id: input.addressId };
+}
+function providerCertificateResource<I extends { certificateId: string }>(input: I) {
+  return { type: 'provider-certificate', id: input.certificateId };
+}
+function providerLoadBalancerResource<I extends { loadBalancerId: string }>(input: I) {
+  return { type: 'provider-load-balancer', id: input.loadBalancerId };
+}
+function providerDnsZoneResource<I extends { zoneId: string }>(input: I) {
+  return { type: 'provider-dns-zone', id: input.zoneId };
 }
 
 function parsePool(raw: unknown): PoolInput {
@@ -1066,11 +1189,15 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
    * also hold `compute:secrets:manage` on the tenant (and on the fleet in the root tenant, whose
    * store also holds fleet secrets). Decided outside any transaction, on the caller's credential.
    */
-  const userDataSecretCheck = async (context: MethodContext, tenantId: string): Promise<void> => {
+  const userDataSecretCheck = async (
+    context: MethodContext,
+    tenantId: string,
+    what = 'An instance whose user data is a secret',
+  ): Promise<void> => {
     if (!context.credential)
       throw new ComputeError(
         'ACCESS_DENIED',
-        'An instance whose user data is a secret is decided on the caller’s own credential',
+        `${what} is decided on the caller’s own credential`,
         undefined,
         { reason: 'credential-required' },
       );
@@ -1142,6 +1269,52 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       action: 'compute:instances:update',
       resource: { type: `${prefix}instance`, id: instanceId },
     });
+  };
+  /** (DO P4) `instances.create({ dns })`: decided as `compute:dns:manage` on the zone, on the caller's own credential. */
+  const dnsZoneCheck = async (
+    context: MethodContext,
+    tenantId: string,
+    zoneId: string,
+  ): Promise<void> => {
+    if (!context.credential)
+      throw new ComputeError(
+        'ACCESS_DENIED',
+        'Publishing an instance in a DNS zone is decided on the caller’s own credential',
+        undefined,
+        { reason: 'credential-required' },
+      );
+    const prefix = context.typePrefix ?? typePrefix;
+    await context.iam.require(context.credential, {
+      tenantId,
+      action: 'compute:dns:manage',
+      resource: { type: `${prefix}provider-dns-zone`, id: zoneId },
+    });
+  };
+  /** (DO P4) `networks.peer`: the other network is decided as the first one (`compute:networks:update`). */
+  const peerNetworkCheck = async (context: MethodContext, input: PeerNetworkInput): Promise<void> => {
+    if (input.peerNetworkId === input.networkId || !input.enabled) return;
+    if (!context.credential)
+      throw new ComputeError(
+        'ACCESS_DENIED',
+        'Peering two networks is decided on the caller’s own credential',
+        undefined,
+        { reason: 'credential-required' },
+      );
+    const prefix = context.typePrefix ?? typePrefix;
+    await context.iam.require(context.credential, {
+      tenantId: input.tenantId,
+      action: 'compute:networks:update',
+      resource: { type: `${prefix}network`, id: input.peerNetworkId },
+    });
+  };
+  /** (DO P4) A load balancer's named target instances: each decided as `targetInstanceCheck` decides one. */
+  const instancesCheck = async (
+    context: MethodContext,
+    tenantId: string,
+    instanceIds: readonly string[] | undefined,
+  ): Promise<void> => {
+    for (const instanceId of instanceIds ?? [])
+      await targetInstanceCheck(context, tenantId, instanceId);
   };
   /**
    * An update that changes what the guest runs (image, flavor, user data, env, network) hands the
@@ -1297,10 +1470,27 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           check: async (context, input) => {
             await assertOwnerMember(context, input);
             if (isSecretRef(input.userData)) await userDataSecretCheck(context, input.tenantId);
+            // (DO P4) Publishing the instance in a zone is a record in that zone: decided as dnsRecords.create is.
+            if (input.dns) await dnsZoneCheck(context, input.tenantId, input.dns.zoneId);
             await budgetAdmissionCheck(context, input.tenantId, input.poolId);
           },
         },
-        handler: (context, input) => completeCreateInstance(depsOf(context), context, input),
+        handler: async (context, input) => {
+          const created = await completeCreateInstance(depsOf(context), context, input);
+          // (DO P4) Its records in the same transaction: a zone that is not the tenant's (or is being deleted)
+          // refuses the whole create. Keyed by the instance, so a retry finds the records it made.
+          if (input.dns)
+            for (const type of input.dns.ipv6 ? (['A', 'AAAA'] as const) : (['A'] as const))
+              await createProviderDnsRecord(networkDeps(context), context, {
+                tenantId: input.tenantId,
+                zoneId: input.dns.zoneId,
+                name: instanceDnsRecordName(created.id, input.dns),
+                type,
+                instanceId: created.id,
+                idempotencyKey: `instance-dns:${created.id}:${type}`,
+              });
+          return created;
+        },
         // §9.1 async-with-wait: `wait` holds the answer until the instance is placed and started
         // (or failed), refreshed from its row.
         poll: {
@@ -2135,6 +2325,51 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         validate: describedBy(networkSchemas.adoptNetwork, parseAdoptNetwork),
         handler: (context, input) => adoptNetwork(networkDeps(context), context, input),
       }),
+      natGateway: defineMethod({
+        action: 'compute:networks:update',
+        kind: 'mutation',
+        resource: networkResource,
+        validate: describedBy(networkEdgeSchemas.natGateway, parseSetNatGateway),
+        handler: (context, input) => setNatGateway(networkDeps(context), context.sql, input),
+      }),
+      peer: defineMethod({
+        action: 'compute:networks:update',
+        kind: 'mutation',
+        resource: networkResource,
+        validate: describedBy(networkEdgeSchemas.peer, parsePeerNetwork),
+        admission: {
+          prepare: async (_context, input) => ({
+            status: 'decide',
+            resource: networkResource(input),
+          }),
+          // A peering joins the other network too: decided on it as well (the same right, on the caller's own
+          // credential), unless it is the same network.
+          check: (context, input) => peerNetworkCheck(context, input),
+        },
+        handler: (context, input) => peerNetwork(networkDeps(context), context.sql, input),
+      }),
+      routes: defineMethod({
+        action: 'compute:networks:update',
+        kind: 'mutation',
+        resource: networkResource,
+        validate: describedBy(networkEdgeSchemas.routes, parseSetRoutes),
+        admission: {
+          prepare: async (_context, input) => ({
+            status: 'decide',
+            resource: networkResource(input),
+          }),
+          // Sending a subnet's traffic through an instance hands that instance the traffic: decided on it too.
+          check: (context, input) =>
+            instancesCheck(
+              context,
+              input.tenantId,
+              input.routes.flatMap((route) =>
+                'instanceId' in route.nextHop ? [route.nextHop.instanceId] : [],
+              ),
+            ),
+        },
+        handler: (context, input) => setRoutes(networkDeps(context), context.sql, input),
+      }),
     },
     firewallRules: {
       create: defineMethod({
@@ -2376,6 +2611,208 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         validate: describedBy(providerResourceSchemas.address, parseProviderAddressRef),
         handler: (context, input) =>
           deleteProviderAddress(networkDeps(context), context.sql, input),
+      }),
+    },
+    certificates: {
+      create: defineMethod({
+        action: 'compute:certificates:manage',
+        kind: 'mutation',
+        // The envelope decides on the certificate `prepare` returns.
+        resource: (input: CreateProviderCertificateInput) => ({
+          type: 'provider-certificate',
+          id: `draft:${input.idempotencyKey}`,
+        }),
+        validate: describedBy(providerCertificateSchemas.create, parseCreateProviderCertificate),
+        admission: {
+          prepare: (context, input, tx) =>
+            prepareCreateProviderCertificate(networkDeps(context), context, input, tx),
+          denied: (context, input, tx) => clearStagedProviderCertificate(context, input, tx),
+          abandoned: (context, input, tx) => clearStagedProviderCertificate(context, input, tx),
+          // A custom certificate's PEMs are the tenant's secrets, which the control plane resolves and uploads to the
+          // provider account: handing a secret outside the store takes `compute:secrets:manage` on the tenant (and
+          // on the fleet in the root tenant), as user data and template env do.
+          check: async (context, input) => {
+            if (input.kind === 'custom')
+              await userDataSecretCheck(context, input.tenantId, 'A custom certificate (it uploads secrets)');
+          },
+        },
+        handler: (context, input) =>
+          createProviderCertificate(networkDeps(context), context, input),
+      }),
+      list: defineMethod({
+        action: 'compute:certificates:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(providerCertificateSchemas.list, parseListProviderCertificates),
+        handler: (context, input) => listProviderCertificates(context.sql, input),
+      }),
+      get: defineMethod({
+        action: 'compute:certificates:read',
+        kind: 'read',
+        resource: providerCertificateResource,
+        validate: describedBy(providerCertificateSchemas.certificate, parseProviderCertificateRef),
+        handler: (context, input) => getProviderCertificate(context.sql, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:certificates:manage',
+        kind: 'mutation',
+        resource: providerCertificateResource,
+        validate: describedBy(providerCertificateSchemas.certificate, parseProviderCertificateRef),
+        handler: (context, input) =>
+          deleteProviderCertificate(networkDeps(context), context.sql, input),
+      }),
+    },
+    loadBalancers: {
+      create: defineMethod({
+        action: 'compute:load-balancers:manage',
+        kind: 'mutation',
+        resource: (input: CreateProviderLoadBalancerInput) => ({
+          type: 'provider-load-balancer',
+          id: `draft:${input.idempotencyKey}`,
+        }),
+        validate: describedBy(providerLoadBalancerSchemas.create, parseCreateProviderLoadBalancer),
+        admission: {
+          prepare: (context, input, tx) =>
+            prepareCreateProviderLoadBalancer(networkDeps(context), context, input, tx),
+          denied: (context, input, tx) => clearStagedProviderLoadBalancer(context, input, tx),
+          abandoned: (context, input, tx) => clearStagedProviderLoadBalancer(context, input, tx),
+          // Sending an instance traffic changes what reaches its guest: decided on each named instance too.
+          check: (context, input) =>
+            instancesCheck(context, input.tenantId, input.targets.instanceIds),
+        },
+        handler: (context, input) =>
+          createProviderLoadBalancer(networkDeps(context), context, input),
+      }),
+      list: defineMethod({
+        action: 'compute:load-balancers:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(providerLoadBalancerSchemas.list, parseListProviderLoadBalancers),
+        handler: (context, input) => listProviderLoadBalancers(context.sql, input),
+      }),
+      get: defineMethod({
+        action: 'compute:load-balancers:read',
+        kind: 'read',
+        resource: providerLoadBalancerResource,
+        validate: describedBy(
+          providerLoadBalancerSchemas.loadBalancer,
+          parseProviderLoadBalancerRef,
+        ),
+        handler: (context, input) => getProviderLoadBalancer(context.sql, input),
+      }),
+      update: defineMethod({
+        action: 'compute:load-balancers:manage',
+        kind: 'mutation',
+        resource: providerLoadBalancerResource,
+        validate: describedBy(providerLoadBalancerSchemas.update, parseUpdateProviderLoadBalancer),
+        admission: {
+          prepare: async (_context, input) => ({
+            status: 'decide',
+            resource: providerLoadBalancerResource(input),
+          }),
+          check: (context, input) =>
+            instancesCheck(context, input.tenantId, input.targets?.instanceIds),
+        },
+        handler: (context, input) =>
+          updateProviderLoadBalancer(networkDeps(context), context.sql, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:load-balancers:manage',
+        kind: 'mutation',
+        resource: providerLoadBalancerResource,
+        validate: describedBy(
+          providerLoadBalancerSchemas.loadBalancer,
+          parseProviderLoadBalancerRef,
+        ),
+        handler: (context, input) =>
+          deleteProviderLoadBalancer(networkDeps(context), context.sql, input),
+      }),
+    },
+    dnsZones: {
+      create: defineMethod({
+        action: 'compute:dns:manage',
+        kind: 'mutation',
+        resource: (input: CreateProviderDnsZoneInput) => ({
+          type: 'provider-dns-zone',
+          id: `draft:${input.idempotencyKey}`,
+        }),
+        validate: describedBy(providerDnsSchemas.createZone, parseCreateProviderDnsZone),
+        admission: {
+          prepare: (context, input, tx) =>
+            prepareCreateProviderDnsZone(networkDeps(context), context, input, tx),
+          denied: (context, input, tx) => clearStagedProviderDnsZone(context, input, tx),
+          abandoned: (context, input, tx) => clearStagedProviderDnsZone(context, input, tx),
+        },
+        handler: (context, input) => createProviderDnsZone(networkDeps(context), context, input),
+      }),
+      list: defineMethod({
+        action: 'compute:dns:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(providerDnsSchemas.listZones, parseListProviderDnsZones),
+        handler: (context, input) => listProviderDnsZones(context.sql, input),
+      }),
+      get: defineMethod({
+        action: 'compute:dns:read',
+        kind: 'read',
+        resource: providerDnsZoneResource,
+        validate: describedBy(providerDnsSchemas.zone, parseProviderDnsZoneRef),
+        handler: (context, input) => getProviderDnsZone(context.sql, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:dns:manage',
+        kind: 'mutation',
+        resource: providerDnsZoneResource,
+        validate: describedBy(providerDnsSchemas.zone, parseProviderDnsZoneRef),
+        handler: (context, input) =>
+          deleteProviderDnsZone(networkDeps(context), context.sql, input),
+      }),
+    },
+    dnsRecords: {
+      create: defineMethod({
+        action: 'compute:dns:manage',
+        kind: 'mutation',
+        resource: providerDnsZoneResource,
+        validate: describedBy(providerDnsSchemas.createRecord, parseCreateProviderDnsRecord),
+        admission: {
+          prepare: async (_context, input) => ({
+            status: 'decide',
+            resource: providerDnsZoneResource(input),
+          }),
+          // Publishing an instance's address under a name: decided on the instance too.
+          check: (context, input) => targetInstanceCheck(context, input.tenantId, input.instanceId),
+        },
+        handler: (context, input) => createProviderDnsRecord(networkDeps(context), context, input),
+      }),
+      list: defineMethod({
+        action: 'compute:dns:read',
+        kind: 'read',
+        resource: providerDnsZoneResource,
+        validate: describedBy(providerDnsSchemas.listRecords, parseListProviderDnsRecords),
+        handler: (context, input) => listProviderDnsRecords(context.sql, input),
+      }),
+      get: defineMethod({
+        action: 'compute:dns:read',
+        kind: 'read',
+        resource: providerDnsZoneResource,
+        validate: describedBy(providerDnsSchemas.record, parseProviderDnsRecordRef),
+        handler: (context, input) => getProviderDnsRecord(context.sql, input),
+      }),
+      update: defineMethod({
+        action: 'compute:dns:manage',
+        kind: 'mutation',
+        resource: providerDnsZoneResource,
+        validate: describedBy(providerDnsSchemas.updateRecord, parseUpdateProviderDnsRecord),
+        handler: (context, input) =>
+          updateProviderDnsRecord(networkDeps(context), context.sql, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:dns:manage',
+        kind: 'mutation',
+        resource: providerDnsZoneResource,
+        validate: describedBy(providerDnsSchemas.record, parseProviderDnsRecordRef),
+        handler: (context, input) =>
+          deleteProviderDnsRecord(networkDeps(context), context.sql, input),
       }),
     },
   });

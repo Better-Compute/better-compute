@@ -251,7 +251,7 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     subject: 'network/{id}',
     module: 'vps',
     description:
-      'Tenant networks (VPCs): created, adopted (an existing provider VPC, networks.adopt: { externalNetwork, sharedTagScoped }), ready, error, deleting, deleted; network.subnet.ready and network.rule.ready/error when a subnet or firewall rule converges; network.filesystem.created/ready/error/deleting/deleted for its shared filesystems { filesystemId, ... }; data { networkId, ... }',
+      'Tenant networks (VPCs): created, adopted (an existing provider VPC, networks.adopt: { externalNetwork, sharedTagScoped }), ready, error, deleting, deleted; network.subnet.ready and network.rule.ready/error when a subnet or firewall rule converges; network.filesystem.created/ready/error/deleting/deleted for its shared filesystems { filesystemId, ... }; (edge) network.natGateway.ready/error, network.peering.ready/error and network.route.ready/error { edgeId, subnetId }; data { networkId, ... }',
   },
   {
     type: 'providerVolume.*',
@@ -273,6 +273,34 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     module: 'vps',
     description:
       'Reserved provider addresses (DO P2): created { poolId, providerAccountId, name, region, family }, updated ({ assign | unassign }), ready { address }, assigned { instanceId }, unassigned, error { message }, deleting, deleted; data { addressId, ... }',
+  },
+  {
+    type: 'providerCertificate.*',
+    subject: 'provider-certificate/{id}',
+    module: 'vps',
+    description:
+      'TLS certificates on a provider account (DO P4): created { poolId, providerAccountId, name, kind }, ready, error { message }, deleting, deleted; data { certificateId, ... }',
+  },
+  {
+    type: 'providerLoadBalancer.*',
+    subject: 'provider-load-balancer/{id}',
+    module: 'vps',
+    description:
+      'Load balancers on a provider account (DO P4): created { poolId, providerAccountId, name, scope, region? }, updated { changed }, ready { address? }, error { message }, deleting, deleted; data { loadBalancerId, ... }',
+  },
+  {
+    type: 'providerDnsZone.*',
+    subject: 'provider-dns-zone/{id}',
+    module: 'vps',
+    description:
+      'DNS zones on a provider account (DO P4): created { poolId, providerAccountId, zone, adopt }, ready, error { message }, deleting, deleted; data { zoneId, ... }',
+  },
+  {
+    type: 'providerDnsRecord.*',
+    subject: 'provider-dns-record/{id}',
+    module: 'vps',
+    description:
+      'DNS records (DO P4): created { zoneId, name, type, instanceId? }, updated { changed }, ready, error { message }, deleting { instanceId? }, deleted; data { recordId, ... }',
   },
   {
     type: 'kubernetes.cluster.*',

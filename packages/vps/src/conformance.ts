@@ -9,6 +9,7 @@ import {
   type ProviderDefinition,
   type ProviderImpl,
   type ProviderResourceState,
+  type SecretRef,
 } from '@better-compute/core';
 import {
   check,
@@ -78,6 +79,25 @@ export interface ProviderConformanceSubject {
    * The reinstall case is skipped without it: on real hardware it can take many minutes.
    */
   reinstallable?: boolean;
+  /**
+   * (edge) A DNS zone the subject may create and delete (a test domain the account can host). The DNS case is
+   * skipped without it.
+   */
+  dnsZone?: string;
+  /**
+   * (edge) Secret references to a PEM certificate and key `context.secrets` resolves, for the custom certificate
+   * case; it is skipped without them.
+   */
+  certificate?: { certificate: SecretRef; privateKey: SecretRef; chain?: SecretRef };
+  /** (edge) The CIDR of the subnet the NAT gateway case makes (default `10.250.0.0/24`). */
+  natCidr?: string;
+  /** (edge) The CIDRs of the two subnets the peering case makes (default `10.251.0.0/24`, `10.252.0.0/24`). */
+  peeringCidrs?: readonly [string, string];
+  /**
+   * (edge) The subnet the route case makes and the private address in it the route points at (default
+   * `10.253.0.0/24` and `10.253.0.10`).
+   */
+  route?: { cidr: string; nextHop: string };
 }
 
 const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -991,6 +1011,550 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
             await addresses.deleteAddress(addressId, call('addr-cleanup')).catch(() => {});
           }
           await cleanUp(impl, call, machine.id);
+        }
+      },
+    },
+    {
+      name: 'load balancers (when offered): a regional one in front of a machine, changed in place, deleted',
+      async run(subject) {
+        const probe = await client(subject);
+        if (!probe.impl.loadBalancers) return;
+        const { impl, call, machine } = await create(subject, key(subject, 'lb-host'));
+        const lbs = impl.loadBalancers!;
+        let lbId: string | undefined;
+        try {
+          const region = regionOf(subject, machine);
+          const spec = {
+            name: key(subject, 'lb'),
+            scope: 'regional' as const,
+            region,
+            forwarding: [
+              { entryProtocol: 'http', entryPort: 80, targetProtocol: 'http', targetPort: 80 },
+            ] as const,
+            healthCheck: { protocol: 'tcp' as const, port: 80 },
+            targets: { machines: [machine.id] },
+          };
+          const made = await settle(
+            subject,
+            () => lbs.ensureLoadBalancer(spec, call('lb-ensure')),
+            ['ready'],
+            'ensureLoadBalancer',
+          );
+          const id = made.id;
+          lbId = id;
+          checkEqual(made.outputs?.scope, 'regional', 'a load balancer reports its scope');
+          checkEqual(made.outputs?.region, region, 'a regional load balancer reports its region');
+          const again = await lbs.ensureLoadBalancer({ ...spec, id }, call('lb-ensure-again'));
+          checkEqual(again.id, id, 'ensuring again returns the same load balancer');
+          const byName = await lbs.ensureLoadBalancer(spec, call('lb-ensure-by-name'));
+          checkEqual(byName.id, id, 'ensuring by name alone returns the same load balancer');
+          const changed = await settle(
+            subject,
+            () =>
+              lbs.ensureLoadBalancer(
+                {
+                  ...spec,
+                  id,
+                  forwarding: [
+                    {
+                      entryProtocol: 'http',
+                      entryPort: 8080,
+                      targetProtocol: 'http',
+                      targetPort: 80,
+                    },
+                  ],
+                },
+                call('lb-change'),
+              ),
+            ['ready'],
+            'ensureLoadBalancer (changed forwarding)',
+          );
+          checkEqual(changed.id, id, 'a forwarding change keeps the load balancer');
+          await checkRejects(
+            () =>
+              lbs.ensureLoadBalancer(
+                { ...spec, id, internal: true },
+                call('lb-change-internal'),
+              ),
+            'INVALID_STATE',
+            'making a public load balancer internal in place',
+          );
+          checkResource(await lbs.getLoadBalancer(id, call('lb-get')), 'getLoadBalancer');
+          await settle(
+            subject,
+            () => lbs.deleteLoadBalancer(id, call('lb-delete')),
+            ['deleted'],
+            'deleteLoadBalancer',
+          );
+          lbId = undefined;
+          checkEqual(
+            (await lbs.deleteLoadBalancer(id, call('lb-delete-again'))).state,
+            'deleted',
+            'deleting a deleted load balancer counts as deleted',
+          );
+          const gone = await lbs.getLoadBalancer(id, call('lb-get-deleted'));
+          check(
+            gone === undefined || gone.state === 'deleting' || gone.state === 'deleted',
+            'getLoadBalancer after delete finds nothing live',
+          );
+        } finally {
+          if (lbId !== undefined)
+            await lbs.deleteLoadBalancer(lbId, call('lb-cleanup')).catch(() => {});
+          await cleanUp(impl, call, machine.id);
+        }
+      },
+    },
+    {
+      name: 'load balancers (when offered): a target machine in another region is INVALID_INPUT',
+      async run(subject) {
+        const probe = await client(subject);
+        if (!probe.impl.loadBalancers || subject.otherRegionOfferId === undefined) return;
+        const { impl, call, machine } = await create(subject, key(subject, 'lb-region-host'));
+        const lbs = impl.loadBalancers!;
+        let foreign: ExternalMachine | undefined;
+        try {
+          foreign = await impl.create(
+            {
+              offerId: subject.otherRegionOfferId,
+              image: subject.image,
+              userData: '#cloud-config\n',
+              name: key(subject, 'lb-region-foreign'),
+            },
+            call(key(subject, 'lb-region-foreign')),
+          );
+          const region = regionOf(subject, machine);
+          const other = foreign;
+          check(
+            other.region === undefined || other.region !== region,
+            'the other-region offer made a machine in another region',
+          );
+          await checkRejects(
+            () =>
+              lbs.ensureLoadBalancer(
+                {
+                  name: key(subject, 'lb-region'),
+                  scope: 'regional',
+                  region,
+                  forwarding: [
+                    { entryProtocol: 'tcp', entryPort: 80, targetProtocol: 'tcp', targetPort: 80 },
+                  ],
+                  targets: { machines: [other.id] },
+                },
+                call('lb-region-ensure'),
+              ),
+            'INVALID_INPUT',
+            'a load balancer targeting a machine in another region',
+          );
+        } finally {
+          if (foreign) await cleanUp(impl, call, foreign.id);
+          await cleanUp(impl, call, machine.id);
+        }
+      },
+    },
+    {
+      name: 'dns (when offered): a zone, a record found by name, type and data, changed in place, deleted',
+      async run(subject) {
+        const probe = await client(subject);
+        if (!probe.impl.dns || subject.dnsZone === undefined) return;
+        const { impl, call } = probe;
+        const dns = impl.dns!;
+        const zoneName = subject.dnsZone;
+        let zone: string | undefined;
+        let recordId: string | undefined;
+        try {
+          const made = await dns.ensureZone({ name: zoneName }, call('dns-zone'));
+          checkResource(made, 'ensureZone');
+          checkEqual(made.state, 'ready', 'a zone is ready when ensureZone returns');
+          zone = made.id;
+          checkEqual(
+            (await dns.ensureZone({ name: zoneName }, call('dns-zone-again'))).id,
+            zone,
+            'ensuring a zone again returns the same zone',
+          );
+          const spec = {
+            name: key(subject, 'rec'),
+            type: 'A' as const,
+            data: '192.0.2.10',
+            ttlSeconds: 300,
+          };
+          const record = await dns.ensureRecord(zone, spec, call('dns-record'));
+          checkResource(record, 'ensureRecord');
+          checkEqual(record.state, 'ready', 'a record is ready when ensureRecord returns');
+          const id = record.id;
+          recordId = id;
+          checkEqual(record.outputs?.data, '192.0.2.10', 'a record reports its data');
+          checkEqual(
+            (await dns.ensureRecord(zone, spec, call('dns-record-again'))).id,
+            id,
+            'ensuring the same name, type and data again returns the same record',
+          );
+          const changed = await dns.ensureRecord(
+            zone,
+            { ...spec, id, data: '192.0.2.11' },
+            call('dns-record-change'),
+          );
+          checkEqual(changed.id, id, 'a data change keeps the record');
+          checkEqual(
+            (await dns.getRecord(zone, id, call('dns-record-get')))?.outputs?.data,
+            '192.0.2.11',
+            'the record reports its new data',
+          );
+          await checkRejects(
+            () =>
+              dns.ensureRecord(
+                zone!,
+                { ...spec, id, name: key(subject, 'rec-other') },
+                call('dns-record-rename'),
+              ),
+            'INVALID_STATE',
+            'ensuring a record id under another name',
+          );
+          await checkRejects(
+            () =>
+              dns.deleteRecord(zone!, id, call('dns-record-delete-other'), {
+                name: spec.name,
+                type: 'AAAA',
+              }),
+            'INVALID_STATE',
+            'deleting a record that is not the one expected',
+          );
+          checkEqual(
+            (
+              await dns.deleteRecord(zone, id, call('dns-record-delete'), {
+                name: spec.name,
+                type: 'A',
+              })
+            ).state,
+            'deleted',
+            'deleteRecord',
+          );
+          recordId = undefined;
+          checkEqual(
+            (await dns.deleteRecord(zone, id, call('dns-record-delete-again'))).state,
+            'deleted',
+            'deleting a deleted record counts as deleted',
+          );
+          checkEqual(
+            (await dns.deleteZone(zone, call('dns-zone-delete'))).state,
+            'deleted',
+            'deleteZone',
+          );
+          zone = undefined;
+          checkEqual(
+            (await dns.deleteZone(zoneName, call('dns-zone-delete-again'))).state,
+            'deleted',
+            'deleting a deleted zone counts as deleted',
+          );
+        } finally {
+          if (zone !== undefined) {
+            if (recordId !== undefined)
+              await dns.deleteRecord(zone, recordId, call('dns-cleanup-record')).catch(() => {});
+            await dns.deleteZone(zone, call('dns-cleanup-zone')).catch(() => {});
+          }
+        }
+      },
+    },
+    {
+      name: 'nat gateways (when offered): one per subnet by name; the subnet goes only after its gateway',
+      async run(subject) {
+        const probe = await client(subject);
+        const networks = probe.impl.networks;
+        if (!networks?.ensureNatGateway || !networks.deleteNatGateway) return;
+        const { impl, call } = probe;
+        const region =
+          subject.region ??
+          (await impl.listOffers({})).find((offer) => offer.id === subject.offerId)?.region;
+        check(region !== undefined, 'the subject names no region and its offer reports none');
+        const network = key(subject, 'nat-net');
+        const subnet = key(subject, 'nat-sub');
+        const name = key(subject, 'nat');
+        const asResource = (step: () => Promise<{ id: string; state: string; message?: string }>) =>
+          step as () => Promise<ProviderResourceState>;
+        let made = false;
+        try {
+          await settle(
+            subject,
+            asResource(() => networks.ensureNetwork({ name: network }, call('nat-network'))),
+            ['ready'],
+            'ensureNetwork',
+          );
+          await settle(
+            subject,
+            asResource(() =>
+              networks.ensureSubnet(
+                { network, name: subnet, region, cidr: subject.natCidr ?? '10.250.0.0/24' },
+                call('nat-subnet'),
+              ),
+            ),
+            ['ready'],
+            'ensureSubnet',
+          );
+          const spec = { name, network, subnet, region };
+          const gateway = await settle(
+            subject,
+            () => networks.ensureNatGateway!(spec, call('nat-ensure')),
+            ['ready'],
+            'ensureNatGateway',
+          );
+          made = true;
+          check(
+            typeof gateway.outputs?.address === 'string' && gateway.outputs.address !== '',
+            'a NAT gateway reports its egress address',
+          );
+          checkEqual(
+            (await networks.ensureNatGateway!(spec, call('nat-ensure-again'))).id,
+            gateway.id,
+            'ensuring the gateway again returns the same gateway',
+          );
+          const early = await networks.deleteSubnet(region, subnet, call('nat-subnet-early'));
+          check(early.state !== 'deleted', 'a subnet is not deleted while its NAT gateway exists');
+          await settle(
+            subject,
+            () => networks.deleteNatGateway!(region, name, call('nat-delete')),
+            ['deleted'],
+            'deleteNatGateway',
+          );
+          made = false;
+          checkEqual(
+            (await networks.deleteNatGateway!(region, name, call('nat-delete-again'))).state,
+            'deleted',
+            'deleting a deleted gateway counts as deleted',
+          );
+          await settle(
+            subject,
+            asResource(() => networks.deleteSubnet(region, subnet, call('nat-subnet-delete'))),
+            ['deleted'],
+            'deleteSubnet',
+          );
+          await settle(
+            subject,
+            asResource(() => networks.deleteNetwork(network, call('nat-network-delete'))),
+            ['deleted'],
+            'deleteNetwork',
+          );
+        } finally {
+          if (made) await networks.deleteNatGateway!(region, name, call('nat-cleanup')).catch(() => {});
+          await networks.deleteSubnet(region, subnet, call('nat-cleanup-subnet')).catch(() => {});
+          await networks.deleteNetwork(network, call('nat-cleanup-network')).catch(() => {});
+        }
+      },
+    },
+    {
+      name: 'peerings (when offered): two subnets peered by name, deleted idempotently',
+      async run(subject) {
+        const probe = await client(subject);
+        const networks = probe.impl.networks;
+        if (!networks?.ensurePeering || !networks.deletePeering) return;
+        const { impl, call } = probe;
+        const region =
+          subject.region ??
+          (await impl.listOffers({})).find((offer) => offer.id === subject.offerId)?.region;
+        check(region !== undefined, 'the subject names no region and its offer reports none');
+        const network = key(subject, 'peer-net');
+        const left = key(subject, 'peer-a');
+        const right = key(subject, 'peer-b');
+        const name = key(subject, 'peering');
+        const asResource = (step: () => Promise<{ id: string; state: string; message?: string }>) =>
+          step as () => Promise<ProviderResourceState>;
+        let made = false;
+        try {
+          await settle(
+            subject,
+            asResource(() => networks.ensureNetwork({ name: network }, call('peer-network'))),
+            ['ready'],
+            'ensureNetwork',
+          );
+          for (const [subnet, cidr] of [
+            [left, subject.peeringCidrs?.[0] ?? '10.251.0.0/24'],
+            [right, subject.peeringCidrs?.[1] ?? '10.252.0.0/24'],
+          ] as const)
+            await settle(
+              subject,
+              asResource(() =>
+                networks.ensureSubnet({ network, name: subnet, region, cidr }, call(`peer-${subnet}`)),
+              ),
+              ['ready'],
+              'ensureSubnet',
+            );
+          const spec = {
+            name,
+            network,
+            subnet: left,
+            region,
+            peer: { network, subnet: right, region },
+          };
+          const peering = await settle(
+            subject,
+            () => networks.ensurePeering!(spec, call('peer-ensure')),
+            ['ready'],
+            'ensurePeering',
+          );
+          made = true;
+          checkEqual(
+            (await networks.ensurePeering!(spec, call('peer-ensure-again'))).id,
+            peering.id,
+            'ensuring the peering again returns the same peering',
+          );
+          await settle(
+            subject,
+            () => networks.deletePeering!(name, call('peer-delete')),
+            ['deleted'],
+            'deletePeering',
+          );
+          made = false;
+          checkEqual(
+            (await networks.deletePeering!(name, call('peer-delete-again'))).state,
+            'deleted',
+            'deleting a deleted peering counts as deleted',
+          );
+        } finally {
+          if (made) await networks.deletePeering!(name, call('peer-cleanup')).catch(() => {});
+          for (const subnet of [left, right])
+            await networks.deleteSubnet(region, subnet, call(`peer-cleanup-${subnet}`)).catch(() => {});
+          await networks.deleteNetwork(network, call('peer-cleanup-network')).catch(() => {});
+        }
+      },
+    },
+    {
+      name: 'routes (when offered): a subnet route by name, refused when changed, deleted before its subnet',
+      async run(subject) {
+        const probe = await client(subject);
+        const networks = probe.impl.networks;
+        if (!networks?.ensureRoute || !networks.deleteRoute) return;
+        const { impl, call } = probe;
+        const region =
+          subject.region ??
+          (await impl.listOffers({})).find((offer) => offer.id === subject.offerId)?.region;
+        check(region !== undefined, 'the subject names no region and its offer reports none');
+        const network = key(subject, 'route-net');
+        const subnet = key(subject, 'route-sub');
+        const name = key(subject, 'route');
+        const cidr = subject.route?.cidr ?? '10.253.0.0/24';
+        const hop = subject.route?.nextHop ?? '10.253.0.10';
+        const asResource = (step: () => Promise<{ id: string; state: string; message?: string }>) =>
+          step as () => Promise<ProviderResourceState>;
+        const ref = { name, network, subnet, region };
+        let made = false;
+        try {
+          await settle(
+            subject,
+            asResource(() => networks.ensureNetwork({ name: network }, call('route-network'))),
+            ['ready'],
+            'ensureNetwork',
+          );
+          await settle(
+            subject,
+            asResource(() =>
+              networks.ensureSubnet({ network, name: subnet, region, cidr }, call('route-subnet')),
+            ),
+            ['ready'],
+            'ensureSubnet',
+          );
+          const spec = {
+            ...ref,
+            destination: '192.0.2.0/24',
+            nextHop: { kind: 'address' as const, id: hop },
+          };
+          const route = await settle(
+            subject,
+            () => networks.ensureRoute!(spec, call('route-ensure')),
+            ['ready'],
+            'ensureRoute',
+          );
+          made = true;
+          checkEqual(
+            (await networks.ensureRoute!(spec, call('route-ensure-again'))).id,
+            route.id,
+            'ensuring the route again returns the same route',
+          );
+          await checkRejects(
+            () =>
+              networks.ensureRoute!(
+                { ...spec, destination: '198.51.100.0/24' },
+                call('route-change'),
+              ),
+            'INVALID_STATE',
+            'changing a route in place',
+          );
+          const early = await networks.deleteSubnet(region, subnet, call('route-subnet-early'));
+          check(early.state !== 'deleted', 'a subnet is not deleted while a route of ours is in it');
+          await settle(
+            subject,
+            () => networks.deleteRoute!(ref, call('route-delete')),
+            ['deleted'],
+            'deleteRoute',
+          );
+          made = false;
+          checkEqual(
+            (await networks.deleteRoute!(ref, call('route-delete-again'))).state,
+            'deleted',
+            'deleting a deleted route counts as deleted',
+          );
+          await settle(
+            subject,
+            asResource(() => networks.deleteSubnet(region, subnet, call('route-subnet-delete'))),
+            ['deleted'],
+            'deleteSubnet',
+          );
+        } finally {
+          if (made) await networks.deleteRoute!(ref, call('route-cleanup')).catch(() => {});
+          await networks.deleteSubnet(region, subnet, call('route-cleanup-subnet')).catch(() => {});
+          await networks.deleteNetwork(network, call('route-cleanup-network')).catch(() => {});
+        }
+      },
+    },
+    {
+      name: 'certificates (when offered): a custom certificate by name, deleted idempotently',
+      async run(subject) {
+        const probe = await client(subject);
+        if (!probe.impl.certificates || subject.certificate === undefined) return;
+        const { impl, call } = probe;
+        const certificates = impl.certificates!;
+        const spec = {
+          name: key(subject, 'cert'),
+          kind: 'custom' as const,
+          certificate: subject.certificate.certificate,
+          privateKey: subject.certificate.privateKey,
+          ...(subject.certificate.chain !== undefined ? { chain: subject.certificate.chain } : {}),
+        };
+        let certId: string | undefined;
+        try {
+          const made = await settle(
+            subject,
+            () => certificates.ensureCertificate(spec, call('cert-ensure')),
+            ['ready'],
+            'ensureCertificate',
+          );
+          certId = made.id;
+          checkEqual(made.outputs?.kind, 'custom', 'a certificate reports its kind');
+          check(
+            typeof made.outputs?.fingerprint === 'string' && made.outputs.fingerprint !== '',
+            'a certificate reports its fingerprint',
+          );
+          check(
+            !Object.values(made.outputs ?? {}).some((value) => value.includes('PRIVATE KEY')),
+            'a certificate never reports its key',
+          );
+          checkEqual(
+            (await certificates.ensureCertificate(spec, call('cert-ensure-again'))).id,
+            made.id,
+            'ensuring the same certificate again returns it',
+          );
+          await settle(
+            subject,
+            () => certificates.deleteCertificate(made.id, call('cert-delete')),
+            ['deleted'],
+            'deleteCertificate',
+          );
+          certId = undefined;
+          checkEqual(
+            (await certificates.deleteCertificate(made.id, call('cert-delete-again'))).state,
+            'deleted',
+            'deleting a deleted certificate counts as deleted',
+          );
+        } finally {
+          if (certId !== undefined)
+            await certificates.deleteCertificate(certId, call('cert-cleanup')).catch(() => {});
         }
       },
     },

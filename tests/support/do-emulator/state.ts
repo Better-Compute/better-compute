@@ -73,6 +73,22 @@ export class DoState {
   reservedIps = new Map<string, Json>();
   /** Keyed by address. DO reserved IPv6 addresses. */
   reservedIpv6 = new Map<string, Json>();
+  /** Keyed by uuid. DO BYOIP prefixes (read-only to the provider). */
+  byoipPrefixes = new Map<string, Json>();
+  /** Keyed by uuid. DO load balancers (regional and global). */
+  loadBalancers = new Map<string, Json>();
+  /** Keyed by uuid. DO certificates. */
+  certificates = new Map<string, Json>();
+  /** Keyed by name. DO domains (DNS zones). */
+  domains = new Map<string, Json>();
+  /** Keyed by id. DO domain records; `zone` names the domain. */
+  domainRecords = new Map<number, Json>();
+  /** Keyed by uuid. DO VPC NAT gateways. */
+  natGateways = new Map<string, Json>();
+  /** Keyed by uuid. DO VPC peerings. */
+  vpcPeerings = new Map<string, Json>();
+  /** Keyed by id. DO VPC routes (preview; `vpc_uuid` names the VPC). */
+  vpcRoutes = new Map<string, Json>();
   regions: Json[] = structuredClone(fixture('regions').regions as Json[]);
   sizes: Json[] = structuredClone(fixture('sizes').sizes as Json[]);
 

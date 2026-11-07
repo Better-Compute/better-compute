@@ -25,11 +25,16 @@ import {
 import { vpsFilesystemsMigration } from './filesystems.js';
 import { purchaseProposalsMigration } from './purchase-proposals.js';
 import {
+  providerAddressByoipSql,
   providerAddressesMigration,
   providerSharedVolumesMigration,
   providerSnapshotsMigration,
   providerVolumesMigration,
 } from './provider-resources.js';
+import { networkEdgesSql } from './network-edge.js';
+import { providerCertificatesMigration } from './provider-certificates.js';
+import { providerLoadBalancersMigration } from './provider-load-balancers.js';
+import { providerDnsSql } from './provider-dns.js';
 import {
   vpsIdentityRebindMigration,
   vpsSandboxExpiringMigration,
@@ -48,6 +53,15 @@ import {
   vpsSnapshotAgentMigration,
   vpsSnapshotFixesMigration,
 } from './snapshots.js';
+
+/**
+ * (DO P4) The edge's last slot of the lane's block: DNS zones and records (provider-dns.ts), the edge of tenant
+ * networks (NAT gateways, peerings, routes: network-edge.ts) and BYOIP addresses (provider-resources.ts).
+ */
+const providerEdgeMigration: Migration = {
+  name: 'vps/0104_provider_edge',
+  sql: `${providerDnsSql}${networkEdgesSql}${providerAddressByoipSql}`,
+};
 
 /**
  * The VPS tables (PLAN.md §3.6, §8.3 "v0.3 tables"): flavors per pool, provider accounts, instances
@@ -249,4 +263,7 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   providerSnapshotsMigration,
   providerAddressesMigration,
   providerSharedVolumesMigration,
+  providerCertificatesMigration,
+  providerLoadBalancersMigration,
+  providerEdgeMigration,
 ]);

@@ -82,6 +82,10 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
         ...action('addresses', 'read'),
         // Managed data and platform services: `cloudResources.list`, `kinds` and `discover` are gated on the tenant.
         ...action('cloud-resources', 'read'),
+        // (DO P4) Certificates and load balancers: their `list` methods are gated on the tenant.
+        ...action('certificates', 'read'),
+        ...action('load-balancers', 'read'),
+        ...action('dns', 'read'),
         // §13 destructive-batch quorum (v1.0).
         ...action('batches', 'read', 'create', 'approve'),
       ],
@@ -249,6 +253,27 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
         region: 'string',
         projectId: 'string',
       },
+    },
+    [`${p}provider-certificate`]: {
+      parent: `${p}tenant`,
+      actions: action('certificates', 'read', 'manage'),
+      attributes: { providerAccountId: 'string', poolId: 'string', projectId: 'string', kind: 'string' },
+    },
+    [`${p}provider-load-balancer`]: {
+      parent: `${p}tenant`,
+      actions: action('load-balancers', 'read', 'manage'),
+      attributes: {
+        providerAccountId: 'string',
+        poolId: 'string',
+        projectId: 'string',
+        region: 'string',
+        scope: 'string',
+      },
+    },
+    [`${p}provider-dns-zone`]: {
+      parent: `${p}tenant`,
+      actions: action('dns', 'read', 'manage'),
+      attributes: { providerAccountId: 'string', poolId: 'string', projectId: 'string', zone: 'string' },
     },
   };
 }

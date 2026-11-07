@@ -37,6 +37,18 @@ export * from './volumes.js';
 export * from './volume-storage.js';
 export * from './networks.js';
 export * from './filesystems.js';
+export {
+  maxPeeringsPerNetwork,
+  maxRoutesPerSubnet,
+  type NetworkNatGatewayView,
+  type NetworkPeeringView,
+  type NetworkRouteView,
+  type PeerNetworkInput,
+  type RouteInput,
+  type RouteNextHop,
+  type SetNatGatewayInput,
+  type SetRoutesInput,
+} from './network-edge.js';
 export * from './provider-resources.js';
 export * from './shared-mounts.js';
 export * from './provider-resource-usage.js';

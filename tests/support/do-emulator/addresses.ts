@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { DoEmulator, RouteContext } from './index.js';
 import { isoSeconds, settleAction } from './actions.js';
 import { fixture, type DoState, type Json } from './state.js';
@@ -9,11 +10,17 @@ import { fixture, type DoState, type Json } from './state.js';
 // v4 address is `locked`, and another action on the address is the 422 `has a pending event`.
 // Assigning moves an address from another Droplet as DO does (the provider never asks for that).
 // Deleting a Droplet unassigns its addresses. An assigned address can't be deleted (422).
+//
+// BYOIP prefixes (`/v2/byoip_prefixes`) are seeded by tests (`seedPrefix`) and only read. A v4
+// reserve with `byoip_prefix_uuid` draws the next free address of an active prefix in the region
+// (this request shape is unverified, see the fixture); a prefix that is full is the 422
+// `no available IPs`.
 
 const templates = fixture('reserved-ips');
 const v4Template = templates.reserved_ip as Json;
 const v6Template = templates.reserved_ipv6 as Json;
 const actionTemplate = fixture('actions').action as Json;
+const prefixTemplate = fixture('byoip-prefixes').byoip_prefix as Json;
 
 type Family = 'v4' | 'v6';
 
@@ -111,6 +118,35 @@ export function unassignAll(state: DoState, dropletId: number): void {
       if (address.droplet_id === dropletId) delete address.droplet_id;
 }
 
+/** A BYOIP prefix on the account, as if brought out of band. Default an active /29 in nyc3. */
+export function seedPrefix(
+  state: DoState,
+  seed: { prefix?: string; region?: string; status?: string; uuid?: string } = {},
+): Json {
+  const prefix: Json = {
+    ...structuredClone(prefixTemplate),
+    uuid: seed.uuid ?? randomUUID(),
+    prefix: seed.prefix ?? '203.0.113.0/29',
+    region: seed.region ?? 'nyc3',
+    status: seed.status ?? 'active',
+  };
+  state.byoipPrefixes.set(prefix.uuid, prefix);
+  return prefix;
+}
+
+/** The addresses of an IPv4 CIDR, network and broadcast left out. */
+function hosts(cidr: string): string[] {
+  const [base, bits] = cidr.split('/');
+  const n = base!.split('.').reduce((acc, octet) => acc * 256 + Number(octet), 0);
+  const size = 2 ** (32 - Number(bits));
+  const out: string[] = [];
+  for (let i = 1; i < size - 1; i += 1) {
+    const v = n + i;
+    out.push([24, 16, 8, 0].map((shift) => Math.floor(v / 2 ** shift) % 256).join('.'));
+  }
+  return out;
+}
+
 function reserve(emulator: DoEmulator, context: RouteContext, family: Family) {
   const { state } = context;
   const body = context.body ?? {};
@@ -119,7 +155,15 @@ function reserve(emulator: DoEmulator, context: RouteContext, family: Family) {
     return emulator.error('422-unknown');
   if (state.reservedIps.size + state.reservedIpv6.size >= emulator.reservedIpLimit)
     return emulator.error('422-reserved-ip-limit');
-  const address = seedAddress(state, { family, region: slug });
+  let ip: string | undefined;
+  if (body.byoip_prefix_uuid !== undefined) {
+    const prefix = state.byoipPrefixes.get(String(body.byoip_prefix_uuid));
+    if (family !== 'v4' || !prefix) return emulator.error('not-found');
+    if (prefix.status !== 'active' || prefix.region !== slug) return emulator.error('422-unknown');
+    ip = hosts(prefix.prefix).find((candidate) => !state.reservedIps.has(candidate));
+    if (ip === undefined) return emulator.error('422-unknown');
+  }
+  const address = seedAddress(state, { family, region: slug, ...(ip ? { ip } : {}) });
   return family === 'v4'
     ? { status: 202, body: { reserved_ip: view(state, address), links: {} } }
     : { status: 201, body: { reserved_ipv6: view(state, address) } };
@@ -176,6 +220,14 @@ function act(emulator: DoEmulator, context: RouteContext, family: Family) {
 }
 
 export function registerAddresses(emulator: DoEmulator): void {
+  emulator.route('GET', /^\/byoip_prefixes$/, (context) =>
+    emulator.paged(context, 'byoip_prefixes', [...context.state.byoipPrefixes.values()]),
+  );
+  emulator.route('GET', /^\/byoip_prefixes\/([^/]+)$/, (context) => {
+    const prefix = context.state.byoipPrefixes.get(decodeURIComponent(context.match[1]!));
+    if (!prefix) return emulator.error('not-found');
+    return { status: 200, body: { byoip_prefix: structuredClone(prefix) } };
+  });
   for (const [family, base, field, one] of [
     ['v4', 'reserved_ips', 'reserved_ips', 'reserved_ip'],
     ['v6', 'reserved_ipv6', 'reserved_ipv6s', 'reserved_ipv6'],

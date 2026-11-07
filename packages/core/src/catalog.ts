@@ -45,6 +45,9 @@ export const computeResourceKinds = [
   'provider-snapshot',
   'provider-address',
   'cloud-resource',
+  'provider-certificate',
+  'provider-load-balancer',
+  'provider-dns-zone',
 ] as const;
 export type ComputeResourceKind = (typeof computeResourceKinds)[number];
 
@@ -110,6 +113,10 @@ const definitions = {
       ...a('addresses', 'read'),
       // Managed data and platform services: `cloudResources.list`, `kinds` and `discover` are gated on the tenant.
       ...a('cloud-resources', 'read'),
+      // (DO P4) Certificates and load balancers: their `list` methods are gated on the tenant.
+      ...a('certificates', 'read'),
+      ...a('load-balancers', 'read'),
+      ...a('dns', 'read'),
       // v1.0 destructive-batch quorum (§13): on top of the approvers' signatures, never instead.
       ...a('batches', 'read', 'create', 'approve'),
     ],
@@ -317,6 +324,33 @@ const definitions = {
       region: 'string',
       projectId: 'string',
     },
+  },
+  'provider-certificate': {
+    description:
+      "A tenant's TLS certificate on a provider account (managed by the provider, or uploaded from the tenant's secrets), for its load balancers",
+    parent: 'tenant',
+    actions: a('certificates', 'read', 'manage'),
+    attributes: { providerAccountId: 'string', poolId: 'string', projectId: 'string', kind: 'string' },
+  },
+  'provider-load-balancer': {
+    description:
+      "A tenant's load balancer on a provider account: regional in front of its instances, or global in front of its regional ones",
+    parent: 'tenant',
+    actions: a('load-balancers', 'read', 'manage'),
+    attributes: {
+      providerAccountId: 'string',
+      poolId: 'string',
+      projectId: 'string',
+      region: 'string',
+      scope: 'string',
+    },
+  },
+  'provider-dns-zone': {
+    description:
+      "A tenant's DNS zone on a provider account and the records in it (the records are decided on their zone)",
+    parent: 'tenant',
+    actions: a('dns', 'read', 'manage'),
+    attributes: { providerAccountId: 'string', poolId: 'string', projectId: 'string', zone: 'string' },
   },
 } as const satisfies Record<ComputeResourceKind, KindDefinition>;
 
@@ -732,6 +766,10 @@ group('networks', 'vps', [
   ['removeSubnet', 'mutation', 'networks:update', 'network', 'v1.0'],
   // The platform registers a provider VPC that already exists as a tenant network (root only).
   ['adopt', 'mutation', 'providers:manage', 'fleet', 'v1.0'],
+  // (DO P4) The network's edge: a subnet's NAT gateway, peerings between subnets, a subnet's static routes.
+  ['natGateway', 'mutation', 'networks:update', 'network', 'v1.0'],
+  ['peer', 'mutation', 'networks:update', 'network', 'v1.0'],
+  ['routes', 'mutation', 'networks:update', 'network', 'v1.0'],
 ]);
 group('firewallRules', 'vps', [
   ['create', 'mutation', 'networks:update', 'network', 'v1.0'],
@@ -771,6 +809,34 @@ group('providerAddresses', 'vps', [
   ['assign', 'mutation', 'addresses:manage', 'provider-address', 'v1.0'],
   ['unassign', 'mutation', 'addresses:manage', 'provider-address', 'v1.0'],
   ['delete', 'mutation', 'addresses:manage', 'provider-address', 'v1.0'],
+]);
+// (DO P4) TLS certificates and load balancers on a provider account (vps provider-certificates.ts, -load-balancers.ts).
+group('certificates', 'vps', [
+  ['create', 'mutation', 'certificates:manage', 'provider-certificate', 'v1.0'],
+  ['list', 'read', 'certificates:read', 'tenant', 'v1.0', list],
+  ['get', 'read', 'certificates:read', 'provider-certificate', 'v1.0'],
+  ['delete', 'mutation', 'certificates:manage', 'provider-certificate', 'v1.0'],
+]);
+group('loadBalancers', 'vps', [
+  ['create', 'mutation', 'load-balancers:manage', 'provider-load-balancer', 'v1.0'],
+  ['list', 'read', 'load-balancers:read', 'tenant', 'v1.0', list],
+  ['get', 'read', 'load-balancers:read', 'provider-load-balancer', 'v1.0'],
+  ['update', 'mutation', 'load-balancers:manage', 'provider-load-balancer', 'v1.0'],
+  ['delete', 'mutation', 'load-balancers:manage', 'provider-load-balancer', 'v1.0'],
+]);
+// (DO P4) DNS zones and their records (vps provider-dns.ts); a record is decided on its zone.
+group('dnsZones', 'vps', [
+  ['create', 'mutation', 'dns:manage', 'provider-dns-zone', 'v1.0'],
+  ['list', 'read', 'dns:read', 'tenant', 'v1.0', list],
+  ['get', 'read', 'dns:read', 'provider-dns-zone', 'v1.0'],
+  ['delete', 'mutation', 'dns:manage', 'provider-dns-zone', 'v1.0'],
+]);
+group('dnsRecords', 'vps', [
+  ['create', 'mutation', 'dns:manage', 'provider-dns-zone', 'v1.0'],
+  ['list', 'read', 'dns:read', 'provider-dns-zone', 'v1.0'],
+  ['get', 'read', 'dns:read', 'provider-dns-zone', 'v1.0'],
+  ['update', 'mutation', 'dns:manage', 'provider-dns-zone', 'v1.0'],
+  ['delete', 'mutation', 'dns:manage', 'provider-dns-zone', 'v1.0'],
 ]);
 // Managed Kubernetes (GKE, …) on a provider account; the provider runs the control plane (kubernetes module).
 group('kubernetesClusters', 'kubernetes', [

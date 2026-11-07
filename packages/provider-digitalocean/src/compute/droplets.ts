@@ -29,6 +29,9 @@ import {
   tagFor,
 } from '../ids.js';
 import { DoAddresses } from '../edge/addresses.js';
+import { DoCertificates } from '../edge/certificates.js';
+import { DoDns } from '../edge/dns.js';
+import { DoLoadBalancers } from '../edge/load-balancers.js';
 import { DoNetworks } from '../networks/index.js';
 import { DoVolumes } from '../storage/volumes.js';
 import { DoResources } from '../resources/registry.js';
@@ -193,6 +196,12 @@ export class DoCompute implements ProviderImpl {
   kubernetes?: ProviderKubernetes;
   /** Managed databases and the rest of the long tail, through the generic resource contract (P7). */
   readonly resources: DoResources;
+  /** Load balancers (P4). */
+  readonly loadBalancers: DoLoadBalancers;
+  /** DNS zones and records (P4). */
+  readonly dns: DoDns;
+  /** TLS certificates for load balancers (P4). */
+  readonly certificates: DoCertificates;
 
   constructor(
     config: DoConfig,
@@ -205,7 +214,7 @@ export class DoCompute implements ProviderImpl {
     this.options = options;
     this.client = client;
     this.deploymentTag = deploymentTag(options.deployment);
-    this.networks = new DoNetworks(client, config, options.deployment);
+    this.networks = new DoNetworks(client, config, options.deployment, context.log);
     this.volumes = new DoVolumes(client, config, options.deployment, context.log);
     this.addresses = new DoAddresses(client, config, options.deployment, context.log);
     this.catalog = options.catalogImages
@@ -217,6 +226,9 @@ export class DoCompute implements ProviderImpl {
         )
       : undefined;
     this.resources = new DoResources(client, config, options.deployment);
+    this.loadBalancers = new DoLoadBalancers(client, config, options.deployment, context.log);
+    this.dns = new DoDns(client, options.deployment, context.log);
+    this.certificates = new DoCertificates(client, options.deployment, context.log);
   }
 
   /**

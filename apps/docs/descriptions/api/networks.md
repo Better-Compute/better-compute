@@ -32,9 +32,9 @@ Changes the network's `description`. The name, pool and account never change, be
 
 ## delete
 
-Marks the network, its subnets and its rules for deletion and returns it `deleting`. The reconciler deletes the rules, then the subnets, then the network, and then the network is `deleted` and publishes `network.deleted`.
+Marks the network, its subnets and its rules for deletion and returns it `deleting`, along with its routes, peerings (also those another network holds with it) and NAT gateways. The reconciler deletes the routes, peerings and gateways, then the rules, then the subnets, then the network, and then the network is `deleted` and publishes `network.deleted`.
 
-- `INVALID_STATE` while instances that are not deleted are on the network, with their ids in `details.instanceIds`: delete or move them first.
+- `INVALID_STATE` while instances that are not deleted are on the network, with their ids in `details.instanceIds`: delete or move them first. Likewise while load balancers are on one of its subnets (`details.loadBalancerIds`).
 - `INVALID_STATE` while [filesystems](/docs/reference/api/filesystems) that are not deleted are on the network, with their ids in `details.filesystemIds`: delete them first.
 - `INVALID_STATE` while shared provider volumes that are not deleted are reached over the network, with their ids in `details.volumeIds`: delete them first.
 - Deleting a network that is being deleted returns it unchanged.
@@ -56,7 +56,7 @@ Publishes `network.subnet.ready` once the provider has the subnet. Decided as `c
 
 ## removeSubnet
 
-Marks a subnet for deletion and returns the network with the subnet `deleting`. `INVALID_STATE` while instances that are not deleted use the subnet, with their ids in `details.instanceIds`, and while shared provider volumes of the network that are not deleted are in the subnet's region (a share lives in one of the network's VPCs there), with their ids in `details.volumeIds`. Its range is free for a new subnet at once. Decided as `compute:networks:update` on the network.
+Marks a subnet for deletion and returns the network with the subnet `deleting`. `INVALID_STATE` while instances that are not deleted use the subnet, with their ids in `details.instanceIds`, or load balancers are on it (`details.loadBalancerIds`), and while shared provider volumes of the network that are not deleted are in the subnet's region (a share lives in one of the network's VPCs there), with their ids in `details.volumeIds`. Its range is free for a new subnet at once. Decided as `compute:networks:update` on the network.
 
 ## adopt
 
@@ -69,3 +69,37 @@ Registers a VPC that already exists in the pool's provider account as a network 
 - **Idempotency.** The same adoption again (same pool, VPC, name, flag and description) returns the network. A VPC already adopted in the tenant under another request is `CONFLICT` with `details.networkId`; one adopted by another tenant is `CONFLICT` unless both adoptions are `sharedTagScoped`.
 - **IAM.** Decided as `compute:providers:manage` on the fleet (`compute-fleet`, in the root tenant); anyone but the platform is `ACCESS_DENIED`. The adopting identity owns the network.
 - **Events.** `network.adopted` with `poolId`, `providerAccountId`, `name`, `externalNetwork` and `sharedTagScoped`.
+
+## natGateway
+
+Turns a subnet's NAT gateway on (`enabled: true`) or off (`enabled: false`) and returns the network; the gateway appears in `natGateways` (`pending`, then `ready` with its public egress `addresses`). A NAT gateway carries the subnet's outbound traffic, so its machines need no public address of their own (isolated pools, and DOKS isolated worker nodes). Only providers with NAT gateways take it (DigitalOcean does; Google Cloud is `UNSUPPORTED` here).
+
+- One gateway per subnet: asking again returns the network unchanged, and turning off a subnet without one is a no-op.
+- Turning it off is `INVALID_STATE`, with the route names in `details.routes`, while a route of the subnet sends traffic to it (`networks.routes`): change those routes first.
+- The subnet must belong to the network and not be being removed (`NOT_FOUND`, `INVALID_STATE`); a network being deleted is `INVALID_STATE`.
+- Removing the subnet or deleting the network removes the gateway first: the reconciler deletes the subnet only once the gateway is gone.
+
+Publishes `network.natGateway.ready` (and `network.natGateway.error`) with `edgeId` and `subnetId`. Decided as `compute:networks:update` on the network.
+
+## peer
+
+Peers a subnet of the network (`subnetId`) with a subnet of another network of the tenant (`peerNetworkId`, `peerSubnetId`), so their machines reach each other on private addresses; `enabled: false` removes the peering. Two subnets of the same network may be peered too: on DigitalOcean every subnet is a VPC of its own, and two of them do not reach each other otherwise. Only providers with peerings take it (`UNSUPPORTED` otherwise).
+
+- The peering appears in `peerings` on both networks, each seen from its own side (`subnetId` is that network's subnet). The same pair asked again, from either network, is the same peering; either network can remove it.
+- Both networks must be the tenant's (another tenant's network is `NOT_FOUND`), on the same provider account (`INVALID_INPUT`), and not being deleted (`INVALID_STATE`). A subnet is never peered with itself (`INVALID_INPUT`).
+- A network takes part in at most 16 peerings (`QUOTA_EXCEEDED`, with `details.limit` and the network in `details.networkId`).
+- Removing either subnet, or deleting either network, removes the peering first; the subnet goes once the peering is gone.
+
+Publishes `network.peering.ready` (and `network.peering.error`) on the network that asked first. Decided as `compute:networks:update` on the network, and, on the caller's own credential, on the other network too.
+
+## routes
+
+Replaces the static routes of a subnet with `routes` (at most 32) and returns the network; the routes appear in `routes`. A route kept exactly as it was stays; a changed one is replaced (deleted at the provider, then made anew); one left out is deleted; an empty list removes them all. Each route has a `name` (unique in the subnet), a `destination` IPv4 CIDR written as its network address (`0.0.0.0/0` for everything), and exactly one `nextHop`:
+
+- `{ natGateway: true }`: the subnet's NAT gateway, which must exist (`INVALID_STATE` otherwise). The reconciler makes the route once the gateway is `ready`.
+- `{ instanceId }`: an instance of the tenant on this subnet (`NOT_FOUND`, or `INVALID_INPUT` when it is on another subnet). The route waits until the instance has a machine; an instance that is gone later puts the route in `error`. Decided, besides the network, as `compute:instances:update` on the instance, on the caller's own credential.
+- `{ address }`: a host address inside the subnet (`INVALID_INPUT` otherwise).
+
+Routes are a preview at DigitalOcean (VPC Routes): the account needs `previews: true`, or the route goes to `error` with the provider's refusal. Only providers with static routes take a non-empty list (`UNSUPPORTED` otherwise).
+
+Publishes `network.route.ready` (and `network.route.error`). Decided as `compute:networks:update` on the network.

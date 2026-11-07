@@ -35,6 +35,14 @@ import { carries } from '../storage/volumes.js';
 // deployment's is never unassigned; an assigned address is never deleted. Assign and unassign
 // are DO actions: a call reports `pending`/`deleting` while one runs (v4 shows it as `locked`; v6
 // answers a second action with the 422 `has a pending event`) and starts nothing more.
+//
+// BYOIP (P4, preview): with `source: 'byoip'` (or a `prefix` and no source) an IPv4 address is
+// drawn from one of the account's own prefixes. Prefixes are only read here (`GET /byoip_prefixes`,
+// never created, changed or withdrawn); the prefix is named by its CIDR or uuid and must be active
+// and in the spec's region, all checked before the reserve. The reserve request
+// (`POST /reserved_ips` with `byoip_prefix_uuid`) is unverified, so BYOIP needs the account's
+// `previews: true`. An answer outside the prefix is `PROVIDER_ERROR` and never handed out. Once
+// drawn, a BYOIP address is a reserved IP like any other: assign, unassign and delete as above.
 
 export type AddressFamily = 'ipv4' | 'ipv6';
 
@@ -45,6 +53,29 @@ export interface DoReservedIp {
   droplet: DoDroplet | null;
   locked?: boolean;
   project_id?: string;
+}
+
+/** A BYOIP prefix (`GET /byoip_prefixes`): read-only to this provider. Shape unverified. */
+export interface DoByoipPrefix {
+  uuid: string;
+  prefix: string;
+  region: string;
+  status: string;
+  advertised?: boolean;
+  locked?: boolean;
+  project_id?: string;
+}
+
+/** Whether an IPv4 address lies in an IPv4 CIDR. False for anything malformed. */
+export function inIpv4Cidr(ip: string, cidr: string): boolean {
+  const [base, bitsText, ...rest] = cidr.split('/');
+  if (rest.length > 0 || base === undefined || bitsText === undefined) return false;
+  if (!isIPv4(base) || !isIPv4(ip) || !/^\d{1,2}$/.test(bitsText)) return false;
+  const bits = Number(bitsText);
+  if (bits > 32) return false;
+  const value = (a: string) => a.split('.').reduce((acc, octet) => acc * 256 + Number(octet), 0);
+  const size = 2 ** (32 - bits);
+  return Math.floor(value(ip) / size) === Math.floor(value(base) / size);
 }
 
 /** A reserved IPv6 address (`GET /reserved_ipv6/{ip}`). */
@@ -244,12 +275,25 @@ export class DoAddresses implements ProviderAddresses {
         `address family ${String(spec.family)} is not ipv4 or ipv6`,
         'family',
       );
-    if ((spec.source !== undefined && spec.source !== 'pool') || spec.prefix !== undefined)
+    if (spec.source !== undefined && spec.source !== 'pool' && spec.source !== 'byoip')
+      throw fail(
+        'INVALID_INPUT',
+        `address source ${String(spec.source)} is not pool or byoip`,
+        'source',
+      );
+    const byoip = spec.source === 'byoip' || (spec.source === undefined && spec.prefix !== undefined);
+    if (byoip && this.config.previews !== true)
       throw fail(
         'UNSUPPORTED',
-        'reserved IPs from your own prefix (BYOIP) are not supported on DigitalOcean yet',
-        'byoip',
+        "reserved IPs from your own prefix (BYOIP) are a preview here: set the account's previews: true",
+        'preview',
       );
+    if (spec.source === 'pool' && spec.prefix !== undefined)
+      throw fail('INVALID_INPUT', 'a prefix is only for source byoip', 'prefix');
+    if (byoip && (typeof spec.prefix !== 'string' || spec.prefix.trim() === ''))
+      throw fail('INVALID_INPUT', 'source byoip needs the prefix to draw from', 'prefix');
+    if (byoip && spec.family !== 'ipv4')
+      throw fail('INVALID_INPUT', 'BYOIP addresses on DigitalOcean are IPv4 only', 'family');
     if (!this.config.regions.includes(spec.region))
       throw fail('INVALID_INPUT', `region ${spec.region} is not one this account uses`, 'region');
     const { signal } = ctx;
@@ -257,7 +301,14 @@ export class DoAddresses implements ProviderAddresses {
       const { family } = parseAddressId(spec.id);
       if (family !== spec.family)
         throw fail('INVALID_INPUT', `${spec.id} is not an ${spec.family} address`, 'family');
+      const prefix = byoip ? await this.prefix(spec.prefix!, spec.region, signal) : undefined;
       const address = await this.existing(spec.id, signal);
+      if (prefix && !inIpv4Cidr(address.ip, prefix.prefix))
+        throw fail(
+          'INVALID_STATE',
+          `reserved IP ${address.ip} is not in the BYOIP prefix ${prefix.prefix}`,
+          'prefix',
+        );
       if (spec.fingerprint !== undefined) this.refuseStranger(address, { fingerprint: spec.fingerprint });
       if (address.region !== spec.region)
         throw fail(
@@ -265,8 +316,12 @@ export class DoAddresses implements ProviderAddresses {
           `reserved IP ${address.ip} is in ${address.region}, not ${spec.region}; an address does not move between regions`,
           'region',
         );
-      return state(address.ip, 'ready', outputs(address));
+      return state(address.ip, 'ready', {
+        ...outputs(address),
+        ...(prefix ? { source: 'byoip', prefix: prefix.prefix } : {}),
+      });
     }
+    if (byoip) return this.drawFromPrefix(spec, signal);
     let ip: string | undefined;
     let fingerprint: string | undefined;
     try {
@@ -308,6 +363,91 @@ export class DoAddresses implements ProviderAddresses {
       family: spec.family,
       region: spec.region,
       ...(fingerprint ? { fingerprint } : {}),
+    });
+  }
+
+  /**
+   * The account's prefix named by CIDR or uuid, checked usable for a reserve in `region`: one of
+   * the account's (`INVALID_INPUT` otherwise), active (`INVALID_STATE`) and in the region.
+   */
+  protected async prefix(name: string, region: string, signal: AbortSignal): Promise<DoByoipPrefix> {
+    const wanted = name.trim().toLowerCase();
+    let found: DoByoipPrefix | undefined;
+    for await (const prefix of this.client.pages<DoByoipPrefix>(
+      '/byoip_prefixes',
+      'byoip_prefixes',
+      { signal, budget: 'observe' },
+    ))
+      if (prefix.uuid?.toLowerCase() === wanted || prefix.prefix?.toLowerCase() === wanted) {
+        found = prefix;
+        break;
+      }
+    if (!found)
+      throw fail(
+        'INVALID_INPUT',
+        `${JSON.stringify(name)} is not a BYOIP prefix of this account`,
+        'prefix',
+      );
+    if (found.status !== 'active')
+      throw fail(
+        'INVALID_STATE',
+        `BYOIP prefix ${found.prefix} is ${String(found.status)}, not active`,
+        'prefixNotActive',
+      );
+    if (found.region !== region)
+      throw fail(
+        'INVALID_INPUT',
+        `BYOIP prefix ${found.prefix} is in ${found.region}, not ${region}`,
+        'region',
+      );
+    return found;
+  }
+
+  /** Reserves an IPv4 address from a BYOIP prefix (preview; the request shape is unverified). */
+  protected async drawFromPrefix(
+    spec: ProviderAddressSpec,
+    signal: AbortSignal,
+  ): Promise<ProviderResourceState> {
+    const prefix = await this.prefix(spec.prefix!, spec.region, signal);
+    let reply: { reserved_ip?: DoReservedIp };
+    try {
+      reply = await this.client.request<{ reserved_ip?: DoReservedIp }>('POST', paths.ipv4, {
+        body: { region: spec.region, byoip_prefix_uuid: prefix.uuid },
+        signal,
+        budget: 'mutate',
+      });
+    } catch (error) {
+      if (isComputeError(error, 'UNAVAILABLE'))
+        this.log.warn('digitalocean.reserveUnconfirmed', {
+          region: spec.region,
+          family: spec.family,
+          name: spec.name,
+          prefix: prefix.prefix,
+        });
+      throw error;
+    }
+    const ip = reply.reserved_ip?.ip;
+    if (ip === undefined || !inIpv4Cidr(ip, prefix.prefix)) {
+      if (ip !== undefined)
+        this.log.warn('digitalocean.byoipOutsidePrefix', { address: ip, prefix: prefix.prefix });
+      throw new ComputeError(
+        'PROVIDER_ERROR',
+        `DigitalOcean accepted a BYOIP reserve but returned no address in ${prefix.prefix}`,
+        undefined,
+        { provider: 'digitalocean', reason: 'badBody' },
+      );
+    }
+    this.log.info('digitalocean.addressReserved', {
+      address: ip,
+      name: spec.name,
+      prefix: prefix.prefix,
+    });
+    return state(ip, 'ready', {
+      address: ip,
+      family: 'ipv4',
+      region: spec.region,
+      source: 'byoip',
+      prefix: prefix.prefix,
     });
   }
 

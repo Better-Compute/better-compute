@@ -275,6 +275,17 @@
       }
     },
     {
+      "name": "422-load-balancer-limit",
+      "status": 422,
+      "verified": false,
+      "code": "QUOTA_EXCEEDED",
+      "body": {
+        "id": "unprocessable_entity",
+        "message": "You have reached the load balancer limit for your account",
+        "request_id": "f2a6c8e4-0040-4b7b-9a51-1c0e7f6c0040"
+      }
+    },
+    {
       "name": "422-unknown",
       "status": 422,
       "verified": true,

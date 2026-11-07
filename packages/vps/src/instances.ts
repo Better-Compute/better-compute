@@ -187,12 +187,48 @@ export interface CreateInstanceInput {
   ownerIdentityId?: string;
   /** (AWS A7) The IAM role the instance's workloads assume (hosted pools that allow it). */
   workloadIdentity?: InstanceWorkloadIdentity;
+  /**
+   * (DO P4) Publish the instance in a DNS zone of the tenant (`dnsZones`): an A record `<name>.<zone>` (and an AAAA
+   * one with `ipv6`) that follows the instance's public address and is deleted with it. `name` defaults to the
+   * instance id with `-` for `_`.
+   */
+  dns?: InstanceDns;
   idempotencyKey: string;
   /**
    * §9.1 async-with-wait: hold the answer up to `timeoutMs` (≤ 30 s) until the instance leaves
    * `pending`/`scheduling`/`provisioning`/`starting`. Not part of the request: a retry may differ.
    */
   wait?: { timeoutMs: number };
+}
+
+/** (DO P4) `instances.create({ dns })`. */
+export interface InstanceDns {
+  zoneId: string;
+  name?: string;
+  ipv6?: boolean;
+}
+
+/** A DNS name relative to a zone: lower-case labels, no wildcard, no apex (an instance gets a name of its own). */
+const instanceDnsName = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
+
+function parseInstanceDns(value: unknown): InstanceDns {
+  const input = object(value, ['zoneId', 'name', 'ipv6']);
+  const out: InstanceDns = { zoneId: id(input.zoneId, 'pdz', 'dns.zoneId') };
+  if (input.name !== undefined) {
+    if (typeof input.name !== 'string' || input.name.length > 200 || !instanceDnsName.test(input.name))
+      fail('dns.name must be a lower-case name relative to the zone, such as web-1 or web.eu');
+    out.name = input.name;
+  }
+  if (input.ipv6 !== undefined) {
+    if (typeof input.ipv6 !== 'boolean') fail('dns.ipv6 must be true or false');
+    if (input.ipv6) out.ipv6 = true;
+  }
+  return out;
+}
+
+/** The record name an instance gets in its `dns` zone: the given one, or its id with `-` for `_`. */
+export function instanceDnsRecordName(instanceId: string, dns: InstanceDns): string {
+  return dns.name ?? instanceId.toLowerCase().replace(/_/g, '-');
 }
 
 /** User data that starts like a URI (`secret://…`, `vault://…`, `env://…`) is a reference, not content. */
@@ -356,6 +392,7 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
     'filesystems',
     'ownerIdentityId',
     'workloadIdentity',
+    'dns',
     'idempotencyKey',
     'wait',
   ]);
@@ -424,6 +461,7 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
   }
   if (input.workloadIdentity !== undefined)
     result.workloadIdentity = parseWorkloadIdentity(input.workloadIdentity);
+  if (input.dns !== undefined) result.dns = parseInstanceDns(input.dns);
   if (input.wait !== undefined) {
     if (typeof input.wait !== 'object' || input.wait === null || Array.isArray(input.wait))
       fail('wait must be an object');

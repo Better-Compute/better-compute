@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   baseFirewallName,
+  certificateName,
   deploymentTag,
   digitaloceanProvider,
   dropletName,
   firewallName,
   labels,
+  loadBalancerName,
   networkDescription,
   networkMemberTag,
   resetBudgets,
@@ -16,7 +18,13 @@ import {
   type CatalogImageSource,
 } from '@better-compute/provider-digitalocean';
 import { closeFixtures, computeFixture, type ComputeFixture } from '@better-compute/testing';
-import { networkTag, providerResourceName, vps, type ImageResolver } from '@better-compute/vps';
+import {
+  edgeResourceName,
+  networkTag,
+  providerResourceName,
+  vps,
+  type ImageResolver,
+} from '@better-compute/vps';
 import { failAction } from './support/do-emulator/actions.js';
 import { seedDroplet } from './support/do-emulator/droplets.js';
 import { DoEmulator, type Json } from './support/do-emulator/index.js';
@@ -118,7 +126,7 @@ async function world(
     tenantId: tenants.root.id,
     poolId: pool.id,
     toTenantId: tenants.acme.id,
-    quota: { vcpu: 2000, memoryGiB: 20_000, diskGiB: 10_000, gpu: 64, addresses: 4 },
+    quota: { vcpu: 2000, memoryGiB: 20_000, diskGiB: 10_000, gpu: 64, addresses: 4, loadBalancers: 2 },
   });
   await api.flavors.create(root, {
     tenantId: tenants.root.id,
@@ -406,6 +414,252 @@ describe('provider-digitalocean through vps, end to end', () => {
     expect(droplet.tags).toEqual(
       expect.arrayContaining([networkMemberTag(networkName), networkTag(created.id)]),
     );
+  });
+
+  it('gives a subnet a NAT gateway and peers two subnets on DigitalOcean, and tears both down first', async () => {
+    const w = await world();
+    const network = await w.api.networks.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      name: 'edge',
+      idempotencyKey: 'net-edge',
+    });
+    const ref = { tenantId: w.acmeTenant, networkId: network.id };
+    await w.api.networks.addSubnet(w.acme, { ...ref, name: 'app', region: REGION, cidr: '10.30.0.0/24' });
+    const both = await w.api.networks.addSubnet(w.acme, {
+      ...ref,
+      name: 'db',
+      region: REGION,
+      cidr: '10.31.0.0/24',
+    });
+    const [app, db] = [...both.subnets].sort((a: { name: string }, b: { name: string }) =>
+      a.name.localeCompare(b.name),
+    );
+    await w.api.networks.natGateway(w.acme, { ...ref, subnetId: app.id, enabled: true });
+    await w.api.networks.peer(w.acme, {
+      ...ref,
+      subnetId: app.id,
+      peerNetworkId: network.id,
+      peerSubnetId: db.id,
+    });
+    const view = () => w.api.networks.get(w.acme, ref);
+    const edgesReady = async () => {
+      const current = await view();
+      return (
+        current.state === 'ready' &&
+        current.natGateways?.[0]?.state === 'ready' &&
+        current.peerings?.[0]?.state === 'ready'
+      );
+    };
+    for (let round = 0; round < 12 && !(await edgesReady()); round++)
+      await w.tick('vps.networks', 5_000);
+    const ready = await view();
+    expect(ready.natGateways).toEqual([
+      expect.objectContaining({ subnetId: app.id, state: 'ready', addresses: [expect.stringMatching(/^203\.0\.113\./)] }),
+    ]);
+    expect(ready.peerings).toEqual([
+      expect.objectContaining({ subnetId: app.id, peerSubnetId: db.id, state: 'ready' }),
+    ]);
+    // DO holds one gateway serving the app subnet's VPC, and one peering between the two subnet VPCs.
+    const vpcOf = (subnetId: string) =>
+      [...w.emu.state.vpcs.values()].find((vpc) => vpc.name === providerResourceName(subnetId))!;
+    const gateways = [...w.emu.state.natGateways.values()];
+    expect(gateways).toHaveLength(1);
+    expect(gateways[0]!.vpcs.map((vpc: Json) => vpc.vpc_uuid)).toEqual([vpcOf(app.id).id]);
+    const peerings = [...w.emu.state.vpcPeerings.values()];
+    expect(peerings).toHaveLength(1);
+    expect([...peerings[0]!.vpc_ids].sort()).toEqual([vpcOf(app.id).id, vpcOf(db.id).id].sort());
+
+    await w.api.networks.delete(w.acme, ref);
+    for (let round = 0; round < 16 && (await view()).state !== 'deleted'; round++)
+      await w.tick('vps.networks', 5_000);
+    expect((await view()).state).toBe('deleted');
+    expect(w.emu.state.natGateways.size).toBe(0);
+    expect(w.emu.state.vpcPeerings.size).toBe(0);
+    expect([...w.emu.state.vpcs.values()].filter((vpc) => !vpc.default)).toEqual([]);
+  });
+
+  it('instances.create({ dns }) publishes <name>.<zone> with the droplet address and removes it with the instance', async () => {
+    const w = await world();
+    const zone = await w.api.dnsZones.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      zone: 'acme-edge.example',
+      idempotencyKey: 'zone-1',
+    });
+    const zoneView = () => w.api.dnsZones.get(w.acme, { tenantId: w.acmeTenant, zoneId: zone.id });
+    for (let round = 0; round < 6 && (await zoneView()).state !== 'ready'; round++)
+      await w.tick('vps.provider-resources', 5_000);
+    expect((await zoneView()).state).toBe('ready');
+
+    // A zone that is not the tenant's refuses the whole create.
+    expect(
+      await w.api.instances
+        .create(
+          w.acme,
+          createInput(w, {
+            idempotencyKey: 'dns-missing',
+            dns: { zoneId: 'pdz_01jz0000000000000000000000' },
+          }),
+        )
+        .then(
+          () => 'created',
+          (error: { code?: string }) => error.code,
+        ),
+    ).toBe('NOT_FOUND');
+
+    const created = await w.api.instances.create(
+      w.acme,
+      createInput(w, { idempotencyKey: 'dns-vm', dns: { zoneId: zone.id, name: 'web' } }),
+    );
+    expect(await settle(w, created.id, 'running')).toMatchObject({ state: 'running' });
+    const records = async () =>
+      (await w.api.dnsRecords.list(w.acme, { tenantId: w.acmeTenant, zoneId: zone.id })).items;
+    expect(await records()).toEqual([
+      expect.objectContaining({ name: 'web', type: 'A', instanceId: created.id, fqdn: 'web.acme-edge.example' }),
+    ]);
+    for (let round = 0; round < 6 && (await records())[0]?.state !== 'ready'; round++)
+      await w.tick('vps.provider-resources', 5_000);
+    expect((await records())[0]?.state).toBe('ready');
+    const droplet = dropletOf(w, created.id)!;
+    const publicIp = (droplet.networks.v4 as Json[]).find((net) => net.type === 'public')!.ip_address;
+    const atDo = () =>
+      [...w.emu.state.domainRecords.values()].filter(
+        (record) => record.zone === 'acme-edge.example' && record.name === 'web',
+      );
+    expect(atDo()).toEqual([expect.objectContaining({ type: 'A', data: publicIp })]);
+
+    await w.api.instances.delete(w.acme, { tenantId: w.acmeTenant, instanceId: created.id });
+    expect(await settle(w, created.id, 'deleted')).toMatchObject({ state: 'deleted' });
+    for (let round = 0; round < 6 && atDo().length > 0; round++)
+      await w.tick('vps.provider-resources', 5_000);
+    expect(atDo()).toEqual([]);
+  });
+
+  it('certificates.create and loadBalancers.create reach DigitalOcean under names it takes, through ready and delete', async () => {
+    const w = await world();
+    const tenantId = w.acmeTenant;
+    const converge = async (done: () => Promise<boolean>, rounds = 10) => {
+      for (let round = 0; round < rounds && !(await done()); round++)
+        await w.tick('vps.provider-resources', 5_000);
+    };
+    // A managed certificate names a zone of the tenant's.
+    const zone = await w.api.dnsZones.create(w.acme, {
+      tenantId,
+      poolId: w.poolId,
+      zone: 'acme-lb.example',
+      idempotencyKey: 'zone-lb',
+    });
+    await converge(async () => (await w.api.dnsZones.get(w.acme, { tenantId, zoneId: zone.id })).state === 'ready');
+    const certificate = await w.api.certificates.create(w.acme, {
+      tenantId,
+      poolId: w.poolId,
+      name: 'www',
+      kind: 'managed',
+      domains: ['www.acme-lb.example'],
+      idempotencyKey: 'cert-www',
+    });
+    const created = await w.api.instances.create(w.acme, createInput(w, { idempotencyKey: 'lb-vm' }));
+    expect(await settle(w, created.id, 'running')).toMatchObject({ state: 'running' });
+    const lb = await w.api.loadBalancers.create(w.acme, {
+      tenantId,
+      poolId: w.poolId,
+      name: 'web',
+      region: REGION,
+      targets: { instanceIds: [created.id] },
+      forwarding: [
+        { entryProtocol: 'http', entryPort: 80, targetProtocol: 'http', targetPort: 8080 },
+        { entryProtocol: 'https', entryPort: 443, targetProtocol: 'http', targetPort: 8080, certificateId: certificate.id },
+      ],
+      idempotencyKey: 'lb-web',
+    });
+    const lbView = () => w.api.loadBalancers.get(w.acme, { tenantId, loadBalancerId: lb.id });
+    const certView = () => w.api.certificates.get(w.acme, { tenantId, certificateId: certificate.id });
+    await converge(async () => (await lbView()).state === 'ready', 14);
+    expect(await certView()).toMatchObject({ state: 'ready' });
+    expect(await lbView()).toMatchObject({ state: 'ready', address: expect.stringMatching(/^192.0.2./) });
+
+    // DO holds both under vps's short name plus the deployment hash, and the load balancer reaches the droplet
+    // with the certificate DO issued.
+    const doCert = [...w.emu.state.certificates.values()];
+    expect(doCert).toEqual([
+      expect.objectContaining({
+        name: certificateName(edgeResourceName(certificate.id), 'default'),
+        type: 'lets_encrypt',
+        dns_names: ['www.acme-lb.example'],
+      }),
+    ]);
+    const doLb = [...w.emu.state.loadBalancers.values()];
+    expect(doLb).toHaveLength(1);
+    expect(doLb[0]).toMatchObject({
+      name: loadBalancerName(edgeResourceName(lb.id), 'default'),
+      droplet_ids: [dropletOf(w, created.id)!.id],
+    });
+    expect(doLb[0]!.forwarding_rules).toEqual(
+      expect.arrayContaining([expect.objectContaining({ entry_port: 443, certificate_id: doCert[0]!.id })]),
+    );
+
+    await w.api.loadBalancers.delete(w.acme, { tenantId, loadBalancerId: lb.id });
+    await converge(async () => (await lbView()).state === 'deleted');
+    expect(w.emu.state.loadBalancers.size).toBe(0);
+    await w.api.certificates.delete(w.acme, { tenantId, certificateId: certificate.id });
+    await converge(async () => (await certView()).state === 'deleted');
+    expect(w.emu.state.certificates.size).toBe(0);
+  });
+
+  it('a load balancer in front of an instance on a tenant subnet is made in that subnet VPC', async () => {
+    const w = await world();
+    const tenantId = w.acmeTenant;
+    const network = await w.api.networks.create(w.acme, {
+      tenantId,
+      poolId: w.poolId,
+      name: 'lbnet',
+      idempotencyKey: 'net-lb',
+    });
+    const withSubnet = await w.api.networks.addSubnet(w.acme, {
+      tenantId,
+      networkId: network.id,
+      name: 'web',
+      region: REGION,
+      cidr: '10.40.0.0/24',
+    });
+    const subnet = withSubnet.subnets[0];
+    const networkView = () => w.api.networks.get(w.acme, { tenantId, networkId: network.id });
+    for (let round = 0; round < 8 && (await networkView()).state !== 'ready'; round++)
+      await w.tick('vps.networks', 5_000);
+    const created = await w.api.instances.create(
+      w.acme,
+      createInput(w, { networkId: network.id, subnetId: subnet.id, idempotencyKey: 'lb-net-vm' }),
+    );
+    expect(await settle(w, created.id, 'running')).toMatchObject({ state: 'running' });
+    const lb = await w.api.loadBalancers.create(w.acme, {
+      tenantId,
+      poolId: w.poolId,
+      name: 'web',
+      region: REGION,
+      targets: { instanceIds: [created.id] },
+      forwarding: [{ entryProtocol: 'http', entryPort: 80, targetProtocol: 'http', targetPort: 8080 }],
+      idempotencyKey: 'lb-net',
+    });
+    expect(lb).toMatchObject({ networkId: network.id, subnetId: subnet.id });
+    const lbView = () => w.api.loadBalancers.get(w.acme, { tenantId, loadBalancerId: lb.id });
+    for (let round = 0; round < 10 && (await lbView()).state !== 'ready'; round++)
+      await w.tick('vps.provider-resources', 5_000);
+    expect(await lbView()).toMatchObject({ state: 'ready' });
+    const vpc = [...w.emu.state.vpcs.values()].find((entry) => entry.name === providerResourceName(subnet.id))!;
+    const droplet = dropletOf(w, created.id)!;
+    expect(droplet.vpc_uuid).toBe(vpc.id);
+    const [doLb] = [...w.emu.state.loadBalancers.values()];
+    expect(doLb).toMatchObject({ vpc_uuid: vpc.id, droplet_ids: [droplet.id] });
+    // The subnet and its network cannot go while the load balancer is on them.
+    await w.api.instances.delete(w.acme, { tenantId, instanceId: created.id });
+    expect(await settle(w, created.id, 'deleted')).toMatchObject({ state: 'deleted' });
+    expect(
+      await w.api.networks.delete(w.acme, { tenantId, networkId: network.id }).then(
+        () => 'deleted',
+        (error: { code?: string }) => error.code,
+      ),
+    ).toBe('INVALID_STATE');
   });
 
   it('a create DO refuses for capacity ends the instance in error with ProvisionFailed', async () => {

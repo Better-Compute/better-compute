@@ -19,6 +19,7 @@ import {
   type ProviderImpl,
   type ProviderNetworkState,
   type ProviderNetworks,
+  type ProviderResourceState,
   type Reconciler,
   type SecretResolver,
   type SqlExecutor,
@@ -40,6 +41,22 @@ import {
   visibleVpsPool,
 } from './instances.js';
 import { canonical, fail, id, key, object, optional, sha256Hex, tenant } from './input.js';
+import {
+  edgeColumns,
+  edgeViews,
+  hopOf,
+  hostOf,
+  maxPeeringsPerNetwork,
+  outputsOf,
+  readEdges,
+  type EdgeRow,
+  type NetworkNatGatewayView,
+  type NetworkPeeringView,
+  type NetworkRouteView,
+  type PeerNetworkInput,
+  type SetNatGatewayInput,
+  type SetRoutesInput,
+} from './network-edge.js';
 
 // Tenant networks (v1.0): a VPC on a provider account, its subnets and its firewall rules. The API
 // records what the tenant wants (`desired_state`); the `vps.networks` reconciler (below) converges
@@ -191,6 +208,21 @@ export function providerResourceName(resourceId: string, externalName?: string |
     .slice(0, 60)}`;
 }
 
+/**
+ * The provider-side name of a load balancer or certificate: `bc-`, the id's prefix, `-` and the first 40
+ * characters of its body (`bc-plb-…`, 47 characters; `bc-pcert-…`, 49). Their ids are draft ids (a 52-character
+ * base32 SHA-256), and a provider such as DigitalOcean appends its own deployment suffix to a name of at most 51
+ * characters, so `providerResourceName` (up to 63) does not fit. 40 base32 characters keep 200 bits of the hash:
+ * names stay unique per id. Lower-case `[a-z0-9-]`, deterministic, so a create whose answer was lost is found again.
+ */
+export function edgeResourceName(resourceId: string): string {
+  const at = resourceId.indexOf('_');
+  const clean = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const prefix = at > 0 ? clean(resourceId.slice(0, at)).slice(0, 6) : '';
+  const body = clean(at > 0 ? resourceId.slice(at + 1) : resourceId).slice(0, 40);
+  return prefix ? `bc-${prefix}-${body}` : `bc-${body}`;
+}
+
 // --- Views and input ---------------------------------------------------------------------------
 
 export type NetworkState = 'pending' | 'ready' | 'deleting' | 'deleted' | 'error';
@@ -222,6 +254,12 @@ export interface NetworkView {
   externalNetwork?: string;
   /** Adopted with `sharedTagScoped`: a VPC shared with other machines (`default`). */
   sharedTagScoped?: true;
+  /** (edge) The subnets' NAT gateways (`networks.natGateway`); absent when there are none. */
+  natGateways?: NetworkNatGatewayView[];
+  /** (edge) The peerings this network's subnets take part in (`networks.peer`), from either side. */
+  peerings?: NetworkPeeringView[];
+  /** (edge) The subnets' static routes (`networks.routes`). */
+  routes?: NetworkRouteView[];
   version: number;
   createdAt: number;
 }
@@ -918,7 +956,11 @@ const networkColumns = `id, tenant_id, project_id, pool_id, provider_account_id,
 const subnetColumns = `id, network_id, name, region, zone, cidr::text AS cidr, private_access, state, desired_state, message`;
 const ruleColumns = `id, network_id, name, spec, enabled, state, desired_state, message, version`;
 
-export function networkView(row: NetworkRow, subnets: readonly SubnetRow[]): NetworkView {
+export function networkView(
+  row: NetworkRow,
+  subnets: readonly SubnetRow[],
+  edges: readonly EdgeRow[] = [],
+): NetworkView {
   return {
     id: row.id,
     tenantId: row.tenant_id,
@@ -943,6 +985,7 @@ export function networkView(row: NetworkRow, subnets: readonly SubnetRow[]): Net
       })),
     ...(row.external_name !== null ? { externalNetwork: row.external_name } : {}),
     ...(row.shared_tag_scoped === true ? { sharedTagScoped: true as const } : {}),
+    ...edgeViews(row.id, edges),
     version: Number(row.version),
     createdAt: new Date(row.created_at).getTime(),
   };
@@ -1004,7 +1047,7 @@ async function readSubnets(tx: SqlTx, networkIds: readonly string[]): Promise<Su
 
 async function viewOf(tx: SqlTx, networkId: string): Promise<NetworkView> {
   const row = (await readNetwork(tx, { networkId }))!;
-  return networkView(row, await readSubnets(tx, [networkId]));
+  return networkView(row, await readSubnets(tx, [networkId]), await readEdges(tx, [networkId]));
 }
 
 const code = (error: unknown): string | undefined => (error as { code?: string } | undefined)?.code;
@@ -1415,7 +1458,7 @@ function assertTagScoped(network: NetworkRow, targets: RuleFields['targets']): v
 
 export async function getNetwork(tx: SqlTx, ref: NetworkRef): Promise<NetworkView> {
   const row = await requireNetwork(tx, ref);
-  return networkView(row, await readSubnets(tx, [row.id]));
+  return networkView(row, await readSubnets(tx, [row.id]), await readEdges(tx, [row.id]));
 }
 
 export async function listNetworks(
@@ -1433,11 +1476,16 @@ export async function listNetworks(
     tx,
     rows.map((row) => row.id),
   );
+  const edges = await readEdges(
+    tx,
+    rows.map((row) => row.id),
+  );
   return {
     items: rows.map((row) =>
       networkView(
         row,
         subnets.filter((subnet) => subnet.network_id === row.id),
+        edges,
       ),
     ),
   };
@@ -1625,6 +1673,8 @@ export async function removeSubnet(
   tx: SqlTx,
   input: RemoveSubnetInput,
 ): Promise<NetworkView> {
+  // The networks its peerings reach are reopened below: lock them with this one first, in id order (peerNetwork's).
+  await lockWithPeers(tx, input, 'subnet', input.subnetId);
   const network = await openNetwork(tx, input);
   const { rows } = await tx.query<SubnetRow>(
     `SELECT ${subnetColumns} FROM network_subnets WHERE id = $1 AND network_id = $2 FOR UPDATE`,
@@ -1657,10 +1707,369 @@ export async function removeSubnet(
       undefined,
       { volumeIds: sharedVolumes.rows.map((volume) => volume.id) },
     );
+  const loadBalancerIds = await loadBalancersOn(tx, 'subnet_id', subnet.id);
+  if (loadBalancerIds.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Subnet ${subnet.name} holds ${loadBalancerIds.length} load balancer(s); delete them first`,
+      undefined,
+      { loadBalancerIds },
+    );
   await tx.query(
     `UPDATE network_subnets SET desired_state = 'deleted', state = 'deleting', message = NULL WHERE id = $1`,
     [subnet.id],
   );
+  // Its gateway, routes and peerings go first (the reconciler deletes the subnet after them).
+  await releaseEdges(tx, deps, 'subnet', subnet.id, network.id);
+  await reopen(tx, deps, network.id);
+  return viewOf(tx, network.id);
+}
+
+// --- Edge: NAT gateways, peerings and routes (DO P4) ----------------------------------------------
+
+/**
+ * The load balancers on a subnet or network (DO P4: a regional load balancer lives in its subnet's VPC), until the
+ * provider deleted them: the subnet cannot go before them.
+ */
+async function loadBalancersOn(
+  tx: SqlTx,
+  column: 'subnet_id' | 'network_id',
+  value: string,
+): Promise<string[]> {
+  const { rows } = await tx.query<{ id: string }>(
+    `SELECT id FROM provider_load_balancers WHERE ${column} = $1 AND state <> 'deleted' ORDER BY id LIMIT 50`,
+    [value],
+  );
+  return rows.map((row) => row.id);
+}
+
+/**
+ * Locks a network and every network its live peerings on `scope` (a subnet of it, or the whole network) reach, all
+ * FOR UPDATE in id order, as peerNetwork locks a pair. releaseEdges then updates edge rows and reopens those other
+ * networks; taking their locks first means no transaction holds an edge while it waits for a network another one
+ * holds (peer(enabled: false) against delete, or two deletes of a peered pair, were 40P01). The peer ids are read
+ * without a lock; a peering made between that read and the lock is CONFLICT (retry), never locked out of order.
+ */
+async function lockWithPeers(
+  tx: SqlTx,
+  ref: NetworkRef,
+  scope: 'subnet' | 'network',
+  scopeId: string,
+): Promise<void> {
+  const own = await requireNetwork(tx, ref);
+  const where =
+    scope === 'subnet'
+      ? `(subnet_id = $1 OR peer_subnet_id = $1)`
+      : `(network_id = $1 OR peer_network_id = $1)`;
+  const peers = async () => {
+    const { rows } = await tx.query<{ network_id: string; peer_network_id: string | null }>(
+      `SELECT DISTINCT network_id, peer_network_id FROM network_edges
+        WHERE ${where} AND (network_id = $2 OR peer_network_id = $2) AND desired_state = 'present'`,
+      [scopeId, own.id],
+    );
+    return new Set(rows.flatMap((row) => [row.network_id, row.peer_network_id ?? row.network_id]));
+  };
+  const ids = [...new Set([own.id, ...(await peers())])].sort();
+  await tx.query(`SELECT id FROM networks WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE`, [ids]);
+  for (const id of await peers())
+    if (!ids.includes(id))
+      throw new ComputeError(
+        'CONFLICT',
+        `Network ${own.id} was peered with ${id} while this request ran; retry it`,
+        undefined,
+        { reason: 'peeringChanged' },
+      );
+}
+
+/**
+ * Marks for deletion every live edge row on a subnet (its gateway, its routes, the peerings it takes part in) or of
+ * a network (its own rows, and the peerings other networks hold with it), and wakes the networks that hold them.
+ */
+async function releaseEdges(
+  tx: SqlTx,
+  deps: Pick<NetworkDeps, 'work'>,
+  scope: 'subnet' | 'network',
+  scopeId: string,
+  networkId: string,
+): Promise<void> {
+  const where =
+    scope === 'subnet'
+      ? `(subnet_id = $1 OR peer_subnet_id = $1)`
+      : `(network_id = $1 OR peer_network_id = $1)`;
+  const { rows } = await tx.query<{ network_id: string }>(
+    `UPDATE network_edges SET desired_state = 'deleted', version = version + 1,
+            state = CASE WHEN state = 'deleted' THEN state ELSE 'deleting' END, message = NULL
+      WHERE ${where} AND desired_state = 'present'
+      RETURNING network_id`,
+    [scopeId],
+  );
+  for (const holder of new Set(rows.map((row) => row.network_id)))
+    if (holder !== networkId) await reopen(tx, deps, holder);
+}
+
+/** A subnet of the network that is not being removed (locked). */
+async function liveSubnet(tx: SqlTx, networkId: string, subnetId: string): Promise<SubnetRow> {
+  const { rows } = await tx.query<SubnetRow>(
+    `SELECT ${subnetColumns} FROM network_subnets WHERE id = $1 AND network_id = $2 FOR UPDATE`,
+    [subnetId, networkId],
+  );
+  const subnet = rows[0];
+  if (!subnet || subnet.state === 'deleted')
+    throw new ComputeError('NOT_FOUND', `Subnet ${subnetId} not found`);
+  if (subnet.desired_state === 'deleted')
+    throw new ComputeError('INVALID_STATE', `Subnet ${subnet.name} is being removed`);
+  return subnet;
+}
+
+const edgeFeatures = {
+  ensureNatGateway: 'NAT gateways',
+  ensurePeering: 'network peerings',
+  ensureRoute: 'static routes',
+} as const;
+
+/** UNSUPPORTED unless the network's provider implements `method` (checked before anything is recorded). */
+async function requireEdgeFeature(
+  deps: NetworkDeps,
+  tx: SqlTx,
+  network: NetworkRow,
+  method: keyof typeof edgeFeatures,
+): Promise<void> {
+  const { client } = await networkProvider(deps, tx, network.tenant_id, network.pool_id);
+  if (typeof client.networks?.[method] !== 'function')
+    throw new ComputeError(
+      'UNSUPPORTED',
+      `The provider of network ${network.name} does not provide ${edgeFeatures[method]}`,
+    );
+}
+
+async function insertEdge(
+  tx: SqlTx,
+  fields: {
+    networkId: string;
+    kind: EdgeRow['kind'];
+    subnetId: string;
+    name?: string;
+    peerNetworkId?: string;
+    peerSubnetId?: string;
+    destination?: string;
+    nextHop?: Json;
+  },
+): Promise<void> {
+  await tx.query(
+    `INSERT INTO network_edges (id, network_id, kind, subnet_id, name, peer_network_id, peer_subnet_id, destination,
+                                next_hop, state, desired_state, version)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::cidr, $9::jsonb, 'pending', 'present', 1)`,
+    [
+      newId('nedge'),
+      fields.networkId,
+      fields.kind,
+      fields.subnetId,
+      fields.name ?? null,
+      fields.peerNetworkId ?? null,
+      fields.peerSubnetId ?? null,
+      fields.destination ?? null,
+      fields.nextHop === undefined ? null : JSON.stringify(fields.nextHop),
+    ],
+  );
+}
+
+async function liveGateway(tx: SqlTx, subnetId: string): Promise<EdgeRow | undefined> {
+  const { rows } = await tx.query<EdgeRow>(
+    `SELECT ${edgeColumns} FROM network_edges
+      WHERE subnet_id = $1 AND kind = 'nat-gateway' AND desired_state = 'present' FOR UPDATE`,
+    [subnetId],
+  );
+  return rows[0];
+}
+
+/**
+ * `networks.natGateway`: `enabled: true` gives the subnet a NAT gateway (one per subnet; asking again returns the
+ * network unchanged), `enabled: false` removes it, refused (INVALID_STATE, `details.routes`) while a route of the
+ * subnet sends traffic to it.
+ */
+export async function setNatGateway(
+  deps: NetworkDeps,
+  tx: SqlTx,
+  input: SetNatGatewayInput,
+): Promise<NetworkView> {
+  const network = await openNetwork(tx, input);
+  const subnet = await liveSubnet(tx, network.id, input.subnetId);
+  const existing = await liveGateway(tx, subnet.id);
+  if (input.enabled) {
+    if (existing) return viewOf(tx, network.id);
+    await requireEdgeFeature(deps, tx, network, 'ensureNatGateway');
+    await insertEdge(tx, { networkId: network.id, kind: 'nat-gateway', subnetId: subnet.id });
+  } else {
+    if (!existing) return viewOf(tx, network.id);
+    const { rows } = await tx.query<{ name: string }>(
+      `SELECT name FROM network_edges
+        WHERE subnet_id = $1 AND kind = 'route' AND desired_state = 'present' AND next_hop ? 'natGateway'
+        ORDER BY name`,
+      [subnet.id],
+    );
+    if (rows.length > 0)
+      throw new ComputeError(
+        'INVALID_STATE',
+        `Routes of subnet ${subnet.name} send traffic to its NAT gateway: change them first`,
+        undefined,
+        { routes: rows.map((row) => row.name) },
+      );
+    await tx.query(
+      `UPDATE network_edges SET desired_state = 'deleted', state = 'deleting', message = NULL, version = version + 1
+        WHERE id = $1`,
+      [existing.id],
+    );
+  }
+  await reopen(tx, deps, network.id);
+  return viewOf(tx, network.id);
+}
+
+/**
+ * `networks.peer`: peers a subnet of the network with a subnet of another network of the tenant (or another subnet
+ * of the same network) on the same provider account; `enabled: false` removes the peering, from either side. The
+ * same pair asked again, from either side, is the same peering. A network of another tenant is NOT_FOUND.
+ */
+export async function peerNetwork(
+  deps: NetworkDeps,
+  tx: SqlTx,
+  input: PeerNetworkInput,
+): Promise<NetworkView> {
+  // Both networks are locked, in id order, so two calls on one pair never deadlock.
+  const ids = [...new Set([input.networkId, input.peerNetworkId])].sort();
+  const locked = new Map<string, NetworkRow>();
+  for (const networkId of ids)
+    locked.set(
+      networkId,
+      await requireNetwork(tx, { tenantId: input.tenantId, networkId }, { lock: true }),
+    );
+  const network = locked.get(input.networkId)!;
+  const peer = locked.get(input.peerNetworkId)!;
+  // The pair's peering, only between the two networks named (both the tenant's, checked above): subnets of other
+  // networks never select a row, so no caller reaches a peering of networks that are not theirs.
+  const { rows } = await tx.query<EdgeRow>(
+    `SELECT ${edgeColumns} FROM network_edges
+      WHERE kind = 'peering' AND desired_state = 'present'
+        AND ((network_id = $3 AND subnet_id = $1 AND peer_network_id = $4 AND peer_subnet_id = $2)
+          OR (network_id = $4 AND subnet_id = $2 AND peer_network_id = $3 AND peer_subnet_id = $1))
+      FOR UPDATE`,
+    [input.subnetId, input.peerSubnetId, network.id, peer.id],
+  );
+  const existing = rows[0];
+  if (!input.enabled) {
+    if (existing) {
+      await tx.query(
+        `UPDATE network_edges SET desired_state = 'deleted', state = 'deleting', message = NULL, version = version + 1
+          WHERE id = $1`,
+        [existing.id],
+      );
+      await reopen(tx, deps, existing.network_id);
+    }
+    return viewOf(tx, network.id);
+  }
+  for (const row of locked.values())
+    if (row.desired_state === 'deleted' || row.state === 'deleting' || row.state === 'deleted')
+      throw new ComputeError('INVALID_STATE', `Network ${row.id} is being deleted`);
+  if (peer.provider_account_id !== network.provider_account_id)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `Network ${peer.id} is on another provider account; only networks of one account are peered`,
+    );
+  await liveSubnet(tx, network.id, input.subnetId);
+  await liveSubnet(tx, peer.id, input.peerSubnetId);
+  if (existing) return viewOf(tx, network.id);
+  await requireEdgeFeature(deps, tx, network, 'ensurePeering');
+  for (const row of locked.values()) {
+    const count = await tx.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM network_edges
+        WHERE kind = 'peering' AND desired_state = 'present' AND (network_id = $1 OR peer_network_id = $1)`,
+      [row.id],
+    );
+    if (Number(count.rows[0]!.count) >= maxPeeringsPerNetwork)
+      throw new ComputeError(
+        'QUOTA_EXCEEDED',
+        `A network takes part in at most ${maxPeeringsPerNetwork} peerings`,
+        undefined,
+        { limit: maxPeeringsPerNetwork, networkId: row.id },
+      );
+  }
+  await insertEdge(tx, {
+    networkId: network.id,
+    kind: 'peering',
+    subnetId: input.subnetId,
+    peerNetworkId: peer.id,
+    peerSubnetId: input.peerSubnetId,
+  });
+  await reopen(tx, deps, network.id);
+  return viewOf(tx, network.id);
+}
+
+/**
+ * `networks.routes`: replaces the static routes of a subnet. A route kept as it is stays; a changed one is replaced
+ * (the provider route is deleted, then made anew); one left out is deleted. Next hops: the subnet's NAT gateway
+ * (INVALID_STATE without one), an instance of the tenant on the subnet, or a host address inside the subnet.
+ */
+export async function setRoutes(
+  deps: NetworkDeps,
+  tx: SqlTx,
+  input: SetRoutesInput,
+): Promise<NetworkView> {
+  const network = await openNetwork(tx, input);
+  const subnet = await liveSubnet(tx, network.id, input.subnetId);
+  for (const route of input.routes) {
+    const hop = route.nextHop;
+    if ('natGateway' in hop && !(await liveGateway(tx, subnet.id)))
+      throw new ComputeError(
+        'INVALID_STATE',
+        `Subnet ${subnet.name} has no NAT gateway: enable one with networks.natGateway first`,
+      );
+    if ('address' in hop && !hostOf(subnet.cidr, hop.address))
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `Route ${route.name}: ${hop.address} is not a host address of subnet ${subnet.name} (${subnet.cidr})`,
+      );
+    if ('instanceId' in hop) {
+      const { rows } = await tx.query<{ subnet_id: string | null }>(
+        `SELECT subnet_id FROM instances WHERE id = $1 AND tenant_id = $2 AND NOT draft AND state <> 'deleted'`,
+        [hop.instanceId, network.tenant_id],
+      );
+      if (!rows[0]) throw new ComputeError('NOT_FOUND', `Instance ${hop.instanceId} not found`);
+      if (rows[0].subnet_id !== subnet.id)
+        throw new ComputeError(
+          'INVALID_INPUT',
+          `Route ${route.name}: instance ${hop.instanceId} is not on subnet ${subnet.name}`,
+        );
+    }
+  }
+  const { rows: current } = await tx.query<EdgeRow>(
+    `SELECT ${edgeColumns} FROM network_edges
+      WHERE subnet_id = $1 AND kind = 'route' AND desired_state = 'present' FOR UPDATE`,
+    [subnet.id],
+  );
+  const same = (row: EdgeRow, route: SetRoutesInput['routes'][number]) =>
+    row.name === route.name &&
+    row.destination === route.destination &&
+    canonical(hopOf(row)) === canonical(route.nextHop);
+  const kept = current.filter((row) => input.routes.some((route) => same(row, route)));
+  const dropped = current.filter((row) => !kept.includes(row));
+  const added = input.routes.filter((route) => !kept.some((row) => same(row, route)));
+  if (dropped.length === 0 && added.length === 0) return viewOf(tx, network.id);
+  if (added.length > 0) await requireEdgeFeature(deps, tx, network, 'ensureRoute');
+  if (dropped.length > 0)
+    await tx.query(
+      `UPDATE network_edges SET desired_state = 'deleted', state = CASE WHEN state = 'deleted' THEN state ELSE 'deleting' END,
+              message = NULL, version = version + 1
+        WHERE id = ANY($1::text[])`,
+      [dropped.map((row) => row.id)],
+    );
+  for (const route of added)
+    await insertEdge(tx, {
+      networkId: network.id,
+      kind: 'route',
+      subnetId: subnet.id,
+      name: route.name,
+      destination: route.destination,
+      nextHop: route.nextHop as Json,
+    });
   await reopen(tx, deps, network.id);
   return viewOf(tx, network.id);
 }
@@ -1675,6 +2084,8 @@ export async function deleteNetwork(
   tx: SqlTx,
   ref: NetworkRef,
 ): Promise<NetworkView> {
+  // The networks its peerings reach are reopened below: lock them with this one first, in id order (peerNetwork's).
+  await lockWithPeers(tx, ref, 'network', ref.networkId);
   const row = await requireNetwork(tx, ref, { lock: true });
   if (row.desired_state === 'deleted') return viewOf(tx, row.id);
   const instanceIds = await instancesOn(tx, 'network_id', row.id);
@@ -1684,6 +2095,14 @@ export async function deleteNetwork(
       `Network ${row.name} has ${instanceIds.length} instance(s) on it`,
       undefined,
       { instanceIds },
+    );
+  const loadBalancerIds = await loadBalancersOn(tx, 'network_id', row.id);
+  if (loadBalancerIds.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Network ${row.name} holds ${loadBalancerIds.length} load balancer(s); delete them first`,
+      undefined,
+      { loadBalancerIds },
     );
   const clusterIds = await liveKubernetesClusters(tx, 'network_id', row.id);
   if (clusterIds.length > 0)
@@ -1736,6 +2155,8 @@ export async function deleteNetwork(
       WHERE network_id = $1`,
     [row.id],
   );
+  // Its gateways, routes and peerings, and the peerings other networks hold with it: those networks delete them.
+  await releaseEdges(tx, deps, 'network', row.id, row.id);
   await tx.query(
     `UPDATE networks SET desired_state = 'deleted', state = 'deleting', message = NULL, version = version + 1 WHERE id = $1`,
     [row.id],
@@ -2204,6 +2625,14 @@ const runBudgetMs = 40_000;
  */
 export const networkTagRefreshMs = 60 * 60_000;
 
+/** The event family of an edge kind: `network.natGateway.ready`, `network.peering.error`, ... */
+const edgeEvent = { 'nat-gateway': 'natGateway', peering: 'peering', route: 'route' } as const;
+
+function edgeLabel(edge: EdgeRow): string {
+  if (edge.kind === 'route') return `route ${edge.name ?? edge.id}`;
+  return edge.kind === 'peering' ? `peering ${edge.id}` : `NAT gateway ${edge.id}`;
+}
+
 /** What converging one resource at the provider came to. */
 type Outcome = { state: NetworkState; message?: string };
 
@@ -2213,6 +2642,23 @@ interface Snapshot {
   subnets: SubnetRow[];
   rules: RuleRow[];
   instances: TaggedInstance[];
+  /** (edge) The network's own gateways, peerings and routes that are not gone, with what converging them needs. */
+  edges: EdgeWork[];
+  /** (edge) This network's subnets that a peering held by another network still joins: they wait for it. */
+  peeredByOthers: Set<string>;
+}
+
+/** An edge row with its subnet, its peer subnet (a peering) and its next-hop instance (a route). */
+interface EdgeWork extends EdgeRow {
+  subnet_region: string;
+  subnet_state: NetworkState;
+  peer_region: string | null;
+  peer_subnet_state: NetworkState | null;
+  peer_subnet_desired: 'present' | 'deleted' | null;
+  peer_external_name: string | null;
+  hop_external_id: string | null;
+  hop_state: string | null;
+  hop_subnet_id: string | null;
 }
 
 interface TaggedInstance {
@@ -2245,12 +2691,35 @@ async function loadSnapshot(tx: SqlTx, networkId: string): Promise<Snapshot | un
       ORDER BY network_tagged_at NULLS FIRST, id`,
     [networkId, [attachConflictCondition, ownershipLostCondition, duplicateMachineCondition]],
   );
+  const edges = await tx.query<EdgeWork>(
+    `SELECT e.id, e.network_id, e.kind, e.subnet_id, e.name, e.peer_network_id, e.peer_subnet_id,
+            e.destination::text AS destination, e.next_hop, e.external_id, e.outputs, e.state, e.desired_state,
+            e.message, e.version, s.region AS subnet_region, s.state AS subnet_state,
+            ps.region AS peer_region, ps.state AS peer_subnet_state, ps.desired_state AS peer_subnet_desired,
+            pn.external_name AS peer_external_name,
+            i.external_id AS hop_external_id, i.state AS hop_state, i.subnet_id AS hop_subnet_id
+       FROM network_edges e
+       JOIN network_subnets s ON s.id = e.subnet_id
+       LEFT JOIN network_subnets ps ON ps.id = e.peer_subnet_id
+       LEFT JOIN networks pn ON pn.id = e.peer_network_id
+       LEFT JOIN instances i ON e.kind = 'route' AND i.id = e.next_hop->>'instanceId'
+      WHERE e.network_id = $1 AND (e.state <> 'deleted' OR e.desired_state = 'present')
+      ORDER BY e.created_at, e.id`,
+    [networkId],
+  );
+  const inbound = await tx.query<{ peer_subnet_id: string }>(
+    `SELECT peer_subnet_id FROM network_edges
+      WHERE peer_network_id = $1 AND network_id <> $1 AND kind = 'peering' AND state <> 'deleted'`,
+    [networkId],
+  );
   return {
     network,
     account: await readAccount(tx, network.provider_account_id),
     subnets,
     rules,
     instances: instances.rows,
+    edges: edges.rows,
+    peeredByOthers: new Set(inbound.rows.map((row) => row.peer_subnet_id)),
   };
 }
 
@@ -2508,6 +2977,281 @@ class NetworkWorker {
     return { state: 'pending' };
   }
 
+  // --- Edge (DO P4): NAT gateways, peerings and routes ------------------------------------------
+
+  /** Like `#attempt`, keeping the provider's id and outputs of what it answered. */
+  async #attemptEdge(
+    op: () => Promise<ProviderResourceState>,
+  ): Promise<(Outcome & { id?: string; outputs?: Readonly<Record<string, string>> }) | undefined> {
+    const seen: { answer?: ProviderResourceState } = {};
+    const outcome = await this.#attempt(async () => {
+      const answer = await op();
+      seen.answer = answer;
+      return {
+        id: answer.id,
+        state: answer.state === 'updating' ? 'pending' : answer.state,
+        ...(answer.message ? { message: answer.message } : {}),
+      };
+    });
+    const answer = seen.answer;
+    if (!outcome || !answer || outcome.state === 'error') return outcome;
+    return { ...outcome, id: answer.id, ...(answer.outputs ? { outputs: answer.outputs } : {}) };
+  }
+
+  /** Writes an edge row's state (guarded by the version this run read) and publishes what changed. */
+  async #setEdge(
+    edge: EdgeWork,
+    state: NetworkState,
+    message?: string,
+    found?: { id?: string; outputs?: Readonly<Record<string, string>> },
+  ): Promise<void> {
+    const outputs = found?.outputs ? JSON.stringify(found.outputs) : null;
+    const written = await this.sql.transaction(async (tx) => {
+      const { rows } = await tx.query(
+        `UPDATE network_edges SET state = $3, message = $4, external_id = coalesce($5::text, external_id),
+                outputs = coalesce($6::jsonb, outputs)
+          WHERE id = $1 AND version = $2
+            AND (state IS DISTINCT FROM $3 OR message IS DISTINCT FROM $4
+                 OR ($5::text IS NOT NULL AND external_id IS DISTINCT FROM $5::text)
+                 OR ($6::jsonb IS NOT NULL AND outputs IS DISTINCT FROM $6::jsonb))
+          RETURNING id`,
+        [edge.id, edge.version, state, message ?? null, found?.id ?? null, outputs],
+      );
+      if (rows.length === 0) return false;
+      const event = `network.${edgeEvent[edge.kind]}`;
+      const data = { edgeId: edge.id, subnetId: edge.subnet_id };
+      if (state === 'ready' && edge.state !== 'ready')
+        await publish(this.deps, tx, this.#network, `${event}.ready`, data);
+      if (state === 'error' && edge.state !== 'error')
+        await publish(this.deps, tx, this.#network, `${event}.error`, {
+          ...data,
+          message: message ?? '',
+        });
+      return true;
+    });
+    if (!written) return;
+    edge.state = state;
+    if (found?.id) edge.external_id = found.id;
+  }
+
+  /** The provider id of the subnet's NAT gateway, once it is ready. */
+  #gatewayOf(subnetId: string): string | undefined {
+    return (
+      this.snapshot.edges.find(
+        (edge) =>
+          edge.kind === 'nat-gateway' &&
+          edge.subnet_id === subnetId &&
+          edge.desired_state === 'present' &&
+          edge.state === 'ready' &&
+          edge.external_id !== null,
+      )?.external_id ?? undefined
+    );
+  }
+
+  /** Whether an edge resource (ours, or a peering another network holds) still uses the subnet. */
+  #edgesOn(subnetId: string): boolean {
+    return (
+      this.snapshot.peeredByOthers.has(subnetId) ||
+      this.snapshot.edges.some(
+        (edge) =>
+          edge.state !== 'deleted' &&
+          (edge.subnet_id === subnetId || edge.peer_subnet_id === subnetId),
+      )
+    );
+  }
+
+  /** A subnet's state changed in this run: the edges on it see it at once. */
+  #subnetSettled(subnetId: string, state: NetworkState): void {
+    for (const edge of this.snapshot.edges) {
+      if (edge.subnet_id === subnetId) edge.subnet_state = state;
+      if (edge.peer_subnet_id === subnetId) edge.peer_subnet_state = state;
+    }
+  }
+
+  /** What an edge waits for before the provider is asked (or why it cannot be made); undefined: ask now. */
+  #edgeBlocker(edge: EdgeWork): { message: string; error?: true } | undefined {
+    if (edge.subnet_state !== 'ready') return { message: 'Waiting for its subnet' };
+    if (
+      edge.kind === 'peering' &&
+      (edge.peer_subnet_state !== 'ready' || edge.peer_subnet_desired !== 'present')
+    )
+      return { message: 'Waiting for the peer subnet' };
+    if (edge.kind !== 'route') return undefined;
+    const hop = hopOf(edge);
+    if ('natGateway' in hop && this.#gatewayOf(edge.subnet_id) === undefined)
+      return { message: "Waiting for the subnet's NAT gateway" };
+    if ('instanceId' in hop) {
+      if (
+        edge.hop_state === null ||
+        edge.hop_state === 'deleted' ||
+        edge.hop_subnet_id !== edge.subnet_id
+      )
+        return {
+          message: `Next hop instance ${hop.instanceId} is gone or not on the subnet`,
+          error: true,
+        };
+      if (edge.hop_external_id === null)
+        return { message: `Waiting for instance ${hop.instanceId} to have a machine` };
+    }
+    return undefined;
+  }
+
+  #ensureCall(networks: ProviderNetworks, edge: EdgeWork): Promise<ProviderResourceState> {
+    const name = providerResourceName(edge.id);
+    const subnet = providerResourceName(edge.subnet_id);
+    const call = this.#call(edge.id);
+    const unsupported = (what: string) =>
+      Promise.reject(new ComputeError('UNSUPPORTED', `The provider does not provide ${what}`));
+    if (edge.kind === 'nat-gateway')
+      return networks.ensureNatGateway
+        ? networks.ensureNatGateway(
+            { name, network: this.#networkName, subnet, region: edge.subnet_region },
+            call,
+          )
+        : unsupported('NAT gateways');
+    if (edge.kind === 'peering')
+      return networks.ensurePeering
+        ? networks.ensurePeering(
+            {
+              name,
+              network: this.#networkName,
+              subnet,
+              region: edge.subnet_region,
+              peer: {
+                network: providerResourceName(edge.peer_network_id!, edge.peer_external_name),
+                subnet: providerResourceName(edge.peer_subnet_id!),
+                region: edge.peer_region!,
+              },
+            },
+            call,
+          )
+        : unsupported('network peerings');
+    const hop = hopOf(edge);
+    const nextHop =
+      'natGateway' in hop
+        ? { kind: 'natGateway' as const, id: this.#gatewayOf(edge.subnet_id)! }
+        : 'instanceId' in hop
+          ? { kind: 'machine' as const, id: edge.hop_external_id! }
+          : { kind: 'address' as const, id: hop.address };
+    return networks.ensureRoute
+      ? networks.ensureRoute(
+          {
+            name,
+            network: this.#networkName,
+            subnet,
+            region: edge.subnet_region,
+            destination: edge.destination!,
+            nextHop,
+          },
+          call,
+        )
+      : unsupported('static routes');
+  }
+
+  /** Makes (or re-applies) the wanted edges: gateways, then peerings, then routes (a route may need a gateway's id). */
+  async #ensureEdges(networks: ProviderNetworks, problems: string[]): Promise<boolean> {
+    let waiting = false;
+    const wanted = this.snapshot.edges.filter((edge) => edge.desired_state === 'present');
+    for (const kind of ['nat-gateway', 'peering', 'route'] as const)
+      for (const edge of wanted.filter((entry) => entry.kind === kind)) {
+        const blocked = this.#edgeBlocker(edge);
+        if (blocked?.error) {
+          await this.#setEdge(edge, 'error', blocked.message);
+          problems.push(`${edgeLabel(edge)}: ${blocked.message}`);
+          continue;
+        }
+        if (blocked) {
+          this.#inFlight = true;
+          waiting = true;
+          await this.#setEdge(edge, 'pending', blocked.message);
+          continue;
+        }
+        const outcome = await this.#attemptEdge(() => this.#ensureCall(networks, edge));
+        if (!outcome) {
+          waiting = true;
+          continue;
+        }
+        const state = this.#presentState(outcome);
+        await this.#setEdge(edge, state.state, state.message, outcome);
+        if (state.state === 'error')
+          problems.push(`${edgeLabel(edge)}: ${state.message ?? 'the provider refused it'}`);
+        else if (state.state !== 'ready') waiting = true;
+      }
+    return waiting;
+  }
+
+  async #deleteEdge(networks: ProviderNetworks, edge: EdgeWork): Promise<Outcome | undefined> {
+    const name = providerResourceName(edge.id);
+    const call = this.#call(edge.id);
+    const op =
+      edge.kind === 'nat-gateway'
+        ? networks.deleteNatGateway &&
+          (() => networks.deleteNatGateway!(edge.subnet_region, name, call))
+        : edge.kind === 'peering'
+          ? networks.deletePeering && (() => networks.deletePeering!(name, call))
+          : networks.deleteRoute &&
+            (() =>
+              networks.deleteRoute!(
+                {
+                  name,
+                  network: this.#networkName,
+                  subnet: providerResourceName(edge.subnet_id),
+                  region: edge.subnet_region,
+                },
+                call,
+              ));
+    // A provider without the call made nothing, unless it once answered with an id (then it cannot be undone here).
+    const gone: Outcome | undefined = op
+      ? await this.#attemptEdge(op)
+      : edge.external_id === null
+        ? { state: 'deleted' }
+        : { state: 'error', message: 'The provider no longer deletes it' };
+    if (!gone) return undefined;
+    if (gone.state === 'deleted') await this.#setEdge(edge, 'deleted');
+    else if (gone.state === 'error') await this.#setEdge(edge, 'error', gone.message);
+    else {
+      this.#inFlight = true;
+      await this.#setEdge(edge, 'deleting');
+    }
+    return gone;
+  }
+
+  /**
+   * Deletes the edges marked for deletion: routes first, then peerings, then gateways (one goes once no route of
+   * ours sends traffic to it). True when none of them is left.
+   */
+  async #deleteEdges(networks: ProviderNetworks, problems: string[]): Promise<boolean> {
+    let left = false;
+    const doomed = this.snapshot.edges.filter(
+      (edge) => edge.desired_state === 'deleted' && edge.state !== 'deleted',
+    );
+    for (const kind of ['route', 'peering', 'nat-gateway'] as const)
+      for (const edge of doomed.filter((entry) => entry.kind === kind)) {
+        const routed =
+          kind === 'nat-gateway' &&
+          this.snapshot.edges.some(
+            (other) =>
+              other.kind === 'route' &&
+              other.subnet_id === edge.subnet_id &&
+              other.state !== 'deleted' &&
+              'natGateway' in hopOf(other),
+          );
+        if (routed) {
+          left = true;
+          this.#inFlight = true;
+          continue;
+        }
+        const gone = await this.#deleteEdge(networks, edge);
+        if (gone?.state === 'deleted') continue;
+        left = true;
+        if (gone?.state === 'error')
+          problems.push(
+            `${edgeLabel(edge)}: ${gone.message ?? 'the provider refused to delete it'}`,
+          );
+      }
+    return !left;
+  }
+
   async converge(networks: ProviderNetworks): Promise<number | undefined> {
     const { snapshot } = this;
     const network = this.#network;
@@ -2541,11 +3285,23 @@ class NetworkWorker {
 
     const problems: string[] = [];
     let waiting = false;
+    // Edges marked for deletion go before anything else: a subnet goes only after its gateway, routes and peerings.
+    if (!(await this.#deleteEdges(networks, problems))) waiting = true;
     // Deletions first: a range freed by `removeSubnet` is reused by a new subnet only once the old one is gone.
     for (const subnet of snapshot.subnets) {
       const name = providerResourceName(subnet.id);
       if (subnet.desired_state === 'deleted') {
         if (subnet.state === 'deleted') continue;
+        if (this.#edgesOn(subnet.id)) {
+          this.#inFlight = true;
+          waiting = true;
+          await this.#setSubnet(
+            subnet,
+            'deleting',
+            'Waiting for its NAT gateway, routes and peerings to be deleted',
+          );
+          continue;
+        }
         const gone = await this.#attempt(() =>
           networks.deleteSubnet(subnet.region, name, this.#call(subnet.id)),
         );
@@ -2597,10 +3353,14 @@ class NetworkWorker {
       }
       const state = this.#presentState(result);
       await this.#setSubnet(subnet, state.state, state.message);
+      this.#subnetSettled(subnet.id, state.state);
       if (state.state === 'error')
         problems.push(`subnet ${subnet.name}: ${state.message ?? 'the provider refused it'}`);
       else if (state.state !== 'ready') waiting = true;
     }
+
+    // Edges once their subnets are there: gateways, peerings, then routes.
+    if (await this.#ensureEdges(networks, problems)) waiting = true;
 
     for (const rule of snapshot.rules) {
       const name = providerResourceName(rule.id);
@@ -2678,6 +3438,9 @@ class NetworkWorker {
     const network = this.#network;
     const problems: string[] = [];
 
+    // Edges first (routes, peerings, then gateways): the subnets they use go after them.
+    if (!(await this.#deleteEdges(networks, problems))) return this.#waitOnTeardown(problems);
+
     let rulesLeft = false;
     for (const rule of snapshot.rules) {
       if (rule.state === 'deleted') continue;
@@ -2703,6 +3466,12 @@ class NetworkWorker {
     let subnetsLeft = false;
     for (const subnet of snapshot.subnets) {
       if (subnet.state === 'deleted') continue;
+      // A peering another network holds still joins it: that network deletes the peering first.
+      if (this.#edgesOn(subnet.id)) {
+        subnetsLeft = true;
+        this.#inFlight = true;
+        continue;
+      }
       const gone = await this.#attempt(() =>
         networks.deleteSubnet(
           subnet.region,
@@ -2752,6 +3521,10 @@ class NetworkWorker {
       if (rows.length === 0) return;
       await tx.query(
         `UPDATE network_firewall_rules SET state = 'deleted', message = NULL WHERE network_id = $1`,
+        [network.id],
+      );
+      await tx.query(
+        `UPDATE network_edges SET state = 'deleted', message = NULL WHERE network_id = $1`,
         [network.id],
       );
       await tx.query(

@@ -7,6 +7,8 @@ import { registerApps } from './apps.js';
 import { registerAutoscale } from './autoscale.js';
 import { registerCatalog } from './catalog.js';
 import { registerDatabases } from './databases.js';
+import { registerCertificates } from './certificates.js';
+import { registerDns } from './dns.js';
 import { registerDroplets } from './droplets.js';
 import { registerFirewalls } from './firewalls.js';
 import { registerFunctions } from './functions.js';
@@ -14,8 +16,12 @@ import { registerImages } from './images.js';
 import { registerKeys } from './keys.js';
 import { registerNfs } from './nfs.js';
 import { registerPartner } from './partner.js';
+import { registerLoadBalancers } from './load-balancers.js';
+import { registerNatGateways } from './nat-gateways.js';
 import { registerTags } from './tags.js';
 import { registerVolumes } from './volumes.js';
+import { registerVpcPeerings } from './vpc-peerings.js';
+import { registerVpcRoutes } from './vpc-routes.js';
 import { registerVpcs } from './vpcs.js';
 import { DoState, errorFixtures, type Json } from './state.js';
 
@@ -132,6 +138,18 @@ export class DoEmulator {
   addonReads = 1;
   /** How many reads a partner attachment stays `PENDING` (or `DELETING`). */
   partnerReads = 1;
+  /** How many reads a new load balancer answers `new` to before it is `active`; at 0, at once. */
+  loadBalancerReads = 1;
+  /** How many load balancers the account may hold. */
+  loadBalancerLimit = 10;
+  /** How many reads a new Let's Encrypt certificate answers `pending` to before it is `verified`. */
+  certificateReads = 1;
+  /** How many reads a new NAT gateway answers `NEW` to before it is `ACTIVE`; at 0, at once. */
+  natGatewayReads = 1;
+  /** How many reads a peering takes to turn `ACTIVE`, and to be gone once deleted; at 0, at once. */
+  peeringReads = 1;
+  /** How many route list reads a new VPC route answers `PENDING` to before it is `ACTIVE`. */
+  routeReads = 1;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -326,5 +344,11 @@ export class DoEmulator {
     registerAddons(this);
     registerPartner(this);
     registerOneClicks(this);
+    registerLoadBalancers(this);
+    registerDns(this);
+    registerCertificates(this);
+    registerNatGateways(this);
+    registerVpcPeerings(this);
+    registerVpcRoutes(this);
   }
 }

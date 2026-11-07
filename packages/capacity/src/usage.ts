@@ -135,7 +135,9 @@ export type UsageSourceKind =
   | 'volume'
   | 'address'
   /** A managed cloud resource (`@better-compute/cloud-resources`, whose migration adds it to the CHECK). */
-  | 'cloud-resource';
+  | 'cloud-resource'
+  /** (DO P4) A provider load balancer (vps provider-resource-usage.ts; core/0060 adds it). */
+  | 'loadBalancer';
 
 /** The idempotency key of one source window (D2): `cmp:<kind>:<id>:<windowStartMs>[:<meter>]`. */
 export function sourceUsageKey(

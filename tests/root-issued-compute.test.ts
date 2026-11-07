@@ -1254,6 +1254,43 @@ describe('isolation between tenants, and between tenants and the root tenant', (
             });
           },
         },
+        // (DO P4) The edge methods: decided on the network; GCE provides none of them.
+        {
+          path: 'networks.natGateway',
+          tenant: A,
+          call: () =>
+            api.networks.natGateway(root, {
+              tenantId: A,
+              networkId: net,
+              subnetId: w.aNet.subnetId,
+              enabled: true,
+            }),
+          expect: 'UNSUPPORTED',
+        },
+        {
+          path: 'networks.peer',
+          tenant: A,
+          call: () =>
+            api.networks.peer(root, {
+              tenantId: A,
+              networkId: net,
+              subnetId: w.aNet.subnetId,
+              peerNetworkId: net,
+              peerSubnetId: 'snet_01jz0000000000000000000000',
+            }),
+          expect: 'NOT_FOUND',
+        },
+        {
+          path: 'networks.routes',
+          tenant: A,
+          call: () =>
+            api.networks.routes(root, {
+              tenantId: A,
+              networkId: net,
+              subnetId: w.aNet.subnetId,
+              routes: [],
+            }),
+        },
         {
           path: 'firewallRules.list',
           tenant: A,

@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 import { isoSeconds } from './actions.js';
 import type { DoEmulator, RouteContext } from './index.js';
+import { natGatewayOf } from './nat-gateways.js';
+import { peeringOf } from './vpc-peerings.js';
+import { routeOf } from './vpc-routes.js';
 import { fixture, type DoState, type Json } from './state.js';
 
 // VPCs under `/v2/vpcs`: list (paged), read, create and delete over `state.vpcs`, plus a seed.
@@ -141,6 +144,9 @@ export function registerVpcs(emulator: DoEmulator): void {
     if (!vpc) return emulator.error('not-found');
     if (vpc.default) return emulator.error('422-unknown');
     if ([...context.state.droplets.values()].some((d) => d.vpc_uuid === id))
+      return emulator.error('409-vpc-in-use');
+    // A NAT gateway that still serves the VPC holds it too (P4).
+    if (natGatewayOf(context.state, id) || peeringOf(context.state, id) || routeOf(context.state, id))
       return emulator.error('409-vpc-in-use');
     context.state.vpcs.delete(id);
     return { status: 204 };

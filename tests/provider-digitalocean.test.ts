@@ -1640,6 +1640,9 @@ describe('compute', () => {
         'spot-offers',
         'kubernetes',
         'resources',
+        'loadBalancers',
+        'dns',
+        'certificates',
       ],
     });
     const emu = emulator();
@@ -1690,6 +1693,19 @@ describe('compute', () => {
     }
     for (const discoverTag of ['fleet', 'env:prod', 'k8s_pool-1', 'x'.repeat(255)])
       await digitaloceanProvider({ fetch: emu.fetch }).create({ ...config, discoverTag }, context);
+    // networkModel 'vpc-subnets' (P4, DO's VPC Subnets preview) is reserved: refused with or
+    // without previews until its shape is recorded; 'vpc-per-subnet' is the model in use.
+    for (const previews of [false, true]) {
+      const error = await refused({}, { ...config, previews, networkModel: 'vpc-subnets' });
+      expect([error.code, error.details?.reason], String(previews)).toEqual([
+        'INVALID_CONFIG',
+        'networkModel',
+      ]);
+    }
+    await digitaloceanProvider({ fetch: emu.fetch }).create(
+      { ...config, networkModel: 'vpc-per-subnet' },
+      context,
+    );
     expect(emu.requests).toHaveLength(requests);
   });
 
@@ -2273,7 +2289,13 @@ describe('definition', () => {
       return {
         foreign: { volumeId: theirs.id, snapshotId: theirSnapshot.id },
         provider: digitaloceanProvider({ fetch: emu.fetch }),
-        config: { ...doAccount, regions: ['nyc3', 'sfo3'], sshKeyFingerprint: key.fingerprint },
+        // previews: true offers the preview members too (VPC routes, P4), so their case runs.
+        config: {
+          ...doAccount,
+          regions: ['nyc3', 'sfo3'],
+          sshKeyFingerprint: key.fingerprint,
+          previews: true,
+        },
         attachable: String(hand.id),
         reinstallable: true,
         offerId: 'nyc3/s-1vcpu-1gb',
@@ -2282,7 +2304,21 @@ describe('definition', () => {
         // (P6) The opt-in shared-volume case: a tenant network, two Droplets on it and an NFS share.
         sharedVolumes: true,
         image: 'ubuntu-24-04-x64',
-        context: { secrets, account: platformAccount },
+        // The DNS case makes and deletes this zone (P4).
+        dnsZone: 'conformance.example',
+        // The custom certificate case uploads these PEMs (P4).
+        certificate: { certificate: 'secret://do/cert', privateKey: 'secret://do/key' },
+        context: {
+          secrets: {
+            resolve: async (ref: string) =>
+              ref === 'secret://do/cert'
+                ? '-----BEGIN CERTIFICATE-----\nY29uZm9ybWFuY2UtbGVhZg==\n-----END CERTIFICATE-----\n'
+                : ref === 'secret://do/key'
+                  ? '-----BEGIN PRIVATE KEY-----\nY29uZm9ybWFuY2Uta2V5\n-----END PRIVATE KEY-----\n'
+                  : secrets.resolve(ref),
+          },
+          account: platformAccount,
+        },
       };
     });
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
@@ -2317,6 +2353,9 @@ describe('definition', () => {
       'spot-offers',
       'kubernetes',
       'resources',
+      'loadBalancers',
+      'dns',
+      'certificates',
     ]);
     const parsed = await digitalocean.config['~standard'].validate(doAccount);
     expect(parsed).toMatchObject({
@@ -2382,6 +2421,9 @@ describe('definition', () => {
         storage: 'ok',
         addresses: 'ok',
         nfs: 'ok',
+        loadBalancers: 'ok',
+        dns: 'ok',
+        certificates: 'ok',
       },
       missing: [],
       // A read-only probe cannot see write scopes: it names those it did not check, for the operator.
@@ -2402,7 +2444,10 @@ describe('definition', () => {
       [
         'GET /v2/account',
         'GET /v2/account/keys',
+        'GET /v2/certificates',
+        'GET /v2/domains',
         'GET /v2/droplets',
+        'GET /v2/load_balancers',
         'GET /v2/firewalls',
         'GET /v2/nfs',
         'GET /v2/regions',
@@ -2470,6 +2515,7 @@ describe('definition', () => {
     forbidden(emu, /^\/sizes$/);
     forbidden(emu, /^\/tags$/);
     forbidden(emu, /^\/reserved_ips$/);
+    forbidden(emu, /^\/domains$/);
     const report = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
     expect(report.families).toEqual({
       compute: 'denied',
@@ -2479,8 +2525,17 @@ describe('definition', () => {
       storage: 'ok',
       addresses: 'denied',
       nfs: 'ok',
+      loadBalancers: 'ok',
+      dns: 'denied',
+      certificates: 'ok',
     });
-    expect(report.missing).toEqual(['sizes:read', 'firewall:read', 'tag:read', 'reserved_ip:read']);
+    expect(report.missing).toEqual([
+      'sizes:read',
+      'firewall:read',
+      'tag:read',
+      'reserved_ip:read',
+      'domain:read',
+    ]);
     expect(report.account.status).toBe('active');
   });
 
@@ -2535,6 +2590,9 @@ describe('definition: scoped account bodies and timeouts', () => {
       storage: 'ok',
       addresses: 'ok',
       nfs: 'ok',
+      loadBalancers: 'ok',
+      dns: 'ok',
+      certificates: 'ok',
     });
     expect(report.missing).toEqual(['droplet:read']);
     expect(report.account.dropletLimit).toBeUndefined();

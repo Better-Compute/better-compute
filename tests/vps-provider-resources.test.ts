@@ -1984,3 +1984,28 @@ describe('usage', () => {
     expect(rows[0]!.metered_until).not.toBeNull();
   });
 });
+
+describe('providerAddresses from a BYOIP prefix (DO P4)', () => {
+  it('draws from the account owner tenant’s prefix, and refuses any other tenant or an IPv6 one', async () => {
+    const address = await createAddress({ name: 'own-ip', prefix: '198.51.100.0/24' });
+    expect(address).toMatchObject({ name: 'own-ip', family: 'ipv4', prefix: '198.51.100.0/24', state: 'pending' });
+    await drain();
+    const reserved = [...cloud.addresses.values()].find((entry) => entry.spec.name === providerResourceName(address.id))!;
+    expect(reserved.spec).toMatchObject({ source: 'byoip', prefix: '198.51.100.0/24', family: 'ipv4' });
+    expect((await getAddress(address.id)).state).toBe('ready');
+    // The same request again replays.
+    expect((await createAddress({ name: 'own-ip', prefix: '198.51.100.0/24', idempotencyKey: 'k-' + String(keyCounter) })).id).toBe(
+      address.id,
+    );
+    expect(await codeOf(createAddress({ name: 'v6', family: 'ipv6', prefix: '2001:db8::/48' }))).toBe('INVALID_INPUT');
+    expect(await codeOf(createAddress({ name: 'bad', prefix: 'not a prefix!' }))).toBe('INVALID_INPUT');
+    // The prefix is the account owner's address space: no other tenant draws from it.
+    expect(await codeOf(createAddress({ name: 'theirs', prefix: '198.51.100.0/24' }, mallory))).toBe('ACCESS_DENIED');
+    // An address from the provider's pool says no prefix, and asks for none.
+    const plain = await createAddress({ name: 'plain' });
+    expect(plain.prefix).toBeUndefined();
+    await drain();
+    const pooled = [...cloud.addresses.values()].find((entry) => entry.spec.name === providerResourceName(plain.id))!;
+    expect(pooled.spec.source).toBeUndefined();
+  });
+});
