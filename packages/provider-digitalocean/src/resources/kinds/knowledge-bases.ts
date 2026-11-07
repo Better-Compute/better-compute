@@ -18,6 +18,7 @@ import {
   replaceRequired,
   strings,
   tagResource,
+  untagResource,
   type DoKind,
   type DoKindEnv,
 } from '../kind.js';
@@ -428,7 +429,21 @@ export function knowledgeBaseKind(): DoKind {
         '/databases',
         { query: { tag_name: madeForTag(id) }, signal: context.signal, budget: 'observe' },
       );
-      const left = (reply.databases ?? []).filter((database) => removable(env, database));
+      const marked = (reply.databases ?? []).filter((database) => removable(env, database));
+      // Checked again before each removal: a knowledge base created since the mark (on the tenant's own account, one
+      // may name the database) keeps it. Its mark is taken off, so it is never removed later either.
+      const used = new Set<string>();
+      if (marked.length > 0)
+        for await (const other of env.client.pages<DoKnowledgeBase>(base, 'knowledge_bases', {
+          signal: context.signal,
+          budget: 'observe',
+        }))
+          if (other.uuid !== id && other.database_id) used.add(other.database_id);
+      const left: DoDatabase[] = [];
+      for (const database of marked)
+        if (used.has(database.id))
+          await untagResource(env.client, 'database', database.id, [madeForTag(id)], context.signal);
+        else left.push(database);
       for (const database of left)
         await found(() =>
           env.client.request('DELETE', `/databases/${encodeURIComponent(database.id)}`, {

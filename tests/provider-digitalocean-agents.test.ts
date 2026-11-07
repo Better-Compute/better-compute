@@ -274,6 +274,28 @@ describe('do.knowledge-base', () => {
     expect(mutations(emu, 'DELETE', /\/databases\//)).toEqual([]);
   });
 
+  it('a knowledge base that starts using the made database after the delete marked it keeps it', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const ready = await settle(resources, request());
+    const made = emu.state.knowledgeBases.get(ready.id)!.database_id as string;
+    // The first call marks the database and deletes the knowledge base.
+    expect((await resources.delete('do.knowledge-base', ready.id, call())).state).toBe('deleting');
+    expect(emu.state.databases.get(made)!.tags).toContain(`better-compute-kb:${ready.id}`);
+    // Meanwhile a knowledge base on the account names that database.
+    seedKnowledgeBase(emu.state, { database_id: made });
+    let state = await resources.delete('do.knowledge-base', ready.id, call());
+    for (let round = 0; round < 5 && state.state !== 'deleted'; round++)
+      state = await resources.delete('do.knowledge-base', ready.id, call());
+    expect(state.state).toBe('deleted');
+    expect(emu.state.databases.has(made)).toBe(true);
+    expect(mutations(emu, 'DELETE', /^\/v2\/databases\//)).toEqual([]);
+    // Its mark is gone: a later call removes nothing either.
+    expect(emu.state.databases.get(made)!.tags ?? []).not.toContain(`better-compute-kb:${ready.id}`);
+    expect((await resources.delete('do.knowledge-base', ready.id, call())).state).toBe('deleted');
+    expect(emu.state.databases.has(made)).toBe(true);
+  });
+
   it('refuses before any call: no sources, and an account-wide source on a shared account', async () => {
     const emu = emulator();
     const { resources } = await build(emu);
