@@ -461,6 +461,63 @@ describe('provider-digitalocean through vps, end to end', () => {
     expect([...w.emu.state.vpcs.values()].filter((vpc) => !vpc.default)).toEqual([]);
   });
 
+  it('instances.create({ dns }) publishes <name>.<zone> with the droplet address and removes it with the instance', async () => {
+    const w = await world();
+    const zone = await w.api.dnsZones.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      zone: 'acme-edge.example',
+      idempotencyKey: 'zone-1',
+    });
+    const zoneView = () => w.api.dnsZones.get(w.acme, { tenantId: w.acmeTenant, zoneId: zone.id });
+    for (let round = 0; round < 6 && (await zoneView()).state !== 'ready'; round++)
+      await w.tick('vps.provider-resources', 5_000);
+    expect((await zoneView()).state).toBe('ready');
+
+    // A zone that is not the tenant's refuses the whole create.
+    expect(
+      await w.api.instances
+        .create(
+          w.acme,
+          createInput(w, {
+            idempotencyKey: 'dns-missing',
+            dns: { zoneId: 'pdz_01jz0000000000000000000000' },
+          }),
+        )
+        .then(
+          () => 'created',
+          (error: { code?: string }) => error.code,
+        ),
+    ).toBe('NOT_FOUND');
+
+    const created = await w.api.instances.create(
+      w.acme,
+      createInput(w, { idempotencyKey: 'dns-vm', dns: { zoneId: zone.id, name: 'web' } }),
+    );
+    expect(await settle(w, created.id, 'running')).toMatchObject({ state: 'running' });
+    const records = async () =>
+      (await w.api.dnsRecords.list(w.acme, { tenantId: w.acmeTenant, zoneId: zone.id })).items;
+    expect(await records()).toEqual([
+      expect.objectContaining({ name: 'web', type: 'A', instanceId: created.id, fqdn: 'web.acme-edge.example' }),
+    ]);
+    for (let round = 0; round < 6 && (await records())[0]?.state !== 'ready'; round++)
+      await w.tick('vps.provider-resources', 5_000);
+    expect((await records())[0]?.state).toBe('ready');
+    const droplet = dropletOf(w, created.id)!;
+    const publicIp = (droplet.networks.v4 as Json[]).find((net) => net.type === 'public')!.ip_address;
+    const atDo = () =>
+      [...w.emu.state.domainRecords.values()].filter(
+        (record) => record.zone === 'acme-edge.example' && record.name === 'web',
+      );
+    expect(atDo()).toEqual([expect.objectContaining({ type: 'A', data: publicIp })]);
+
+    await w.api.instances.delete(w.acme, { tenantId: w.acmeTenant, instanceId: created.id });
+    expect(await settle(w, created.id, 'deleted')).toMatchObject({ state: 'deleted' });
+    for (let round = 0; round < 6 && atDo().length > 0; round++)
+      await w.tick('vps.provider-resources', 5_000);
+    expect(atDo()).toEqual([]);
+  });
+
   it('a create DO refuses for capacity ends the instance in error with ProvisionFailed', async () => {
     const w = await world();
     // DO accepts the create with a 202, then its create action ends `errored`.

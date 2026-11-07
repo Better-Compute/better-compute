@@ -82,6 +82,7 @@ import {
 } from './reservation-grants.js';
 import {
   completeCreateInstance,
+  instanceDnsRecordName,
   deleteInstance,
   denyCreateInstance,
   assertOwnerMember,
@@ -1166,6 +1167,26 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       resource: { type: `${prefix}instance`, id: instanceId },
     });
   };
+  /** (DO P4) `instances.create({ dns })`: decided as `compute:dns:manage` on the zone, on the caller's own credential. */
+  const dnsZoneCheck = async (
+    context: MethodContext,
+    tenantId: string,
+    zoneId: string,
+  ): Promise<void> => {
+    if (!context.credential)
+      throw new ComputeError(
+        'ACCESS_DENIED',
+        'Publishing an instance in a DNS zone is decided on the caller’s own credential',
+        undefined,
+        { reason: 'credential-required' },
+      );
+    const prefix = context.typePrefix ?? typePrefix;
+    await context.iam.require(context.credential, {
+      tenantId,
+      action: 'compute:dns:manage',
+      resource: { type: `${prefix}provider-dns-zone`, id: zoneId },
+    });
+  };
   /** (DO P4) `networks.peer`: the other network is decided as the first one (`compute:networks:update`). */
   const peerNetworkCheck = async (context: MethodContext, input: PeerNetworkInput): Promise<void> => {
     if (input.peerNetworkId === input.networkId || !input.enabled) return;
@@ -1346,10 +1367,27 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           check: async (context, input) => {
             await assertOwnerMember(context, input);
             if (isSecretRef(input.userData)) await userDataSecretCheck(context, input.tenantId);
+            // (DO P4) Publishing the instance in a zone is a record in that zone: decided as dnsRecords.create is.
+            if (input.dns) await dnsZoneCheck(context, input.tenantId, input.dns.zoneId);
             await budgetAdmissionCheck(context, input.tenantId, input.poolId);
           },
         },
-        handler: (context, input) => completeCreateInstance(depsOf(context), context, input),
+        handler: async (context, input) => {
+          const created = await completeCreateInstance(depsOf(context), context, input);
+          // (DO P4) Its records in the same transaction: a zone that is not the tenant's (or is being deleted)
+          // refuses the whole create. Keyed by the instance, so a retry finds the records it made.
+          if (input.dns)
+            for (const type of input.dns.ipv6 ? (['A', 'AAAA'] as const) : (['A'] as const))
+              await createProviderDnsRecord(networkDeps(context), context, {
+                tenantId: input.tenantId,
+                zoneId: input.dns.zoneId,
+                name: instanceDnsRecordName(created.id, input.dns),
+                type,
+                instanceId: created.id,
+                idempotencyKey: `instance-dns:${created.id}:${type}`,
+              });
+          return created;
+        },
         // §9.1 async-with-wait: `wait` holds the answer until the instance is placed and started
         // (or failed), refreshed from its row.
         poll: {

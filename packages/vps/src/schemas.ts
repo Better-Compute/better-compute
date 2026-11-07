@@ -255,6 +255,27 @@ export const schemas = {
         description:
           'Who owns it in the tenant (default: the caller); only a root caller creating in another tenant names someone else',
       },
+      dns: strictObject(
+        {
+          zoneId: {
+            type: 'string',
+            pattern: '^pdz_[0-9a-hjkmnp-tv-z]{26,52}$',
+            maxLength: 56,
+            description: 'A DNS zone of the tenant (dnsZones)',
+          },
+          name: {
+            type: 'string',
+            maxLength: 200,
+            description: 'The name in the zone (default: the instance id, with - for _)',
+          },
+          ipv6: {
+            type: 'boolean',
+            default: false,
+            description: 'Also an AAAA record for its public IPv6 address',
+          },
+        },
+        ['zoneId'],
+      ),
       idempotencyKey,
       wait: strictObject(
         {

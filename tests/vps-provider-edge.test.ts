@@ -19,7 +19,9 @@ import { pglite } from '@better-compute/postgres/pglite';
 import { capacityMigrations, capacityModule, setQuota } from '@better-compute/capacity';
 import {
   defineProvider,
+  instanceDnsRecordName,
   meterProviderResources,
+  parseCreateInstance,
   providerResourceName,
   providerResourcesWork,
   vps,
@@ -844,5 +846,45 @@ describe('cross-tenant names', () => {
     expect(await codeOf(zone({ zone: 'shop.example.net' }))).toBe('CONFLICT');
     expect(await codeOf(zone({ zone: 'example.net' }))).toBe('CONFLICT');
     expect(await codeOf(zone({ zone: 'example.org' }))).toBe('resolved');
+  });
+});
+
+describe('instances.create({ dns })', () => {
+  const base = {
+    tenantId: 'root',
+    poolId: 'pool_01jz0000000000000000000000',
+    flavor: 'small',
+    imageId: 'ubuntu-24.04',
+    idempotencyKey: 'k',
+  };
+  const parsed = (dns: unknown) => parseCreateInstance({ ...base, dns });
+  const refused = (dns: unknown) => {
+    try {
+      parsed(dns);
+      return 'parsed';
+    } catch (error) {
+      return (error as { code?: string }).code;
+    }
+  };
+
+  it('takes a zone of the tenant, an optional relative name and ipv6, and names the record after the instance', () => {
+    expect(parsed({ zoneId: 'pdz_01jz0000000000000000000000' }).dns).toEqual({
+      zoneId: 'pdz_01jz0000000000000000000000',
+    });
+    expect(parsed({ zoneId: 'pdz_01jz0000000000000000000000', name: 'web.eu', ipv6: true }).dns).toEqual({
+      zoneId: 'pdz_01jz0000000000000000000000',
+      name: 'web.eu',
+      ipv6: true,
+    });
+    expect(instanceDnsRecordName('inst_01JZ00', { zoneId: 'pdz_x' })).toBe('inst-01jz00');
+    expect(instanceDnsRecordName('inst_01jz00', { zoneId: 'pdz_x', name: 'web' })).toBe('web');
+  });
+
+  it('refuses a malformed zone, name or field before anything is written', () => {
+    expect(refused({ zoneId: 'zone' })).toBe('INVALID_INPUT');
+    for (const name of ['@', '*', '*.web', 'Web', '-web', 'web.', '_better-compute'])
+      expect(refused({ zoneId: 'pdz_01jz0000000000000000000000', name }), name).toBe('INVALID_INPUT');
+    expect(refused({ zoneId: 'pdz_01jz0000000000000000000000', ipv6: 'yes' })).toBe('INVALID_INPUT');
+    expect(refused({ zoneId: 'pdz_01jz0000000000000000000000', type: 'CNAME' })).toBe('INVALID_INPUT');
   });
 });
