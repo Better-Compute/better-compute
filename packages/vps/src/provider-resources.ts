@@ -77,7 +77,7 @@ const columns = `
 
 /** (DO P2) Tenant block volumes on a provider account, and which instance each is attached to. */
 export const providerVolumesMigration: Migration = {
-  name: 'vps/0066_provider_volumes',
+  name: 'vps/0114_provider_volumes',
   sql: `
 CREATE TABLE provider_volumes (
   id text PRIMARY KEY,
@@ -125,7 +125,7 @@ CREATE INDEX provider_volume_attachments_instance ON provider_volume_attachments
 
 /** (DO P2) Snapshots of provider volumes; a snapshot outlives its volume and restores into a new one. */
 export const providerSnapshotsMigration: Migration = {
-  name: 'vps/0067_provider_snapshots',
+  name: 'vps/0115_provider_snapshots',
   sql: `
 CREATE TABLE provider_snapshots (
   id text PRIMARY KEY,
@@ -152,7 +152,7 @@ ALTER TABLE provider_volumes ADD CONSTRAINT provider_volumes_source_snapshot
 
 /** (DO P2) Reserved public addresses on a provider account, and the instance each is assigned to. */
 export const providerAddressesMigration: Migration = {
-  name: 'vps/0068_provider_addresses',
+  name: 'vps/0116_provider_addresses',
   sql: `
 CREATE TABLE provider_addresses (
   id text PRIMARY KEY,
