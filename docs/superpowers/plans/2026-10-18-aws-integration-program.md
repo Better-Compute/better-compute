@@ -395,7 +395,18 @@ export interface ProviderImpl { /* existing */
   attempt that may have bought, a retry finds the block by type, zone, count, start and creation time, and buys
   again only after 15 min with nothing in sight; attempts that run out after such an attempt leave the purchase
   `unknown` (`provider.purchase.unknown`), never `failed`. Providers may describe offering ids
-  (`ProviderInput.describeOffering`) for the approver.
+  (`ProviderInput.describeOffering`) for the approver; only the account's own provider is asked.
+- Review 3: `vps/0089_provider_purchases_attempts` adds `attempt_started_at` (set by each claim, cleared by both
+  settles): a claim that finds it set (a crash, a lost lease, a failed settle) makes it `uncertain_since`. A
+  non-retryable error on an uncertain purchase settles `unknown`. A provider's answer is always recorded (also over
+  `failed`/`unknown`; else warn `vps.purchase_unrecorded`). One reservation per purchase (unique index; a duplicate
+  retries with `PurchaseAttempt.excludeReservationIds`). Purchases have no account FK (they outlive it);
+  `providerAccounts.delete` refuses an account with a purchase `requested`/`purchasing`. After a 200, an answer
+  the provider cannot read is `UNAVAILABLE { reason: 'purchase-answer-unreadable' }` (retried, uncertain). mcp and
+  console-kit treat a `CONFIRMATION_REQUIRED` without `confirmationId` (`confirm-spend`) as an error. GovCloud has
+  no Price List: `pricing: 'on-demand'` is refused there, `all` prices Spot only.
+- Still (verify), unchecked without the live suite (A12): quota codes beyond standard/G/P and their Spot twins, and
+  the resource types `ec2:PurchaseCapacityBlock` authorizes against in the IAM policy.
 - Spot metering reads `ExternalMachine.market` (the machine record) rather than a new `instances.market` column;
   the instance view does not show the market yet.
 - `MachineInterruption` kinds `capacity-block-end` and `maintenance` are declared but produced by A4 (event intake,

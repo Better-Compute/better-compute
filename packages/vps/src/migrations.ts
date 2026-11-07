@@ -12,6 +12,7 @@ import { providerReservationsMigration } from './provider-reservations.js';
 import {
   providerPurchasesMigration,
   providerPurchasesUnknownMigration,
+  providerPurchasesAttemptsMigration,
 } from './provider-purchases.js';
 import {
   vpsNetworkAdoptMigration,
@@ -219,4 +220,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsSubnetPrivateAccessMigration,
   providerPurchasesMigration,
   providerPurchasesUnknownMigration,
+  providerPurchasesAttemptsMigration,
 ]);

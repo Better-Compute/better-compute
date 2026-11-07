@@ -662,6 +662,29 @@ describe('tools', () => {
     expect(waited.structuredContent.reservation).toEqual({ id: RSV, state: 'placed' });
     expect(polls).toBe(2);
   });
+
+  it('a CONFIRMATION_REQUIRED nobody can approve is an error, not a pending approval', async () => {
+    const { api } = recorder((path) => {
+      if (path === 'reservations/create') {
+        const error = new ComputeClientError(
+          'CONFIRMATION_REQUIRED',
+          'Buying capacity spends money: retry with confirm: true and the same idempotencyKey',
+          403,
+        );
+        error.details = { reason: 'confirm-spend' };
+        throw error;
+      }
+      return {};
+    });
+    const result = (
+      await rpc(mcpWith(api), 'tools/call', {
+        name: 'reserve_gpus',
+        arguments: { poolId: POOL, gpus: 2, duration: '1h' },
+      })
+    ).body.result;
+    expect(JSON.stringify(result)).not.toContain('A person must approve');
+    expect(JSON.stringify(result)).toContain('CONFIRMATION_REQUIRED');
+  });
 });
 
 describe('better-iam’s gate in front', () => {

@@ -41,6 +41,7 @@ import {
   matchesQuery,
   parseCapacityReservation,
   purchaseTag,
+  reservationIdOf,
   reservationOffer,
   toReservation,
   usable,
@@ -761,7 +762,13 @@ export class AwsCompute implements ProviderImpl {
     // tag, or not show at all, yet. Look for it by what it is; until the window passes, never buy
     // again (nor take a sold-out offering for a failure): the earlier attempt may be the buyer.
     if (offering.kind === 'block' && attempt?.uncertainSince !== undefined) {
-      const like = await this.#boughtBlock(offering, token, attempt.requestedAt, signal);
+      const like = await this.#boughtBlock(
+        offering,
+        token,
+        attempt.requestedAt,
+        new Set(attempt.excludeReservationIds ?? []),
+        signal,
+      );
       if (like) return like;
       if (this.context.clock.now() < attempt.uncertainSince + purchasePropagationMs)
         throw new ComputeError(
@@ -828,20 +835,27 @@ export class AwsCompute implements ProviderImpl {
         throw error;
       }
     }
-    const item = doc.child('capacityReservation');
-    const zoneIds = await this.deps.zones.all(signal);
-    const info = item
-      ? parseCapacityReservation(item, new Map([...zoneIds].map(([name, zid]) => [zid, name])))
-      : undefined;
-    const reservation = info ? await this.#asReservation(info, signal) : undefined;
+    // EC2 answered 200: the capacity is bought. Nothing from here on may read as "not bought" (a
+    // failed purchase): an answer this code cannot use (no reservation, a state it does not know, a
+    // read it may not make) is retried as uncertain, and the retry finds the reservation by its tag
+    // or by what it is.
+    let reservation: ExternalReservation | undefined;
+    try {
+      const item = doc.child('capacityReservation');
+      const zoneIds = await this.deps.zones.all(signal);
+      const info = item
+        ? parseCapacityReservation(item, new Map([...zoneIds].map(([name, zid]) => [zid, name])))
+        : undefined;
+      reservation = info ? await this.#asReservation(info, signal) : undefined;
+    } catch {
+      reservation = undefined;
+    }
     if (!reservation)
       throw new ComputeError(
-        'PROVIDER_ERROR',
-        'EC2 returned no usable capacity reservation',
+        'UNAVAILABLE',
+        'EC2 sold the capacity but its answer is not readable; the purchase is retried and finds it',
         undefined,
-        {
-          provider: 'aws',
-        },
+        { provider: 'aws', reason: 'purchase-answer-unreadable' },
       );
     return reservation;
   }
@@ -869,13 +883,15 @@ export class AwsCompute implements ProviderImpl {
 
   /**
    * A Capacity Block of the account matching the offering (type, zone, count, start, duration),
-   * created since the purchase was requested and carrying no other purchase's tag: what an earlier
-   * attempt bought, when its tag does not show yet.
+   * created since the purchase was requested, carrying no other purchase's tag and not recorded by
+   * another purchase (`exclude`, reservation ids): what an earlier attempt bought, when its tag
+   * does not show yet.
    */
   async #boughtBlock(
     offering: Extract<ParsedOffering, { kind: 'block' }>,
     token: string,
     requestedAt: number,
+    exclude: ReadonlySet<string>,
     signal: AbortSignal,
   ): Promise<ExternalReservation | undefined> {
     const { account } = await this.deps.account.verify({ signal, clock: this.context.clock });
@@ -889,6 +905,8 @@ export class AwsCompute implements ProviderImpl {
       (info) =>
         info.ownerId === account &&
         info.block &&
+        !exclude.has(reservationIdOf(info)) &&
+        !exclude.has(info.capacityReservationId) &&
         info.zone === offering.zone &&
         info.instanceType === offering.instanceType &&
         info.total === offering.count &&

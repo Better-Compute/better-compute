@@ -463,6 +463,7 @@ describe('vps() API surface', () => {
       'vps/0085_subnet_private_access',
       'vps/0087_provider_purchases',
       'vps/0088_provider_purchases_unknown',
+      'vps/0089_provider_purchases_attempts',
     ]);
     expect(module.requires).toEqual(['capacity']);
     expect(() => vps({ runtimes: [] })).toThrow(ComputeError);

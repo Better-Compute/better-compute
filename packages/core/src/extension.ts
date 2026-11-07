@@ -746,6 +746,11 @@ export interface PurchaseAttempt {
    * connection) and so may have bought: when the latest such attempt started, epoch ms.
    */
   uncertainSince?: number;
+  /**
+   * Reservations (`ExternalReservation.id`) other purchases of the account already recorded: never
+   * what this purchase bought, when the provider looks for it by what it is.
+   */
+  excludeReservationIds?: readonly string[];
 }
 
 /** A provider capacity reservation (GCE reservations and the like), as the provider reports it. */

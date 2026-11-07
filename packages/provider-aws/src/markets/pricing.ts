@@ -1,12 +1,12 @@
 import { ComputeError, type Clock } from '@better-compute/core';
-import type { JsonClient, QueryClient } from '@better-compute/aws-core';
+import { partitionOf, type JsonClient, type QueryClient } from '@better-compute/aws-core';
 
 // Offer prices (AWS A3, config `pricing`). On-demand: the Price List Query API (`GetProducts`,
 // JSON 1.1, served from us-east-1 for the commercial partition), one paged region-wide read of
 // Linux / shared tenancy / no pre-installed software / used capacity, cached a day. Spot:
 // `DescribeSpotPriceHistory` from now, which gives the price in effect per zone and type, cached
 // 10 minutes. A failed read leaves prices unset (it never fails listOffers) and is retried after
-// 10 minutes.
+// 10 minutes. GovCloud (aws-us-gov) has no Price List API: on-demand prices are never read there.
 
 export type PricingMode = 'off' | 'on-demand' | 'all';
 
@@ -79,6 +79,8 @@ export function priceReader(options: {
   let onDemand: Cached | undefined;
   let spot: Cached | undefined;
   const empty: ReadonlyMap<string, Price> = new Map();
+  /** Whether the partition has the Price List API (GovCloud does not). */
+  const priceList = partitionOf(options.region).partition !== 'aws-us-gov';
 
   const readOnDemand = async (signal: AbortSignal) => {
     const prices = new Map<string, Price>();
@@ -205,7 +207,7 @@ export function priceReader(options: {
 
   return {
     async onDemand(signal) {
-      if (options.mode === 'off' || !options.pricing) return empty;
+      if (options.mode === 'off' || !options.pricing || !priceList) return empty;
       return cached(
         onDemand,
         (v) => (onDemand = v),

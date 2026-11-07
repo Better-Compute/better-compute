@@ -10,7 +10,9 @@ import {
   type IamStatement,
   awsConfig,
   instanceTypeCache,
+  priceReader,
   purchasePropagationMs,
+  validateAwsConfig,
   zoneCache,
   type AwsConfig,
 } from '@better-compute/provider-aws';
@@ -551,6 +553,40 @@ describe('pricing', () => {
     const later = await w.compute.listOffers({});
     expect(later.find((offer) => offer.id === 'us-east-1a/m7i.large')?.pricePerHour).toBe(0.1008);
   });
+
+  it('GovCloud has no Price List: on-demand pricing is refused, all prices Spot only', async () => {
+    const gov = (pricing: string) =>
+      ({
+        ...(awsConfig.parse({
+          region: 'us-gov-west-1',
+          zones: ['us-gov-west-1a'],
+          pricing,
+        }) as AwsConfig),
+      }) as AwsConfig;
+    expect(() => validateAwsConfig(gov('on-demand'))).toThrow(
+      expect.objectContaining({ code: 'INVALID_CONFIG', details: expect.objectContaining({ reason: 'pricing' }) }),
+    );
+    expect(() => validateAwsConfig(gov('all'))).not.toThrow();
+    expect(() => validateAwsConfig(gov('off'))).not.toThrow();
+    // The reader never calls the Price List there (it does not exist), and logs no failure.
+    const logs: unknown[][] = [];
+    const reader = priceReader({
+      mode: 'all',
+      region: 'us-gov-west-1',
+      zones: ['us-gov-west-1a'],
+      clock: { now: () => 0 },
+      pricing: {
+        call: async () => {
+          throw new Error('no Price List API in aws-us-gov');
+        },
+      } as any,
+      ec2: { call: async () => ({ items: () => [], textOf: () => undefined }) } as any,
+      ready: async () => {},
+      onError: (...args) => void logs.push(args),
+    });
+    expect((await reader.onDemand(new AbortController().signal)).size).toBe(0);
+    expect(logs).toEqual([]);
+  });
 });
 
 describe('purchases', () => {
@@ -870,6 +906,58 @@ describe('purchases', () => {
       ),
     ).rejects.toMatchObject({ code: 'UNAVAILABLE', details: { reason: 'purchase-propagating' } });
     expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(0);
+  });
+
+  it('a block another purchase recorded is never taken for this one', async () => {
+    const w = world({ allowPurchases: true });
+    const start = offerings(w);
+    const requestedAt = w.emu.now();
+    // Bought by another in-flight purchase whose tag does not show yet; vps recorded it for that one.
+    const theirs = w.capacity.add({
+      type: 'p5.48xlarge',
+      zone: 'us-east-1a',
+      total: 2,
+      reservationType: 'capacity-block',
+      state: 'scheduled',
+      start,
+      end: start + DAY,
+    });
+    w.emu.clock.advance(30_000);
+    const id = blockId(w, start, 'cb-0aaaaaaaaaaaaaaa1', 235968);
+    const attempt = { attempt: 2, requestedAt, uncertainSince: requestedAt };
+    await expect(
+      w.compute.purchaseReservation(id, w.call('buy-1'), {
+        ...attempt,
+        excludeReservationIds: [`cb:${theirs.id}`],
+      }),
+    ).rejects.toMatchObject({ code: 'UNAVAILABLE', details: { reason: 'purchase-propagating' } });
+    // Without the exclusion it would be taken for this purchase's.
+    await expect(w.compute.purchaseReservation(id, w.call('buy-1'), attempt)).resolves.toMatchObject(
+      { id: `cb:${theirs.id}` },
+    );
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(0);
+  });
+
+  it('an answer it cannot read after EC2 sold is retried as uncertain, never a failure', async () => {
+    const w = world({ allowPurchases: true });
+    const start = offerings(w);
+    // A state this code does not know yet.
+    w.capacity.purchaseAnswerState = 'payment-processing';
+    const id = blockId(w, start, 'cb-0aaaaaaaaaaaaaaa1', 235968);
+    await expect(w.compute.purchaseReservation(id, w.call('buy-1'))).rejects.toMatchObject({
+      code: 'UNAVAILABLE',
+      details: { reason: 'purchase-answer-unreadable' },
+    });
+    // The retry finds it by its tag.
+    w.capacity.purchaseAnswerState = undefined;
+    const bought = await w.compute.purchaseReservation(id, w.call('buy-1'), {
+      attempt: 2,
+      requestedAt: w.emu.now(),
+      uncertainSince: w.emu.now(),
+    });
+    expect(bought.id).toMatch(/^cb:cr-/);
+    expect(w.capacity.purchases).toHaveLength(1);
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(1);
   });
 
   it('refuses malformed, foreign-zone and tenant-account purchases', async () => {

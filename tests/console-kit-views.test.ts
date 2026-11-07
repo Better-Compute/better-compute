@@ -66,6 +66,20 @@ describe('detail view models', () => {
       tenantId: 'acme',
       reservationId: 'rsv_1',
     });
+    // One nobody can approve (no confirmationId, e.g. confirm-spend) is an ordinary error.
+    const unconfirmable = createDetail(
+      fakeApi({
+        'reservations/get': () => ({ id: 'rsv_1', state }),
+        'reservations/release': () => {
+          throw fail('CONFIRMATION_REQUIRED', { reason: 'confirm-spend' });
+        },
+      }).api,
+      { tenantId: 'acme', kind: 'reservation', id: 'rsv_1', permissions },
+    );
+    await unconfirmable.refresh();
+    await expect(unconfirmable.run('reservations/release')).rejects.toMatchObject({
+      code: 'CONFIRMATION_REQUIRED',
+    });
     await expect(detail.run('nodes/cordon')).rejects.toThrow(/not an action/);
 
     // An event about it refreshes; a terminal state disables everything.
