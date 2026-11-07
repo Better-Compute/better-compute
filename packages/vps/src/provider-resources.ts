@@ -1074,6 +1074,8 @@ interface ResourceProvider {
   account: ProviderAccount;
   client: ProviderImpl;
   regions: string[];
+  /** The zones the account configures (zonal providers: GCE, AWS); a resource may name one as its region. */
+  zones: string[];
 }
 
 /** The pool's account and client when its provider implements `need`; otherwise UNSUPPORTED. */
@@ -1101,11 +1103,17 @@ async function resourceProvider(
     Array.isArray(value)
       ? value.filter((entry): entry is string => typeof entry === 'string')
       : [];
-  // Providers without zones (DigitalOcean) configure regions; zonal ones (GCE) configure zones.
+  // Providers without zones (DigitalOcean) configure regions; zonal ones configure zones (GCE), or a region and its
+  // zones (AWS).
+  const zones = [...new Set(strings(account.config.zones))];
   const regions = [
-    ...new Set([...strings(account.config.regions), ...strings(account.config.zones).map(zoneRegion)]),
+    ...new Set([
+      ...strings(account.config.regions),
+      ...strings([account.config.region]),
+      ...zones.map(zoneRegion),
+    ]),
   ];
-  return { accountId: account.id, account, client, regions };
+  return { accountId: account.id, account, client, regions, zones };
 }
 
 /**
@@ -1145,8 +1153,12 @@ function assertVolumeSpec(
   });
 }
 
+/**
+ * The resource's region is one the account uses, or (AWS A5, `ProviderVolumeSpec.zone`) one of its configured zones:
+ * a zonal volume names its zone as its region.
+ */
 function assertRegion(provider: ResourceProvider, region: string): void {
-  if (provider.regions.length > 0 && !provider.regions.includes(region))
+  if (provider.regions.length > 0 && !provider.regions.includes(region) && !provider.zones.includes(region))
     throw new ComputeError(
       'INVALID_INPUT',
       `Region ${region} is not one the provider account uses (${provider.regions.join(', ')})`,
@@ -1197,7 +1209,13 @@ async function targetInstance(
   if (row.desired_state === 'deleted' || ['deleting', 'deleted'].includes(row.state))
     throw new ComputeError('INVALID_STATE', `Instance ${instanceId} is being deleted`);
   const region = offerRegion(row.offer_id);
-  if (region !== undefined && region !== resource.region && zoneRegion(region) !== resource.region)
+  // A zonal offer in the resource's region, or (a resource named by its zone) a regional offer of that zone's region.
+  if (
+    region !== undefined &&
+    region !== resource.region &&
+    zoneRegion(region) !== resource.region &&
+    zoneRegion(resource.region) !== region
+  )
     throw new ComputeError(
       'INVALID_INPUT',
       `Instance ${instanceId} is in ${region}, not in ${resource.region}`,

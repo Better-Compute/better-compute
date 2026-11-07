@@ -414,6 +414,15 @@ export class AwsVolumes implements ProviderVolumes {
     return false;
   }
 
+  /**
+   * Forgets what this client attached to an instance that is terminating: EC2 detaches its volumes with it, so a
+   * detach that then reads a volume on no instance is done, not an attach this client has yet to see (AwsCompute
+   * calls it from `delete`).
+   */
+  forgetInstance(instanceId: string): void {
+    this.#devices.delete(instanceId);
+  }
+
   /** Lets go of the devices this client gave a volume on an instance (it is being detached). */
   #releaseDevices(instanceId: string, volumeId: string): void {
     const letters = this.#devices.get(instanceId);
@@ -590,6 +599,14 @@ export class AwsVolumes implements ProviderVolumes {
         'throughput',
       );
     return { zone: this.#zoneOf(spec), type, name };
+  }
+
+  /**
+   * What `ensureVolume` would refuse of the spec, refused with no request (core `ProviderVolumes.checkVolume`):
+   * vps calls it before it books a volume, so a bare region on a multi-zone account is refused at create.
+   */
+  checkVolume(spec: ProviderVolumeSpec): void {
+    this.#validate(spec);
   }
 
   async ensureVolume(

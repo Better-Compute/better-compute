@@ -1612,7 +1612,10 @@ export class AwsCompute implements ProviderImpl {
       return;
     }
     const state = instance.child('instanceState')?.textOf('name');
-    if (state === 'terminated' || state === 'shutting-down') return;
+    if (state === 'terminated' || state === 'shutting-down') {
+      this.volumes.forgetInstance(id);
+      return;
+    }
     const tagged = new Map(
       instance.items('tagSet').map((item) => [item.textOf('key'), item.textOf('value')]),
     );
@@ -1630,6 +1633,8 @@ export class AwsCompute implements ProviderImpl {
         },
       );
     await this.#terminate(id, context);
+    // EC2 detaches its volumes as it terminates (A5): what this client attached to it is no longer pending.
+    this.volumes.forgetInstance(id);
   }
 
   /**
