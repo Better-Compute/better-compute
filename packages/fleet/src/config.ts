@@ -14,6 +14,69 @@ export interface FleetConfig {
   flavors?: FleetFlavor[];
   /** (v0.5, PLAN §3.7) The tenant's sandbox templates, by name. */
   sandboxTemplates?: FleetSandboxTemplate[];
+  /**
+   * (D25, `@better-compute/kubernetes`) The tenant's managed Kubernetes clusters, by name, with their
+   * node pools. A pool substrate's cluster (`policy.substrate`) is the pool's, never listed here.
+   */
+  kubernetesClusters?: FleetKubernetesCluster[];
+}
+
+export type FleetKubernetesTaint = {
+  key: string;
+  value?: string;
+  effect: 'NoSchedule' | 'PreferNoSchedule' | 'NoExecute';
+};
+
+/**
+ * A node pool of a `standard` cluster. `nodeCount` and `autoscaling` change in place; every other
+ * field is fixed once the node pool exists (a change is blocked: add a node pool under another name).
+ */
+export interface FleetKubernetesNodePool {
+  /** Unique in its cluster; also the provider-side name. */
+  name: string;
+  machineType: string;
+  /** Nodes per zone; with `autoscaling`, the initial count. */
+  nodeCount: number;
+  autoscaling?: { minNodes: number; maxNodes: number };
+  diskGiB?: number;
+  diskType?: string;
+  spot?: boolean;
+  accelerators?: { type: string; count: number };
+  zones?: string[];
+  labels?: Record<string, string>;
+  taints?: FleetKubernetesTaint[];
+}
+
+/**
+ * A managed Kubernetes cluster on a provider pool. `releaseChannel`, `version`, `authorizedNetworks`
+ * and `description` change in place (`kubernetesClusters.update`); `pool`, `mode`, `location`,
+ * `privateNodes`, `networkId` and `projectId` are fixed once created (a change is blocked).
+ */
+export interface FleetKubernetesCluster {
+  /** Unique among the tenant's clusters; 1-40 lower-case letters, digits or '-'. */
+  name: string;
+  /** A pool name in this document, or the id (`pool_…`) of a pool offered to the tenant. */
+  pool: string;
+  /** Default `standard`. */
+  mode?: 'standard' | 'autopilot';
+  /** A region (regional cluster) or a zone (zonal cluster) of the pool's provider account. */
+  location: string;
+  /** Default `regular`. */
+  releaseChannel?: 'rapid' | 'regular' | 'stable' | 'extended';
+  /** A minor (`1.33`) or full version; absent: the channel's default (and never compared). */
+  version?: string;
+  /** A tenant network (`net_…`) the nodes use. */
+  networkId?: string;
+  projectId?: string;
+  /** CIDRs that may reach the control plane; default none (any address, still authenticated). */
+  authorizedNetworks?: string[];
+  privateNodes?: boolean;
+  description?: string;
+  /**
+   * `standard`: up to 10 node pools, at least one to create the cluster (a live one may have none
+   * left). `autopilot`: none (the provider runs the nodes).
+   */
+  nodePools?: FleetKubernetesNodePool[];
 }
 
 /**
@@ -160,12 +223,241 @@ function list<T>(
   return items;
 }
 
+// --- Kubernetes (the kubernetes module's own rules, so a document fails before it is planned) ------
+
+/** Cluster and node pool names: GKE's rule (1-40 lower-case letters, digits and '-', a letter first). */
+const kubernetesName = /^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$/;
+const kubernetesLocation = /^[a-z][a-z0-9-]{1,38}[a-z0-9]$/;
+const kubernetesVersion = /^[0-9]{1,3}\.[0-9]{1,3}(\.[0-9]{1,3})?(-[a-z0-9.]{1,40})?$/;
+/**
+ * Machine and accelerator types: GCE (`e2-standard-4`), DigitalOcean (`s-2vcpu-4gb`) and EC2
+ * (`m5.large`). Deliberately the widest form any provider lane's kubernetes module takes, never
+ * narrower: an exported document must always validate, and the module checks the call again.
+ */
+const machineType = /^[a-z0-9][a-z0-9.-]{0,62}$/;
+const diskType = /^[a-z][a-z0-9-]{1,40}$/;
+const labelKey =
+  /^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?\/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$/;
+const labelValue = /^([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)?$/;
+const poolRef = /^(pool_[0-9a-z]{26,52}|[a-z0-9][a-z0-9._-]{0,62})$/;
+const typedId = (prefix: string) => new RegExp(`^${prefix}_[0-9a-z]{26,52}$`);
+const maxNodePools = 10;
+
+function flag(value: unknown, path: string): boolean {
+  if (typeof value !== 'boolean') fail(path, 'must be true or false');
+  return value as boolean;
+}
+
+function oneOf<const T extends string>(value: unknown, options: readonly T[], path: string): T {
+  if (typeof value !== 'string' || !(options as readonly string[]).includes(value))
+    fail(path, `must be ${options.slice(0, -1).join(', ')} or ${options.at(-1)}`);
+  return value as T;
+}
+
+function strings(
+  value: unknown,
+  path: string,
+  max: number,
+  check: (item: unknown, at: string) => string,
+) {
+  if (!Array.isArray(value) || value.length > max) fail(path, `must list at most ${max} items`);
+  return [...new Set((value as unknown[]).map((item, index) => check(item, `${path}[${index}]`)))];
+}
+
+function cidr(value: unknown, path: string): string {
+  const match =
+    typeof value === 'string'
+      ? /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(value)
+      : null;
+  const octets = match?.slice(1, 5).map(Number) ?? [];
+  const prefix = Number(match?.[5]);
+  if (!match || octets.some((octet) => octet > 255) || prefix > 32)
+    fail(path, 'must be an IPv4 CIDR such as 203.0.113.0/24');
+  const address = ((octets[0]! << 24) | (octets[1]! << 16) | (octets[2]! << 8) | octets[3]!) >>> 0;
+  const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+  if ((address & ~mask) >>> 0 !== 0) fail(path, 'has host bits set: write its network address');
+  return value as string;
+}
+
+function nodePool(raw: unknown, path: string): FleetKubernetesNodePool {
+  const input = record(raw, path);
+  only(
+    input,
+    [
+      'name',
+      'machineType',
+      'nodeCount',
+      'autoscaling',
+      'diskGiB',
+      'diskType',
+      'spot',
+      'accelerators',
+      'zones',
+      'labels',
+      'taints',
+    ],
+    path,
+  );
+  const result: FleetKubernetesNodePool = {
+    name: string(input.name, `${path}.name`, kubernetesName),
+    machineType: string(input.machineType, `${path}.machineType`, machineType),
+    nodeCount: int(input.nodeCount, `${path}.nodeCount`, 0, 1000),
+  };
+  if (input.autoscaling !== undefined) {
+    const at = `${path}.autoscaling`;
+    const scaling = record(input.autoscaling, at);
+    only(scaling, ['minNodes', 'maxNodes'], at);
+    const minNodes = int(scaling.minNodes, `${at}.minNodes`, 0, 1000);
+    const maxNodes = int(scaling.maxNodes, `${at}.maxNodes`, 1, 1000);
+    if (minNodes > maxNodes) fail(`${at}.minNodes`, 'must not exceed maxNodes');
+    result.autoscaling = { minNodes, maxNodes };
+  }
+  if (input.diskGiB !== undefined)
+    result.diskGiB = int(input.diskGiB, `${path}.diskGiB`, 10, 65_536);
+  if (input.diskType !== undefined)
+    result.diskType = string(input.diskType, `${path}.diskType`, diskType);
+  if (input.spot !== undefined && flag(input.spot, `${path}.spot`)) result.spot = true;
+  if (input.accelerators !== undefined) {
+    const at = `${path}.accelerators`;
+    const accelerators = record(input.accelerators, at);
+    only(accelerators, ['type', 'count'], at);
+    result.accelerators = {
+      type: string(accelerators.type, `${at}.type`, machineType),
+      count: int(accelerators.count, `${at}.count`, 1, 16),
+    };
+  }
+  if (input.zones !== undefined) {
+    const zones = strings(input.zones, `${path}.zones`, 10, (zone, at) =>
+      string(zone, at, kubernetesLocation),
+    );
+    if (zones.length) result.zones = zones;
+  }
+  if (input.labels !== undefined) {
+    const at = `${path}.labels`;
+    const labels = record(input.labels, at);
+    if (Object.keys(labels).length > 32) fail(at, 'has at most 32 labels');
+    for (const [key, value] of Object.entries(labels)) {
+      if (key.length > 317 || !labelKey.test(key))
+        fail(`${at}.${key}`, 'is not a Kubernetes label key');
+      if (typeof value !== 'string' || !labelValue.test(value))
+        fail(`${at}.${key}`, 'must be a Kubernetes label value (at most 63 characters)');
+    }
+    if (Object.keys(labels).length) result.labels = { ...(labels as Record<string, string>) };
+  }
+  if (input.taints !== undefined) {
+    const at = `${path}.taints`;
+    if (!Array.isArray(input.taints) || input.taints.length > 32)
+      fail(at, 'must list at most 32 taints');
+    const taints = (input.taints as unknown[]).map((entry, index) => {
+      const taintPath = `${at}[${index}]`;
+      const taint = record(entry, taintPath);
+      only(taint, ['key', 'value', 'effect'], taintPath);
+      const item: FleetKubernetesTaint = {
+        key: string(taint.key, `${taintPath}.key`, labelKey),
+        effect: oneOf(
+          taint.effect,
+          ['NoSchedule', 'PreferNoSchedule', 'NoExecute'],
+          `${taintPath}.effect`,
+        ),
+      };
+      if (taint.value !== undefined) {
+        if (typeof taint.value !== 'string' || !labelValue.test(taint.value))
+          fail(`${taintPath}.value`, 'must be a Kubernetes label value');
+        item.value = taint.value;
+      }
+      return {
+        key: item.key,
+        ...(item.value !== undefined ? { value: item.value } : {}),
+        effect: item.effect,
+      };
+    });
+    if (taints.length) result.taints = taints;
+  }
+  return result;
+}
+
+function kubernetesCluster(raw: unknown, path: string): FleetKubernetesCluster {
+  const input = record(raw, path);
+  only(
+    input,
+    [
+      'name',
+      'pool',
+      'mode',
+      'location',
+      'releaseChannel',
+      'version',
+      'networkId',
+      'projectId',
+      'authorizedNetworks',
+      'privateNodes',
+      'description',
+      'nodePools',
+    ],
+    path,
+  );
+  const result: FleetKubernetesCluster = {
+    name: string(input.name, `${path}.name`, kubernetesName),
+    pool: string(input.pool, `${path}.pool`, poolRef),
+    location: string(input.location, `${path}.location`, kubernetesLocation),
+  };
+  if (input.mode !== undefined)
+    result.mode = oneOf(input.mode, ['standard', 'autopilot'], `${path}.mode`);
+  if (input.releaseChannel !== undefined)
+    result.releaseChannel = oneOf(
+      input.releaseChannel,
+      ['rapid', 'regular', 'stable', 'extended'],
+      `${path}.releaseChannel`,
+    );
+  if (input.version !== undefined)
+    result.version = string(input.version, `${path}.version`, kubernetesVersion);
+  if (input.description !== undefined) {
+    if (
+      typeof input.description !== 'string' ||
+      input.description.length > 256 ||
+      /[\u0000-\u001f]/.test(input.description)
+    )
+      fail(`${path}.description`, 'must be text of at most 256 characters');
+    result.description = input.description;
+  }
+  if (input.authorizedNetworks !== undefined) {
+    const networks = strings(input.authorizedNetworks, `${path}.authorizedNetworks`, 50, cidr);
+    if (networks.length) result.authorizedNetworks = networks;
+  }
+  if (input.privateNodes !== undefined && flag(input.privateNodes, `${path}.privateNodes`))
+    result.privateNodes = true;
+  if (input.networkId !== undefined)
+    result.networkId = string(input.networkId, `${path}.networkId`, typedId('net'));
+  if (input.projectId !== undefined)
+    result.projectId = string(input.projectId, `${path}.projectId`, typedId('prj'));
+  const pools = list(input.nodePools, `${path}.nodePools`, nodePool, (pool) => pool.name);
+  if (pools.length > maxNodePools)
+    fail(`${path}.nodePools`, `lists at most ${maxNodePools} node pools`);
+  // A standard cluster may run with no node pools (its last one deleted), so the document may say
+  // so; only creating one takes at least one, which the plan checks (it knows what exists).
+  if ((result.mode ?? 'standard') === 'standard') result.nodePools = pools;
+  else if (pools.length)
+    fail(
+      `${path}.nodePools`,
+      'must be empty for an autopilot cluster (the provider runs its nodes)',
+    );
+  return result;
+}
+
 /** Validates a FleetConfig document; rejects unknown fields, duplicates and dangling references. */
 export function validateFleetConfig(value: unknown): FleetConfig {
   const input = record(value, 'config');
   only(
     input,
-    ['version', 'sites', 'providerAccounts', 'pools', 'flavors', 'sandboxTemplates'],
+    [
+      'version',
+      'sites',
+      'providerAccounts',
+      'pools',
+      'flavors',
+      'sandboxTemplates',
+      'kubernetesClusters',
+    ],
     'config',
   );
   if (input.version !== 1) fail('config.version', 'must be 1');
@@ -402,11 +694,18 @@ export function validateFleetConfig(value: unknown): FleetConfig {
     },
     (template) => template.name,
   );
+  const kubernetesClusters = list(
+    input.kubernetesClusters,
+    'kubernetesClusters',
+    kubernetesCluster,
+    (cluster) => cluster.name,
+  );
   const config: FleetConfig = { version: 1 };
   if (sites.length) config.sites = sites;
   if (providerAccounts.length) config.providerAccounts = providerAccounts;
   if (pools.length) config.pools = pools;
   if (flavors.length) config.flavors = flavors;
   if (sandboxTemplates.length) config.sandboxTemplates = sandboxTemplates;
+  if (kubernetesClusters.length) config.kubernetesClusters = kubernetesClusters;
   return config;
 }

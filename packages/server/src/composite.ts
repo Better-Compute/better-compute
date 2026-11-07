@@ -20,15 +20,21 @@ import type { RegisteredMethod } from './registry.js';
 // with no transaction open and composes other methods in two phases:
 // 1. `ctx.check(path, input)`, with no transaction open (IAM is never awaited inside one): the
 //    target's tenant pre-check for the same caller, its validation and its one decision, exactly as
-//    the envelope would make them. Replay-only admissions (no `denied` hook) run `prepare` in a short
-//    transaction of their own first; admissions with a `denied` hook, list-recipe reads and other
-//    composites are `UNSUPPORTED`. An allowed call leaves a grant keyed by path + canonical JSON of
-//    the raw input; grants are a multiset (one `invoke` per `check`) and live only for this call.
+//    the envelope would make them. Replay-only admissions (no `denied` hook) and `composable` ones run
+//    `prepare` in a short transaction of their own first; other admissions with a `denied` hook,
+//    list-recipe reads and other composites are `UNSUPPORTED`. A composable admission's `denied` runs
+//    after a refusal and `abandoned` after any other failure of `check`, as in the envelope, an
+//    approval mismatch included (review 14 M1: a delegated caller's open approval admits only the
+//    request whose `describe` text it was given for). An
+//    allowed call leaves a grant keyed by path + canonical JSON of the raw input; grants are a
+//    multiset (one `invoke` per `check`) and live only for this call.
 // 2. `ctx.invoke(tx, path, input)`, inside the composite's transaction: consumes one grant (else
 //    `ACCESS_DENIED`), validates, re-runs `prepare` in the transaction for admission methods (a replay
 //    returns the stored result), runs the handler with the recorded decision as `ctx.admission`, and
 //    appends the sub-call's `audit_events` row, all under a savepoint, so a failed sub-call leaves
 //    nothing behind. `invoke` never calls IAM.
+// 3. `end`: what `prepare` staged in phase 1 for a call that did not run (the composite failed, so
+//    its transaction rolled back, or never invoked it) is undone by the admission's `abandoned`.
 
 /** The envelope steps a composite call reuses, exactly as `Operations.call` runs them. */
 export interface CompositeEnvelope {
@@ -64,6 +70,17 @@ export interface CompositeEnvelope {
     error: unknown,
     requestId: string,
   ): Promise<unknown>;
+  /**
+   * Review 14 M1 for an allowed admission: whether an approval still open on a delegated caller's
+   * decision was given for this request (its `describe` text). Always true for other callers.
+   */
+  approvalMatches(
+    entry: RegisteredMethod,
+    admission: MethodAdmission<unknown, unknown>,
+    input: unknown,
+    caller: Caller,
+    decision: Decision,
+  ): Promise<boolean>;
   /** The executor handlers see inside `tx`. */
   within(tx: SqlTx): SqlExecutor;
   /** Records an allowed mutation (`audit_events`) in `tx`. */
@@ -105,8 +122,12 @@ export interface CompositeRun {
 export interface CompositeCall {
   check(path: string, input: unknown): Promise<void>;
   invoke(tx: SqlTx, path: string, input: unknown): Promise<unknown>;
-  /** Ends the call: every grant is forgotten; a later `check` is `INVALID_STATE`, an `invoke` `ACCESS_DENIED`. */
-  end(): void;
+  /**
+   * Ends the call: every grant is forgotten; a later `check` is `INVALID_STATE`, an `invoke` `ACCESS_DENIED`.
+   * Checked admission calls that did not run (all of them when `failure` is given: the composite's
+   * transaction rolled back) are `abandoned`, each in a transaction of its own. Never throws.
+   */
+  end(failure?: { error: unknown }): Promise<void>;
 }
 
 export interface Composites {
@@ -127,6 +148,18 @@ interface Grant {
    * object instead of validating the raw input again (the grant key already pins the raw input).
    */
   checkedInput?: unknown;
+  /** What the call's admission staged in phase 1, undone at `end` unless the call ran. */
+  stage?: Stage;
+}
+
+/** A checked admission call whose `prepare` (`decide`) committed something `abandoned` undoes. */
+interface Stage {
+  admission: MethodAdmission<unknown, unknown>;
+  input: unknown;
+  /** `invoke` ran it (its savepoint released). */
+  ran: boolean;
+  /** Its hooks already ran (`denied` after a refusal, `abandoned` after a failed check). */
+  settled: boolean;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -209,7 +242,11 @@ export function createComposites(options: CompositeOptions): Composites {
     const { definition } = entry;
     if (definition.transaction === 'manual')
       return `${entry.path} is itself a composite method and cannot run inside another`;
-    if (definition.kind === 'mutation' && definition.admission?.denied)
+    if (
+      definition.kind === 'mutation' &&
+      definition.admission?.denied &&
+      definition.admission.composable !== true
+    )
       return `${entry.path} keeps a record of refusals (admission.denied) and must be called on its own`;
     if (definition.kind === 'read' && (runsOutsideTransaction(definition) || entry.row?.list))
       return `${entry.path} follows the list recipe (per-item decisions), which cannot run inside a transaction`;
@@ -220,7 +257,23 @@ export function createComposites(options: CompositeOptions): Composites {
     begin(run) {
       const { caller, credential, requestId } = run;
       const grants = new Map<string, Grant[]>();
+      const stages: Stage[] = [];
       let ended = false;
+      /** Runs an admission hook in a transaction of its own; a failure leaves a draft for GC. */
+      const settle = async (
+        hook: NonNullable<MethodAdmission<unknown, unknown>['abandoned']> | undefined,
+        input: unknown,
+        error: unknown,
+      ) => {
+        if (!hook) return;
+        try {
+          await database.transaction((tx) =>
+            hook(run.contextFor(envelope.within(tx), undefined, 'caller'), input, tx, error),
+          );
+        } catch {
+          // Best effort, as in the envelope: the caller sees the original error.
+        }
+      };
       const keyOf = (path: string, input: unknown) => `${path} ${canonicalJson(input)}`;
       const grant = (key: string, value: Grant) => {
         if (ended) return;
@@ -285,34 +338,77 @@ export function createComposites(options: CompositeOptions): Composites {
             grant(key, { entry, tenantId, decidedAt: clock.now() });
             return;
           }
-          const decided = envelope.resourceOf(entry, plan.resource);
-          const tenant = envelope.decisionTenant(decided, tenantId)!;
-          envelope.preCheck(caller, tenant);
-          const decision = envelope.decisionOf(tenant, entry.action!, decided);
+          const hooks = admission as MethodAdmission<unknown, unknown>;
+          // Transaction 1 committed what prepare staged: undone unless the call runs (see `end`).
+          const stage: Stage | undefined = hooks.abandoned
+            ? { admission: hooks, input, ran: false, settled: false }
+            : undefined;
+          if (stage) stages.push(stage);
+          let refused = false;
           try {
-            await iam.refreshResource?.(decision.tenantId, decision.resource);
-            await iam.require(credential, decision);
-          } catch (error) {
-            if (!envelope.refused(error)) throw error;
-            throw await envelope.refusal(
+            const decided = envelope.resourceOf(entry, plan.resource);
+            const tenant = envelope.decisionTenant(decided, tenantId)!;
+            envelope.preCheck(caller, tenant);
+            const decision = envelope.decisionOf(tenant, entry.action!, decided);
+            try {
+              await iam.refreshResource?.(decision.tenantId, decision.resource);
+              await iam.require(credential, decision);
+            } catch (error) {
+              if (!envelope.refused(error)) throw error;
+              refused = true;
+              const refusal = await envelope.refusal(
+                entry,
+                hooks,
+                input,
+                caller,
+                credential,
+                decision,
+                error,
+                requestId,
+              );
+              // Only composable admissions get here with a `denied` hook (see `unsupported`).
+              if (stage) stage.settled = true;
+              await settle(hooks.denied, input, refusal);
+              throw refusal;
+            }
+            // Review 14 M1, as the envelope admits: an approval open on this decision admits only
+            // the request it was given for. A different one is refused (`abandoned` runs below).
+            if (!(await envelope.approvalMatches(entry, hooks, input, caller, decision)))
+              throw new ComputeError(
+                'ACCESS_DENIED',
+                'The approval given for this resource was for a different request; ask again for this one',
+                undefined,
+                { reason: 'approval-mismatch' },
+              );
+            // Budget-style checks that may call IAM; `check` runs with no transaction open.
+            if (admission.check) {
+              await admission.check(run.contextFor(database, undefined, 'caller'), input, decided);
+              grant(key, {
+                entry,
+                tenantId,
+                decision,
+                decidedAt: clock.now(),
+                checkedInput: input,
+                ...(stage ? { stage } : {}),
+              });
+              return;
+            }
+            grant(key, {
               entry,
-              admission as MethodAdmission<unknown, unknown>,
-              input,
-              caller,
-              credential,
+              tenantId,
               decision,
-              error,
-              requestId,
-            );
-          }
-          // Budget-style checks that may call IAM; `check` runs with no transaction open.
-          if (admission.check) {
-            await admission.check(run.contextFor(database, undefined, 'caller'), input, decided);
-            grant(key, { entry, tenantId, decision, decidedAt: clock.now(), checkedInput: input });
+              decidedAt: clock.now(),
+              ...(stage ? { stage } : {}),
+            });
             return;
+          } catch (error) {
+            // IAM unavailable, a budget refusal, an approval mismatch: what prepare staged goes.
+            if (stage && !refused && !stage.settled) {
+              stage.settled = true;
+              await settle(hooks.abandoned, input, error);
+            }
+            throw error;
           }
-          grant(key, { entry, tenantId, decision, decidedAt: clock.now() });
-          return;
         }
 
         const decision = envelope.decisionOf(tenantId, entry.action!, resource!);
@@ -338,47 +434,69 @@ export function createComposites(options: CompositeOptions): Composites {
         const { entry } = granted;
         const { definition } = entry;
         const input =
-          granted.checkedInput !== undefined ? granted.checkedInput : definition.validate(raw ?? {});
+          granted.checkedInput !== undefined
+            ? granted.checkedInput
+            : definition.validate(raw ?? {});
         // A savepoint of the composite's transaction: a failed sub-call leaves nothing behind.
-        return database.transaction(async (savepoint) => {
-          const sql = envelope.within(savepoint);
-          if (definition.kind === 'public')
-            return definition.handler(run.contextFor(sql, undefined, 'public'), input);
-          if (definition.kind !== 'mutation')
-            return definition.handler(run.contextFor(sql, undefined, 'caller'), input);
+        return database
+          .transaction(async (savepoint) => {
+            const sql = envelope.within(savepoint);
+            if (definition.kind === 'public')
+              return definition.handler(run.contextFor(sql, undefined, 'public'), input);
+            if (definition.kind !== 'mutation')
+              return definition.handler(run.contextFor(sql, undefined, 'caller'), input);
 
-          const admission = definition.admission;
-          if (admission) {
-            const plan = checkPlan(
-              path,
-              await admission.prepare(run.contextFor(sql, undefined, 'caller'), input, savepoint),
+            const admission = definition.admission;
+            if (admission) {
+              const plan = checkPlan(
+                path,
+                await admission.prepare(run.contextFor(sql, undefined, 'caller'), input, savepoint),
+              );
+              if (plan.status === 'replay') return plan.result;
+              // The decision `check` made must cover what prepare decides on now.
+              const decided = envelope.resourceOf(entry, plan.resource);
+              const tenant = envelope.decisionTenant(decided, granted.tenantId)!;
+              const expected = envelope.decisionOf(tenant, entry.action!, decided);
+              if (!granted.decision || !sameDecision(granted.decision, expected))
+                throw accessDenied();
+            }
+            const admitted = envelope.admissionOf(
+              caller,
+              granted.decision!,
+              requestId,
+              granted.decidedAt,
             );
-            if (plan.status === 'replay') return plan.result;
-            // The decision `check` made must cover what prepare decides on now.
-            const decided = envelope.resourceOf(entry, plan.resource);
-            const tenant = envelope.decisionTenant(decided, granted.tenantId)!;
-            const expected = envelope.decisionOf(tenant, entry.action!, decided);
-            if (!granted.decision || !sameDecision(granted.decision, expected))
-              throw accessDenied();
-          }
-          const admitted = envelope.admissionOf(
-            caller,
-            granted.decision!,
-            requestId,
-            granted.decidedAt,
-          );
-          const value = await definition.handler(run.contextFor(sql, admitted, 'caller'), input);
-          await envelope.recordAudit(savepoint, admitted);
-          return value;
-        });
+            const value = await definition.handler(run.contextFor(sql, admitted, 'caller'), input);
+            await envelope.recordAudit(savepoint, admitted);
+            return value;
+          })
+          .then((value) => {
+            if (granted.stage) granted.stage.ran = true;
+            return value;
+          });
       }
 
       return {
         check,
         invoke,
-        end() {
+        async end(failure) {
           ended = true;
           grants.clear();
+          // A failed composite rolled its transaction back: none of its calls ran.
+          const undo = stages.filter((stage) => !stage.settled && (failure || !stage.ran));
+          stages.length = 0;
+          for (const stage of undo) {
+            stage.settled = true;
+            await settle(
+              stage.admission.abandoned,
+              stage.input,
+              failure?.error ??
+                new ComputeError(
+                  'INVALID_STATE',
+                  'The composite call ended without running this call',
+                ),
+            );
+          }
         },
       };
     },

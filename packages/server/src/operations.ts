@@ -309,6 +309,21 @@ export function createOperations(
     resource: decision.resource,
   });
 
+  /** Review 14 M1: a delegated call IAM allowed goes ahead only for the text an open approval bound. */
+  const approvalMatches = async (
+    entry: RegisteredMethod,
+    admission: MethodAdmission<unknown, unknown>,
+    input: unknown,
+    caller: Caller,
+    decision: Decision,
+  ): Promise<boolean> =>
+    caller.sessionKind !== 'delegated' ||
+    matchesBinding(
+      database,
+      boundDecision(caller, decision),
+      confirmationText(entry, admission, input, decision),
+    );
+
   async function refusalOf(
     entry: RegisteredMethod,
     admission: MethodAdmission<unknown, unknown>,
@@ -456,14 +471,7 @@ export function createOperations(
       }
       // Review 14 M1: an approval still open on this decision admits only the request it was given for.
       // A different one is refused (`abandoned` then clears what prepare staged).
-      if (
-        caller.sessionKind === 'delegated' &&
-        !(await matchesBinding(
-          database,
-          boundDecision(caller, decision),
-          confirmationText(entry, admission, input, decision),
-        ))
-      )
+      if (!(await approvalMatches(entry, admission, input, caller, decision)))
         throw new ComputeError(
           'ACCESS_DENIED',
           'The approval given for this resource was for a different request; ask again for this one',
@@ -541,6 +549,7 @@ export function createOperations(
         caches.authorize(caller, decision, () => iam.authorize(credential, decision)),
       refused,
       refusal: refusalOf,
+      approvalMatches,
       within: (tx) => withinTransaction(database, tx),
       recordAudit,
     },
@@ -639,14 +648,18 @@ export function createOperations(
             kind === 'public' ? { ...base, sql, credential } : contextFor(sql, admission),
         });
         let value: unknown;
+        let failure: { error: unknown } | undefined;
         try {
           value = await definition.handler(
             contextFor(outsideTransaction(database), admitted, composite),
             input,
           );
+        } catch (error) {
+          failure = { error };
+          throw error;
         } finally {
-          // Grants live only for this call.
-          composite.end();
+          // Grants live only for this call; what checked admissions staged and did not run is undone.
+          await composite.end(failure);
         }
         await database.transaction((tx) => recordAudit(tx, admitted));
         return value;

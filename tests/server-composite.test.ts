@@ -18,6 +18,7 @@ import { betterCompute, type BetterCompute } from '@better-compute/server';
 import { fakeIam, type FakeIam } from './support/fake-iam.js';
 import { ACME, BASE_URL, OTHER, ROOT, SECRET, options } from './support/server.js';
 import { countingExecutor, START, type CountingExecutor } from './support/server-api.js';
+import { bindConfirmation } from '../packages/server/src/confirmation-bindings.js';
 
 // Composite methods (PLAN.md §3.4, core `MethodContext.check/invoke`): a `transaction: 'manual'`
 // mutation decides each sub-call for its own caller with no transaction open (`check`), then runs
@@ -206,6 +207,34 @@ const kit = definePlugin({
         handler: async () => ({}),
       }),
     },
+    staged: {
+      // A composable admission (as kubernetesClusters.create): its hooks only clear what prepare staged.
+      create: defineMethod<ItemInput, Record<string, never>>({
+        action: 'compute:kit:order',
+        kind: 'mutation',
+        resource: tenant,
+        validate: (raw) => parse<ItemInput>(raw, ['tenantId', 'label', 'idempotencyKey']),
+        admission: {
+          async prepare(_context, input) {
+            trace.push(`staged prepare ${input.label}`);
+            return { status: 'decide', resource: tenant(input) };
+          },
+          async denied(_context, input) {
+            trace.push(`staged denied ${input.label}`);
+          },
+          async abandoned(_context, input) {
+            trace.push(`staged abandoned ${input.label}`);
+          },
+          // What a person approving the request reads: the envelope binds an approval to it.
+          describe: (input) => `staged.create ${input.label}`,
+          composable: true,
+        },
+        async handler(_context, input) {
+          trace.push(`staged handler ${input.label}`);
+          return {};
+        },
+      }),
+    },
     info: {
       ping: defineMethod<Record<string, never>, { pong: true; caller: boolean }>({
         action: null,
@@ -236,6 +265,7 @@ const kit = definePlugin({
 });
 
 const NOTES = 'plugins/kit/notes/add';
+const STAGED = 'plugins/kit/staged/create';
 const ITEMS = 'plugins/kit/items/create';
 
 let store: ReturnType<typeof pglite>;
@@ -448,6 +478,127 @@ describe('composite methods: check, then invoke', () => {
     expect(requires()).toEqual([`compute:kit:compose ${ACME}`]);
     expect(trace).toEqual([]);
     expect(await notes()).toEqual([]);
+  });
+
+  it('composes a composable admission: denied after a refusal, abandoned for calls that did not run', async () => {
+    iam.allow({ token: USER });
+    // Checked and run: no hook.
+    await compose(USER, async (context) => {
+      await context.check!(STAGED, item('ran', 'k-ran'));
+      return context.sql.transaction((tx) => context.invoke!(tx, STAGED, item('ran', 'k-ran')));
+    });
+    expect(trace).toEqual(['staged prepare ran', 'staged prepare ran', 'staged handler ran']);
+
+    // Checked, never run: abandoned when the composite ends.
+    trace.length = 0;
+    await compose(USER, async (context) => {
+      await context.check!(STAGED, item('skipped', 'k-skipped'));
+      await context.check!(STAGED, item('ran', 'k-ran-2'));
+      return context.sql.transaction((tx) => context.invoke!(tx, STAGED, item('ran', 'k-ran-2')));
+    });
+    expect(trace).toEqual([
+      'staged prepare skipped',
+      'staged prepare ran',
+      'staged prepare ran',
+      'staged handler ran',
+      'staged abandoned skipped',
+    ]);
+
+    // Run, then the composite fails: its transaction rolled back, so the run call is abandoned too.
+    trace.length = 0;
+    const failed = await codeOf(
+      compose(USER, async (context) => {
+        await context.check!(STAGED, item('rolled', 'k-rolled'));
+        await context.sql.transaction(async (tx) => {
+          await context.invoke!(tx, STAGED, item('rolled', 'k-rolled'));
+          throw new ComputeError('CONFIG_DRIFT', 'moved');
+        });
+      }),
+    );
+    expect(failed).toBe('CONFIG_DRIFT');
+    expect(trace).toEqual([
+      'staged prepare rolled',
+      'staged prepare rolled',
+      'staged handler rolled',
+      'staged abandoned rolled',
+    ]);
+
+    // Refused by IAM: denied runs (and abandoned does not), then the refusal surfaces.
+    const refused = 'token-composite-staged-refused-0123456789';
+    iam.addCaller(refused, { tenantId: ACME, identityId: 'id-staged-refused' });
+    iam.allow({ token: refused });
+    iam.deny({ token: refused, action: 'compute:kit:order' });
+    trace.length = 0;
+    expect(
+      await codeOf(compose(refused, (context) => context.check!(STAGED, item('no', 'k-no')))),
+    ).toBe('ACCESS_DENIED');
+    expect(trace).toEqual(['staged prepare no', 'staged denied no']);
+    expect(insideTransaction).toEqual([]);
+  });
+
+  it('admits a delegated composable call under an open approval only for the request approved (review 14 M1)', async () => {
+    const token = 'token-composite-delegated-0123456789';
+    iam.addCaller(token, {
+      tenantId: ACME,
+      identityId: 'id-delegated',
+      sessionId: 'ses-delegated',
+      sessionKind: 'delegated',
+      agentId: 'agent-delegated',
+      delegationId: 'dlg-composite',
+    });
+    iam.allow({ token });
+    // No approval open on the decision: IAM's answer stands.
+    await compose(token, (context) => context.check!(STAGED, item('small', 'k-free')));
+    const decision = iam.calls.filter((entry) => entry.method === 'require').at(-1)!.decision!;
+    expect(decision.action).toBe('compute:kit:order');
+    // The person approved "staged.create small" on that decision a moment ago.
+    await bindConfirmation(
+      store,
+      'conf_composite',
+      {
+        tenantId: decision.tenantId,
+        delegationId: 'dlg-composite',
+        action: decision.action,
+        resource: decision.resource,
+      },
+      'staged.create small',
+      START + 60 * 60_000,
+    );
+    trace.length = 0;
+    await compose(token, async (context) => {
+      await context.check!(STAGED, item('small', 'k-small'));
+      return context.sql.transaction((tx) => context.invoke!(tx, STAGED, item('small', 'k-small')));
+    });
+    expect(trace).toEqual(['staged prepare small', 'staged prepare small', 'staged handler small']);
+    // A different request under the same open approval: refused at check, and what prepare staged
+    // is abandoned (not denied: IAM allowed it).
+    trace.length = 0;
+    let refusal: unknown;
+    await compose(token, (context) => context.check!(STAGED, item('large', 'k-large'))).catch(
+      (error: unknown) => (refusal = error),
+    );
+    expect(refusal).toMatchObject({
+      code: 'ACCESS_DENIED',
+      details: { reason: 'approval-mismatch' },
+    });
+    expect(trace).toEqual(['staged prepare large', 'staged abandoned large']);
+    // Another delegation is not bound by it; neither is a person's own session.
+    const peer = 'token-composite-delegated-peer-0123456789';
+    iam.addCaller(peer, {
+      tenantId: ACME,
+      identityId: 'id-delegated',
+      sessionId: 'ses-delegated-peer',
+      sessionKind: 'delegated',
+      agentId: 'agent-delegated',
+      delegationId: 'dlg-other',
+    });
+    iam.allow({ token: peer });
+    iam.allow({ token: USER });
+    for (const as of [peer, USER])
+      expect(
+        await codeOf(compose(as, (context) => context.check!(STAGED, item('large', `k-${as}`)))),
+      ).toBe('ok');
+    expect(insideTransaction).toEqual([]);
   });
 
   it('surfaces a sub-call refused by IAM from check, before anything runs', async () => {

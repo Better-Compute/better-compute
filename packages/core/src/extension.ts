@@ -2655,7 +2655,8 @@ export interface MethodContext extends ModuleContext {
    * Composite methods (e.g. `fleet.apply`), phase 1: decides another method's call exactly as the
    * envelope would for the current caller (tenant pre-check, validation, one IAM decision), with no
    * transaction open (IAM is never awaited inside a compute transaction). Methods whose `admission`
-   * has a `denied` hook (reservations, instances) are refused with `UNSUPPORTED`; replay-only admissions
+   * has a `denied` hook (reservations, instances) are refused with `UNSUPPORTED`, unless it is
+   * `composable` (its hooks only clear what `prepare` staged, e.g. `kubernetesClusters.create`); admissions
    * run `admission.prepare` in a short transaction of their own: `decide` → one IAM decision on the
    * returned resource, `replay` → allowed. Only available to methods declared `transaction: 'manual'`;
    * `check` and `invoke` always act as the calling identity.
@@ -2765,6 +2766,15 @@ export interface MethodAdmission<I, O> {
    * logged; the caller sees the handler's error.
    */
   abandoned?(context: MethodContext, input: I, tx: SqlTx, error: unknown): Promise<void>;
+  /**
+   * `denied` and `abandoned` only undo what `prepare` staged for a request that was never carried out
+   * (e.g. a projection row), and are safe to run whatever became of the request. Such an admission can
+   * be composed (`ctx.check`/`ctx.invoke`, e.g. `fleet.apply`): `check` runs `denied` after a refusal and
+   * `abandoned` after any other failure, as the envelope does, and the composite runs `abandoned` for
+   * every checked call it did not carry out (the call failed, or never ran). Without it, a composite
+   * refuses an admission that has a `denied` hook (`UNSUPPORTED`). Default false.
+   */
+  composable?: boolean;
 }
 
 export function defineMethod<I, O>(method: MethodDefinition<I, O>): MethodDefinition<I, O> {

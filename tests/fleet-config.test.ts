@@ -755,3 +755,31 @@ describe('validateFleetConfig', () => {
     expect(validateFleetConfig(base)).toEqual(base);
   });
 });
+
+describe('Kubernetes clusters without the kubernetes module', () => {
+  it('blocks them, exports none and lists the module as missing', async () => {
+    const planned = await plan({
+      ...clone(),
+      kubernetesClusters: [
+        {
+          name: 'training',
+          pool: 'burst',
+          location: 'us-central1',
+          nodePools: [{ name: 'system', machineType: 'e2-standard-4', nodeCount: 1 }],
+        },
+      ],
+    });
+    expect(planned.blocked).toBe(true);
+    expect(planned.changes.find((change) => change.kind === 'kubernetesCluster')).toEqual({
+      kind: 'kubernetesCluster',
+      name: 'training',
+      action: 'create',
+      blocked: 'this deployment does not run the kubernetes module',
+    });
+    const exported = await fleet<{ config: FleetConfig; missing: string[] }>('export', {
+      tenantId: 'root',
+    });
+    expect(exported.missing).toContain('kubernetes_clusters');
+    expect(exported.config.kubernetesClusters).toBeUndefined();
+  });
+});
