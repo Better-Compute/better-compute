@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CallContext, Logger, ProviderContext, ProviderPlacement } from '@better-compute/core';
-import { ec2Client } from '@better-compute/aws-core';
+import { ec2Client, jsonClient } from '@better-compute/aws-core';
 import {
   accountCredentials,
   AwsCompute,
@@ -49,8 +49,19 @@ function world(overrides: Partial<AwsConfig> = {}, logs: unknown[][] = []) {
     fetch: emu.fetch,
     clock: emu.clock,
   });
+  // Reinstall resolves a resolve:ssm: image (an alias) to an AMI id through SSM.
+  const ssm = jsonClient({
+    service: 'ssm',
+    jsonVersion: '1.1',
+    targetPrefix: 'AmazonSSM',
+    region: config.region,
+    credentials: account.source,
+    fetch: emu.fetch,
+    clock: emu.clock,
+  });
   const compute = new AwsCompute(config, context, options, {
     ec2,
+    ssm,
     account,
     types: instanceTypeCache(ec2, { clock: emu.clock }),
     zones: zoneCache(ec2, { clock: emu.clock }),
@@ -559,7 +570,13 @@ describe('Graviton', () => {
       { code: 'INVALID_INPUT', details: { reason: 'image-arch' } },
     );
     expect(w.runs()).toHaveLength(0);
-    w.ec2emu.images.set('ami-0aaaaaaaaaaaaaaa1', { rootDevice: '/dev/xvda', arch: 'arm64' });
+    w.ec2emu.images.set('ami-0aaaaaaaaaaaaaaa1', {
+      rootDevice: '/dev/xvda',
+      arch: 'arm64',
+      ownerId: '137112412989',
+      ownerAlias: 'amazon',
+      public: true,
+    });
     await w.compute.create(
       { ...request('us-east-1a/m7g.large'), image: 'ami-0aaaaaaaaaaaaaaa1' },
       w.call(),
@@ -569,7 +586,13 @@ describe('Graviton', () => {
 
   it('refuses a reinstall onto an AMI of the other architecture before replacing the root volume', async () => {
     const w = world();
-    w.ec2emu.images.set('ami-0aaaaaaaaaaaaaaa1', { rootDevice: '/dev/xvda', arch: 'arm64' });
+    w.ec2emu.images.set('ami-0aaaaaaaaaaaaaaa1', {
+      rootDevice: '/dev/xvda',
+      arch: 'arm64',
+      ownerId: '137112412989',
+      ownerAlias: 'amazon',
+      public: true,
+    });
     const machine = await w.compute.create(
       { ...request('us-east-1a/m7g.large'), image: 'ami-0aaaaaaaaaaaaaaa1' },
       w.call(),
@@ -582,6 +605,10 @@ describe('Graviton', () => {
     await w.compute.reinstall(machine.id, 'ami-0aaaaaaaaaaaaaaa1', w.call('ins_1:r2'));
     expect(replaces()).toHaveLength(1);
     // An alias resolves the build of the machine's own architecture: nothing to refuse.
+    w.ec2emu.ssm.parameters.set(
+      '/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id',
+      'ami-0aaaaaaaaaaaaaaa1',
+    );
     await w.compute.reinstall(machine.id, 'ubuntu-24.04', w.call('ins_1:r3'));
     expect(replaces()).toHaveLength(2);
   });
