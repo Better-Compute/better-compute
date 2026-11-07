@@ -2564,6 +2564,30 @@ describe('network edge (networks.natGateway, networks.peer, networks.routes)', (
     expect(view.peerings).toHaveLength(1);
   });
 
+  it('unpeering never reaches a peering of networks that are not the caller’s', async () => {
+    const left = (await readyNetwork(['10.0.0.0/20'], 0)).network;
+    const right = (await readyNetwork(['10.1.0.0/20'], 0)).network;
+    await peer(left.id, left.subnets[0]!.id, right.id, right.subnets[0]!.id);
+    // Two networks of another tenant, named with root's subnets.
+    const theirs = (await readyNetwork(['10.2.0.0/20'], 0)).network;
+    await db.query(`UPDATE networks SET tenant_id = 'other' WHERE id = $1`, [theirs.id]);
+    projected.set(`network/${theirs.id}`, 'other');
+    const view = await peer(
+      theirs.id,
+      left.subnets[0]!.id,
+      theirs.id,
+      right.subnets[0]!.id,
+      false,
+      mallory,
+    );
+    expect(view.peerings).toBeUndefined();
+    expect((await getNetwork(left.id)).peerings).toHaveLength(1);
+    const { rows } = await db.query<{ desired_state: string }>(
+      `SELECT desired_state FROM network_edges WHERE kind = 'peering'`,
+    );
+    expect(rows).toEqual([{ desired_state: 'present' }]);
+  });
+
   it('decides a peering on the other network too, and a route through an instance on that instance', async () => {
     const asked: { action: string; resource: { type: string; id: string } }[] = [];
     const context = {

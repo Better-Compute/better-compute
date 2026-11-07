@@ -1694,13 +1694,15 @@ export async function peerNetwork(
     );
   const network = locked.get(input.networkId)!;
   const peer = locked.get(input.peerNetworkId)!;
+  // The pair's peering, only between the two networks named (both the tenant's, checked above): subnets of other
+  // networks never select a row, so no caller reaches a peering of networks that are not theirs.
   const { rows } = await tx.query<EdgeRow>(
     `SELECT ${edgeColumns} FROM network_edges
       WHERE kind = 'peering' AND desired_state = 'present'
-        AND least(subnet_id, peer_subnet_id) = least($1::text, $2::text)
-        AND greatest(subnet_id, peer_subnet_id) = greatest($1::text, $2::text)
+        AND ((network_id = $3 AND subnet_id = $1 AND peer_network_id = $4 AND peer_subnet_id = $2)
+          OR (network_id = $4 AND subnet_id = $2 AND peer_network_id = $3 AND peer_subnet_id = $1))
       FOR UPDATE`,
-    [input.subnetId, input.peerSubnetId],
+    [input.subnetId, input.peerSubnetId, network.id, peer.id],
   );
   const existing = rows[0];
   if (!input.enabled) {
@@ -1777,7 +1779,7 @@ export async function setRoutes(
       );
     if ('instanceId' in hop) {
       const { rows } = await tx.query<{ subnet_id: string | null }>(
-        `SELECT subnet_id FROM instances WHERE id = $1 AND tenant_id = $2 AND state <> 'deleted'`,
+        `SELECT subnet_id FROM instances WHERE id = $1 AND tenant_id = $2 AND NOT draft AND state <> 'deleted'`,
         [hop.instanceId, network.tenant_id],
       );
       if (!rows[0]) throw new ComputeError('NOT_FOUND', `Instance ${hop.instanceId} not found`);
