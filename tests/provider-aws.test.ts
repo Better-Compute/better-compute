@@ -631,6 +631,34 @@ describe('compute', () => {
     );
   });
 
+  it('adds the keys part to a multipart user data instead of nesting it (EKS nodes)', () => {
+    const decode = (packed: { base64: string }) => Buffer.from(packed.base64, 'base64').toString('utf8');
+    const mime = (eol: string) =>
+      [
+        'MIME-Version: 1.0',
+        'Content-Type: multipart/mixed; boundary="bc-eks-1"',
+        '',
+        '--bc-eks-1',
+        'Content-Type: application/node.eks.aws',
+        '',
+        'kind: NodeConfig',
+        '--bc-eks-1--',
+        '',
+      ].join(eol);
+    for (const eol of ['\n', '\r\n']) {
+      const text = decode(packUserData(mime(eol), ['ssh-ed25519 AAAA key1']));
+      // One boundary, one closing delimiter, the keys as the last part.
+      expect(text.match(/boundary=/g)).toHaveLength(1);
+      expect(text.match(/--bc-eks-1--/g)).toHaveLength(1);
+      expect(text.indexOf('kind: NodeConfig')).toBeLessThan(text.indexOf('ssh_authorized_keys'));
+      expect(text).toContain(`ssh_authorized_keys:${eol}  - "ssh-ed25519 AAAA key1"${eol}--bc-eks-1--`);
+      expect(text.startsWith(mime(eol).split('--bc-eks-1--')[0]!)).toBe(true);
+    }
+    // Without its closing delimiter it is not trusted as a multipart: wrapped as before.
+    const open = 'Content-Type: multipart/mixed; boundary="x"\n\n--x\nContent-Type: text/plain\n\nhi\n';
+    expect(decode(packUserData(open, ['ssh-ed25519 AAAA key1']))).toMatch(/boundary="bc-[0-9a-f]{32}"/);
+  });
+
   it('get finds a just-created instance through its client token', async () => {
     const { emu, ec2emu, create, impl, call } = await providerWorld();
     ec2emu.newInstanceNotFound = { byId: 1, byToken: 0 };

@@ -69,3 +69,15 @@ export function jsonError(code: string, message: string, status = 400): Response
     headers: { 'content-type': 'application/x-amz-json-1.1', 'x-amzn-requestid': requestId() },
   });
 }
+
+/** A rest-json error (EKS, …): the code in `x-amzn-errortype`, the message in the body. */
+export function restJsonError(code: string, message: string, status = 400): Response {
+  return new Response(JSON.stringify({ message }), {
+    status,
+    headers: {
+      'content-type': 'application/json',
+      'x-amzn-errortype': `${code}:http://internal.amazon.com/coral/com.amazonaws.eks/`,
+      'x-amzn-requestid': requestId(),
+    },
+  });
+}

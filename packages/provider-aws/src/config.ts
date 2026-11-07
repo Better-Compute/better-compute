@@ -1,4 +1,5 @@
 import { ComputeError, field, manifest, type SecretRef } from '@better-compute/core';
+import type { KubeTransport } from './eks/transport.js';
 import {
   assertRegion,
   parseArn,
@@ -42,7 +43,15 @@ export const awsConfig = manifest({
   instanceProfile: field
     .string({ maxLength: 2048 })
     .optional()
-    .describe('Instance profile ARN passed to RunInstances'),
+    .describe(
+      'Instance profile ARN passed to RunInstances (never one whose role has an EKS access entry: see eksNodeInstanceProfile)',
+    ),
+  eksNodeInstanceProfile: field
+    .string({ maxLength: 2048 })
+    .optional()
+    .describe(
+      '(kubernetes) Instance profile ARN of EC2 machines a pool with policy.kubernetes.eks launches as nodes of the cluster (its role has an EC2_LINUX access entry); no other launch gets it',
+    ),
   rootVolumeGiB: field
     .int({ min: 8, max: 16384 })
     .default(100)
@@ -103,6 +112,20 @@ export const awsConfig = manifest({
     .describe(
       'Allow buying capacity (Capacity Blocks, new ODCRs) in this platform account; spends money, root-only and confirmed',
     ),
+  eksClusterRoleArn: field
+    .string({ maxLength: 2048 })
+    .optional()
+    .describe('(kubernetes) The EKS cluster IAM role ARN new clusters run as'),
+  eksNodeRoleArn: field
+    .string({ maxLength: 2048 })
+    .optional()
+    .describe('(kubernetes) The node IAM role ARN of managed node groups and EKS Auto Mode nodes'),
+  eksSubnetIds: field
+    .list(field.string({ pattern: '^subnet-[0-9a-f]{8,17}$' }), { max: 16 })
+    .optional()
+    .describe(
+      '(kubernetes) Default subnets of new EKS clusters (at least two, in two Availability Zones); node groups use the cluster subnets',
+    ),
 });
 
 /** The validated account configuration. */
@@ -114,6 +137,7 @@ export interface AwsConfig {
   subnetId?: string;
   securityGroupIds?: string[];
   instanceProfile?: string;
+  eksNodeInstanceProfile?: string;
   rootVolumeGiB: number;
   rootVolumeType: 'gp3' | 'gp2' | 'io2';
   kmsKeyId?: string;
@@ -130,12 +154,26 @@ export interface AwsConfig {
   pricing: 'off' | 'on-demand' | 'all';
   /** (A3) Allow purchaseReservation (spends money). */
   allowPurchases: boolean;
+  eksClusterRoleArn?: string;
+  eksNodeRoleArn?: string;
+  eksSubnetIds?: string[];
 }
 
 export interface AwsProviderOptions {
   fetch?: typeof fetch;
   /** Tests and VPC endpoints; host options, never account config. */
-  endpoints?: Partial<Record<'ec2' | 'sts' | 'servicequotas' | 'pricing' | 'ssm', string>>;
+  endpoints?: Partial<Record<'ec2' | 'sts' | 'servicequotas' | 'pricing' | 'ssm' | 'eks', string>>;
+  /**
+   * (kubernetes) The transport to an EKS cluster's own Kubernetes API (`kubernetes.credentials`). Default:
+   * `node:https` trusting only the cluster's CA.
+   */
+  kubeTransport?: KubeTransport;
+  /**
+   * (kubernetes) The IAM role ARN, path included, of the host's ambient identity when it is a role
+   * under a path: an assumed-role session ARN drops the path, which an EKS access entry needs.
+   * Platform accounts without assumeRoleArn or credentials name it in their access entry.
+   */
+  platformRoleArn?: string;
   /** Ambient identity for platform accounts (default `ambientCredentials()`). */
   credentials?: CredentialSource;
   /** ExternalId prefix: `${externalIdPrefix}:${providerAccountId}` (default 'better-compute'). */
@@ -219,15 +257,44 @@ export function validateAwsConfig(config: AwsConfig): void {
       'pricing',
     );
   if (config.discoverTag !== undefined) parseDiscoverTag(config.discoverTag);
-  if (config.instanceProfile !== undefined) {
+  for (const key of ['instanceProfile', 'eksNodeInstanceProfile'] as const) {
+    const value = config[key];
+    if (value === undefined) continue;
     let arn;
     try {
-      arn = parseArn(config.instanceProfile);
+      arn = parseArn(value);
     } catch {
-      throw invalid('instanceProfile is not an instance profile ARN', 'instanceProfile');
+      throw invalid(`${key} is not an instance profile ARN`, key);
     }
     if (arn.service !== 'iam' || !arn.resource.startsWith('instance-profile/'))
-      throw invalid('instanceProfile is not an instance profile ARN', 'instanceProfile');
+      throw invalid(`${key} is not an instance profile ARN`, key);
+  }
+  // The account-wide profile goes on every launch: it must never carry the EKS node identity.
+  if (
+    config.eksNodeInstanceProfile !== undefined &&
+    config.instanceProfile === config.eksNodeInstanceProfile
+  )
+    throw invalid(
+      'instanceProfile must not be eksNodeInstanceProfile: every machine of the account gets instanceProfile, only EKS nodes the node identity',
+      'eksNodeInstanceProfile',
+    );
+  for (const key of ['eksClusterRoleArn', 'eksNodeRoleArn'] as const) {
+    const value = config[key];
+    if (value === undefined) continue;
+    let arn;
+    try {
+      arn = parseArn(value);
+    } catch {
+      throw invalid(`${key} is not an IAM role ARN`, key);
+    }
+    if (
+      arn.service !== 'iam' ||
+      arn.region !== '' ||
+      !/^\d{12}$/.test(arn.account) ||
+      !/^role\/[\w+=,.@/-]{1,512}$/.test(arn.resource) ||
+      arn.partition !== partitionOf(config.region).partition
+    )
+      throw invalid(`${key} is not an IAM role ARN of this partition`, key);
   }
 }
 

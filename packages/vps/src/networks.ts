@@ -1092,7 +1092,12 @@ function assertCidrPrefix(client: ProviderImpl, kind: 'network' | 'subnet', cidr
 }
 
 /** A GCE zone's region: `us-central1-a` is in `us-central1`. */
+/** A zone's region: GCE `us-central1-a` is in `us-central1`, AWS `us-east-1a` in `us-east-1`. */
 export function zoneRegion(zone: string): string {
+  // AWS: us-east-1a, us-west-2-lax-1a (a Local Zone) → us-east-1, us-west-2.
+  const aws = /^([a-z]{2}(?:-gov)?-[a-z]+-\d{1,2})(?:[a-z]|-[a-z]{2,10}-\d{1,2}[a-z])$/.exec(zone);
+  if (aws) return aws[1]!;
+  // GCP: us-central1-a → us-central1.
   return zone.replace(/-[a-z]$/, '');
 }
 

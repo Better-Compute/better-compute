@@ -43,6 +43,7 @@ export const awsErrorCodes: Readonly<Partial<Record<ErrorCode, readonly string[]
     'AddressLimitExceeded',
     'LimitExceededException',
     'ServiceQuotaExceededException',
+    'ResourceLimitExceededException',
   ],
   NOT_FOUND: [
     'ResourceNotFoundException',
@@ -67,6 +68,7 @@ export const awsErrorCodes: Readonly<Partial<Record<ErrorCode, readonly string[]
     'ResourceInUseException',
     'OperationNotPermitted',
     'InvalidInstanceState',
+    'InvalidRequestException',
   ],
   ACCESS_DENIED: [
     'UnauthorizedOperation',
@@ -95,8 +97,18 @@ export const awsErrorCodes: Readonly<Partial<Record<ErrorCode, readonly string[]
     'ValidationException',
     'MissingParameter',
     'InvalidInput',
+    'InvalidParameterException',
+    'UnsupportedAvailabilityZoneException',
   ],
-  UNAVAILABLE: ['InternalError', 'InternalFailure', 'ServiceUnavailable', 'Unavailable'],
+  UNAVAILABLE: [
+    'InternalError',
+    'InternalFailure',
+    'ServiceUnavailable',
+    'Unavailable',
+    'ServerException',
+    'ServiceUnavailableException',
+    'ResourcePropagationDelayException',
+  ],
 };
 
 const byCode = new Map<string, ErrorCode>();

@@ -7,3 +7,4 @@ export * from './redact.js';
 export * from './errors.js';
 export * from './paginate.js';
 export * from './client.js';
+export * from './eks.js';

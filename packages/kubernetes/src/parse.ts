@@ -36,7 +36,8 @@ const resourceName = /^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$/;
 /** A zone (`us-central1-a`) or a region (`us-central1`). */
 const locationName = /^[a-z][a-z0-9-]{1,38}[a-z0-9]$/;
 const versionPattern = /^[0-9]{1,3}\.[0-9]{1,3}(\.[0-9]{1,3})?(-[a-z0-9.]{1,40})?$/;
-const machineTypePattern = /^[a-z0-9][a-z0-9-]{0,62}$/;
+/** GCE (`e2-standard-4`), DigitalOcean (`s-2vcpu-4gb`) and EC2 (`m7i.large`) machine types. */
+const machineTypePattern = /^[a-z0-9][a-z0-9.-]{0,62}$/;
 const diskTypePattern = /^[a-z][a-z0-9-]{1,40}$/;
 const acceleratorPattern = /^[a-z0-9][a-z0-9-]{0,62}$/;
 /** A Kubernetes label key: an optional DNS-subdomain prefix and `/`, then a name of at most 63 characters. */
@@ -169,7 +170,7 @@ const nodePoolFields = [
 function nodePoolOf(input: Record<string, unknown>, what: string): NodePoolInput {
   const field = (name: string) => (what ? `${what}.${name}` : name);
   if (typeof input.machineType !== 'string' || !machineTypePattern.test(input.machineType))
-    fail(`${field('machineType')} must be a provider machine type such as e2-standard-4`);
+    fail(`${field('machineType')} must be a provider machine type such as e2-standard-4 or m7i.large`);
   const pool: NodePoolInput = {
     name: resource(input.name, field('name')),
     machineType: input.machineType as string,

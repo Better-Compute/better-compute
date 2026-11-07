@@ -91,7 +91,7 @@ func (m *Manager) worker() bool {
 	if _, ok, err := ReadState(m.Sys); err != nil || ok {
 		return true
 	}
-	for _, path := range []string{KubeletConf, kubeletConfigYAML} {
+	for _, path := range []string{KubeletConf, EksKubeletConf, kubeletConfigYAML} {
 		if _, err := m.Sys.ReadFile(path); err == nil || !errors.Is(err, fs.ErrNotExist) {
 			return true
 		}

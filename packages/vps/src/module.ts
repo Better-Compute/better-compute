@@ -18,6 +18,7 @@ import {
   type OfferQuery,
   type ReservationOffering,
   type ProviderDefinition,
+  type ProviderKubernetesCluster,
   type SecretResolver,
   type WorkloadIssuerPort,
 } from '@better-compute/core';
@@ -201,6 +202,7 @@ import {
   type CostsOptions,
 } from './costs.js';
 import { vpsMigrations } from './migrations.js';
+import { listProviderClusters } from './provider-clusters.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
 import {
   describeCreateInstance,
@@ -480,6 +482,8 @@ export type VpsApi = {
     purchaseReservation: MethodDefinition<PurchaseReservationInput, ProviderPurchaseView>;
     /** (AWS A3) The account's purchases (root-only). */
     purchases: MethodDefinition<ListPurchasesInput, { items: ProviderPurchaseView[] }>;
+    /** (AWS A9) The account's managed Kubernetes clusters, with the nodeadm settings to join one. */
+    clusters: MethodDefinition<AccountRef, { items: ProviderKubernetesCluster[] }>;
   };
   /** Discovered provider machines bound to provider pools (discovery.ts); the rest of the group is capacity's. */
   pools: {
@@ -1601,6 +1605,27 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         validate: describedBy(purchaseSchemas.purchases, parseListPurchases),
         handler: (context, input) =>
           listPurchases(rootOf(context), context.sql, input, context.caller),
+      }),
+      // (AWS A9) What `policy.kubernetes` can name: the provider's clusters, read with no transaction open.
+      clusters: defineMethod({
+        action: 'compute:providers:read',
+        kind: 'read',
+        transaction: 'manual',
+        resource: accountResource,
+        validate: describedBy(schemas.account, (raw) => parseAccountRef(raw) as AccountRef),
+        handler: async (context, input) => {
+          const account = await readAccount(context.sql, input.accountId, input.tenantId);
+          if (!account)
+            throw new ComputeError('NOT_FOUND', `Provider account ${input.accountId} not found`);
+          const client = await clients.client(account, depsOf(context));
+          return listProviderClusters(client, account.provider, {
+            idempotencyKey: `clusters:${account.id}`,
+            ...(context.signal ? { signal: context.signal } : {}),
+            clock: context.clock,
+            secrets: options.secrets ?? context.secrets ?? noSecrets,
+            log: context.log,
+          });
+        },
       }),
     },
     // Pool membership: the platform or the account's tenant binds discovered machines to a provider

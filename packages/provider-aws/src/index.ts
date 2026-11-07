@@ -14,3 +14,4 @@ export * from './markets/quotas.js';
 export * from './markets/pricing.js';
 export * from './markets/purchases.js';
 export * from './markets/iam.js';
+export * from './eks/index.js';
