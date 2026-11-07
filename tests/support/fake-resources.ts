@@ -60,6 +60,8 @@ export interface FakeResourcesCloud {
   scopes: Map<string, string | undefined>;
   /** The `networks` of the last ensure, by provider-side name. */
   networks: Map<string, Readonly<Record<string, string>> | undefined>;
+  /** The `secretOutputs` (names held sealed) of the last ensure, by provider-side name. */
+  sealedNames: Map<string, readonly string[] | undefined>;
   /** Extra entries the catalog answers (to check the module drops malformed ones). */
   catalogExtra?: ProviderCatalogEntry[];
   /** What `signals` answers (read-only; the module filters them by tenant). */
@@ -88,6 +90,7 @@ export function fakeResourcesCloud(): FakeResourcesCloud {
     passwords: [],
     scopes: new Map(),
     networks: new Map(),
+    sealedNames: new Map(),
     resolved: new Map(),
     reset() {
       this.resources.clear();
@@ -101,6 +104,7 @@ export function fakeResourcesCloud(): FakeResourcesCloud {
       this.passwords.length = 0;
       this.scopes.clear();
       this.networks.clear();
+      this.sealedNames.clear();
       this.resolved.clear();
       delete this.usageExtra;
       delete this.catalogExtra;
@@ -293,6 +297,7 @@ export function fakeProviderResources(
       call(`ensure ${request.kind} ${request.name}`);
       cloud.scopes.set(request.name, request.accountScope);
       cloud.networks.set(request.name, request.networks);
+      cloud.sealedNames.set(request.name, request.secretOutputs);
       const secretRef = (request.spec as { secret?: SecretRef }).secret;
       if (secretRef !== undefined)
         cloud.resolved.set(request.name, await context.secrets.resolve(secretRef));

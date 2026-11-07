@@ -111,6 +111,17 @@ type Recorded = 'recorded' | 'conflict' | 'reopened';
 
 /** What one provider call came to; `undefined` when the provider was busy (try later). */
 type Sealed = { refs: Record<string, SecretRef>; created: SecretRef[]; superseded: SecretRef[] };
+
+/** Sealing failed part-way: the refs it made (to destroy) and the names whose stored ref the provider's value outdated. */
+class SealFailed extends Error {
+  constructor(
+    readonly reason: unknown,
+    readonly created: readonly SecretRef[],
+    readonly stale: readonly string[],
+  ) {
+    super(text(reason));
+  }
+}
 type Outcome = {
   state: ProviderResourceState['state'];
   message?: string;
@@ -295,6 +306,8 @@ class ResourceWorker {
       labels: this.#labels(),
       accountScope: account?.tenantId === row.tenant_id ? 'tenant' : 'shared',
       ...(networks ? { networks } : {}),
+      // What is sealed already: a kind whose secret the provider answers only once mints a missing one again.
+      ...(row.provider_id !== null ? { secretOutputs: Object.keys(json(row.secret_outputs)) } : {}),
     };
   }
 
@@ -335,6 +348,8 @@ class ResourceWorker {
     const created: SecretRef[] = [];
     const superseded: SecretRef[] = [];
     const declared = kind.secretOutputs ?? [];
+    // First what changed (resolving the stored refs), then the puts: a failed put leaves every changed name stale.
+    const changed: { name: string; value: string }[] = [];
     for (const [name, value] of Object.entries(secrets ?? {})) {
       if (!declared.includes(name)) {
         this.deps.log.warn('cloud-resources: dropped an undeclared secret output', {
@@ -345,27 +360,103 @@ class ResourceWorker {
         continue;
       }
       if (typeof value !== 'string' || value.length === 0) continue;
-      const broker = this.deps.secrets;
-      if (!broker || typeof broker.put !== 'function')
-        throw new ComputeError(
+      const existing = refs[name];
+      if (existing !== undefined) {
+        const current = await this.deps.secrets
+          ?.resolve(existing, { tenantId: this.#row.tenant_id })
+          .catch(() => undefined);
+        if (current === value) continue;
+      }
+      changed.push({ name, value });
+    }
+    if (changed.length === 0) return { refs, created, superseded };
+    const stale = changed.map((entry) => entry.name);
+    const broker = this.deps.secrets;
+    if (!broker || typeof broker.put !== 'function')
+      throw new SealFailed(
+        new ComputeError(
           'UNSUPPORTED',
           `${kind.kind} returned secrets, and this deployment has no secret store to seal them in`,
           undefined,
           { reason: 'secretStore' },
-        );
-      const existing = refs[name];
-      if (existing !== undefined) {
-        const current = await broker
-          .resolve(existing, { tenantId: this.#row.tenant_id })
-          .catch(() => undefined);
-        if (current === value) continue;
-        superseded.push(existing);
+        ),
+        created,
+        stale,
+      );
+    for (const { name, value } of changed) {
+      let ref: SecretRef;
+      try {
+        ref = await broker.put(this.#row.tenant_id, value);
+      } catch (error) {
+        throw new SealFailed(error, created, stale);
       }
-      const ref = await broker.put(this.#row.tenant_id, value);
       created.push(ref);
+      if (refs[name] !== undefined) superseded.push(refs[name]!);
       refs[name] = ref;
     }
     return { refs, created, superseded };
+  }
+
+  /**
+   * Secrets the provider just answered, kept whatever the row's version (like its id): a guarded write that missed (a
+   * change through the API meanwhile) must not destroy a secret the provider hands out only once. Each name made in
+   * this run takes its new ref; the refs it replaces are returned to destroy. Undefined: the row no longer holds this
+   * provider resource (finished, or another id), and nothing was kept.
+   */
+  async #keepSealed(sealed: Sealed): Promise<SecretRef[] | undefined> {
+    const row = this.#row;
+    const made = new Set(sealed.created);
+    const names = Object.entries(sealed.refs).filter(([, ref]) => made.has(ref));
+    if (names.length === 0 || row.provider_id === null) return undefined;
+    return this.sql.transaction(async (tx) => {
+      const current = await this.#lockSecrets(tx);
+      if (current === undefined) return undefined;
+      const replaced: SecretRef[] = [];
+      for (const [name, ref] of names) {
+        const old = current[name];
+        if (old !== undefined && old !== ref) replaced.push(old);
+        current[name] = ref;
+      }
+      await this.#writeSecrets(tx, current);
+      return replaced;
+    });
+  }
+
+  /**
+   * Sealing failed: the refs whose value the provider changed are outdated, so they are dropped (whatever the row's
+   * version) and destroyed. A kind whose secret the provider answers only once then mints it again
+   * (`ProviderResourceRequest.secretOutputs` lacks it), rather than leave a ref to a secret that no longer works.
+   */
+  async #dropStale(stale: readonly string[]): Promise<void> {
+    if (stale.length === 0 || this.#row.provider_id === null) return;
+    const dropped = await this.sql.transaction(async (tx) => {
+      const current = await this.#lockSecrets(tx);
+      if (current === undefined) return [];
+      const gone = stale.flatMap((name) => (current[name] !== undefined ? [current[name]!] : []));
+      if (gone.length === 0) return [];
+      for (const name of stale) delete current[name];
+      await this.#writeSecrets(tx, current);
+      return gone;
+    });
+    await this.#destroy(dropped);
+  }
+
+  /** The row's sealed secrets, locked, while it still holds this run's provider resource; otherwise undefined. */
+  async #lockSecrets(tx: SqlTx): Promise<Record<string, SecretRef> | undefined> {
+    const { rows } = await tx.query<{ secret_outputs: Record<string, SecretRef> | string | null }>(
+      `SELECT secret_outputs FROM cloud_resources
+        WHERE id = $1 AND provider_id = $2 AND state NOT IN ('deleted', 'released') FOR UPDATE`,
+      [this.#row.id, this.#row.provider_id],
+    );
+    return rows.length === 0 ? undefined : { ...json(rows[0]!.secret_outputs) };
+  }
+
+  async #writeSecrets(tx: SqlTx, secrets: Record<string, SecretRef>): Promise<void> {
+    await tx.query(
+      `UPDATE cloud_resources SET secret_outputs = $2::jsonb, updated_at = compute_now() WHERE id = $1`,
+      [this.#row.id, JSON.stringify(secrets)],
+    );
+    this.#row.secret_outputs = secrets;
   }
 
   async #destroy(refs: readonly SecretRef[]): Promise<void> {
@@ -563,6 +654,10 @@ class ResourceWorker {
     try {
       sealed = await this.#seal(kind, result.secretOutputs);
     } catch (error) {
+      if (error instanceof SealFailed) {
+        await this.#destroy(error.created);
+        await this.#dropStale(error.stale);
+      }
       await this.#set({ state: 'error', message: text(error) });
       return this.#next();
     }
@@ -583,7 +678,12 @@ class ResourceWorker {
       // Ready on the spec this run ensured (the write is guarded by its version): a kept shrink is returned.
       ...(ready && !observe ? settleOf(kind, row.spec) : {}),
     });
-    await this.#destroy(written ? sealed.superseded : sealed.created);
+    if (written || sealed.created.length === 0) await this.#destroy(sealed.superseded);
+    else {
+      // The write missed (the row changed meanwhile): the new secrets are kept anyway, never destroyed unsealed.
+      const replaced = await this.#keepSealed(sealed);
+      await this.#destroy(replaced ?? sealed.created);
+    }
     return this.#next();
   }
 

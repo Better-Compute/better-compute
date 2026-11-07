@@ -910,6 +910,12 @@ export interface ProviderResourceRequest {
    * a spec network missing here: a bare id is never trusted.
    */
   networks?: Readonly<Record<string, string>>;
+  /**
+   * With `id`: the names of the secret outputs the caller holds sealed for the resource. A kind whose secret the
+   * provider answers only once (on create or a regenerate) mints it again when its name is missing here (a seal that
+   * failed), so no resource is left with no usable secret. Absent: the caller does not say, and nothing is minted.
+   */
+  secretOutputs?: readonly string[];
 }
 
 /** (cloud-resources) A resource the account can see, managed by better-compute or not. */

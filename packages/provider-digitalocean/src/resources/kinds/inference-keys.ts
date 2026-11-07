@@ -125,20 +125,33 @@ export function inferenceKeyKind(endpoint: string = defaultInferenceEndpoint): D
     name: string,
     context: CallContext,
   ): Promise<ProviderResourceState> {
-    // The secret first, the name (the applied rotation) after: when either answer is lost, the name still says the
-    // rotation is behind, so the next run regenerates again and no secret that was never sealed stays live.
+    // The secret first, the name (the applied rotation) after. A lost regenerate answer leaves the name behind, so the
+    // next run regenerates again and no secret that was never sealed stays live. Once the new secret is in hand it is
+    // always returned, to be sealed: a failed rename (DigitalOcean may have applied it and lost the answer) answers
+    // `updating` with the rotation the name had, so the next run reads the name again and renames (or regenerates
+    // and renames) until it is applied; the secret is never dropped while the old one already stopped working.
     const reply = await env.client.request<{ api_key_info: DoModelKey }>(
       'PUT',
       `${path(key.uuid)}/regenerate`,
       { signal: context.signal, budget: 'mutate' },
     );
+    const secret = reply.api_key_info.secret_key;
     if (key.name !== name)
-      await env.client.request('PUT', path(key.uuid), {
-        body: { name },
-        signal: context.signal,
-        budget: 'mutate',
-      });
-    return state({ ...reply.api_key_info, name }, endpoint, reply.api_key_info.secret_key);
+      try {
+        await env.client.request('PUT', path(key.uuid), {
+          body: { name },
+          signal: context.signal,
+          budget: 'mutate',
+        });
+      } catch (error) {
+        context.log?.warn('digitalocean: a model access key was regenerated but its rename failed', {
+          key: key.uuid,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        const behind = state({ ...reply.api_key_info, name: key.name }, endpoint, secret);
+        return { ...behind, state: 'updating' };
+      }
+    return state({ ...reply.api_key_info, name }, endpoint, secret);
   }
 
   return {
@@ -175,7 +188,10 @@ export function inferenceKeyKind(endpoint: string = defaultInferenceEndpoint): D
             message: `Model access key ${request.id} is gone at DigitalOcean`,
           };
         assertOwned(env, key);
-        if (parse(key.name)?.rotation === wanted.rotation) return state(key, endpoint);
+        // The applied rotation, and a key the caller holds sealed: nothing to do. A sealed key that is missing (its
+        // seal failed, so the secret DigitalOcean answered is lost) is minted again: the old one stops working.
+        const sealed = request.secretOutputs === undefined || request.secretOutputs.includes('key');
+        if (parse(key.name)?.rotation === wanted.rotation && sealed) return state(key, endpoint);
         return regenerate(env, key, name, context);
       }
       const existing = await byName(env, request.name, context.signal);

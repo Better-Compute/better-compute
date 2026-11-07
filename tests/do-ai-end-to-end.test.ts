@@ -21,9 +21,20 @@ async function world(gpuQuota = 2, config: Record<string, unknown> = {}) {
   emu.validTokens = new Set(['root-do-token', 'acme-do-token']);
   // A path whose next POST DigitalOcean carries out but whose answer never comes back (a timeout after it accepted).
   const loseAnswer = { path: undefined as RegExp | undefined };
+  // Once: runs after DigitalOcean answered a request to this path, before the provider reads the answer.
+  const afterAnswer = {
+    path: undefined as RegExp | undefined,
+    fn: undefined as (() => Promise<void>) | undefined,
+  };
   const fetch: typeof emu.fetch = async (input, init) => {
     const answer = await emu.fetch(input, init);
     const url = new URL(input instanceof Request ? input.url : String(input));
+    if (afterAnswer.path?.test(url.pathname)) {
+      const fn = afterAnswer.fn;
+      afterAnswer.path = undefined;
+      afterAnswer.fn = undefined;
+      await fn?.();
+    }
     if (loseAnswer.path?.test(url.pathname) && (init?.method ?? 'GET') === 'POST') {
       loseAnswer.path = undefined;
       throw new TypeError('fetch failed: the connection was reset');
@@ -139,6 +150,7 @@ async function world(gpuQuota = 2, config: Record<string, unknown> = {}) {
     until,
     gpusUsed,
     loseAnswer,
+    afterAnswer,
   };
 }
 
@@ -311,6 +323,47 @@ describe('DigitalOcean Dedicated Inference through cloudResources', () => {
     await w.api.cloudResources.delete(w.acme, { tenantId: w.acmeTenant, resourceId: created.id });
     await w.until(created.id, 'deleted');
     expect(w.emu.state.modelKeys.size).toBe(0);
+  });
+
+  it('a key rotated while its description changes keeps the one secret DigitalOcean answered', async () => {
+    const w = await world(0);
+    const ownPoolId = await w.ownPool();
+    const created = await w.api.cloudResources.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: ownPoolId,
+      kind: 'do.inference-key',
+      name: 'race-key',
+      spec: {},
+      idempotencyKey: 'race-key',
+    });
+    await w.until(created.id, 'ready');
+    const ready = await w.get(created.id);
+    const atDo = w.emu.state.modelKeys.get(ready.providerId)!;
+    const secrets = w.fixture.compute.context.secrets!;
+    await w.api.cloudResources.update(w.acme, {
+      tenantId: w.acmeTenant,
+      resourceId: created.id,
+      spec: { rotation: 1 },
+    });
+    // A description-only update lands after DigitalOcean regenerated the key, before the run writes its answer.
+    w.afterAnswer.path = /\/regenerate$/;
+    w.afterAnswer.fn = async () => {
+      await w.api.cloudResources.update(w.acme, {
+        tenantId: w.acmeTenant,
+        resourceId: created.id,
+        description: 'meanwhile',
+      });
+    };
+    await w.until(created.id, 'ready');
+    const rotated = await w.get(created.id);
+    expect(rotated.description).toBe('meanwhile');
+    expect(atDo.name).toMatch(/-r1-bc/);
+    // Regenerated once, and the sealed key is the live one.
+    expect(w.emu.requests.filter((r) => r.url.pathname.endsWith('/regenerate'))).toHaveLength(1);
+    expect(await secrets.resolve(rotated.secretOutputs.key, { tenantId: w.acmeTenant })).toBe(
+      atDo._secret,
+    );
+    await expect(secrets.resolve(ready.secretOutputs.key)).rejects.toBeDefined();
   });
 });
 

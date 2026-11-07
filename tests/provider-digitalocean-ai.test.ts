@@ -413,6 +413,56 @@ describe('do.inference-key (a model access key)', () => {
     expect(mutations(emu, 'PUT', /api_keys/)).toHaveLength(puts);
   });
 
+  it('a key the caller holds no sealed secret for is minted again; one it holds is left alone', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const created = await resources.ensure(request(), call());
+    const first = secretOf(emu, created.id);
+    const held = await resources.ensure(
+      request({ id: created.id, secretOutputs: ['key'] }),
+      call(),
+    );
+    expect(held.secretOutputs).toBeUndefined();
+    expect(mutations(emu, 'PUT', /api_keys/)).toEqual([]);
+    // Its seal failed: the secret DigitalOcean answered is lost, so the key is regenerated and the new one returned.
+    const minted = await resources.ensure(request({ id: created.id, secretOutputs: [] }), call());
+    expect(minted.state).toBe('ready');
+    expect(minted.secretOutputs?.key).toBe(secretOf(emu, created.id));
+    expect(minted.secretOutputs?.key).not.toBe(first);
+    expect(emu.state.modelKeys.get(created.id)!.name).toBe(`bc-r-key-r0-bc${hash}`);
+  });
+
+  it('a rename whose answer is lost after DigitalOcean applied it still returns the new secret', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const created = await resources.ensure(request(), call());
+    // The rename is applied, then its answer is lost (a 5xx after commit).
+    emu.beforeAction('PUT /gen-ai/models/api_keys/*', (context) => {
+      emu.state.modelKeys.get(decodeURIComponent(context.match[0]!.split('/').pop()!))!.name =
+        context.body!.name;
+    });
+    emu.failNext({ method: 'PUT', path: /^\/gen-ai\/models\/api_keys\/[^/]+$/ }, 500, {
+      id: 'server_error',
+      message: 'Server Error',
+    });
+    const rotated = await resources.ensure(
+      request({ id: created.id, spec: { rotation: 1 }, secretOutputs: ['key'] }),
+      call(),
+    );
+    expect(rotated.state).toBe('updating');
+    expect(rotated.spec).toEqual({ rotation: 0 });
+    expect(rotated.secretOutputs?.key).toBe(secretOf(emu, created.id));
+    expect(emu.state.modelKeys.get(created.id)!.name).toBe(`bc-r-key-r1-bc${hash}`);
+    // The next run reads the applied name and stops: the sealed secret is the live one.
+    const puts = mutations(emu, 'PUT', /api_keys/).length;
+    const settled = await resources.ensure(
+      request({ id: created.id, spec: { rotation: 1 }, secretOutputs: ['key'] }),
+      call(),
+    );
+    expect(settled.state).toBe('ready');
+    expect(mutations(emu, 'PUT', /api_keys/)).toHaveLength(puts);
+  });
+
   it('delete and discover leave a key made by hand or by another deployment alone', async () => {
     const emu = emulator();
     const { resources } = await build(emu);
