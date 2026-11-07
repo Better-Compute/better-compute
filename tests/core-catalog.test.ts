@@ -49,6 +49,8 @@ const planActions: Record<string, string[]> = {
     ...a('sandboxes', 'read', 'manage'),
     ...a('networks', 'read'),
     ...a('kubernetes', 'read'),
+    ...a('volumes', 'read'),
+    ...a('addresses', 'read'),
     ...a('batches', 'read', 'create', 'approve'),
   ],
   'compute-project': [...a('projects', 'read', 'manage'), ...a('usage', 'read')],
@@ -88,6 +90,9 @@ const planActions: Record<string, string[]> = {
   'compute-sandbox-volume': a('sandboxes', 'read', 'manage'),
   'compute-network': a('networks', 'create', 'read', 'update', 'delete'),
   'compute-kubernetes-cluster': a('kubernetes', 'create', 'read', 'update', 'delete', 'connect'),
+  'compute-provider-volume': a('volumes', 'read', 'manage'),
+  'compute-provider-snapshot': a('volumes', 'read', 'manage'),
+  'compute-provider-address': a('addresses', 'read', 'manage'),
 };
 
 describe('resource types (§12.3)', () => {
@@ -108,6 +113,9 @@ describe('resource types (§12.3)', () => {
       'compute-sandbox-volume': 'compute-pool',
       'compute-network': 'compute-tenant',
       'compute-kubernetes-cluster': 'compute-tenant',
+      'compute-provider-volume': 'compute-tenant',
+      'compute-provider-snapshot': 'compute-tenant',
+      'compute-provider-address': 'compute-tenant',
     });
     expect(types['compute-project']?.relations).toEqual(['member', 'admin']);
     expect(types['compute-pool']?.relations).toEqual(['viewer', 'user', 'operator', 'admin']);
@@ -398,6 +406,9 @@ describe('apiSurface (§9.2)', () => {
         'sandboxTemplates.list',
         'sandboxSnapshots.list',
         'networks.list',
+        'providerVolumes.list',
+        'providerSnapshots.list',
+        'providerAddresses.list',
         'kubernetesClusters.list',
       ],
     );

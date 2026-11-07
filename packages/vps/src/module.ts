@@ -357,6 +357,61 @@ import {
   type FilesystemView,
 } from './filesystems.js';
 import {
+  attachProviderVolume,
+  assignProviderAddress,
+  clearStagedProviderAddress,
+  clearStagedProviderVolume,
+  createProviderAddress,
+  createProviderVolume,
+  deleteProviderAddress,
+  deleteProviderSnapshot,
+  deleteProviderVolume,
+  detachProviderVolume,
+  getProviderAddress,
+  getProviderSnapshot,
+  getProviderVolume,
+  listProviderAddresses,
+  listProviderSnapshots,
+  listProviderVolumes,
+  parseAssignProviderAddress,
+  parseAttachProviderVolume,
+  parseCreateProviderAddress,
+  parseCreateProviderVolume,
+  parseListProviderAddresses,
+  parseListProviderSnapshots,
+  parseListProviderVolumes,
+  parseProviderAddressRef,
+  parseProviderSnapshotRef,
+  parseProviderVolumeRef,
+  parseResizeProviderVolume,
+  parseRestoreProviderSnapshot,
+  parseSnapshotProviderVolume,
+  prepareCreateProviderAddress,
+  prepareCreateProviderVolume,
+  providerResourceSchemas,
+  providerResourcesReconciler,
+  resizeProviderVolume,
+  restoreProviderSnapshot,
+  snapshotProviderVolume,
+  unassignProviderAddress,
+  type AssignProviderAddressInput,
+  type AttachProviderVolumeInput,
+  type CreateProviderAddressInput,
+  type CreateProviderVolumeInput,
+  type ListProviderAddressesInput,
+  type ListProviderSnapshotsInput,
+  type ListProviderVolumesInput,
+  type ProviderAddressRef,
+  type ProviderAddressView,
+  type ProviderSnapshotRef,
+  type ProviderSnapshotView,
+  type ProviderVolumeRef,
+  type ProviderVolumeView,
+  type ResizeProviderVolumeInput,
+  type RestoreProviderSnapshotInput,
+  type SnapshotProviderVolumeInput,
+} from './provider-resources.js';
+import {
   deleteSnapshot,
   getSnapshot,
   instanceSnapshotKind,
@@ -587,6 +642,33 @@ export type VpsApi = {
     get: MethodDefinition<FilesystemRef, FilesystemView>;
     delete: MethodDefinition<FilesystemRef, FilesystemView>;
   };
+  /** (DO P2) Tenant block volumes on a provider account (provider-resources.ts). */
+  providerVolumes: {
+    create: MethodDefinition<CreateProviderVolumeInput, ProviderVolumeView>;
+    list: MethodDefinition<ListProviderVolumesInput, { items: ProviderVolumeView[] }>;
+    get: MethodDefinition<ProviderVolumeRef, ProviderVolumeView>;
+    attach: MethodDefinition<AttachProviderVolumeInput, ProviderVolumeView>;
+    detach: MethodDefinition<ProviderVolumeRef, ProviderVolumeView>;
+    resize: MethodDefinition<ResizeProviderVolumeInput, ProviderVolumeView>;
+    snapshot: MethodDefinition<SnapshotProviderVolumeInput, ProviderSnapshotView>;
+    delete: MethodDefinition<ProviderVolumeRef, ProviderVolumeView>;
+  };
+  /** (DO P2) Snapshots of provider volumes; restore makes a new volume. */
+  providerSnapshots: {
+    list: MethodDefinition<ListProviderSnapshotsInput, { items: ProviderSnapshotView[] }>;
+    get: MethodDefinition<ProviderSnapshotRef, ProviderSnapshotView>;
+    delete: MethodDefinition<ProviderSnapshotRef, ProviderSnapshotView>;
+    restore: MethodDefinition<RestoreProviderSnapshotInput, ProviderVolumeView>;
+  };
+  /** (DO P2) Reserved public addresses on a provider account. */
+  providerAddresses: {
+    create: MethodDefinition<CreateProviderAddressInput, ProviderAddressView>;
+    list: MethodDefinition<ListProviderAddressesInput, { items: ProviderAddressView[] }>;
+    get: MethodDefinition<ProviderAddressRef, ProviderAddressView>;
+    assign: MethodDefinition<AssignProviderAddressInput, ProviderAddressView>;
+    unassign: MethodDefinition<ProviderAddressRef, ProviderAddressView>;
+    delete: MethodDefinition<ProviderAddressRef, ProviderAddressView>;
+  };
 };
 
 function tenantResource<I extends { tenantId: string }>(input: I) {
@@ -652,6 +734,15 @@ function volumeResource<I extends { volumeId: string }>(input: I) {
 }
 function networkResource<I extends { networkId: string }>(input: I) {
   return { type: 'network', id: input.networkId };
+}
+function providerVolumeResource<I extends { volumeId: string }>(input: I) {
+  return { type: 'provider-volume', id: input.volumeId };
+}
+function providerSnapshotResource<I extends { snapshotId: string }>(input: I) {
+  return { type: 'provider-snapshot', id: input.snapshotId };
+}
+function providerAddressResource<I extends { addressId: string }>(input: I) {
+  return { type: 'provider-address', id: input.addressId };
 }
 
 function parsePool(raw: unknown): PoolInput {
@@ -1017,6 +1108,32 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         resource: { type: `${prefix}sandbox-volume`, id: volume.volumeId },
       });
     return decided;
+  };
+  /**
+   * (DO P2) A provider volume attached to an instance, or an address assigned to one, reaches that instance's guest:
+   * besides the decision on the volume or address, the caller must be able to change the instance
+   * (`compute:instances:update` on it), decided on its own credential with no transaction open. Without an instance
+   * nothing more is decided.
+   */
+  const targetInstanceCheck = async (
+    context: MethodContext,
+    tenantId: string,
+    instanceId: string | undefined,
+  ): Promise<void> => {
+    if (instanceId === undefined) return;
+    if (!context.credential)
+      throw new ComputeError(
+        'ACCESS_DENIED',
+        'Attaching a volume or assigning an address to an instance is decided on the caller’s own credential',
+        undefined,
+        { reason: 'credential-required' },
+      );
+    const prefix = context.typePrefix ?? typePrefix;
+    await context.iam.require(context.credential, {
+      tenantId,
+      action: 'compute:instances:update',
+      resource: { type: `${prefix}instance`, id: instanceId },
+    });
   };
   /**
    * An update that changes what the guest runs (image, flavor, user data, env, network) hands the
@@ -2072,6 +2189,187 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         handler: (context, input) => deleteFilesystem(networkDeps(context), context.sql, input),
       }),
     },
+    providerVolumes: {
+      create: defineMethod({
+        action: 'compute:volumes:manage',
+        kind: 'mutation',
+        // The envelope decides on the volume `prepare` returns.
+        resource: (input: CreateProviderVolumeInput) => ({
+          type: 'provider-volume',
+          id: `draft:${input.idempotencyKey}`,
+        }),
+        validate: describedBy(providerResourceSchemas.createVolume, parseCreateProviderVolume),
+        admission: {
+          prepare: (context, input, tx) =>
+            prepareCreateProviderVolume(networkDeps(context), context, input, tx),
+          denied: (context, input, tx) => clearStagedProviderVolume(context, input, tx),
+          // Transaction 2 threw (QUOTA_EXCEEDED, CONFLICT): the projection row staged for it goes.
+          abandoned: (context, input, tx) => clearStagedProviderVolume(context, input, tx),
+          // Created attached: the instance is decided too.
+          check: (context, input) => targetInstanceCheck(context, input.tenantId, input.instanceId),
+        },
+        handler: (context, input) => createProviderVolume(networkDeps(context), context, input),
+      }),
+      list: defineMethod({
+        action: 'compute:volumes:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(providerResourceSchemas.listVolumes, parseListProviderVolumes),
+        handler: (context, input) => listProviderVolumes(context.sql, input),
+      }),
+      get: defineMethod({
+        action: 'compute:volumes:read',
+        kind: 'read',
+        resource: providerVolumeResource,
+        validate: describedBy(providerResourceSchemas.volume, parseProviderVolumeRef),
+        handler: (context, input) => getProviderVolume(context.sql, input),
+      }),
+      attach: defineMethod({
+        action: 'compute:volumes:manage',
+        kind: 'mutation',
+        resource: providerVolumeResource,
+        validate: describedBy(providerResourceSchemas.attachVolume, parseAttachProviderVolume),
+        admission: {
+          prepare: async (_context, input) => ({
+            status: 'decide',
+            resource: providerVolumeResource(input),
+          }),
+          check: (context, input) => targetInstanceCheck(context, input.tenantId, input.instanceId),
+        },
+        handler: (context, input) =>
+          attachProviderVolume(networkDeps(context), context.sql, input),
+      }),
+      detach: defineMethod({
+        action: 'compute:volumes:manage',
+        kind: 'mutation',
+        resource: providerVolumeResource,
+        validate: describedBy(providerResourceSchemas.volume, parseProviderVolumeRef),
+        handler: (context, input) =>
+          detachProviderVolume(networkDeps(context), context.sql, input),
+      }),
+      resize: defineMethod({
+        action: 'compute:volumes:manage',
+        kind: 'mutation',
+        resource: providerVolumeResource,
+        validate: describedBy(providerResourceSchemas.resizeVolume, parseResizeProviderVolume),
+        handler: (context, input) =>
+          resizeProviderVolume(networkDeps(context), context.sql, input),
+      }),
+      snapshot: defineMethod({
+        action: 'compute:volumes:manage',
+        kind: 'mutation',
+        resource: providerVolumeResource,
+        validate: describedBy(providerResourceSchemas.snapshotVolume, parseSnapshotProviderVolume),
+        handler: (context, input) => snapshotProviderVolume(networkDeps(context), context, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:volumes:manage',
+        kind: 'mutation',
+        resource: providerVolumeResource,
+        validate: describedBy(providerResourceSchemas.volume, parseProviderVolumeRef),
+        handler: (context, input) =>
+          deleteProviderVolume(networkDeps(context), context.sql, input),
+      }),
+    },
+    providerSnapshots: {
+      list: defineMethod({
+        action: 'compute:volumes:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(providerResourceSchemas.listSnapshots, parseListProviderSnapshots),
+        handler: (context, input) => listProviderSnapshots(context.sql, input),
+      }),
+      get: defineMethod({
+        action: 'compute:volumes:read',
+        kind: 'read',
+        resource: providerSnapshotResource,
+        validate: describedBy(providerResourceSchemas.snapshot, parseProviderSnapshotRef),
+        handler: (context, input) => getProviderSnapshot(context.sql, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:volumes:manage',
+        kind: 'mutation',
+        resource: providerSnapshotResource,
+        validate: describedBy(providerResourceSchemas.snapshot, parseProviderSnapshotRef),
+        handler: (context, input) =>
+          deleteProviderSnapshot(networkDeps(context), context.sql, input),
+      }),
+      // Decided on the snapshot: the new volume is in the snapshot's pool, projected by the handler.
+      restore: defineMethod({
+        action: 'compute:volumes:manage',
+        kind: 'mutation',
+        resource: providerSnapshotResource,
+        validate: describedBy(
+          providerResourceSchemas.restoreSnapshot,
+          parseRestoreProviderSnapshot,
+        ),
+        handler: (context, input) => restoreProviderSnapshot(networkDeps(context), context, input),
+      }),
+    },
+    providerAddresses: {
+      create: defineMethod({
+        action: 'compute:addresses:manage',
+        kind: 'mutation',
+        // The envelope decides on the address `prepare` returns.
+        resource: (input: CreateProviderAddressInput) => ({
+          type: 'provider-address',
+          id: `draft:${input.idempotencyKey}`,
+        }),
+        validate: describedBy(providerResourceSchemas.createAddress, parseCreateProviderAddress),
+        admission: {
+          prepare: (context, input, tx) =>
+            prepareCreateProviderAddress(networkDeps(context), context, input, tx),
+          denied: (context, input, tx) => clearStagedProviderAddress(context, input, tx),
+          abandoned: (context, input, tx) => clearStagedProviderAddress(context, input, tx),
+        },
+        handler: (context, input) => createProviderAddress(networkDeps(context), context, input),
+      }),
+      list: defineMethod({
+        action: 'compute:addresses:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(providerResourceSchemas.listAddresses, parseListProviderAddresses),
+        handler: (context, input) => listProviderAddresses(context.sql, input),
+      }),
+      get: defineMethod({
+        action: 'compute:addresses:read',
+        kind: 'read',
+        resource: providerAddressResource,
+        validate: describedBy(providerResourceSchemas.address, parseProviderAddressRef),
+        handler: (context, input) => getProviderAddress(context.sql, input),
+      }),
+      assign: defineMethod({
+        action: 'compute:addresses:manage',
+        kind: 'mutation',
+        resource: providerAddressResource,
+        validate: describedBy(providerResourceSchemas.assignAddress, parseAssignProviderAddress),
+        admission: {
+          prepare: async (_context, input) => ({
+            status: 'decide',
+            resource: providerAddressResource(input),
+          }),
+          check: (context, input) => targetInstanceCheck(context, input.tenantId, input.instanceId),
+        },
+        handler: (context, input) =>
+          assignProviderAddress(networkDeps(context), context.sql, input),
+      }),
+      unassign: defineMethod({
+        action: 'compute:addresses:manage',
+        kind: 'mutation',
+        resource: providerAddressResource,
+        validate: describedBy(providerResourceSchemas.address, parseProviderAddressRef),
+        handler: (context, input) =>
+          unassignProviderAddress(networkDeps(context), context.sql, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:addresses:manage',
+        kind: 'mutation',
+        resource: providerAddressResource,
+        validate: describedBy(providerResourceSchemas.address, parseProviderAddressRef),
+        handler: (context, input) =>
+          deleteProviderAddress(networkDeps(context), context.sql, input),
+      }),
+    },
   });
 
   return defineModule({
@@ -2248,6 +2546,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       networksReconciler(networkDeps),
       // (AWS A10) Shared filesystems converged through the provider once their network is.
       filesystemsReconciler(networkDeps),
+      // (DO P2) Provider volumes, their snapshots and reserved addresses, converged through the provider.
+      providerResourcesReconciler(networkDeps),
     ],
     selfCheck: async (context) => [
       ...(await vpsSelfCheck(context.sql, runtimeTable, runtimes[0]!)),

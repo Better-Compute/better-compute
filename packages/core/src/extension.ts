@@ -1070,12 +1070,28 @@ export interface ProviderAddressSpec {
    * (DigitalOcean) finds the address by it; without it, it reserves a new one.
    */
   id?: string;
+  /**
+   * With `id`: the `fingerprint` output the reserve returned. An address at that id whose fingerprint differs (the
+   * address was released and handed out again) is `INVALID_STATE` (reason `notManaged`), never taken over.
+   */
+  fingerprint?: string;
+}
+
+/**
+ * (provider addresses) What vps recorded about an address it reserved, for a provider whose addresses carry no tag:
+ * an address that does not match is `INVALID_STATE` (reason `notManaged`) and is never released.
+ */
+export interface ProviderAddressExpectation {
+  region?: string;
+  /** The `fingerprint` output the reserve returned. */
+  fingerprint?: string;
 }
 
 /**
  * (provider addresses) Reserved public addresses on a provider account, idempotent and non-blocking like
- * `ProviderVolumes`. Outputs: `address`, `family`, `region` and `assignedTo` (the machine id; absent while
- * unassigned). `assignAddress` and `unassignAddress` return the assignment's state (`pending`/`ready`,
+ * `ProviderVolumes`. Outputs: `address`, `family`, `region`, `assignedTo` (the machine id; absent while
+ * unassigned) and, where the provider has one, `fingerprint`: what tells this reservation apart from a later one at
+ * the same address (DigitalOcean: a reserved IPv6's reservation time; a reserved IPv4 has none). `assignAddress` and `unassignAddress` return the assignment's state (`pending`/`ready`,
  * `deleting`/`deleted`). An address assigned to another machine is `CONFLICT` (never moved silently); an assigned
  * address is not deleted (`INVALID_STATE`); a machine in another region is `INVALID_INPUT`.
  */
@@ -1090,7 +1106,12 @@ export interface ProviderAddresses {
     instanceId?: string,
   ): Promise<ProviderResourceState>;
   unassignAddress(addressId: string, context: CallContext): Promise<ProviderResourceState>;
-  deleteAddress(addressId: string, context: CallContext): Promise<ProviderResourceState>;
+  /** With `expected`, an address that does not match what was recorded is refused (`notManaged`). */
+  deleteAddress(
+    addressId: string,
+    context: CallContext,
+    expected?: ProviderAddressExpectation,
+  ): Promise<ProviderResourceState>;
 }
 
 /**
@@ -1348,6 +1369,17 @@ export interface ProviderEventBatch {
   ack(): Promise<void>;
 }
 
+/**
+ * (P2) What a machine's delete may take down with it. Optional: a provider that cannot delete associated resources in
+ * the same call ignores it, and the caller deletes them after the machine (so naming one is never required for it to
+ * go). A provider names only resources it would delete on its own (ours, attached to that machine): a tenant's own
+ * volume attached by hand always survives.
+ */
+export interface ProviderDeleteOptions {
+  /** Provider ids (as `ProviderVolumes` returns them) of volumes attached to the machine, to delete with it. */
+  volumes?: readonly string[];
+}
+
 /** One configured provider account's client (§5.4). */
 export interface ProviderImpl {
   listOffers(query: OfferQuery): Promise<Offer[]>;
@@ -1382,7 +1414,7 @@ export interface ProviderImpl {
   ): Promise<ExternalMachine>;
   get(id: string, context: CallContext): Promise<ExternalMachine | undefined>;
   /** A machine that is already gone counts as deleted (`NOT_FOUND` ⇒ success). */
-  delete(id: string, context: CallContext): Promise<void>;
+  delete(id: string, context: CallContext, options?: ProviderDeleteOptions): Promise<void>;
   /**
    * `agent: 'bcd'` pools only: delivers a single-use `provisioned` join token through rescue or
    * installimage, never through tenant-readable user-data. The installed OS runs

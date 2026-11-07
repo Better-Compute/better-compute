@@ -130,7 +130,10 @@ export type UsageSourceKind =
   | 'snapshot'
   | 'cost'
   /** A managed Kubernetes cluster (`@better-compute/kubernetes`, whose migration adds it to the CHECK). */
-  | 'kubernetes';
+  | 'kubernetes'
+  /** (DO P2) A provider volume or reserved address (vps provider-resource-usage.ts; core/0044 adds both). */
+  | 'volume'
+  | 'address';
 
 /** The idempotency key of one source window (D2): `cmp:<kind>:<id>:<windowStartMs>[:<meter>]`. */
 export function sourceUsageKey(

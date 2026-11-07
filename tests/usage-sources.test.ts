@@ -449,7 +449,7 @@ describe('meterSource', () => {
       db.query(
         `INSERT INTO usage_windows (idempotency_key, source_kind, source_id, tenant_id, meter, quantity, window_start,
                                     window_end)
-         VALUES ('cmp:address:x:1', 'address', 'x', 'acme', 'm', 1, $1, $2)`,
+         VALUES ('cmp:bogus:x:1', 'bogus', 'x', 'acme', 'm', 1, $1, $2)`,
         [iso(T0), iso(T0 + HOUR)],
       ),
     ).rejects.toThrow(/usage_windows_source_kind_ck/);

@@ -7,6 +7,7 @@ import {
   type OfferQuery,
   type PowerAction,
   type ProviderContext,
+  type ProviderDeleteOptions,
   type ProviderImpl,
 } from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
@@ -25,7 +26,9 @@ import {
   parseOfferId,
   tagFor,
 } from '../ids.js';
+import { DoAddresses } from '../edge/addresses.js';
 import { DoNetworks } from '../networks/index.js';
+import { DoVolumes } from '../storage/volumes.js';
 import { networkNamer, vpcForNetwork } from '../networks/vpcs.js';
 import { poolMembers } from './autoscale.js';
 import { ensureSshKeys } from './keys.js';
@@ -174,6 +177,10 @@ export class DoCompute implements ProviderImpl {
   protected readonly deploymentTag: string;
   /** Tenant networks: VPCs, Cloud Firewalls and Droplet tags. */
   readonly networks: DoNetworks;
+  /** Block Storage volumes and their snapshots (P2). */
+  readonly volumes: DoVolumes;
+  /** Reserved IPv4 and IPv6 addresses (P2). */
+  readonly addresses: DoAddresses;
 
   constructor(
     config: DoConfig,
@@ -187,6 +194,8 @@ export class DoCompute implements ProviderImpl {
     this.client = client;
     this.deploymentTag = deploymentTag(options.deployment);
     this.networks = new DoNetworks(client, config, options.deployment);
+    this.volumes = new DoVolumes(client, config, options.deployment, context.log);
+    this.addresses = new DoAddresses(client, config, options.deployment, context.log);
   }
 
   /** Whether better-compute may delete the Droplet: managed, and in this deployment (R3). */
@@ -476,7 +485,12 @@ export class DoCompute implements ProviderImpl {
     return networkNamer(this.client, ctx.signal, this.context.log)(toMachine(droplet));
   }
 
-  async delete(id: string, ctx: CallContext): Promise<void> {
+  /**
+   * Deletes a Droplet of ours. With `options.volumes` (P2) it is one selective destroy that also deletes those of the
+   * named volumes that are ours and attached to it (DO-D16: never a tag-scoped bulk call, never a tenant's own
+   * volume); naming none of ours is a plain delete. Every other volume is detached by DO and survives.
+   */
+  async delete(id: string, ctx: CallContext, options?: ProviderDeleteOptions): Promise<void> {
     const droplet = await this.droplet(id, ctx.signal);
     if (!droplet) return;
     if (!this.owned(droplet))
@@ -485,7 +499,22 @@ export class DoCompute implements ProviderImpl {
         `Droplet ${droplet.id} is not managed by this better-compute deployment and is never deleted by it`,
         'notManaged',
       );
-    await this.destroy(droplet.id, ctx.signal);
+    const volumes = options?.volumes?.length
+      ? await this.volumes.deletableWith(options.volumes, droplet.id, ctx.signal)
+      : [];
+    if (volumes.length === 0) {
+      await this.destroy(droplet.id, ctx.signal);
+      return;
+    }
+    try {
+      await this.client.request(
+        'DELETE',
+        `/droplets/${droplet.id}/destroy_with_associated_resources/selective`,
+        { body: { volumes }, signal: ctx.signal, budget: 'mutate' },
+      );
+    } catch (error) {
+      if (!isComputeError(error, 'NOT_FOUND')) throw error;
+    }
   }
 
   // ------------------------------------------------------------------- power, reinstall, list

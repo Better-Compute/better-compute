@@ -22,7 +22,8 @@ import { seedSshKey } from './support/do-emulator/keys.js';
 // tests use inline fakes, this one proves the two packages agree). One root DO account, its token
 // in the fixture's sealed secret store, backs a provider pool offered to acme; discovery runs every
 // minute and auto-attaches machines tagged for a tenant and its pool. Covers create/stop/delete,
-// attach/detach, auto-attach, a tenant network, and a create DO accepts and then fails.
+// attach/detach, auto-attach, a tenant network, a create DO accepts and then fails, and (P2) Block
+// Storage volumes, snapshots and Reserved IPs on an instance through its delete.
 
 afterEach(closeFixtures);
 // The provider's request budgets are per token and process-wide.
@@ -107,7 +108,7 @@ async function world(): Promise<World> {
     tenantId: tenants.root.id,
     poolId: pool.id,
     toTenantId: tenants.acme.id,
-    quota: { vcpu: 2000, memoryGiB: 20_000, diskGiB: 10_000, gpu: 64 },
+    quota: { vcpu: 2000, memoryGiB: 20_000, diskGiB: 10_000, gpu: 64, addresses: 4 },
   });
   await api.flavors.create(root, {
     tenantId: tenants.root.id,
@@ -428,5 +429,88 @@ describe('provider-digitalocean through vps, end to end', () => {
     await w.api.instances.delete(w.acme, { tenantId: w.acmeTenant, instanceId: created.id });
     expect(await settle(w, created.id, 'deleted')).toMatchObject({ state: 'deleted' });
     expect(w.emu.state.droplets.has(droplet.id)).toBe(false);
+  });
+
+  it('attaches volumes, snapshots one, assigns a reserved IP, and deletes with the instance (P2)', async () => {
+    const w = await world();
+    const created = await w.api.instances.create(w.acme, createInput(w, { idempotencyKey: 'p2' }));
+    expect(await settle(w, created.id, 'running')).toMatchObject({ state: 'running' });
+    const droplet = dropletOf(w, created.id)!;
+    const tenantId = w.acmeTenant;
+    const volume = (extra: Record<string, unknown>) =>
+      w.api.providerVolumes.create(w.acme, {
+        tenantId,
+        poolId: w.poolId,
+        region: REGION,
+        sizeGiB: 10,
+        instanceId: created.id,
+        ...extra,
+      });
+    const data = await volume({ name: 'data', idempotencyKey: 'v-data' });
+    const scratch = await volume({
+      name: 'scratch',
+      deleteWithInstance: true,
+      idempotencyKey: 'v-scratch',
+    });
+    const ip = await w.api.providerAddresses.create(w.acme, {
+      tenantId,
+      poolId: w.poolId,
+      name: 'ingress',
+      region: REGION,
+      idempotencyKey: 'ip-1',
+    });
+    await w.api.providerAddresses.assign(w.acme, { tenantId, addressId: ip.id, instanceId: created.id });
+    const converge = async (rounds = 8) => {
+      for (let round = 0; round < rounds; round++) await w.tick('vps.provider-resources', 5_000);
+    };
+    await converge();
+
+    const doVolume = (id: string) =>
+      [...w.emu.state.volumes.values()].find((v) => v.name === providerResourceName(id));
+    for (const id of [data.id, scratch.id]) {
+      const view = await w.api.providerVolumes.get(w.acme, { tenantId, volumeId: id });
+      expect(view).toMatchObject({ state: 'ready', attachment: { instanceId: created.id, state: 'ready' } });
+      expect(doVolume(id)).toMatchObject({ droplet_ids: [droplet.id], size_gigabytes: 10 });
+      expect(doVolume(id)!.tags).toEqual(expect.arrayContaining([managed, deployment]));
+    }
+    const reserved = await w.api.providerAddresses.get(w.acme, { tenantId, addressId: ip.id });
+    expect(reserved).toMatchObject({ state: 'ready', assignmentState: 'ready', instanceId: created.id });
+    expect(w.emu.state.reservedIps.get(reserved.address)?.droplet_id).toBe(droplet.id);
+
+    const snapshot = await w.api.providerVolumes.snapshot(w.acme, {
+      tenantId,
+      volumeId: data.id,
+      name: 'data-1',
+      idempotencyKey: 's-1',
+    });
+    await converge(3);
+    expect(
+      await w.api.providerSnapshots.get(w.acme, { tenantId, snapshotId: snapshot.id }),
+    ).toMatchObject({ state: 'ready', sizeGiB: 10 });
+
+    const scratchOnDo = doVolume(scratch.id)!.id;
+    await w.api.instances.delete(w.acme, { tenantId, instanceId: created.id });
+    expect(await settle(w, created.id, 'deleted')).toMatchObject({ state: 'deleted' });
+    // One selective destroy, naming the deleteWithInstance volume only (DO-D16).
+    const destroys = requests(w, 'DELETE', new RegExp(`^/v2/droplets/${droplet.id}`));
+    expect(destroys.map((request) => request.url.pathname)).toEqual([
+      `/v2/droplets/${droplet.id}/destroy_with_associated_resources/selective`,
+    ]);
+    expect(destroys[0]!.body).toEqual({ volumes: [scratchOnDo] });
+    await converge();
+    expect(
+      await w.api.providerVolumes.get(w.acme, { tenantId, volumeId: scratch.id }),
+    ).toMatchObject({ state: 'deleted' });
+    expect(doVolume(scratch.id)).toBeUndefined();
+    const kept = await w.api.providerVolumes.get(w.acme, { tenantId, volumeId: data.id });
+    expect(kept).toMatchObject({ state: 'ready', desiredState: 'present' });
+    expect(kept.attachment).toBeUndefined();
+    expect(doVolume(data.id)).toMatchObject({ droplet_ids: [] });
+    expect(
+      await w.api.providerAddresses.get(w.acme, { tenantId, addressId: ip.id }),
+    ).toMatchObject({ state: 'ready', assignmentState: 'none' });
+    expect(w.emu.state.reservedIps.get(reserved.address)?.droplet_id).toBeUndefined();
+    // No delete of a volume by tag or of a volume vps did not delete.
+    expect(requests(w, 'DELETE', /^\/v2\/volumes/)).toHaveLength(0);
   });
 });

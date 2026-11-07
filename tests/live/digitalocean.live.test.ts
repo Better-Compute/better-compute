@@ -101,10 +101,32 @@ function noteCreate(input: Parameters<typeof fetch>[0], init: RequestInit | unde
   }
 }
 
+/**
+ * The reserved IPs this run reserved. DO gives a reserved IP no name or tag, so the answer to the
+ * reserve is the only place the sweeper can learn it from.
+ */
+const reservedAddresses = new Set<string>();
+
+async function noteReserved(input: Parameters<typeof fetch>[0], response: Response): Promise<void> {
+  try {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (!/^\/v2\/reserved_ip(s|v6)$/.test(url.pathname) || !response.ok) return;
+    const body = (await response.clone().json()) as {
+      reserved_ip?: { ip?: unknown };
+      reserved_ipv6?: { ip?: unknown };
+    };
+    const ip = body.reserved_ip?.ip ?? body.reserved_ipv6?.ip;
+    if (typeof ip === 'string') reservedAddresses.add(ip);
+  } catch {
+    // Not a reserve we can read.
+  }
+}
+
 /** Every request this suite makes (the provider's and the sweeper's) goes through here. */
 const observedFetch: typeof fetch = async (input, init) => {
   noteCreate(input, init);
   const response = await fetch(input, init);
+  if ((init?.method ?? 'GET').toUpperCase() === 'POST') await noteReserved(input, response);
   requests += 1;
   const remaining = Number(response.headers.get('ratelimit-remaining'));
   if (response.headers.get('ratelimit-remaining') !== null && Number.isFinite(remaining))
@@ -185,6 +207,17 @@ interface Vpc {
   id: string;
   name: string;
 }
+interface Volume {
+  id: string;
+  name: string;
+  droplet_ids?: number[];
+  tags?: string[] | null;
+}
+interface Snapshot {
+  id: string;
+  name: string;
+  tags?: string[] | null;
+}
 
 const lower = (tags: readonly string[] | undefined) => (tags ?? []).map((t) => t.toLowerCase());
 
@@ -215,6 +248,26 @@ const runFirewalls = async () =>
   (await listAll<Firewall>('/firewalls', 'firewalls')).filter(isRunFirewall);
 const runVpcs = async () =>
   (await listAll<Vpc>('/vpcs', 'vpcs')).filter((v) => v.name.startsWith(`${prefix}-`));
+
+/** The run's volumes and volume snapshots: those that carry its deployment tag. */
+const runVolumes = async () =>
+  (await listAll<Volume>('/volumes', 'volumes')).filter((v) =>
+    lower(v.tags ?? []).includes(deployTag),
+  );
+const runSnapshots = async () =>
+  (await listAll<Snapshot>('/snapshots?resource_type=volume', 'snapshots')).filter((s) =>
+    lower(s.tags ?? []).includes(deployTag),
+  );
+/** The reserved IPs this run reserved that still exist. */
+async function runAddresses(): Promise<string[]> {
+  const out: string[] = [];
+  for (const ip of reservedAddresses) {
+    const path = ip.includes(':') ? '/reserved_ipv6' : '/reserved_ips';
+    const { status } = await api('GET', `${path}/${encodeURIComponent(ip)}`, [200, 404]);
+    if (status === 200) out.push(ip);
+  }
+  return out;
+}
 
 /** Tags only this run could have made: its deployment and network tags, and any naming its hex. */
 const runTag = (tag: string): boolean => {
@@ -249,7 +302,10 @@ async function deleteIfEmpty(name: string): Promise<void> {
  * rest still runs. Returns what is still there afterwards, and every error met.
  */
 async function sweep(): Promise<{
-  left: Record<'droplets' | 'firewalls' | 'vpcs' | 'tags', string[]>;
+  left: Record<
+    'droplets' | 'firewalls' | 'vpcs' | 'tags' | 'volumes' | 'snapshots' | 'addresses',
+    string[]
+  >;
   errors: string[];
 }> {
   const errors: string[] = [];
@@ -282,6 +338,40 @@ async function sweep(): Promise<{
       120_000,
     ),
   );
+
+  // Deleting a Droplet detaches its volumes and unassigns its reserved IPs, in the background:
+  // each delete is retried for a while.
+  for (const snapshot of (await attempt('list the run snapshots', runSnapshots)) ?? [])
+    await attempt(`delete snapshot ${snapshot.name}`, () =>
+      api('DELETE', `/snapshots/${encodeURIComponent(snapshot.id)}`, [204, 404]),
+    );
+  for (const volume of (await attempt('list the run volumes', runVolumes)) ?? [])
+    await attempt(`delete volume ${volume.name}`, () =>
+      until(
+        `volume ${volume.name} to be deleted`,
+        async () => (await api('DELETE', `/volumes/${volume.id}`, [204, 404, 409, 422])).status,
+        (status) => status === 204 || status === 404,
+        120_000,
+        5_000,
+      ),
+    );
+  for (const ip of (await attempt('list the run reserved IPs', runAddresses)) ?? [])
+    await attempt(`release reserved IP ${ip}`, () =>
+      until(
+        `reserved IP ${ip} to be released`,
+        async () =>
+          (
+            await api(
+              'DELETE',
+              `${ip.includes(':') ? '/reserved_ipv6' : '/reserved_ips'}/${encodeURIComponent(ip)}`,
+              [204, 404, 409, 422],
+            )
+          ).status,
+        (status) => status === 204 || status === 404,
+        120_000,
+        5_000,
+      ),
+    );
 
   for (const firewall of (await attempt('list the run firewalls', runFirewalls)) ?? [])
     await attempt(`delete firewall ${firewall.name}`, () =>
@@ -318,6 +408,9 @@ async function sweep(): Promise<{
     firewalls: ((await attempt('re-list firewalls', runFirewalls)) ?? []).map((f) => f.name),
     vpcs: ((await attempt('re-list VPCs', runVpcs)) ?? []).map((v) => v.name),
     tags: (await attempt('re-list tags', () => runTags(ownTags))) ?? [],
+    volumes: ((await attempt('re-list volumes', runVolumes)) ?? []).map((v) => v.name),
+    snapshots: ((await attempt('re-list snapshots', runSnapshots)) ?? []).map((v) => v.name),
+    addresses: (await attempt('re-list reserved IPs', runAddresses)) ?? [],
   };
   return { left, errors };
 }
@@ -383,6 +476,9 @@ describe.skipIf(!enabled)('provider-digitalocean live', () => {
       image,
       prefix,
       context: { secrets, account },
+      // Volumes and reserved IPs settle in seconds: the smallest volume, polled every 3 s.
+      volumeGiB: 1,
+      settle: { attempts: 60, intervalMs: 3_000 },
       ...(attachable ? { attachable } : {}),
     });
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);

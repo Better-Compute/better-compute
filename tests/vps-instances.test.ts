@@ -470,6 +470,9 @@ describe('vps() API surface', () => {
       'vps/0111_instance_placement',
       'vps/0112_filesystems',
       'vps/0113_purchase_proposals',
+      'vps/0066_provider_volumes',
+      'vps/0067_provider_snapshots',
+      'vps/0068_provider_addresses',
     ]);
     expect(module.requires).toEqual(['capacity']);
     expect(() => vps({ runtimes: [] })).toThrow(ComputeError);

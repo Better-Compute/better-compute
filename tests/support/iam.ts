@@ -77,6 +77,9 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
         ...action('networks', 'read'),
         // Managed Kubernetes: `kubernetesClusters.list` and `versions` are gated on the tenant.
         ...action('kubernetes', 'read'),
+        // (DO P2) Provider volumes, snapshots and addresses: their `list` methods are gated on the tenant.
+        ...action('volumes', 'read'),
+        ...action('addresses', 'read'),
         // §13 destructive-batch quorum (v1.0).
         ...action('batches', 'read', 'create', 'approve'),
       ],
@@ -203,6 +206,33 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
         projectId: 'string',
         mode: 'string',
         location: 'string',
+      },
+    },
+    [`${p}provider-volume`]: {
+      parent: `${p}tenant`,
+      actions: action('volumes', 'read', 'manage'),
+      attributes: { providerAccountId: 'string', poolId: 'string', projectId: 'string', region: 'string' },
+    },
+    [`${p}provider-snapshot`]: {
+      parent: `${p}tenant`,
+      actions: action('volumes', 'read', 'manage'),
+      attributes: {
+        providerAccountId: 'string',
+        poolId: 'string',
+        projectId: 'string',
+        region: 'string',
+        volumeId: 'string',
+      },
+    },
+    [`${p}provider-address`]: {
+      parent: `${p}tenant`,
+      actions: action('addresses', 'read', 'manage'),
+      attributes: {
+        providerAccountId: 'string',
+        poolId: 'string',
+        projectId: 'string',
+        region: 'string',
+        family: 'string',
       },
     },
   };

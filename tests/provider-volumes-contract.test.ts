@@ -20,13 +20,27 @@ const clock = manualClock(Date.UTC(2026, 10, 5, 12));
 const volumeCase = 'volumes (when offered): ensure by name, attach, grow-only resize, delete';
 const snapshotCase = 'volume snapshots (when offered): snapshot by name, delete idempotently';
 const addressCase = 'addresses (when offered): reserve, assign, unassign, delete';
+const conflictCase = 'volumes and addresses (when offered): a second machine is CONFLICT while on the first';
+const regionCase = 'volumes and addresses (when offered): a machine in another region is INVALID_INPUT';
+const ownershipCase = 'volumes and addresses (when offered): a delete refuses what this deployment did not make';
 
 const fail = (code: ConstructorParameters<typeof ComputeError>[0], message: string) =>
   new ComputeError(code, message);
 
-/** A provider with machines, volumes, snapshots and addresses in one region, held in memory. */
-function fakeProvider(options: { strict?: boolean } = {}) {
+/**
+ * A provider with machines, volumes, snapshots and addresses, held in memory: offer `o` makes machines in r1, `o2`
+ * in r2. `strict: false` shrinks volumes and deletes attached ones; `regions: false` attaches and assigns across
+ * regions; `conflicts: false` moves a volume or address attached elsewhere; `ownership: false` deletes a volume or
+ * snapshot it did not make (`vol-foreign`, `snap-foreign`) and releases an address that does not match what was
+ * recorded.
+ */
+function fakeProvider(
+  options: { strict?: boolean; regions?: boolean; conflicts?: boolean; ownership?: boolean } = {},
+) {
   const strict = options.strict ?? true;
+  const regions = options.regions ?? true;
+  const conflicts = options.conflicts ?? true;
+  const ownership = options.ownership ?? true;
   const machines = new Map<string, ExternalMachine>();
   const volumes = new Map<
     string,
@@ -34,6 +48,10 @@ function fakeProvider(options: { strict?: boolean } = {}) {
   >();
   const snapshots = new Map<string, { name: string; volume: string; sizeGiB: number }>();
   const addresses = new Map<string, { region: string; address: string; assignedTo?: string }>();
+  // Made by someone else (another deployment, the account owner): never deleted by this one.
+  volumes.set('vol-foreign', { name: 'theirs', region: 'r1', sizeGiB: 5 });
+  snapshots.set('snap-foreign', { name: 'theirs', volume: 'vol-foreign', sizeGiB: 5 });
+  const foreign = new Set(['vol-foreign', 'snap-foreign']);
   let next = 0;
   const state = (
     id: string,
@@ -75,9 +93,9 @@ function fakeProvider(options: { strict?: boolean } = {}) {
     async attachVolume(id, machineId) {
       const v = volumeOf(id);
       const m = machine(machineId);
-      if (m.region !== v.region) throw fail('INVALID_INPUT', 'another region');
+      if (regions && m.region !== v.region) throw fail('INVALID_INPUT', 'another region');
       if (v.attachedTo === machineId) return state(id, 'ready', volumeOutputs(id));
-      if (v.attachedTo) throw fail('CONFLICT', 'attached elsewhere');
+      if (conflicts && v.attachedTo) throw fail('CONFLICT', 'attached elsewhere');
       v.attachedTo = machineId;
       return state(id, 'pending', volumeOutputs(id));
     },
@@ -97,6 +115,7 @@ function fakeProvider(options: { strict?: boolean } = {}) {
     async deleteVolume(id) {
       const v = volumes.get(id);
       if (!v) return state(id, 'deleted');
+      if (ownership && foreign.has(id)) throw fail('INVALID_STATE', 'not ours');
       if (strict && v.attachedTo) throw fail('INVALID_STATE', 'attached');
       volumes.delete(id);
       return state(id, 'deleting');
@@ -114,6 +133,7 @@ function fakeProvider(options: { strict?: boolean } = {}) {
       return s ? state(id, 'ready', { volume: s.volume, sizeGiB: String(s.sizeGiB) }) : undefined;
     },
     async deleteSnapshot(id) {
+      if (ownership && foreign.has(id) && snapshots.has(id)) throw fail('INVALID_STATE', 'not ours');
       return snapshots.delete(id) ? state(id, 'deleting') : state(id, 'deleted');
     },
   };
@@ -141,9 +161,9 @@ function fakeProvider(options: { strict?: boolean } = {}) {
     async assignAddress(id, machineId) {
       const a = addresses.get(id);
       if (!a) throw fail('NOT_FOUND', 'gone');
-      if (machine(machineId).region !== a.region) throw fail('INVALID_INPUT', 'another region');
+      if (regions && machine(machineId).region !== a.region) throw fail('INVALID_INPUT', 'another region');
       if (a.assignedTo === machineId) return state(id, 'ready');
-      if (a.assignedTo) throw fail('CONFLICT', 'assigned elsewhere');
+      if (conflicts && a.assignedTo) throw fail('CONFLICT', 'assigned elsewhere');
       a.assignedTo = machineId;
       return state(id, 'pending');
     },
@@ -153,9 +173,11 @@ function fakeProvider(options: { strict?: boolean } = {}) {
       delete a.assignedTo;
       return state(id, 'deleting');
     },
-    async deleteAddress(id) {
+    async deleteAddress(id, _context, expected) {
       const a = addresses.get(id);
       if (!a) return state(id, 'deleted');
+      if (ownership && expected?.region !== undefined && expected.region !== a.region)
+        throw fail('INVALID_STATE', 'not the address that was recorded');
       if (strict && a.assignedTo) throw fail('INVALID_STATE', 'assigned');
       addresses.delete(id);
       return state(id, 'deleted');
@@ -165,14 +187,17 @@ function fakeProvider(options: { strict?: boolean } = {}) {
     listOffers: async (query) =>
       query.minVcpu && query.minVcpu > 1000
         ? []
-        : [{ id: 'o', kind: 'vps', region: 'r1', vcpu: 1, memoryGiB: 1, available: true }],
+        : [
+            { id: 'o', kind: 'vps', region: 'r1', vcpu: 1, memoryGiB: 1, available: true },
+            { id: 'o2', kind: 'vps', region: 'r2', vcpu: 1, memoryGiB: 1, available: true },
+          ],
     create: async (request, ctx) => {
       const id = `m-${ctx.idempotencyKey}`;
       const made: ExternalMachine = machines.get(id) ?? {
         id,
         name: request.name,
         state: 'running',
-        region: 'r1',
+        region: request.offerId === 'o2' ? 'r2' : 'r1',
         addresses: [],
       };
       machines.set(id, made);
@@ -200,6 +225,9 @@ describe('provider volume and address contracts', () => {
     expect(names).toContain(volumeCase);
     expect(names).toContain(snapshotCase);
     expect(names).toContain(addressCase);
+    expect(names).toContain(conflictCase);
+    expect(names).toContain(regionCase);
+    expect(names).toContain(ownershipCase);
   });
 
   it('a provider that keeps the contract passes every case', async () => {
@@ -207,11 +235,52 @@ describe('provider volume and address contracts', () => {
       provider: fakeProvider(),
       config: {},
       offerId: 'o',
+      otherRegionOfferId: 'o2',
       image: 'i',
       volumeGiB: 1,
+      foreign: { volumeId: 'vol-foreign', snapshotId: 'snap-foreign' },
       context: { clock },
     });
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
+  });
+
+  it('a provider that deletes what it did not make fails the ownership case', async () => {
+    const subject = { config: {}, offerId: 'o', image: 'i', context: { clock } };
+    const careless = await runConformance(providerConformanceCases(), {
+      ...subject,
+      foreign: { volumeId: 'vol-foreign', snapshotId: 'snap-foreign' },
+      provider: fakeProvider({ ownership: false }),
+    });
+    expect(careless.failed.map(({ name }) => name)).toEqual([ownershipCase]);
+    expect(String(careless.failed[0]!.error)).toMatch(/did not make/);
+    // Without foreign ids the volume checks are skipped; the address check still runs.
+    const addressOnly = await runConformance(providerConformanceCases(), {
+      ...subject,
+      provider: fakeProvider({ ownership: false }),
+    });
+    expect(addressOnly.failed.map(({ name }) => name)).toEqual([ownershipCase]);
+    expect(String(addressOnly.failed[0]!.error)).toMatch(/address/);
+  });
+
+  it('a provider that attaches across regions, or moves what is on another machine, fails those cases', async () => {
+    const subject = { config: {}, offerId: 'o', otherRegionOfferId: 'o2', image: 'i', context: { clock } };
+    const acrossRegions = await runConformance(providerConformanceCases(), {
+      ...subject,
+      provider: fakeProvider({ regions: false }),
+    });
+    expect(acrossRegions.failed.map(({ name }) => name)).toEqual([regionCase]);
+    const moves = await runConformance(providerConformanceCases(), {
+      ...subject,
+      provider: fakeProvider({ conflicts: false }),
+    });
+    expect(moves.failed.map(({ name }) => name)).toEqual([conflictCase]);
+    // A subject that offers one region skips the region case.
+    const oneRegion = await runConformance(providerConformanceCases(), {
+      ...subject,
+      otherRegionOfferId: undefined,
+      provider: fakeProvider({ regions: false }),
+    });
+    expect(oneRegion.failed).toEqual([]);
   });
 
   it('a provider that shrinks volumes or deletes attached ones fails the volume and address cases', async () => {

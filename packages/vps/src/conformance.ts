@@ -48,10 +48,21 @@ export interface ProviderConformanceSubject {
   /** The region volumes and addresses live in; absent: the region of the machine the case creates. */
   region?: string;
   /**
+   * An offer id `create` accepts in another region than the volumes and addresses: the case that attaches and
+   * assigns across regions (`INVALID_INPUT`) is skipped without it (a subject that offers one region).
+   */
+  otherRegionOfferId?: string;
+  /**
    * How the volume and address cases wait for a non-blocking call to settle: they call again up to
    * `attempts` times (default 30), `intervalMs` apart (default 0; a live run sets a few seconds).
    */
   settle?: { attempts?: number; intervalMs?: number };
+  /**
+   * A volume and a volume snapshot at the provider that this deployment did not make (another deployment's, or the
+   * account owner's): the ownership case checks a delete refuses each (`INVALID_STATE`) and leaves it. Each check is
+   * skipped without its id; the address check needs none.
+   */
+  foreign?: { volumeId?: string; snapshotId?: string };
 }
 
 const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -476,6 +487,261 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
           if (volumeId !== undefined)
             await volumes.deleteVolume(volumeId, call('snapvol-cleanup')).catch(() => {});
           await cleanUp(impl, call, machine.id);
+        }
+      },
+    },
+    {
+      name: 'volumes and addresses (when offered): a second machine is CONFLICT while on the first',
+      async run(subject) {
+        const probe = await client(subject);
+        const offered = probe.impl.volumes ?? probe.impl.addresses;
+        if (!offered) return;
+        const { impl, call, machine } = await create(subject, key(subject, 'conflict-host'));
+        const other = await impl.create(
+          { offerId: subject.offerId, image: subject.image, userData: '#cloud-config\n', name: key(subject, 'conflict-other') },
+          call(key(subject, 'conflict-other')),
+        );
+        const volumes = impl.volumes;
+        const addresses = impl.addresses;
+        let volumeId: string | undefined;
+        let addressId: string | undefined;
+        try {
+          const region = regionOf(subject, machine);
+          if (volumes) {
+            const volume = await settle(
+              subject,
+              () =>
+                volumes.ensureVolume(
+                  { name: key(subject, 'conflict-vol'), region, sizeGiB: subject.volumeGiB ?? 10, kind: 'block' },
+                  call('conflict-vol'),
+                ),
+              ['ready'],
+              'ensureVolume',
+            );
+            volumeId = volume.id;
+            await settle(
+              subject,
+              () => volumes.attachVolume(volume.id, machine.id, call('conflict-attach')),
+              ['ready'],
+              'attachVolume',
+            );
+            await checkRejects(
+              () => volumes.attachVolume(volume.id, other.id, call('conflict-attach-other')),
+              'CONFLICT',
+              'attaching a volume attached to another machine',
+            );
+            checkEqual(
+              (await volumes.getVolume(volume.id, call('conflict-get')))?.outputs?.attachedTo,
+              machine.id,
+              'a refused attach leaves the volume on its machine',
+            );
+          }
+          if (addresses) {
+            const address = await settle(
+              subject,
+              () =>
+                addresses.ensureAddress(
+                  { name: key(subject, 'conflict-addr'), region, family: 'ipv4' },
+                  call('conflict-addr'),
+                ),
+              ['ready'],
+              'ensureAddress',
+            );
+            addressId = address.id;
+            await settle(
+              subject,
+              () => addresses.assignAddress(address.id, machine.id, call('conflict-assign')),
+              ['ready'],
+              'assignAddress',
+            );
+            await checkRejects(
+              () => addresses.assignAddress(address.id, other.id, call('conflict-assign-other')),
+              'CONFLICT',
+              'assigning an address assigned to another machine',
+            );
+            checkEqual(
+              (await addresses.getAddress(address.id, call('conflict-get-addr')))?.outputs?.assignedTo,
+              machine.id,
+              'a refused assign leaves the address on its machine',
+            );
+          }
+        } finally {
+          if (volumes && volumeId !== undefined) {
+            await settle(
+              subject,
+              () => volumes.detachVolume(volumeId!, machine.id, call('conflict-detach')),
+              ['deleted'],
+              'detachVolume',
+            ).catch(() => {});
+            await volumes.deleteVolume(volumeId, call('conflict-vol-cleanup')).catch(() => {});
+          }
+          if (addresses && addressId !== undefined) {
+            await settle(
+              subject,
+              () => addresses.unassignAddress(addressId!, call('conflict-unassign')),
+              ['deleted'],
+              'unassignAddress',
+            ).catch(() => {});
+            await addresses.deleteAddress(addressId, call('conflict-addr-cleanup')).catch(() => {});
+          }
+          await cleanUp(impl, call, other.id);
+          await cleanUp(impl, call, machine.id);
+        }
+      },
+    },
+    {
+      name: 'volumes and addresses (when offered): a machine in another region is INVALID_INPUT',
+      async run(subject) {
+        const probe = await client(subject);
+        const offered = probe.impl.volumes ?? probe.impl.addresses;
+        if (!offered || subject.otherRegionOfferId === undefined) return;
+        const { impl, call, machine } = await create(subject, key(subject, 'region-host'));
+        const foreign = await impl.create(
+          {
+            offerId: subject.otherRegionOfferId,
+            image: subject.image,
+            userData: '#cloud-config\n',
+            name: key(subject, 'region-foreign'),
+          },
+          call(key(subject, 'region-foreign')),
+        );
+        const volumes = impl.volumes;
+        const addresses = impl.addresses;
+        let volumeId: string | undefined;
+        let addressId: string | undefined;
+        try {
+          const region = regionOf(subject, machine);
+          check(
+            foreign.region === undefined || foreign.region !== region,
+            `otherRegionOfferId made a machine in ${String(foreign.region)}, the volumes' own region`,
+          );
+          if (volumes) {
+            const volume = await settle(
+              subject,
+              () =>
+                volumes.ensureVolume(
+                  { name: key(subject, 'region-vol'), region, sizeGiB: subject.volumeGiB ?? 10, kind: 'block' },
+                  call('region-vol'),
+                ),
+              ['ready'],
+              'ensureVolume',
+            );
+            volumeId = volume.id;
+            await checkRejects(
+              () => volumes.attachVolume(volume.id, foreign.id, call('region-attach')),
+              'INVALID_INPUT',
+              'attaching a volume to a machine in another region',
+            );
+            check(
+              (await volumes.getVolume(volume.id, call('region-get')))?.outputs?.attachedTo === undefined,
+              'a refused attach attaches nothing',
+            );
+          }
+          if (addresses) {
+            const address = await settle(
+              subject,
+              () =>
+                addresses.ensureAddress(
+                  { name: key(subject, 'region-addr'), region, family: 'ipv4' },
+                  call('region-addr'),
+                ),
+              ['ready'],
+              'ensureAddress',
+            );
+            addressId = address.id;
+            await checkRejects(
+              () => addresses.assignAddress(address.id, foreign.id, call('region-assign')),
+              'INVALID_INPUT',
+              'assigning an address to a machine in another region',
+            );
+            check(
+              (await addresses.getAddress(address.id, call('region-get-addr')))?.outputs?.assignedTo ===
+                undefined,
+              'a refused assign assigns nothing',
+            );
+          }
+        } finally {
+          if (volumes && volumeId !== undefined)
+            await volumes.deleteVolume(volumeId, call('region-vol-cleanup')).catch(() => {});
+          if (addresses && addressId !== undefined)
+            await addresses.deleteAddress(addressId, call('region-addr-cleanup')).catch(() => {});
+          await cleanUp(impl, call, foreign.id);
+          await cleanUp(impl, call, machine.id);
+        }
+      },
+    },
+    {
+      name: 'volumes and addresses (when offered): a delete refuses what this deployment did not make',
+      async run(subject) {
+        const { impl, call } = await client(subject);
+        const volumes = impl.volumes;
+        const addresses = impl.addresses;
+        if (!volumes && !addresses) return;
+        const foreign = subject.foreign ?? {};
+        if (volumes && foreign.volumeId !== undefined) {
+          const id = foreign.volumeId;
+          checkResource(await volumes.getVolume(id, call('foreign-vol-get')), "the subject's foreign volume");
+          await checkRejects(
+            () => volumes.deleteVolume(id, call('foreign-vol-delete')),
+            'INVALID_STATE',
+            'deleting a volume this deployment did not make',
+          );
+          const after = await volumes.getVolume(id, call('foreign-vol-after'));
+          check(
+            after !== undefined && after.state !== 'deleting' && after.state !== 'deleted',
+            'a refused delete leaves the volume',
+          );
+        }
+        if (volumes && foreign.snapshotId !== undefined) {
+          const id = foreign.snapshotId;
+          checkResource(await volumes.getSnapshot(id, call('foreign-snap-get')), "the subject's foreign snapshot");
+          await checkRejects(
+            () => volumes.deleteSnapshot(id, call('foreign-snap-delete')),
+            'INVALID_STATE',
+            'deleting a snapshot this deployment did not make',
+          );
+          const after = await volumes.getSnapshot(id, call('foreign-snap-after'));
+          check(
+            after !== undefined && after.state !== 'deleting' && after.state !== 'deleted',
+            'a refused delete leaves the snapshot',
+          );
+        }
+        if (!addresses) return;
+        // An address that does not match what was recorded (here: its region) is another reservation: never released.
+        const region =
+          subject.region ?? (await impl.listOffers({})).find((offer) => offer.id === subject.offerId)?.region;
+        if (region === undefined) return;
+        let addressId: string | undefined;
+        try {
+          const address = await settle(
+            subject,
+            () =>
+              addresses.ensureAddress(
+                { name: key(subject, 'owner-addr'), region, family: 'ipv4' },
+                call('owner-addr'),
+              ),
+            ['ready'],
+            'ensureAddress',
+          );
+          addressId = address.id;
+          await checkRejects(
+            () =>
+              addresses.deleteAddress(address.id, call('owner-addr-delete'), {
+                region: `${region}-elsewhere`,
+              }),
+            'INVALID_STATE',
+            'releasing an address that does not match what this deployment recorded',
+          );
+          const after = await addresses.getAddress(address.id, call('owner-addr-after'));
+          check(
+            after !== undefined && after.state !== 'deleting' && after.state !== 'deleted',
+            'a refused release leaves the address',
+          );
+        } finally {
+          if (addressId !== undefined)
+            await addresses
+              .deleteAddress(addressId, call('owner-addr-cleanup'), { region })
+              .catch(() => {});
         }
       },
     },

@@ -203,6 +203,9 @@ export function meterCatalog(options: MeterCatalogOptions): MeterSpec[] {
   // (AWS A10) Shared filesystems on a tenant network: EFS (nfs) and FSx for Lustre (lustre).
   add('filesystem.nfs.gib.hours', 'NFS filesystem GiB hours', 'gib-hour');
   add('filesystem.lustre.gib.hours', 'Lustre filesystem GiB hours', 'gib-hour');
+  // (DO P2) Reserved provider addresses and provider volume snapshots.
+  add('vps.address.hours', 'Reserved address hours', 'hour');
+  add('vps.snapshot.gib.hours', 'Provider volume snapshot GiB hours', 'gib-hour');
 
   for (const key of options.flavorMeters ?? []) {
     if (!key.startsWith('flavor.'))

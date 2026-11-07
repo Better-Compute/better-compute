@@ -1,0 +1,32 @@
+{
+  "_provenance": "Shape: OpenAPI volumes/models/volume_full.yml (spec): id (uuid), region (a region object), droplet_ids, name, description, size_gigabytes, created_at, filesystem_type, filesystem_label, tags. Snapshot: OpenAPI snapshots/models/snapshots.yml (spec): id, name, created_at, regions, resource_id, resource_type, min_disk_size, size_gigabytes, tags. Values are illustrative. The emulator spreads these templates and overrides ids, names, regions, sizes, attachments and tags.",
+  "volume": {
+    "id": "506f78a4-e098-11e5-ad9f-000f53306ae1",
+    "region": {
+      "name": "New York 3",
+      "slug": "nyc3",
+      "features": ["private_networking", "backups", "ipv6", "metadata"],
+      "available": true,
+      "sizes": ["s-1vcpu-1gb", "s-2vcpu-4gb"]
+    },
+    "droplet_ids": [],
+    "name": "example",
+    "description": "Block store for examples",
+    "size_gigabytes": 10,
+    "created_at": "2020-03-02T17:00:49Z",
+    "filesystem_type": "ext4",
+    "filesystem_label": "example",
+    "tags": ["aninterestingtag"]
+  },
+  "snapshot": {
+    "id": "8fa70202-873f-11e6-8b68-000f533176b1",
+    "name": "big-data-snapshot1475261774",
+    "regions": ["nyc3"],
+    "created_at": "2020-09-30T18:56:12Z",
+    "resource_id": "82a48a18-873f-11e6-96bf-000f53315a41",
+    "resource_type": "volume",
+    "min_disk_size": 10,
+    "size_gigabytes": 0,
+    "tags": ["aninterestingtag"]
+  }
+}

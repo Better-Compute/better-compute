@@ -1,4 +1,5 @@
 import { registerAccount } from './account.js';
+import { registerAddresses } from './addresses.js';
 import { registerActions } from './actions.js';
 import { registerAutoscale } from './autoscale.js';
 import { registerCatalog } from './catalog.js';
@@ -6,6 +7,7 @@ import { registerDroplets } from './droplets.js';
 import { registerFirewalls } from './firewalls.js';
 import { registerKeys } from './keys.js';
 import { registerTags } from './tags.js';
+import { registerVolumes } from './volumes.js';
 import { registerVpcs } from './vpcs.js';
 import { DoState, errorFixtures, type Json } from './state.js';
 
@@ -88,6 +90,17 @@ export class DoEmulator {
    * turns `succeeded` (list entries count). The create or replace itself always answers `waiting`.
    */
   firewallReads = 0;
+  /**
+   * How many reads of a volume (or of its action list) a volume action takes to complete; at 0 it
+   * completes when it starts.
+   */
+  volumeActionReads = 0;
+  /** How many volumes the account may hold (DO's per-account volume limit). */
+  volumeLimit = 100;
+  /** How many reads of a reserved IP an assign or unassign takes to complete; at 0, at once. */
+  addressActionReads = 0;
+  /** How many reserved IPs (v4 and v6) the account may hold. */
+  reservedIpLimit = 10;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -272,5 +285,7 @@ export class DoEmulator {
     registerActions(this);
     registerVpcs(this);
     registerFirewalls(this);
+    registerVolumes(this);
+    registerAddresses(this);
   }
 }

@@ -15,7 +15,8 @@ function invalidConfig(message: string, reason: string): ComputeError {
 }
 
 /**
- * A DigitalOcean provider definition. Pass `fetch` to emulate the API; `deployment` names the
+ * A DigitalOcean provider definition: Droplets, tenant networks, Block Storage volumes and
+ * reserved IPs. Pass `fetch` to emulate the API; `deployment` names the
  * trust domain whose Droplets this control plane may delete.
  *
  * `create` builds a client without a request and without resolving the token (vps builds clients
@@ -30,7 +31,16 @@ export function digitaloceanProvider(
     version: '0.1.0',
     provides: ['vps'],
     config: doConfig as unknown as ProviderDefinition<DoConfig>['config'],
-    capabilities: ['power', 'reinstall', 'list', 'discover', 'claim', 'networks'],
+    capabilities: [
+      'power',
+      'reinstall',
+      'list',
+      'discover',
+      'claim',
+      'networks',
+      'volumes',
+      'addresses',
+    ],
     create: (config: DoConfig, context: ProviderContext) => {
       if (config.regions.length === 0)
         throw invalidConfig('A DigitalOcean account lists at least one region', 'regions');

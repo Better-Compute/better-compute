@@ -254,6 +254,27 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
       'Tenant networks (VPCs): created, adopted (an existing provider VPC, networks.adopt: { externalNetwork, sharedTagScoped }), ready, error, deleting, deleted; network.subnet.ready and network.rule.ready/error when a subnet or firewall rule converges; network.filesystem.created/ready/error/deleting/deleted for its shared filesystems { filesystemId, ... }; data { networkId, ... }',
   },
   {
+    type: 'providerVolume.*',
+    subject: 'provider-volume/{id}',
+    module: 'vps',
+    description:
+      'Provider volumes (DO P2): created { poolId, providerAccountId, name, region, sizeGiB, sourceSnapshotId?, instanceId? }, updated (an attach, detach or resize asked: { attach | detach | sizeGiB, previousSizeGiB }), ready, attached and detached { instanceId }, resized { sizeGiB }, error { message }, deleting, deleted; data { volumeId, ... }',
+  },
+  {
+    type: 'providerVolume.snapshot.*',
+    subject: 'provider-snapshot/{id}',
+    module: 'vps',
+    description:
+      'Provider volume snapshots: created { volumeId, name }, ready, error { message }, deleting, deleted; data { snapshotId, volumeId }',
+  },
+  {
+    type: 'providerAddress.*',
+    subject: 'provider-address/{id}',
+    module: 'vps',
+    description:
+      'Reserved provider addresses (DO P2): created { poolId, providerAccountId, name, region, family }, updated ({ assign | unassign }), ready { address }, assigned { instanceId }, unassigned, error { message }, deleting, deleted; data { addressId, ... }',
+  },
+  {
     type: 'kubernetes.cluster.*',
     subject: 'kubernetes-cluster/{id}',
     module: 'kubernetes',

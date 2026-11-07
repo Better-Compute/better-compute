@@ -54,6 +54,7 @@ import { seedAutoscalePool } from './support/do-emulator/autoscale.js';
 import { seedDroplet } from './support/do-emulator/droplets.js';
 import { DoEmulator, type RecordedRequest } from './support/do-emulator/index.js';
 import { seedSshKey } from './support/do-emulator/keys.js';
+import { seedSnapshot, seedVolume } from './support/do-emulator/volumes.js';
 import { seedVpc } from './support/do-emulator/vpcs.js';
 import {
   build,
@@ -1626,7 +1627,16 @@ describe('compute', () => {
       id: 'digitalocean',
       version: '0.1.0',
       provides: ['vps'],
-      capabilities: ['power', 'reinstall', 'list', 'discover', 'claim', 'networks'],
+      capabilities: [
+        'power',
+        'reinstall',
+        'list',
+        'discover',
+        'claim',
+        'networks',
+        'volumes',
+        'addresses',
+      ],
     });
     const emu = emulator();
     let resolved = 0;
@@ -2199,15 +2209,24 @@ describe('definition', () => {
 
   it('passes every case of the ProviderImpl contract', async () => {
     const report = await runConformance(providerConformanceCases(), () => {
+      // Each case gets the token's whole budget: the volume and address cases alone make a
+      // few dozen requests on one manual clock.
+      freshBudgets();
       const emu = emulator();
       // A create needs an SSH key: the account's default one.
       const key = seedSshKey(emu.state, 'ops', testKey);
       const hand = seedDroplet(emu.state, { name: 'legacy', tags: [] });
+      // The account owner's own volume and snapshot (no better-compute tags): never deleted.
+      const theirs = seedVolume(emu.state, { name: 'owner-data', tags: ['team:ops'] });
+      const theirSnapshot = seedSnapshot(emu.state, { volume: theirs, name: 'owner-nightly', tags: ['team:ops'] });
       return {
+        foreign: { volumeId: theirs.id, snapshotId: theirSnapshot.id },
         provider: digitaloceanProvider({ fetch: emu.fetch }),
-        config: { ...doAccount, sshKeyFingerprint: key.fingerprint },
+        config: { ...doAccount, regions: ['nyc3', 'sfo3'], sshKeyFingerprint: key.fingerprint },
         attachable: String(hand.id),
         offerId: 'nyc3/s-1vcpu-1gb',
+        // The volume and address cases attach and assign across regions too (INVALID_INPUT).
+        otherRegionOfferId: 'sfo3/s-1vcpu-1gb',
         image: 'ubuntu-24-04-x64',
         context: { secrets, account: platformAccount },
       };
@@ -2230,6 +2249,8 @@ describe('definition', () => {
       'discover',
       'claim',
       'networks',
+      'volumes',
+      'addresses',
     ]);
     const parsed = await digitalocean.config['~standard'].validate(doAccount);
     expect(parsed).toMatchObject({
@@ -2287,9 +2308,28 @@ describe('definition', () => {
     const report = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
     expect(report).toEqual({
       account: { uuid: emu.account.uuid, status: 'active', dropletLimit: 40 },
-      families: { compute: 'ok', networks: 'ok', keys: 'ok', tags: 'ok' },
+      families: {
+        compute: 'ok',
+        networks: 'ok',
+        keys: 'ok',
+        tags: 'ok',
+        storage: 'ok',
+        addresses: 'ok',
+      },
       missing: [],
+      // A read-only probe cannot see write scopes: it names those it did not check, for the operator.
+      unverified: expect.arrayContaining([
+        'droplet:create',
+        'block_storage:create',
+        'block_storage:delete',
+        'block_storage_action:create',
+        'block_storage_snapshot:create',
+        'reserved_ip:create',
+        'reserved_ip:update',
+        'reserved_ip:delete',
+      ]),
     });
+    expect(report.unverified.every((scope) => !scope.endsWith(':read'))).toBe(true);
     // Single, read-only requests: one page of each, nothing that changes anything.
     expect(reads(emu).sort()).toEqual(
       [
@@ -2298,8 +2338,10 @@ describe('definition', () => {
         'GET /v2/droplets',
         'GET /v2/firewalls',
         'GET /v2/regions',
+        'GET /v2/reserved_ips',
         'GET /v2/sizes',
         'GET /v2/tags',
+        'GET /v2/volumes',
         'GET /v2/vpcs',
       ].sort(),
     );
@@ -2312,14 +2354,17 @@ describe('definition', () => {
     forbidden(emu, /^\/firewalls$/);
     forbidden(emu, /^\/sizes$/);
     forbidden(emu, /^\/tags$/);
+    forbidden(emu, /^\/reserved_ips$/);
     const report = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
     expect(report.families).toEqual({
       compute: 'denied',
       networks: 'denied',
       keys: 'ok',
       tags: 'denied',
+      storage: 'ok',
+      addresses: 'denied',
     });
-    expect(report.missing).toEqual(['sizes:read', 'firewall:read', 'tag:read']);
+    expect(report.missing).toEqual(['sizes:read', 'firewall:read', 'tag:read', 'reserved_ip:read']);
     expect(report.account.status).toBe('active');
   });
 
@@ -2371,6 +2416,8 @@ describe('definition: scoped account bodies and timeouts', () => {
       networks: 'ok',
       keys: 'ok',
       tags: 'ok',
+      storage: 'ok',
+      addresses: 'ok',
     });
     expect(report.missing).toEqual(['droplet:read']);
     expect(report.account.dropletLimit).toBeUndefined();
