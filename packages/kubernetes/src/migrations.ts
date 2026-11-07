@@ -6,8 +6,10 @@ import type { Migration } from '@better-compute/core';
  * tables it lives on (pool, provider account, tenant network) by id only, without foreign keys: vps owns those
  * rows and their deletion rules.
  *
- * `usage_windows` gains the `kubernetes` source kind (`kubernetes.cluster.hours`, see usage.ts): the CHECK of
- * core/0029 is replaced by the same list plus `kubernetes`, `NOT VALID` as there, so no partition is scanned.
+ * `usage_windows` gains the `kubernetes` source kind (`kubernetes.cluster.hours`, see usage.ts). The CHECK is not
+ * replaced by a fixed list: another module's migration that ran before this one may have added its own kind (the
+ * cloud-resources module's `cloud-resource`, when a host registers it first), so its current values are read back
+ * and `kubernetes` is appended, `NOT VALID` as in core/0029, so no partition is scanned.
  */
 export const kubernetesClustersMigration: Migration = {
   name: 'kubernetes/0001_clusters',
@@ -101,11 +103,26 @@ CREATE TABLE kubernetes_node_pools (
 CREATE UNIQUE INDEX kubernetes_node_pools_name ON kubernetes_node_pools (cluster_id, name) WHERE state <> 'deleted';
 CREATE INDEX kubernetes_node_pools_cluster ON kubernetes_node_pools (cluster_id) WHERE state <> 'deleted';
 
-ALTER TABLE usage_windows DROP CONSTRAINT IF EXISTS usage_windows_source_kind_ck;
-ALTER TABLE usage_windows
-  ADD CONSTRAINT usage_windows_source_kind_ck
-    CHECK (source_kind IN ('allocation', 'instance', 'grant', 'network', 'snapshot', 'cost', 'kubernetes', 'volume',
-                           'address')) NOT VALID;
+DO $$
+DECLARE
+  kinds text[];
+BEGIN
+  SELECT array_agg(DISTINCT m.value[1]) INTO kinds
+    FROM pg_constraint c
+    -- Each value, as PostgreSQL renders it: ARRAY['a'::text, …] or '{a,b}'::text[].
+    CROSS JOIN LATERAL regexp_matches(pg_get_constraintdef(c.oid), '[''{,]([a-z0-9_-]+)(?=[''},])', 'g') AS m(value)
+   WHERE c.conname = 'usage_windows_source_kind_ck' AND c.conrelid = 'usage_windows'::regclass;
+  IF kinds IS NULL THEN
+    kinds := ARRAY['allocation', 'instance', 'grant', 'network', 'snapshot', 'cost'];
+  END IF;
+  IF NOT ('kubernetes' = ANY (kinds)) THEN
+    ALTER TABLE usage_windows DROP CONSTRAINT IF EXISTS usage_windows_source_kind_ck;
+    kinds := kinds || 'kubernetes'::text;
+    EXECUTE 'ALTER TABLE usage_windows ADD CONSTRAINT usage_windows_source_kind_ck CHECK (source_kind IN ('
+      || (SELECT string_agg(quote_literal(k), ', ' ORDER BY k) FROM unnest(kinds) AS k)
+      || ')) NOT VALID';
+  END IF;
+END $$;
 `,
 };
 

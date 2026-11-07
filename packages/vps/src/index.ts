@@ -71,5 +71,7 @@ export type {
   RescueAccess,
 } from '@better-compute/core';
 export * from './conformance.js';
+// The ProviderResources contract's cases (cloud-resources): here so a provider runs them without the module.
+export * from './resources-conformance.js';
 export * from './usage.js';
 export * from './workload-roles.js';

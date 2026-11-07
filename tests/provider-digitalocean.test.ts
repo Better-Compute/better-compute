@@ -1639,6 +1639,7 @@ describe('compute', () => {
         'addresses',
         'spot-offers',
         'kubernetes',
+        'resources',
       ],
     });
     const emu = emulator();
@@ -2315,6 +2316,7 @@ describe('definition', () => {
       'addresses',
       'spot-offers',
       'kubernetes',
+      'resources',
     ]);
     const parsed = await digitalocean.config['~standard'].validate(doAccount);
     expect(parsed).toMatchObject({

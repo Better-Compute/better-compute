@@ -31,6 +31,7 @@ import {
 import { DoAddresses } from '../edge/addresses.js';
 import { DoNetworks } from '../networks/index.js';
 import { DoVolumes } from '../storage/volumes.js';
+import { DoResources } from '../resources/registry.js';
 import { networkNamer, vpcForNetwork } from '../networks/vpcs.js';
 import { poolMembers } from './autoscale.js';
 import { ensureSshKeys } from './keys.js';
@@ -190,6 +191,8 @@ export class DoCompute implements ProviderImpl {
   protected readonly catalog: DoCatalogImages | undefined;
   /** Managed Kubernetes (DOKS clusters and node pools); the provider sets it. */
   kubernetes?: ProviderKubernetes;
+  /** Managed databases and the rest of the long tail, through the generic resource contract (P7). */
+  readonly resources: DoResources;
 
   constructor(
     config: DoConfig,
@@ -213,6 +216,7 @@ export class DoCompute implements ProviderImpl {
           context.log,
         )
       : undefined;
+    this.resources = new DoResources(client, config, options.deployment);
   }
 
   /**

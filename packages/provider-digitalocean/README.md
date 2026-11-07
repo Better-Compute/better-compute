@@ -214,6 +214,86 @@ The account's provider also implements core `ProviderKubernetes` (capability `ku
 - **Deletes.** Only a cluster with both ownership tags is deleted (an adopted cluster never is). The delete is DOKS's plain one, never `/dangerous`: the load balancers, volumes and snapshots the cluster's workloads made are kept, and the answer's message counts them (a listing that fails counts none and is logged by its error code; the delete goes on).
 - **Credentials.** `credentials()` creates (or reuses) the service account of the subject and role in the `bc-access` namespace (`<subject>-v`, `-e` or `-a`; a subject longer than 60 characters is shortened with a hash), binds it to the built-in `view`, `edit` or `cluster-admin` role and mints a bound token through the TokenRequest API. Each role has its own account and binding, so a token always acts with the role it was minted for: an `admin` mint for the same subject, concurrent or later, never re-scopes a `view` token. The mint authenticates with DOKS's cluster-admin credential, fetched for 300 seconds and held in memory for that one call; it must name the cluster's own endpoint, and the connection trusts only the cluster's CA. No token is stored, logged or put in an error. `digitaloceanProvider({ kubeTransport })` replaces the HTTPS transport in tests.
 
+## Managed services (cloud resources)
+
+`resources` serves DigitalOcean's long tail through the provider-neutral `ProviderResources` contract, which the
+`@better-compute/cloud-resources` module drives (`cloudResources({ providers: [digitalocean] })`, next to
+`vps({ providers })`). Pass the same provider definition to both.
+
+- **Managed Databases:** a cluster kind per engine, `do.database.{pg,mysql,valkey,mongodb,kafka,opensearch}` (spec:
+  `region`, `version`, `size`, `nodes`, `storageMiB`), and what lives in a cluster: `.user` (PostgreSQL, MySQL,
+  MongoDB, Kafka, OpenSearch), `do.database.pg.pool` (PgBouncer), `.replica` (PostgreSQL, MySQL) and `.firewall`
+  (trusted addresses, Droplet tags and Droplet ids). Size, nodes and storage resize in place; PostgreSQL and MySQL
+  upgrade in place; a downgrade, a region change or a storage shrink is `INVALID_STATE` (`replaceRequired`).
+  Droplet tags and Droplet ids are account-wide (`accountWide`): on a shared (hosted) account they would reach other
+  tenants' Droplets, so only addresses and `instances` are trusted there. `instances` names better-compute instances
+  of the tenant (the module checks they are its own, on the same account) and trusts each by its Droplet's
+  `better-compute-instance:<id>` tag, which only that Droplet carries. A `.user` is never bound to the cluster's admin user (role
+  `primary`, `doadmin`): that is `INVALID_INPUT` (`primaryUser`), and a delete of it answers `deleted` without a call,
+  since it goes with the cluster.
+- **Private networking.** A cluster's `vpc` (a VPC uuid) is account-wide: the tenant's own account only. On any
+  account a cluster may instead name `network`, a better-compute network of the tenant (`net_…`): the module checks it
+  is the tenant's and passes its provider-side name, and the cluster joins that network's subnet VPC in the cluster's
+  region (`noSubnetInRegion` when it has none). `vpc` and `network` together are `INVALID_INPUT` (`vpcAndNetwork`);
+  either changes only by a new cluster (`replaceRequired`).
+- **User options by engine.** Kafka `acl` (`<admin|consume|produce|produceconsume>:<topic pattern>`) and OpenSearch
+  `acl` (`<deny|admin|read|readwrite|write>:<index pattern>`) and PostgreSQL `replication` change in place
+  (`PUT …/users/{name}`, settings only). A MySQL `authPlugin` (`caching_sha2_password`, `mysql_native_password`)
+  change goes through `reset_auth`: DigitalOcean issues a new password, sealed in the same run. A MongoDB user's
+  `readonly` is fixed at create. A Kafka user's client certificate and key are secret outputs (`accessCert`,
+  `accessKey`) next to its password. These bodies follow the API reference, not a recording; MongoDB's newer
+  `settings.mongo_user_settings` (role, databases) is not mapped yet.
+- **Ownership.** A cluster carries `better-compute-managed:true`, this deployment's tag, the idempotency key's tag and
+  the module's `better-compute-resource:<id>` and `better-compute-tenant:<t>` tags. A create first looks the key's tag
+  up (only among clusters this deployment manages: another deployment's cluster with the same key tag is never
+  changed), and the account-unique name settles a race. `delete` and `release` refuse (`notManaged`, nothing sent) a
+  cluster without the managed and deployment tags, and so does anything living in such a cluster. Users, pools and
+  firewalls have no tags: they are owned through their cluster.
+- **Secrets.** Passwords and connection URIs (which embed the password) are only ever `secretOutputs`; the module
+  seals them in the run that received them. They never reach `outputs`, a log line or an error.
+- **Discover, adopt, release** by engine: adopt tags a cluster no deployment manages (`managedByAnother` otherwise);
+  release takes every `better-compute-*` tag off and leaves it running.
+
+- **App Platform:** `do.app` takes the App spec without its `name` (the provider name) as the manifest. A SECRET
+  env's value, registry credentials and log-destination keys must be SecretRefs; they are resolved just before the
+  call, and DO's ciphertext is never copied into a spec better-compute reports. Apps have no tags: ownership is a set
+  of build-time `BETTER_COMPUTE_*` envs (tenants cannot set those) plus `BETTER_COMPUTE_SPEC`, the fingerprint of
+  the spec last applied, so a converged app is never redeployed. Deployments are read-only status: the latest one
+  decides `pending`, `updating`, `ready` or `error`. On a shared (hosted) account a spec may not reach
+  account-wide objects: linked GitHub/GitLab/Bitbucket repositories, DOCR, a database cluster by name, a VPC or a DNS
+  zone; on the tenant's own account it may. Discover, adopt (rewrites the envs once, keeping DO's ciphertext) and
+  release.
+- **Functions:** `do.functions-namespace` (owned through its label `<name>-bc<deployment hash>`; its key is a secret
+  output; not adoptable) and `do.functions-trigger` (a scheduled trigger in a namespace; cron, body and enabled
+  change in place, the function and name do not).
+- **Add-Ons:** `do.addon`, a Marketplace SaaS add-on on a plan, owned through the name suffix
+  `-bc<deployment hash>` (adopt renames it, release renames it back); only the plan changes in place. The vendor SSO
+  link is never an output.
+- **1-Click catalog:** `resources.catalog` lists `GET /v2/1-clicks` (one `sweep` call): Droplet 1-Clicks as
+  `installsOn: 'instance'` (the slug is the Droplet image), Kubernetes ones as `'kubernetes'` (a DOKS add-on, P5).
+- **Partner Network Connect:** `do.partner-attachment` joins VPCs of the account to a NaaS partner, so it exists only
+  on the tenant's own account (refused with `accountWide` on a shared one). Owned through the name suffix; the
+  service key and the BGP auth key are secret outputs, a BGP key the tenant chooses is a SecretRef; only the attached
+  VPCs change in place.
+
+Meters (`ProviderResourceState.usage`, the rate per hour the module samples): a cluster and each read-only replica
+report `do.database.<engine>.node.hours` (its node count; a replica is one node); an app reports
+`do.app.instance.hours` (its services' and workers' instances, an autoscaled one at its minimum; static sites and
+jobs none); an add-on `do.addon.hours` and a Partner Network Connect attachment `do.partner-attachment.hours` (one
+while it exists). A Functions namespace declares `do.functions.gib.seconds` but reports no rate: it bills by use,
+which only DigitalOcean's billing knows (P9 reconciles it).
+
+Token scopes: `database:read`, `database:create`, `database:update` and `database:delete`, plus `tag:create` for
+adopt and release; the App Platform, Functions and Add-Ons scopes for those kinds. The App, Functions and Add-Ons
+bodies follow the API reference and are not yet checked against recorded responses. A cluster's `vpc` (a VPC uuid)
+is accepted only on the tenant's own account and cannot change in place. A cluster's `network` (a tenant network,
+`net_…`) is accepted on any account: only the tenant's own networks, checked at the API and again before every
+ensure; `vpc` and `network` together are refused (`vpcAndNetwork`), and a change is `replaceRequired`. Every kind
+serves `find` (read-only), as its `ensure` finds its resource: the key tag (clusters), the key env (apps), the label
+(namespaces), the name suffix (add-ons, attachments) or the child of an owned cluster or namespace, so a create
+whose answer was lost is deleted rather than forgotten. Not modelled yet: Standard and Advanced editions and Vector
+Databases. The 1-Click body follows the API reference too.
+
 ## Rate budget
 
 DigitalOcean allows 250 requests a minute and 5 000 an hour per token, over sliding windows, and the limits are shared by everything that uses the token: every reconciler of every account that names it, in every process. The provider keeps each token's requests (found by a hash of the token, which is never kept) under both limits, and re-seeds from the `ratelimit-*` headers of each response, so traffic from other processes counts. Requests have a class: a `mutate` (create, delete, action, tag write) may spend whatever is left, an `observe` (a read of one Droplet, an action, a firewall list) at most 30 % of a window (network reconciles reuse the firewall list for ten seconds, and drop it on each firewall write of their own; deletes read it afresh), and a `sweep` (discovery, `list`, the catalogs) at most 20 %. So discovery defers first, and at least half of every window stays free for the calls that change something. A request over its share is `RATE_LIMITED` with `retryAfterMs` (`details.reason` `budget`); a 429 from DigitalOcean is `RATE_LIMITED` with `retryAfterMs` from `ratelimit-reset`. `digitaloceanProvider({ budget: { perMinute, perHour } })` lowers the limits of an account that shares its token with other tools.

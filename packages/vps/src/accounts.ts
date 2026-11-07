@@ -676,8 +676,36 @@ export async function liveKubernetesClusters(
 }
 
 /**
- * Deletes an account that no live pool, no live instance, no live Kubernetes cluster and no network that is
- * not deleted uses.
+ * The live cloud resources (`@better-compute/cloud-resources`: managed databases, apps, …) on the account
+ * (`provider_account_id`) or naming the network (`network_id`: in their `network_ids`). vps does not depend on that
+ * module, so its table is read only where it exists; without it there are none.
+ */
+export async function liveCloudResources(
+  tx: SqlTx,
+  column: 'provider_account_id' | 'network_id',
+  id: string,
+): Promise<string[]> {
+  const table = await tx.query<{ present: boolean; networks: boolean }>(
+    `SELECT to_regclass('cloud_resources') IS NOT NULL AS present,
+            EXISTS (SELECT 1 FROM pg_attribute
+                     WHERE attrelid = to_regclass('cloud_resources') AND attname = 'network_ids'
+                       AND NOT attisdropped) AS networks`,
+  );
+  const found = table.rows[0];
+  if (!found?.present || (column === 'network_id' && !found.networks)) return [];
+  const where =
+    column === 'provider_account_id' ? 'provider_account_id = $1' : 'network_ids @> ARRAY[$1]::text[]';
+  const { rows } = await tx.query<{ id: string }>(
+    `SELECT id FROM cloud_resources WHERE ${where} AND state NOT IN ('deleted', 'released')
+      ORDER BY id LIMIT 100`,
+    [id],
+  );
+  return rows.map((row) => row.id);
+}
+
+/**
+ * Deletes an account that no live pool, no live instance, no live Kubernetes cluster, no live cloud resource and
+ * no network that is not deleted uses.
  * Archived pools do not pin it, deleted instances keep their history but drop the reference, and
  * deleted networks (with their subnets and rules, all gone at the provider) are removed with it. A provider
  * volume row, live or deleted, keeps it (`INVALID_STATE`, `volumeIds`).
@@ -700,6 +728,16 @@ export async function deleteAccount(
   const clusters = await liveKubernetesClusters(tx, 'provider_account_id', account.id);
   if (pools.rows.length > 0 || live.rows.length > 0 || clusters.length > 0)
     throw new ComputeError('INVALID_STATE', `Provider account ${account.name} is in use`);
+  // A pool can be archived with cloud resources still on it: without the account they could never be deleted (and
+  // would bill on), so they go first.
+  const resourceIds = await liveCloudResources(tx, 'provider_account_id', account.id);
+  if (resourceIds.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Provider account ${account.name} is in use by ${resourceIds.length} cloud resource(s): delete them first`,
+      undefined,
+      { resourceIds },
+    );
   // Reservation grants (F10-4): live ones are commitments still billed; ended ones go with the account.
   const grants = await tx.query<{ id: string }>(
     `SELECT id FROM reservation_grants WHERE account_id = $1 AND state IN ('scheduled', 'active')

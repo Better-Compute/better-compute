@@ -47,6 +47,16 @@ export class DoState {
   tags = new Map<string, Json>();
   /** Keyed by id. DO image resources (public ones seeded from the fixture). */
   images = new Map<number, Json>();
+  /** Keyed by uuid. DO Managed Database clusters (with their users, pools, replicas and firewall). */
+  databases = new Map<string, Json>();
+  /** Keyed by id. DO App Platform apps (with their deployments). */
+  apps = new Map<string, Json>();
+  /** Keyed by id. DO Partner Network Connect attachments. */
+  partnerAttachments = new Map<string, Json>();
+  /** Keyed by uuid. DO Marketplace SaaS add-on resources. */
+  addons = new Map<string, Json>();
+  /** Keyed by namespace id. DO Functions namespaces (with their triggers). */
+  functionsNamespaces = new Map<string, Json>();
   /** Keyed by uuid. DO autoscale pool resources. */
   autoscalePools = new Map<string, Json>();
   /** The members of each autoscale pool, keyed by the pool's uuid. */

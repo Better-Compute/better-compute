@@ -30,6 +30,7 @@ import {
   type ProviderAccount,
   type ProviderClients,
   liveKubernetesClusters,
+  liveCloudResources,
 } from './accounts.js';
 import {
   attachConflictCondition,
@@ -1715,6 +1716,15 @@ export async function deleteNetwork(
       `Network ${row.name} has ${sharedVolumes.rows.length} shared volume(s) on it`,
       undefined,
       { volumeIds: sharedVolumes.rows.map((volume) => volume.id) },
+    );
+  // A managed database in the network's VPC: the provider would refuse to delete a VPC with members in it.
+  const resourceIds = await liveCloudResources(tx, 'network_id', row.id);
+  if (resourceIds.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Network ${row.name} has ${resourceIds.length} cloud resource(s) in it`,
+      undefined,
+      { resourceIds },
     );
   await tx.query(
     `UPDATE network_firewall_rules SET desired_state = 'deleted', state = CASE WHEN state = 'deleted' THEN state ELSE 'deleting' END,

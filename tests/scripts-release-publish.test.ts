@@ -42,9 +42,14 @@ const released021 = [
 ];
 
 describe('the release allowlist', () => {
-  it('is exactly the 0.2.1 packages plus gcp-common and kubernetes', () => {
+  it('is exactly the 0.2.1 packages plus gcp-common, kubernetes and cloud-resources', () => {
     expect([...releaseAllowlist].sort()).toEqual(
-      [...released021, '@better-compute/gcp-common', '@better-compute/kubernetes'].sort(),
+      [
+        ...released021,
+        '@better-compute/gcp-common',
+        '@better-compute/kubernetes',
+        '@better-compute/cloud-resources',
+      ].sort(),
     );
   });
 

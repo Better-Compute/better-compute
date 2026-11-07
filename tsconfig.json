@@ -23,6 +23,7 @@
       "path": "./packages/vps"
     },
     { "path": "./packages/kubernetes" },
+    { "path": "./packages/cloud-resources" },
     {
       "path": "./packages/provider-hetzner"
     },

@@ -1,13 +1,19 @@
 import { registerAccount } from './account.js';
 import { registerAddresses } from './addresses.js';
 import { registerActions } from './actions.js';
+import { registerAddons } from './addons.js';
+import { registerOneClicks } from './one-clicks.js';
+import { registerApps } from './apps.js';
 import { registerAutoscale } from './autoscale.js';
 import { registerCatalog } from './catalog.js';
+import { registerDatabases } from './databases.js';
 import { registerDroplets } from './droplets.js';
 import { registerFirewalls } from './firewalls.js';
+import { registerFunctions } from './functions.js';
 import { registerImages } from './images.js';
 import { registerKeys } from './keys.js';
 import { registerNfs } from './nfs.js';
+import { registerPartner } from './partner.js';
 import { registerTags } from './tags.js';
 import { registerVolumes } from './volumes.js';
 import { registerVpcs } from './vpcs.js';
@@ -116,6 +122,16 @@ export class DoEmulator {
   importReads = 1;
   /** How many reads of an image it takes for a `transfer` action to complete (P3). */
   transferReads = 1;
+  /** How many reads a database cluster (or replica) that is being created, resized or upgraded takes to be online. */
+  databaseReads = 1;
+  /** How many reads an App Platform deployment stays `PENDING_BUILD` before it completes. */
+  appReads = 1;
+  /** App Platform deployments end `ERROR` instead of `ACTIVE`. */
+  failDeployments = false;
+  /** How many reads an add-on stays `provisioning` (or `deprovisioning`). */
+  addonReads = 1;
+  /** How many reads a partner attachment stays `PENDING` (or `DELETING`). */
+  partnerReads = 1;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -304,5 +320,11 @@ export class DoEmulator {
     registerAddresses(this);
     registerImages(this);
     registerNfs(this);
+    registerDatabases(this);
+    registerApps(this);
+    registerFunctions(this);
+    registerAddons(this);
+    registerPartner(this);
+    registerOneClicks(this);
   }
 }

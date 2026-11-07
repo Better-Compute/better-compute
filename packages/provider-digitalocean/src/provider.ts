@@ -44,6 +44,7 @@ export function digitaloceanProvider(
       'addresses',
       'spot-offers',
       'kubernetes',
+      'resources',
     ],
     create: (config: DoConfig, context: ProviderContext) => {
       if (config.regions.length === 0)

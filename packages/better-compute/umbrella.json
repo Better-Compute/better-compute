@@ -15,6 +15,7 @@
     "./fleet": "@better-compute/fleet",
     "./rollout": "@better-compute/rollout",
     "./kubernetes": "@better-compute/kubernetes",
+    "./cloud-resources": "@better-compute/cloud-resources",
     "./audit": "@better-compute/audit",
     "./observability": "@better-compute/observability",
     "./server": "@better-compute/server",

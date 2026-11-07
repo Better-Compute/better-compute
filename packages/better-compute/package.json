@@ -104,6 +104,10 @@
       "types": "./dist/kubernetes.d.ts",
       "import": "./dist/kubernetes.js"
     },
+    "./cloud-resources": {
+      "types": "./dist/cloud-resources.d.ts",
+      "import": "./dist/cloud-resources.js"
+    },
     "./audit": {
       "types": "./dist/audit.d.ts",
       "import": "./dist/audit.js"
@@ -158,6 +162,7 @@
     "@better-compute/capacity": "workspace:*",
     "@better-compute/cli": "workspace:*",
     "@better-compute/client": "workspace:*",
+    "@better-compute/cloud-resources": "workspace:*",
     "@better-compute/core": "workspace:*",
     "@better-compute/events": "workspace:*",
     "@better-compute/fleet": "workspace:*",
