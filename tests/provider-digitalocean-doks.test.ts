@@ -132,6 +132,34 @@ const standard: KubernetesClusterSpec = {
   description: 'tenant cluster',
 };
 
+/**
+ * A fetch over the emulator that loses DigitalOcean's answer to the next request matching (path
+ * `/v2`-relative): the change is made, the caller gets `status` instead (503: the answer never
+ * came; 409: another creator got there first).
+ */
+function losing(
+  doks: DoksEmulator,
+  method: string,
+  path: RegExp,
+  status = 503,
+): NonNullable<DoProviderOptions['fetch']> {
+  let armed = true;
+  return async (input, init) => {
+    const response = await doks.fetch(input, init);
+    const url = new URL(typeof input === 'object' && 'url' in input ? input.url : String(input));
+    const hit =
+      (init?.method ?? 'GET').toUpperCase() === method &&
+      path.test(url.pathname.replace(/^\/v2/, ''));
+    if (!armed || !hit) return response;
+    armed = false;
+    const id = status === 409 ? 'conflict' : 'service_unavailable';
+    return new Response(JSON.stringify({ id, message: 'answer lost' }), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+}
+
 async function readyCluster(s: Setup, spec: KubernetesClusterSpec = standard): Promise<string> {
   const { last } = await settle(() => s.k8s.ensureCluster(spec, s.ctx()), 'ready');
   return last.id;
@@ -416,12 +444,17 @@ describe('doks clusters', () => {
       tags: ours,
       created_at: '2026-10-01T00:00:00Z',
     });
+    // A racing create's duplicate: its nodes are still coming up.
+    s.doks.transitionReads = 100;
     const newer = s.doks.seedCluster({
       name: 'bc-k-one',
       region: 'nyc3',
       tags: ours,
       created_at: '2026-10-02T00:00:00Z',
     });
+    s.doks.transitionReads = 1;
+    for (const pool of newer.node_pools as Json[])
+      for (const node of pool.nodes as Json[]) node.status = { state: 'provisioning' };
     const state = await s.k8s.ensureCluster(standard, s.ctx());
     expect(state.id).toBe(older.id);
     // The survivor is then brought to the spec (a PUT); only the duplicate is deleted.
@@ -429,6 +462,46 @@ describe('doks clusters', () => {
       `DELETE /kubernetes/clusters/${newer.id}`,
     ]);
     expect(s.logs.some((entry) => entry.message === 'doks.cluster.reap')).toBe(true);
+  });
+
+  it('never reaps a duplicate whose nodes run, nor a cluster of that name in another region', async () => {
+    const s = await setup();
+    s.doks.uniqueNames = false;
+    // Ours in tor1 only: the spec's nyc3 finds it immutable, and nothing is deleted.
+    const tor = s.doks.seedCluster({
+      name: 'bc-k-one',
+      region: 'tor1',
+      tags: ours,
+      created_at: '2026-10-01T00:00:00Z',
+    });
+    const moved = await failure(s.k8s.ensureCluster(standard, s.ctx()));
+    expect([moved.code, moved.details?.reason, moved.details?.field]).toEqual([
+      'INVALID_STATE',
+      'immutable',
+      'location',
+    ]);
+    // With one in nyc3 too (newer than the tor1 one), each region keeps its own: no reaping.
+    const nyc = s.doks.seedCluster({
+      name: 'bc-k-one',
+      region: 'nyc3',
+      tags: ours,
+      created_at: '2026-10-02T00:00:00Z',
+    });
+    expect((await s.k8s.ensureCluster(standard, s.ctx())).id).toBe(nyc.id);
+    expect((await s.k8s.ensureCluster({ ...standard, location: 'tor1' }, s.ctx())).id).toBe(tor.id);
+    expect(mutations(s).filter((m) => m.startsWith('DELETE'))).toEqual([]);
+    // A same-region duplicate whose nodes run has workloads: CONFLICT and a log, never a delete.
+    s.doks.seedCluster({
+      name: 'bc-k-one',
+      region: 'nyc3',
+      tags: ours,
+      created_at: '2026-10-03T00:00:00Z',
+    });
+    const fresh = await setup(undefined, {}, s.doks);
+    const busy = await failure(fresh.k8s.ensureCluster(standard, fresh.ctx()));
+    expect([busy.code, busy.details?.reason]).toEqual(['CONFLICT', 'duplicate']);
+    expect(mutations(s).filter((m) => m.startsWith('DELETE'))).toEqual([]);
+    expect(fresh.logs.some((entry) => entry.message === 'doks.cluster.reapRefused')).toBe(true);
   });
 
   it('maps the cluster states', async () => {
@@ -559,6 +632,39 @@ describe('doks node pools', () => {
     expect(posted(s, `/kubernetes/clusters/${cluster}/node_pools`)).toHaveLength(3);
   });
 
+  it("adds a GPU pool only once the cluster's own GPU device plugins are off (DO-D18)", async () => {
+    const s = await setup();
+    // An adopted cluster from before DOKS 1.37: NVIDIA's and AMD's device plugins are on.
+    const adopted = s.doks.seedCluster({ name: 'team-cluster', region: 'tor1' });
+    const refused = await failure(s.k8s.ensureNodePool(adopted.id, gpuPool, s.ctx()));
+    expect([refused.code, refused.details?.reason]).toEqual(['INVALID_STATE', 'devicePluginOn']);
+    expect(refused.details?.field).toBe('nvidia_gpu_device_plugin, amd_gpu_device_plugin');
+    expect(refused.message).toContain('nvidia_gpu_device_plugin');
+    // Someone else's cluster is never changed; a CPU pool needs no check.
+    expect(mutations(s)).toEqual([]);
+    await settle(() => s.k8s.ensureNodePool(adopted.id, cpuPool, s.ctx()), 'ready');
+    // Once its operator turns them off, the GPU pool is added.
+    adopted.nvidia_gpu_device_plugin = { enabled: false };
+    adopted.amd_gpu_device_plugin = { enabled: false };
+    await settle(() => s.k8s.ensureNodePool(adopted.id, gpuPool, s.ctx()), 'ready');
+
+    // On a cluster of ours whose plugins came back on, they are turned off first.
+    const cluster = await readyCluster(s, { ...standard, name: 'bc-k-tor', location: 'tor1' });
+    const mine = s.doks.clusters.get(cluster)!;
+    mine.nvidia_gpu_device_plugin = { enabled: true };
+    const before = mutations(s).length;
+    expect((await s.k8s.ensureNodePool(cluster, gpuPool, s.ctx())).state).toBe('pending');
+    expect(mutations(s).slice(before)).toEqual([`PUT /kubernetes/clusters/${cluster}`]);
+    expect(posted(s, `/kubernetes/clusters/${cluster}`, 'PUT').at(-1)).toMatchObject({
+      name: 'bc-k-tor',
+      nvidia_gpu_device_plugin: { enabled: false },
+      amd_gpu_device_plugin: { enabled: false },
+    });
+    expect(mine.tags).toEqual(expect.arrayContaining(ours));
+    await settle(() => s.k8s.ensureNodePool(cluster, gpuPool, s.ctx()), 'ready');
+    expect(posted(s, `/kubernetes/clusters/${cluster}/node_pools`)).toHaveLength(1);
+  });
+
   it('creates Spot GPU pools only when the account allows Spot and previews', async () => {
     const spot = { ...gpuPool, name: 'spot', spot: true };
     const plain = await setup();
@@ -666,6 +772,63 @@ describe('doks node pools', () => {
     expect(posted(s, '/kubernetes/clusters')).toHaveLength(1);
   });
 
+  it('deletes a pool made on-demand for Spot whose create answer was lost, or that raced', async () => {
+    for (const status of [503, 409]) {
+      freshBudgets();
+      const doks = new DoksEmulator(new DoEmulator({ now: () => t0 }));
+      const lossy = losing(doks, 'POST', /^\/kubernetes\/clusters\/[^/]+\/node_pools$/, status);
+      const s = await setup(spotAccount, { fetch: lossy }, doks);
+      const cluster = await readyCluster(s, torCluster);
+      s.doks.ignoresSpot = true;
+      const spot = { ...gpuPool, name: 'spot', spot: true };
+      const lost = await failure(s.k8s.ensureNodePool(cluster, spot, s.ctx()));
+      const made = s.doks.clusters.get(cluster)!.node_pools.find((p: Json) => p.name === 'spot');
+      expect(made.spot).toBeUndefined();
+      // A lost answer is UNAVAILABLE; a race finds the pool and checks it there and then.
+      if (status === 503) {
+        expect(lost.code).toBe('UNAVAILABLE');
+        expect(mutations(s).filter((m) => m.startsWith('DELETE'))).toEqual([]);
+        const retried = await failure(s.k8s.ensureNodePool(cluster, spot, s.ctx()));
+        expect([retried.code, retried.details?.reason]).toEqual(['UNSUPPORTED', 'spotUnverified']);
+      } else expect([lost.code, lost.details?.reason]).toEqual(['UNSUPPORTED', 'spotUnverified']);
+      expect(mutations(s).filter((m) => m.startsWith('DELETE'))).toEqual([
+        `DELETE ${poolPath(s, cluster, 'spot')}`,
+      ]);
+      expect(posted(s, `/kubernetes/clusters/${cluster}/node_pools`)).toHaveLength(1);
+    }
+  });
+
+  it('never deletes an on-demand pool it made as one when the spec later asks for Spot', async () => {
+    const s = await setup(spotAccount);
+    const cluster = await readyCluster(s, torCluster);
+    await settle(() => s.k8s.ensureNodePool(cluster, gpuPool, s.ctx()), 'ready');
+    const error = await failure(s.k8s.ensureNodePool(cluster, { ...gpuPool, spot: true }, s.ctx()));
+    expect(error.details).toMatchObject({ reason: 'immutable', field: 'spot' });
+    expect(mutations(s).filter((m) => m.startsWith('DELETE'))).toEqual([]);
+  });
+
+  it('deletes a new cluster made with an on-demand pool for Spot when its create answer was lost', async () => {
+    const doks = new DoksEmulator(new DoEmulator({ now: () => t0 }));
+    const s = await setup(
+      spotAccount,
+      { fetch: losing(doks, 'POST', /^\/kubernetes\/clusters$/) },
+      doks,
+    );
+    s.doks.ignoresSpot = true;
+    const spec: KubernetesClusterSpec = {
+      ...torCluster,
+      initialNodePools: [cpuPool, { ...gpuPool, name: 'spot', spot: true }],
+    };
+    expect((await failure(s.k8s.ensureCluster(spec, s.ctx()))).code).toBe('UNAVAILABLE');
+    const [made] = s.doks.byName('bc-k-tor');
+    const retried = await failure(s.k8s.ensureCluster(spec, s.ctx()));
+    expect([retried.code, retried.details?.reason]).toEqual(['UNSUPPORTED', 'spotUnverified']);
+    expect(mutations(s)).toEqual([
+      'POST /kubernetes/clusters',
+      `DELETE /kubernetes/clusters/${made!.id}`,
+    ]);
+  });
+
   it('keeps the worker Droplets of its pools out of discovery, claims and deletes', async () => {
     const s = await setup();
     const cluster = await readyCluster(s);
@@ -695,6 +858,37 @@ describe('doks node pools', () => {
     // Its workers go with the pool.
     await settle(() => s.k8s.deleteNodePool(cluster, 'general', s.ctx()), 'deleted');
     for (const id of workers) expect(s.doks.do.state.droplets.has(Number(id))).toBe(false);
+  });
+
+  it("never takes a vps Droplet for a worker: DOKS's tag keys are no label's, and k8s:<value> needs a uuid", async () => {
+    const s = await setup();
+    const request = {
+      offerId: 'nyc3/s-2vcpu-4gb',
+      image: 'ubuntu-24-04-x64',
+      userData: '#cloud-config\n',
+      name: 'inst_1',
+      sshKeys: [
+        'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICbbzkHhLXTIyRDUgXLAC0pVt8MQajr4BGKVoF5MJ71Z test@bc',
+      ],
+      labels: { team: 'web' },
+    };
+    const drops = (): number => posted(s, '/droplets').length;
+    // DOKS's own tag keys are refused as labels, in any case, before anything is sent.
+    for (const key of ['k8s', 'K8S', 'k8s-worker']) {
+      const error = await failure(s.impl.create({ ...request, labels: { [key]: 'yes' } }, s.ctx()));
+      expect([error.code, error.details?.reason]).toEqual(['INVALID_INPUT', 'label']);
+    }
+    expect(drops()).toBe(0);
+    // A Droplet that carries `k8s:yes` anyway (tagged before that refusal, or by hand) is still
+    // this instance's: a retried create finds it instead of posting a second one, and it deletes.
+    const first = await s.impl.create(request, s.ctx());
+    const droplet = s.doks.do.state.droplets.get(Number(first.id))!;
+    droplet.tags.push('k8s:yes', 'k8s-worker:x');
+    const retried = await s.impl.create(request, s.ctx());
+    expect(retried.id).toBe(first.id);
+    expect(drops()).toBe(1);
+    await s.impl.delete!(first.id, s.ctx());
+    expect(posted(s, `/droplets/${first.id}`, 'DELETE')).toHaveLength(1);
   });
 
   it('refuses differences that cannot change in place with INVALID_STATE', async () => {
@@ -752,6 +946,22 @@ describe('doks node pools', () => {
     expect([conflict.code, conflict.details?.reason]).toEqual(['CONFLICT', 'notOwned']);
     const refused = await failure(s.k8s.deleteNodePool(adopted.id, 'team', s.ctx()));
     expect([refused.code, refused.details?.reason]).toEqual(['INVALID_STATE', 'notOwned']);
+    // A pool with this deployment's tag but the managed tag instead of the kubernetes one.
+    const half = s.doks.seedCluster({
+      name: 'half-cluster',
+      region: 'nyc3',
+      nodePool: {
+        name: 'half',
+        size: 's-2vcpu-4gb',
+        count: 1,
+        tags: [deploymentTag('default'), 'better-compute-managed:true'],
+      },
+    });
+    const halfPool = { name: 'half', machineType: 's-2vcpu-4gb', nodeCount: 3 };
+    const unchanged = await failure(s.k8s.ensureNodePool(half.id, halfPool, s.ctx()));
+    expect([unchanged.code, unchanged.details?.reason]).toEqual(['CONFLICT', 'notOwned']);
+    const kept = await failure(s.k8s.deleteNodePool(half.id, 'half', s.ctx()));
+    expect([kept.code, kept.details?.reason]).toEqual(['INVALID_STATE', 'notOwned']);
     expect(mutations(s)).toEqual([]);
     const mine = { name: 'bc-extra', machineType: 's-2vcpu-4gb', nodeCount: 1 };
     await settle(() => s.k8s.ensureNodePool(adopted.id, mine, s.ctx()), 'ready');
@@ -1208,12 +1418,23 @@ describe('doks upgrades and deletes', () => {
       region: 'nyc3',
       tags: [tagFor('better-compute-kubernetes', 'true'), deploymentTag('another')],
     });
-    for (const cluster of [adopted, other]) {
-      const error = await failure(s.k8s.deleteCluster(cluster.id, s.ctx()));
+    // This deployment's tag without the kubernetes tag (the managed one instead) is not ours.
+    const managedOnly = s.doks.seedCluster({
+      name: 'bc-k-managed',
+      region: 'nyc3',
+      tags: [deploymentTag('test'), 'better-compute-managed:true'],
+    });
+    const half = await setup(undefined, { deployment: 'test' }, s.doks);
+    for (const [k8s, cluster] of [
+      [s, adopted],
+      [s, other],
+      [half, managedOnly],
+    ] as const) {
+      const error = await failure(k8s.k8s.deleteCluster(cluster.id, k8s.ctx()));
       expect([error.code, error.details?.reason]).toEqual(['INVALID_STATE', 'notOwned']);
     }
     expect(mutations(s)).toEqual([]);
-    expect(s.doks.clusters.size).toBe(2);
+    expect(s.doks.clusters.size).toBe(3);
   });
 });
 

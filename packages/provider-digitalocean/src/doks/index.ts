@@ -23,6 +23,7 @@ import {
   clusterTags,
   clusterUpdate,
   firewallOf,
+  gpuDevicePluginsOn,
   immutable,
   isOwned,
   outputsOf,
@@ -46,6 +47,7 @@ import {
   nodePoolBody,
   nodePoolState,
   nodePoolUpdate,
+  spotUnhonoured,
 } from './node-pools.js';
 import { checkCredentialRequest, revokeCredentials, mintCredentials } from './credentials.js';
 import { httpsKubeTransport, type KubeTransport } from './transport.js';
@@ -83,8 +85,9 @@ export type * from './types.js';
 // Like the networks, every ensure*/delete* call is non-blocking: it reads the resource, starts at
 // most one change, and answers `pending`, `updating` or `deleting` while DOKS works. DOKS has no
 // operations: the cluster's and its nodes' own states say when a change is done. A cluster is
-// found by its name (unique in an account); only clusters carrying this deployment's ownership
-// tags are ever changed or deleted. Nothing is persisted beyond a name → uuid cache: after a
+// found by its name in its region (whether DOKS names are unique per account or per region is not
+// verified live, so neither is assumed); only clusters carrying this deployment's ownership tags
+// are ever changed or deleted. Nothing is persisted beyond a name → uuid cache: after a
 // restart a call re-reads the resources.
 
 export interface DoKubernetesOptions {
@@ -228,15 +231,50 @@ export class DoKubernetes implements ProviderKubernetes {
   }
 
   /**
-   * This deployment's cluster named `name`, or undefined when there is none. One of that name
-   * that is not this deployment's is CONFLICT (never adopted, never touched). Duplicates of ours
-   * (DO-D4: two creates raced) keep the oldest; the others are deleted one by one.
+   * A cluster of ours found after its create (the answer was lost, or another creator raced) is
+   * checked as the create's answer would have been: an initial pool asked for as Spot that
+   * DigitalOcean made on-demand (`spotUnhonoured`: it carries the Spot request tag) means the
+   * cluster goes again, so an on-demand GPU pool is never left billing.
    */
-  async #find(name: string, signal: AbortSignal, log: Logger): Promise<DoksCluster | undefined> {
+  async #checkInitialSpot(
+    spec: KubernetesClusterSpec,
+    cluster: DoksCluster,
+    context: CallContext,
+  ): Promise<void> {
+    if (cluster.status?.state === 'deleting') return;
+    const dropped = (spec.initialNodePools ?? []).some((wanted) => {
+      if (wanted.spot !== true) return false;
+      const made = cluster.node_pools?.find((pool) => pool.name === wanted.name);
+      return made !== undefined && this.#owned(made) && spotUnhonoured(made);
+    });
+    if (dropped)
+      throw await this.#dropUnverified(
+        cluster.id,
+        `/kubernetes/clusters/${cluster.id}`,
+        'cluster',
+        context,
+      );
+  }
+
+  /**
+   * This deployment's cluster named `name` in `location`, or undefined when there is none. One of
+   * that name that is not this deployment's is CONFLICT (never adopted, never touched); one of ours
+   * only in another region is INVALID_STATE (`immutable` location), and is never deleted.
+   * Duplicates of ours in the region (DO-D4: two creates raced) keep the oldest, and the others are
+   * deleted one by one, unless one of them has running nodes: a cluster with workloads is never
+   * reaped (logged, and CONFLICT `duplicate` until an operator decides).
+   */
+  async #find(
+    name: string,
+    location: string,
+    signal: AbortSignal,
+    log: Logger,
+  ): Promise<DoksCluster | undefined> {
     const cached = this.#names.get(name);
     if (cached) {
       const found = await this.#read(cached, signal);
-      if (found && found.name === name && this.#owned(found)) return found;
+      if (found && found.name === name && found.region === location && this.#owned(found))
+        return found;
       this.#names.delete(name);
     }
     const named = await this.#named(name, signal);
@@ -248,8 +286,30 @@ export class DoKubernetes implements ProviderKubernetes {
         `A DOKS cluster named ${name} exists that this deployment does not own`,
         'notOwned',
       );
-    const live = owned.filter((cluster) => cluster.status?.state !== 'deleting');
-    const [keep, ...extra] = live.length > 0 ? live : owned;
+    const here = owned.filter((cluster) => cluster.region === location);
+    if (here.length === 0) {
+      const elsewhere = owned.find((cluster) => cluster.status?.state !== 'deleting') ?? owned[0]!;
+      throw immutable(elsewhere.id, 'location', elsewhere.region, location);
+    }
+    const live = here.filter((cluster) => cluster.status?.state !== 'deleting');
+    const [keep, ...extra] = live.length > 0 ? live : here;
+    const busy = extra.filter((cluster) =>
+      (cluster.node_pools ?? []).some((pool) =>
+        (pool.nodes ?? []).some((node) => node.status?.state === 'running'),
+      ),
+    );
+    if (busy.length > 0) {
+      log.error('doks.cluster.reapRefused', {
+        name,
+        kept: keep!.id,
+        clusters: busy.map((cluster) => cluster.id),
+      });
+      throw fail(
+        'CONFLICT',
+        `This deployment has more than one DOKS cluster named ${name} in ${location}, and ${busy.map((cluster) => cluster.id).join(', ')} runs nodes: none is deleted until an operator removes the extra ones`,
+        'duplicate',
+      );
+    }
     for (const duplicate of extra) {
       log.warn('doks.cluster.reap', { cluster: duplicate.id, kept: keep!.id, name });
       await this.#deleteOwned(duplicate, signal);
@@ -308,13 +368,14 @@ export class DoKubernetes implements ProviderKubernetes {
   ): Promise<ProviderResourceState> {
     checkClusterSpec(spec, this.#config.regions, false);
     const { signal, log } = context;
-    const found = await this.#find(spec.name, signal, log);
+    const found = await this.#find(spec.name, spec.location, signal, log);
     if (!found) return this.#createCluster(spec, context);
     const { id } = found;
     const state = found.status?.state;
     if (state === 'deleting') return clusterState(id, found);
     if (this.#unverifiedSpot.has(id))
       throw await this.#dropUnverified(id, `/kubernetes/clusters/${id}`, 'cluster', context);
+    await this.#checkInitialSpot(spec, found, context);
     await this.#checkImmutable(spec, found, signal);
     if (state !== 'running' && state !== 'degraded') return clusterState(id, found);
     // A newer patch of the pinned minor (DOKS auto-upgraded it) satisfies the pin.
@@ -426,8 +487,9 @@ export class DoKubernetes implements ProviderKubernetes {
     } catch (error) {
       // Created meanwhile (a retry, or another creator): what is there is the answer.
       if (!isComputeError(error, 'CONFLICT')) throw error;
-      const found = await this.#find(spec.name, signal, log);
+      const found = await this.#find(spec.name, spec.location, signal, log);
       if (!found) throw error;
+      await this.#checkInitialSpot(spec, found, context);
       return clusterState(found.id, found);
     }
     if (!created?.id)
@@ -537,9 +599,9 @@ export class DoKubernetes implements ProviderKubernetes {
   /**
    * Spot and GPU sizes, checked before a create: Spot only with the account's `allowSpot` and
    * `previews` (Spot GPU is a DO preview, DO-D14/DO-D23) and only on GPU sizes; `accelerators`
-   * must be what the size carries (DO sizes come with their GPUs).
+   * must be what the size carries (DO sizes come with their GPUs). True when the size is a GPU one.
    */
-  async #checkCapacity(spec: KubernetesNodePoolSpec, signal: AbortSignal): Promise<void> {
+  async #checkCapacity(spec: KubernetesNodePoolSpec, signal: AbortSignal): Promise<boolean> {
     if (spec.spot && this.#spotDropped) throw spotUnverified();
     if (spec.spot && !(this.#config.allowSpot && this.#config.previews))
       throw fail(
@@ -547,13 +609,15 @@ export class DoKubernetes implements ProviderKubernetes {
         `Node pool ${spec.name}: Spot node pools need the account's allowSpot and previews (Spot GPU is a DigitalOcean preview)`,
         'spotDisabled',
       );
-    if (!spec.accelerators && !spec.spot && !spec.machineType.startsWith('gpu-')) return;
+    if (!spec.accelerators && !spec.spot && !spec.machineType.startsWith('gpu-')) return false;
     const size = await this.#size(spec.machineType, signal);
     if (!size) throw invalid(`DigitalOcean has no size ${spec.machineType}`, 'size');
-    if (spec.spot && !size.gpu_info)
+    const gpu = size.gpu_info;
+    if (spec.spot && !gpu)
       throw invalid(`Node pool ${spec.name}: Spot node pools are GPU sizes only`, 'spot');
     const mismatch = acceleratorMismatch(spec, size);
     if (mismatch) throw invalid(mismatch, 'accelerators');
+    return gpu !== undefined;
   }
 
   /** A size of `/sizes`, read once per process (sizes and their GPUs do not change). */
@@ -569,6 +633,37 @@ export class DoKubernetes implements ProviderKubernetes {
         return candidate;
       }
     return undefined;
+  }
+
+  /**
+   * DO-D18 before a GPU pool joins a cluster: DOKS's own GPU device plugins must be off, or they
+   * advertise the pool's GPUs next to bcd's and outside compute's booking (clusters before DOKS
+   * 1.37 turned them on). On a cluster of ours they are turned off (a PUT; the pool waits, so the
+   * answer is pending); on any other (an adopted one) INVALID_STATE (`devicePluginOn`) names the
+   * fields its operator must turn off: someone else's cluster is never changed. Undefined when
+   * they are off.
+   */
+  async #gpuPluginsOff(
+    parent: DoksCluster,
+    id: string,
+    context: CallContext,
+  ): Promise<ProviderResourceState | undefined> {
+    const on = gpuDevicePluginsOn(parent);
+    if (on.length === 0) return undefined;
+    if (!this.#owned(parent))
+      throw fail(
+        'INVALID_STATE',
+        `DOKS cluster ${parent.id} runs its own GPU device plugins (${on.join(', ')}): turn them off before a GPU node pool is added, so only better-compute's device plugin advertises the GPUs`,
+        'devicePluginOn',
+        { field: on.join(', ') },
+      );
+    context.log.info('doks.cluster.pluginsOff', { cluster: parent.id, nodePool: id });
+    await this.#client.request('PUT', `/kubernetes/clusters/${parent.id}`, {
+      body: { name: parent.name, tags: ownTags(parent), ...pluginsOff },
+      signal: context.signal,
+      budget: 'mutate',
+    });
+    return resourceState(id, 'pending');
   }
 
   /** The cluster a node pool call names, and the pool of that name in it. */
@@ -616,7 +711,10 @@ export class DoKubernetes implements ProviderKubernetes {
         );
       // A pool is added once the control plane serves (not while it provisions or upgrades).
       if (!serving) return resourceState(id, 'pending');
-      await this.#checkCapacity(spec, signal);
+      if (await this.#checkCapacity(spec, signal)) {
+        const waiting = await this.#gpuPluginsOff(parent, id, context);
+        if (waiting) return waiting;
+      }
       log.info('doks.nodePool.create', { nodePool: id, size: spec.machineType });
       try {
         const created = (
@@ -649,6 +747,7 @@ export class DoKubernetes implements ProviderKubernetes {
         const again = (await this.#pool(clusterId, spec.name, signal)).pool;
         if (!again) throw error;
         if (!this.#owned(again)) throw this.#notOwnedPool(id);
+        await this.#checkPoolSpot(clusterId, spec, again, context);
         return nodePoolState(id, again);
       }
     }
@@ -660,6 +759,7 @@ export class DoKubernetes implements ProviderKubernetes {
         'nodePool',
         context,
       );
+    await this.#checkPoolSpot(clusterId, spec, pool, context);
     checkNodePoolImmutable(id, spec, pool);
     if (spec.accelerators) {
       // A pool's GPUs are its size's: other accelerators would need another pool.
@@ -683,6 +783,27 @@ export class DoKubernetes implements ProviderKubernetes {
       budget: 'mutate',
     });
     return resourceState(id, 'updating');
+  }
+
+  /**
+   * A pool of ours found after its create (the answer was lost, or another creator raced) is
+   * checked as the create's answer would have been: asked for as Spot and made on-demand, it is
+   * deleted (UNSUPPORTED `spotUnverified`). An on-demand pool made as one (no Spot request tag)
+   * that a spec now wants Spot is left alone: that is immutable `spot`.
+   */
+  async #checkPoolSpot(
+    clusterId: string,
+    spec: KubernetesNodePoolSpec,
+    pool: DoksNodePool,
+    context: CallContext,
+  ): Promise<void> {
+    if (spec.spot === true && spotUnhonoured(pool))
+      throw await this.#dropUnverified(
+        pool.id,
+        `/kubernetes/clusters/${clusterId}/node_pools/${pool.id}`,
+        'nodePool',
+        context,
+      );
   }
 
   /** Deletes one of this deployment's node pools (a pool that is not ours is INVALID_STATE). */

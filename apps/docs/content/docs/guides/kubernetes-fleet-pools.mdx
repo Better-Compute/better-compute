@@ -205,7 +205,7 @@ privileged DaemonSet or a cluster-admin identity behind unannounced.
 | -------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | GKE      | `<location>/<cluster name>` | Nothing more: the account's Google identity reaches the cluster API.                                                                                    |
 | EKS      | `<region>/<cluster name>`   | An access entry granting the account's principal `AmazonEKSClusterAdminPolicy`: better-compute grants itself admin only on clusters it created.         |
-| DOKS     | the cluster's UUID          | Nothing more: DigitalOcean issues the cluster credential to the account token.                                                                          |
+| DOKS     | the cluster's UUID          | DigitalOcean's own GPU device plugins off (`nvidia_gpu_device_plugin`, `amd_gpu_device_plugin`), or a GPU node pool is refused (`devicePluginOn`). |
 
 ## Provider differences
 

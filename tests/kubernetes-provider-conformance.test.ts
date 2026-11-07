@@ -120,7 +120,12 @@ function doksSubject(): KubernetesProviderConformanceSubject {
   // DigitalOcean request budgets are per process: every case starts with a fresh one.
   resetBudgets();
   const doks = new DoksEmulator(new DoEmulator());
-  const own = doks.seedCluster({ name: 'tenant-own', region: 'tor1' });
+  // An adoptable DOKS cluster has DigitalOcean's own GPU device plugins off (DO-D18: the tenant turns them off).
+  const own = doks.seedCluster({
+    name: 'tenant-own',
+    region: 'tor1',
+    extra: { nvidia_gpu_device_plugin: { enabled: false }, amd_gpu_device_plugin: { enabled: false } },
+  });
   return {
     provider: digitaloceanProvider({ fetch: doks.fetch, kubeTransport: doks.kube.transport }),
     // Spot GPU node pools are a DigitalOcean preview: the account opts in to both.

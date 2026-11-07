@@ -245,6 +245,16 @@ export function immutable(
   );
 }
 
+/**
+ * The cluster's GPU device plugins that are on (by their field names): each would advertise the
+ * GPUs of a GPU pool next to bcd's device plugin, outside compute's booking (DO-D18).
+ */
+export function gpuDevicePluginsOn(cluster: DoksCluster): string[] {
+  return (['nvidia_gpu_device_plugin', 'amd_gpu_device_plugin'] as const).filter(
+    (field) => cluster[field]?.enabled === true,
+  );
+}
+
 const pluginOn = (cluster: DoksCluster): boolean =>
   cluster.nvidia_gpu_device_plugin?.enabled === true ||
   cluster.amd_gpu_device_plugin?.enabled === true ||

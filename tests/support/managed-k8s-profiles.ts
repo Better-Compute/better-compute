@@ -224,7 +224,13 @@ export function doksProfile(): ManagedKubernetesProfile {
     accepts: (token) => doks.kube.issued.includes(token),
     clusters: () => [...doks.clusters.keys()],
     nodePools: (cluster) => ((doks.clusters.get(cluster)?.node_pools ?? []) as Json[]).map((pool) => pool.name as string),
-    seedCluster: () => doks.seedCluster({ name: 'tenant-own', region: 'tor1' }).id as string,
+    // The tenant turned DigitalOcean's own GPU device plugins off (DO-D18), as adopting for a GPU pool needs.
+    seedCluster: () =>
+      doks.seedCluster({
+        name: 'tenant-own',
+        region: 'tor1',
+        extra: { nvidia_gpu_device_plugin: { enabled: false }, amd_gpu_device_plugin: { enabled: false } },
+      }).id as string,
     secrets: () => ['do-token', ...doks.adminTokens.keys()],
     accessObjects: (server) => doks.kube.clusters.find(server)?.subjectObjects() ?? [],
   };
