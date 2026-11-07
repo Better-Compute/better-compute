@@ -1872,62 +1872,86 @@ export class AwsNetworks implements ProviderNetworks {
         undefined,
         { provider: 'aws', reason: 'no-interface' },
       );
-    const currentIds = primary
-      .items('groupSet')
-      .map((item) => item.textOf('groupId') ?? '')
-      .filter(Boolean);
+    const groupsOf = (eni: (typeof interfaces)[number]): string[] =>
+      eni
+        .items('groupSet')
+        .map((item) => item.textOf('groupId') ?? '')
+        .filter(Boolean);
+    const allIds = [...new Set(interfaces.flatMap(groupsOf))];
 
     const vpcDoc = await this.#call('DescribeVpcs', { VpcId: [vpcId] }, signal);
     const vpcItem = vpcDoc.items('vpcSet')[0];
     const network = vpcItem ? parseVpc(vpcItem).tags.get(networkTags.network) : undefined;
 
     // Which current groups are better-compute's (by tag, never by name): those are replaced.
-    let foreign = currentIds;
-    if (currentIds.length) {
-      const groups = await this.#call('DescribeSecurityGroups', { GroupId: currentIds }, signal);
-      const managed = new Set(
-        groups
-          .items('securityGroupInfo')
-          .filter((item) => {
-            const t = tagMap(item);
-            return (
-              t.has(networkTags.tag) ||
-              (t.get(tags.managed) === 'true' && t.has(networkTags.network))
-            );
-          })
-          .map((item) => item.textOf('groupId')),
-      );
-      foreign = currentIds.filter((id) => !managed.has(id));
+    const managed = new Set<string>();
+    if (allIds.length) {
+      const groups = await this.#call('DescribeSecurityGroups', { GroupId: allIds }, signal);
+      for (const item of groups.items('securityGroupInfo')) {
+        const t = tagMap(item);
+        if (
+          t.has(networkTags.tag) ||
+          (t.get(tags.managed) === 'true' && t.has(networkTags.network))
+        )
+          managed.add(item.textOf('groupId') ?? '');
+      }
     }
+    // Every interface the machine's groups are on changes: the primary, and each other interface
+    // carrying one of ours (an EFA interface per network card launches with the same groups), so
+    // a tag the machine no longer carries admits nothing on any of its addresses. An interface
+    // with none of ours (a claimed machine's own extra interface) is left as it is.
+    const touched = interfaces.filter(
+      (eni) => eni === primary || groupsOf(eni).some((id) => managed.has(id)),
+    );
+    const foreignOf = (eni: (typeof interfaces)[number]) =>
+      groupsOf(eni).filter((id) => !managed.has(id));
     // The limit is checked before any group is made, so a machine over it leaves none behind.
-    const ours = await this.#groupIdsFor(vpcId, network, machineTags, foreign.length, signal);
-    const next = [...new Set([...foreign, ...ours])];
-    if (next.length !== currentIds.length || !next.every((id) => currentIds.includes(id))) {
+    const others = Math.max(...touched.map((eni) => foreignOf(eni).length));
+    const ours = await this.#groupIdsFor(vpcId, network, machineTags, others, signal);
+    const changes = touched
+      .map((eni) => {
+        const current = groupsOf(eni);
+        const next = [...new Set([...foreignOf(eni), ...ours])];
+        return {
+          eniId: eni.textOf('networkInterfaceId') ?? '',
+          next,
+          changed: next.length !== current.length || !next.every((id) => current.includes(id)),
+        };
+      })
+      .filter((change) => change.changed);
+    if (changes.length) {
       if (interfaces.length > 1) {
-        const eniId = primary.textOf('networkInterfaceId') ?? '';
+        const eniIds = changes.map((change) => change.eniId);
         // The IAM policy changes an interface's groups only when it carries the ownership tag:
-        // RunInstances puts it there; a claimed machine's interface gets it now.
+        // RunInstances puts it on every interface it makes; a claimed machine's get it now.
         const eni = await this.#call(
           'DescribeNetworkInterfaces',
-          { NetworkInterfaceId: [eniId] },
+          { NetworkInterfaceId: eniIds },
           signal,
         );
-        const eniItem = eni.items('networkInterfaceSet')[0];
-        if (!eniItem || tagMap(eniItem).get(tags.instance) !== claimedBy)
+        const tagged = new Set(
+          eni
+            .items('networkInterfaceSet')
+            .filter((item) => tagMap(item).get(tags.instance) === claimedBy)
+            .map((item) => item.textOf('networkInterfaceId')),
+        );
+        const untagged = eniIds.filter((id) => !tagged.has(id));
+        if (untagged.length)
           await this.#call(
             'CreateTags',
-            { ResourceId: [eniId], Tag: [{ Key: tags.instance, Value: claimedBy }] },
+            { ResourceId: untagged, Tag: [{ Key: tags.instance, Value: claimedBy }] },
             signal,
           );
-        await this.#call(
-          'ModifyNetworkInterfaceAttribute',
-          { NetworkInterfaceId: eniId, SecurityGroupId: next },
-          signal,
-        );
+        for (const change of changes)
+          await this.#call(
+            'ModifyNetworkInterfaceAttribute',
+            { NetworkInterfaceId: change.eniId, SecurityGroupId: change.next },
+            signal,
+          );
       } else
         await this.#call(
           'ModifyInstanceAttribute',
-          { InstanceId: machineId, GroupId: next },
+          { InstanceId: machineId, GroupId: changes[0]!.next },
           signal,
         );
     }

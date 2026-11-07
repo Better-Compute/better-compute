@@ -954,6 +954,63 @@ describe('networks: machines', () => {
     expect(claimed.groups.map((g) => g.id)).toEqual([groupId('bc-net-bc-net-1'), groupId(tagB)]);
   });
 
+  it('setTags swaps the groups on every EFA interface of a multi-card machine', async () => {
+    const { create, networks, ec2, vpc, emu, groupId, call } = await onNetwork({ efa: 'auto' });
+    ec2.types.set('p4d.24xlarge', {
+      type: 'p4d.24xlarge',
+      vcpu: 96,
+      memoryMiB: 1_179_648,
+      arch: ['x86_64'],
+      gpus: { name: 'A100', manufacturer: 'NVIDIA', count: 8 },
+      efa: 4,
+      networkCards: 4,
+    });
+    ec2.offerings.get('us-east-1a')!.add('p4d.24xlarge');
+    const machine = await create('ins_1', {}, 'us-east-1a/p4d.24xlarge');
+    const instance = ec2.instances.get(machine.id)!;
+    expect(instance.interfaces).toBe(4);
+    const all = () => [instance.groups, ...instance.secondary!.map((eni) => eni.groups)];
+    for (const groups of all())
+      expect(groups.map((g) => g.id)).toEqual([groupId('bc-net-bc-net-1'), groupId(tagA)]);
+    // RunInstances tagged every interface: no tag writes on them.
+    for (const eni of instance.secondary!)
+      expect(eni.tags.get('better-compute:instance')).toBe('ins_1');
+
+    await networks.setTags(machine.id, [tagB], call('ins_1'), 'ins_1');
+    expect(emu.calls('ModifyNetworkInterfaceAttribute')).toHaveLength(4);
+    for (const groups of all())
+      expect(groups.map((g) => g.id)).toEqual([groupId('bc-net-bc-net-1'), groupId(tagB)]);
+    expect(
+      emu.calls('CreateTags').filter((r) => r.params.get('ResourceId.1')?.startsWith('eni-')),
+    ).toHaveLength(0);
+    // No interface carries the old tag group any more, so a sweep may remove it.
+    const old = groupId(tagA)!;
+    expect(all().some((groups) => groups.some((g) => g.id === old))).toBe(false);
+    emu.clock.advance(24 * 3_600_000);
+    await networks.setTags(machine.id, [tagB], call('ins_1'), 'ins_1');
+    emu.clock.advance(24 * 3_600_000);
+    await networks.setTags(machine.id, [tagB], call('ins_1'), 'ins_1');
+    expect(vpc.groups.has(old)).toBe(false);
+    // Current on every interface: no more writes.
+    expect(emu.calls('ModifyNetworkInterfaceAttribute')).toHaveLength(4);
+  });
+
+  it('setTags leaves a claimed machine’s own extra interface alone', async () => {
+    const { networks, ec2, vpcId, subnetId, groupId, call } = await onNetwork();
+    const claimed = ec2.addInstance({ tags: { 'better-compute:instance': 'ins_9' } });
+    claimed.vpcId = vpcId;
+    claimed.subnetId = subnetId;
+    claimed.groups = [];
+    claimed.interfaces = 2;
+    claimed.secondary = [
+      { groups: [{ id: groupId('default')!, name: 'default' }], tags: new Map() },
+    ];
+    await networks.setTags(claimed.id, [tagB], call('ins_9'), 'ins_9');
+    expect(claimed.groups.map((g) => g.id)).toEqual([groupId('bc-net-bc-net-1'), groupId(tagB)]);
+    expect(claimed.secondary[0]!.groups.map((g) => g.name)).toEqual(['default']);
+    expect(claimed.secondary[0]!.tags.size).toBe(0);
+  });
+
   it('setTags checks the interface limit before it creates any group', async () => {
     const { create, networks, call, vpc } = await onNetwork({ securityGroupsPerInterface: 2 });
     const machine = await create('ins_1');

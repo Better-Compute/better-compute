@@ -1,4 +1,4 @@
-import type { Ec2Emulator } from './ec2.js';
+import { type Ec2Emulator, type EmuInstance, secondaryInterfaces } from './ec2.js';
 import type { AwsEmulator, EmulatorRequest, ServiceHandler } from './index.js';
 import { ec2Error, ec2Response, el, items } from './xml.js';
 
@@ -244,16 +244,41 @@ export class VpcEmulator {
       this.rules.get(id)?.tags ??
       this.nacls.get(id)?.tags ??
       this.endpoints.get(id)?.tags ??
-      this.#enis().find((eni) => eni.id === id)?.instance.eniTags
+      this.#enis().find((eni) => eni.id === id)?.tags
     );
   }
 
-  /** The primary network interface of every live instance (the only ones the emulator models). */
-  #enis() {
-    return this.#liveInstances().map((instance) => ({
-      id: `eni-${instance.id.slice(2)}`,
-      instance,
-    }));
+  /** Every network interface of every live instance: the primary, then secondaryInterfaces(). */
+  #enis(): {
+    id: string;
+    instance: EmuInstance;
+    device: number;
+    groups: { id: string; name: string }[];
+    tags: Map<string, string>;
+    setGroups: (groups: { id: string; name: string }[]) => void;
+  }[] {
+    return this.#liveInstances().flatMap((instance) => [
+      {
+        id: `eni-${instance.id.slice(2)}`,
+        instance,
+        device: 0,
+        groups: instance.groups,
+        tags: instance.eniTags,
+        setGroups: (groups: { id: string; name: string }[]) => {
+          instance.groups = groups;
+        },
+      },
+      ...secondaryInterfaces(instance).map((eni, n) => ({
+        id: `eni-${instance.id.slice(2)}-${n + 1}`,
+        instance,
+        device: n + 1,
+        groups: eni.groups,
+        tags: eni.tags,
+        setGroups: (groups: { id: string; name: string }[]) => {
+          eni.groups = groups;
+        },
+      })),
+    ]);
   }
 
   /** The VPC by tag value (test helper). */
@@ -792,7 +817,7 @@ export class VpcEmulator {
         if (group.name === 'default')
           return ec2Error('CannotDelete', 'the default security group cannot be deleted');
         if (
-          this.#liveInstances().some((instance) => instance.groups.some((g) => g.id === id)) ||
+          this.#enis().some((eni) => eni.groups.some((g) => g.id === id)) ||
           this.serviceInterfaces.some((list) => list().some((eni) => eni.groupIds.includes(id)))
         )
           return ec2Error('DependencyViolation', `resource ${id} has a dependent object`);
@@ -1074,13 +1099,13 @@ export class VpcEmulator {
       case 'DescribeNetworkInterfaces': {
         const ids = listOf(p, 'NetworkInterfaceId');
         const found = this.#enis().filter(
-          ({ id, instance }) =>
+          ({ id, instance, groups, tags }) =>
             (ids.length === 0 || ids.includes(id)) &&
-            matches(instance.eniTags, filters, (name) =>
+            matches(tags, filters, (name) =>
               name === 'network-interface-id'
                 ? [id]
                 : name === 'group-id'
-                  ? instance.groups.map((g) => g.id)
+                  ? groups.map((g) => g.id)
                   : name === 'vpc-id'
                     ? [instance.vpcId]
                     : name === 'attachment.instance-id'
@@ -1099,11 +1124,11 @@ export class VpcEmulator {
           items(
             'networkInterfaceSet',
             found.map(
-              ({ id, instance }) =>
-                `${el('networkInterfaceId', id)}${el('vpcId', instance.vpcId)}${el('subnetId', instance.subnetId)}<attachment>${el('instanceId', instance.id)}${el('deviceIndex', 0)}</attachment>${items(
+              ({ id, instance, device, groups, tags }) =>
+                `${el('networkInterfaceId', id)}${el('vpcId', instance.vpcId)}${el('subnetId', instance.subnetId)}<attachment>${el('instanceId', instance.id)}${el('deviceIndex', device)}</attachment>${items(
                   'groupSet',
-                  instance.groups.map((g) => `${el('groupId', g.id)}${el('groupName', g.name)}`),
-                )}${tagSet(instance.eniTags)}`,
+                  groups.map((g) => `${el('groupId', g.id)}${el('groupName', g.name)}`),
+                )}${tagSet(tags)}`,
             ),
           ),
         );
@@ -1111,7 +1136,12 @@ export class VpcEmulator {
       case 'ModifyNetworkInterfaceAttribute': {
         const eni = this.#enis().find(({ id }) => id === p.get('NetworkInterfaceId'));
         if (!eni) return ec2Error('InvalidNetworkInterfaceID.NotFound', 'no such interface');
-        return this.#setGroups(eni.instance, listOf(p, 'SecurityGroupId'), action);
+        return this.#setGroups(
+          eni.instance.vpcId,
+          listOf(p, 'SecurityGroupId'),
+          action,
+          eni.setGroups,
+        );
       }
       case 'ModifyInstanceAttribute': {
         const instance = this.ec2.instances.get(p.get('InstanceId') ?? '');
@@ -1123,7 +1153,9 @@ export class VpcEmulator {
             'InvalidInstanceID',
             `There are multiple interfaces attached to instance '${instance.id}'. Please specify an interface ID for the operation instead.`,
           );
-        return this.#setGroups(instance, ids, action);
+        return this.#setGroups(instance.vpcId, ids, action, (groups) => {
+          instance.groups = groups;
+        });
       }
       case 'RunInstances':
         return this.#run(request);
@@ -1153,9 +1185,10 @@ export class VpcEmulator {
 
   /** The security groups of an instance's primary interface (ModifyInstanceAttribute or the ENI's). */
   #setGroups(
-    instance: { vpcId: string; groups: { id: string; name: string }[] },
+    vpcId: string,
     ids: string[],
     action: string,
+    apply: (groups: { id: string; name: string }[]) => void,
   ): Response {
     if (ids.length > this.groupsPerInterface)
       return ec2Error(
@@ -1167,14 +1200,14 @@ export class VpcEmulator {
       const group = this.groups.get(id);
       if (!group)
         return ec2Error('InvalidGroup.NotFound', `The security group '${id}' does not exist`);
-      if (group.vpcId !== instance.vpcId)
+      if (group.vpcId !== vpcId)
         return ec2Error(
           'InvalidGroup.NotFound',
-          `The security group '${id}' does not exist in VPC '${instance.vpcId}'`,
+          `The security group '${id}' does not exist in VPC '${vpcId}'`,
         );
       groups.push({ id: group.id, name: group.name });
     }
-    instance.groups = groups;
+    apply(groups);
     return ec2Response(action, el('return', true));
   }
 
@@ -1231,6 +1264,16 @@ export class VpcEmulator {
             )!,
           ];
       instance.groups = groups.map((group) => ({ id: group.id, name: group.name }));
+      // Several NetworkInterface.N (EFA: one per network card): each gets the groups and the tags.
+      let count = 1;
+      while (p.has(`NetworkInterface.${count + 1}.DeviceIndex`)) count++;
+      if (count > 1) {
+        instance.interfaces = count;
+        instance.secondary = Array.from({ length: count - 1 }, () => ({
+          groups: instance.groups.map((g) => ({ ...g })),
+          tags: new Map(instance.eniTags),
+        }));
+      }
     }
     // The response was rendered before the patch; later reads show the VPC and groups.
     return response;

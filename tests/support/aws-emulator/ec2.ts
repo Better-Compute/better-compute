@@ -23,6 +23,20 @@ export interface EmuType {
   neuron?: { name: string; count: number };
 }
 
+export interface EmuInterface {
+  groups: { id: string; name: string }[];
+  tags: Map<string, string>;
+}
+
+/** The instance's interfaces after the primary, `interfaces - 1` of them (new ones: no groups). */
+export function secondaryInterfaces(instance: EmuInstance): EmuInterface[] {
+  const want = Math.max(0, (instance.interfaces ?? 1) - 1);
+  const list = (instance.secondary ??= []);
+  while (list.length < want) list.push({ groups: [], tags: new Map() });
+  list.length = want;
+  return list;
+}
+
 export interface EmuInstance {
   id: string;
   type: string;
@@ -47,6 +61,12 @@ export interface EmuInstance {
   eniTags: Map<string, string>;
   /** Network interfaces attached (1 unless a test adds more); the first is the primary. */
   interfaces?: number;
+  /**
+   * The interfaces after the primary (secondaryInterfaces() keeps it `interfaces - 1` long), each
+   * with its own groups and tags. RunInstances with several NetworkInterface.N (EFA, one per
+   * network card) gives each the launch groups and the 'network-interface' tags.
+   */
+  secondary?: EmuInterface[];
   terminationProtected: boolean;
   capacityReservationId?: string;
   lifecycle?: 'spot' | 'capacity-block';
@@ -273,10 +293,12 @@ export class Ec2Emulator {
       tagSet,
       items('networkInterfaceSet', [
         eni,
-        ...Array.from(
-          { length: (instance.interfaces ?? 1) - 1 },
-          (_, n) =>
-            `${el('networkInterfaceId', `eni-${instance.id.slice(2)}-${n + 1}`)}<attachment>${el('deviceIndex', n + 1)}</attachment>${el('subnetId', instance.subnetId)}${el('vpcId', instance.vpcId)}`,
+        ...secondaryInterfaces(instance).map(
+          (eni, n) =>
+            `${el('networkInterfaceId', `eni-${instance.id.slice(2)}-${n + 1}`)}<attachment>${el('deviceIndex', n + 1)}</attachment>${el('subnetId', instance.subnetId)}${el('vpcId', instance.vpcId)}${items(
+              'groupSet',
+              eni.groups.map((g) => `${el('groupId', g.id)}${el('groupName', g.name)}`),
+            )}`,
         ),
       ]),
     ].join('');
