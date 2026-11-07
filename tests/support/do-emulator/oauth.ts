@@ -19,6 +19,8 @@ export class OAuthEmulator {
   clientId = 'client-1';
   clientSecret = 'client-secret-1';
   /** Answers the token endpoint gives next, before anything else (rate limits, odd refusals), one per request. */
+  /** While set, token requests (recorded already) wait for it: a test's way to catch an exchange in flight. */
+  hold: Promise<void> | undefined;
   /** Tokens revoked (`POST /v1/oauth/revoke`), in order. */
   readonly revoked: string[] = [];
   /** The revoke endpoint's answer (200, or a failure to script). */
@@ -52,6 +54,7 @@ export class OAuthEmulator {
     }
     if (url.pathname !== '/v1/oauth/token' || method !== 'POST')
       return json(404, { error: 'not_found' });
+    if (this.hold) await this.hold;
     const scripted = this.scripted.shift();
     if (scripted) return json(scripted.status, scripted.body, scripted.headers);
     if (q.get('client_id') !== this.clientId || q.get('client_secret') !== this.clientSecret)

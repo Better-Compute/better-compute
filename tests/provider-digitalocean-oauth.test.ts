@@ -3,6 +3,7 @@ import { manualClock, type Logger, type ProviderContext } from '@better-compute/
 import {
   digitaloceanProvider,
   exchangeAuthorizationCode,
+  oauthStateOf,
   resetOAuthState,
   type DoCompute,
   type DoConfig,
@@ -387,6 +388,46 @@ describe('token endpoint answers that are not a dead grant', () => {
     await expect(exchangeAuthorizationCode(input)).resolves.toMatchObject({
       refreshToken: 'refresh-1',
     });
+  });
+});
+
+describe('revoking a connected account', () => {
+  it('waits for an exchange in flight, withdraws its tokens too, and never writes them back', async () => {
+    const w = world();
+    let release!: () => void;
+    w.oauth.hold = new Promise<void>((resolve) => (release = resolve));
+    const { provider, config } = await w.account({
+      oauth: { ...w.hooks, redirectUris: ['https://x/cb'] },
+    });
+    const compute = (await provider.create(config, w.context)) as DoCompute;
+    const pending = compute.listOffers({}).catch((e: unknown) => e);
+    while (w.oauth.requests.length === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+    const revoking = provider.connect!.revoke!({
+      ref: REF as never,
+      secret: 'refresh-0',
+      clock: w.clock,
+      signal: new AbortController().signal,
+    });
+    release();
+    await revoking;
+    expect(await pending).toMatchObject({
+      code: 'INVALID_CONFIG',
+      details: expect.objectContaining({ reason: 'oauthRevoked' }),
+    });
+    // The rotated token stayed in memory (never written over the ref being deleted) and was revoked with the rest.
+    expect(w.writes).toEqual([]);
+    expect(w.oauth.revoked).toEqual(['refresh-1', 'refresh-0', 'access-1']);
+    expect(oauthStateOf(REF as never)).toEqual({
+      accessToken: false,
+      unwritten: false,
+      suspect: false,
+    });
+    // Nothing exchanges for the revoked ref again.
+    const before = w.oauth.requests.length;
+    await expect(compute.listOffers({})).rejects.toMatchObject({
+      details: expect.objectContaining({ reason: 'oauthRevoked' }),
+    });
+    expect(w.oauth.requests).toHaveLength(before);
   });
 });
 

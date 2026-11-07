@@ -292,6 +292,19 @@ const accessTokens = new Map<SecretRef, { token: string; expiresAt: number }>();
 const unwritten = new Map<SecretRef, string>();
 /** A refresh token refused once while the store still held it, by secret ref: refused again, the grant is dead. */
 const suspect = new Map<SecretRef, string>();
+/**
+ * Secret refs whose credential is being revoked (vps is deleting it): no new exchange starts, and an exchange still in
+ * flight keeps what it got in memory, for the revoke to withdraw, instead of writing it back (which would seal the
+ * deleted ref again). A ref is never reused, so the set only grows by the connected accounts deleted here.
+ */
+const revokedRefs = new Set<SecretRef>();
+
+const revokedError = () =>
+  oauthError(
+    'INVALID_CONFIG',
+    'The account’s DigitalOcean grant was revoked: connect the account again',
+    'oauthRevoked',
+  );
 
 /** A cached access token is answered while it has more than this left (the same margin as the client's). */
 const freshMarginMs = 60_000;
@@ -318,6 +331,7 @@ export function oauthTokenSource(
 
   async function persist(value: string): Promise<void> {
     unwritten.set(ref, value);
+    if (revokedRefs.has(ref)) return;
     for (let attempt = 0; attempt < writeAttempts; attempt++) {
       try {
         await options.rotate({ ref, value, tenantId: tenantId! });
@@ -382,10 +396,12 @@ export function oauthTokenSource(
     log.info('digitalocean.oauthExchanged', { account: context.account?.id });
     const access = { token: tokens.accessToken, expiresAt: tokens.expiresAt };
     accessTokens.set(ref, access);
+    if (revokedRefs.has(ref)) throw revokedError();
     return { ...access };
   }
 
   return (hint) => {
+    if (revokedRefs.has(ref)) return Promise.reject(revokedError());
     const cached = accessTokens.get(ref);
     if (cached && hint?.refused === cached.token) accessTokens.delete(ref);
     else if (cached && cached.expiresAt - context.clock.now() > freshMarginMs)
@@ -402,6 +418,7 @@ export function oauthTokenSource(
 
 /** Forgets the in-process OAuth state of one account's secret (its credential is being deleted). */
 function forgetOAuthState(ref: SecretRef): void {
+  revokedRefs.add(ref);
   inFlight.delete(ref);
   accessTokens.delete(ref);
   unwritten.delete(ref);
@@ -474,6 +491,7 @@ export function resetOAuthState(): void {
   accessTokens.clear();
   unwritten.clear();
   suspect.clear();
+  revokedRefs.clear();
 }
 
 /**
@@ -539,6 +557,9 @@ export function doConnect(
     // The account's credential is being deleted: its refresh token (a rotated one not written back yet first) and
     // the access token this process holds are revoked, and the process forgets them whatever DigitalOcean answers.
     async revoke({ ref, secret, signal }) {
+      // No exchange starts from here on; one in flight finishes first, so its tokens are withdrawn too.
+      revokedRefs.add(ref);
+      await inFlight.get(ref)?.catch(() => undefined);
       const tokens = [
         ...new Set(
           [unwritten.get(ref), secret, accessTokens.get(ref)?.token].filter(
