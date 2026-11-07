@@ -494,7 +494,7 @@ describe('vps() API surface', () => {
       'vps/0118_provider_certificates',
       'vps/0119_provider_load_balancers',
       'vps/0120_provider_edge',
-      'vps/0108_quota_bookings',
+      'vps/0121_quota_bookings',
     ]);
     expect(module.requires).toEqual(['capacity']);
     expect(() => vps({ runtimes: [] })).toThrow(ComputeError);

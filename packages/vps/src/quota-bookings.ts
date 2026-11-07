@@ -15,7 +15,7 @@ import { chargeQuota, refundQuota } from '@better-compute/capacity';
  * holds nothing and keeps what it last held, for audit.
  */
 export const quotaBookingsMigration: Migration = {
-  name: 'vps/0108_quota_bookings',
+  name: 'vps/0121_quota_bookings',
   sql: `
 CREATE TABLE quota_bookings (
   owner_kind text NOT NULL CHECK (owner_kind ~ '^[a-z][a-z0-9-]{0,31}$'),

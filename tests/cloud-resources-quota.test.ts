@@ -23,7 +23,7 @@ import {
 // External quota bookings (DigitalOcean P8, task 1): a cloud resource whose kind declares `quota(spec)` (a dedicated
 // inference endpoint's GPUs) holds that much of the tenant's capacity quota on its pool, without a node: booked when
 // the resource is recorded, re-booked by the difference when its spec changes, returned once it is deleted. The
-// booking ledger (`quota_bookings`, vps/0108) makes each step idempotent, so a retried release never refunds twice.
+// booking ledger (`quota_bookings`, vps/0121) makes each step idempotent, so a retried release never refunds twice.
 
 type Api = any;
 
