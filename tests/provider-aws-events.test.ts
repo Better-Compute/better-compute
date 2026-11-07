@@ -399,12 +399,37 @@ describe('provider-aws event intake', () => {
     expect((await poll()).events.filter((event) => event.id.endsWith('/completed'))).toEqual([]);
   });
 
-  it('a failed DescribeInstanceStatus scan is retried on the next poll', async () => {
+  it('a failed DescribeInstanceStatus scan is retried after the scan interval', async () => {
+    // vps polls every 15 s: a failing scan must not spend the account's EC2 budget each time.
     const { emu, ec2, poll } = await world({});
     ec2.addInstance({ id: 'i-0abc12345678def01' });
     emu.failNext('DescribeInstanceStatus', 'RequestLimitExceeded', 503);
     await expect(poll()).rejects.toMatchObject({ code: 'RATE_LIMITED' });
+    emu.clock.advance(15_000);
+    await expect(poll()).resolves.toMatchObject({ events: [] });
+    expect(emu.calls('DescribeInstanceStatus')).toHaveLength(1);
+    emu.clock.advance(5 * 60_000);
     await expect(poll()).resolves.toMatchObject({ events: [] });
     expect(emu.calls('DescribeInstanceStatus')).toHaveLength(2);
+  });
+
+  it('a scan the IAM policy does not allow backs off an hour and says how to fix it', async () => {
+    // An account whose policy predates A4 has no ec2:DescribeInstanceStatus.
+    const { emu, ec2, poll, records } = await world({});
+    ec2.addInstance({ id: 'i-0abc12345678def01' });
+    emu.failNext('DescribeInstanceStatus', 'UnauthorizedOperation', 403, 3);
+    await expect(poll()).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    const hints = () => records.filter((line) => line.includes('aws iam-policy'));
+    expect(hints()).toHaveLength(1);
+    for (let minute = 5; minute < 60; minute += 5) {
+      emu.clock.advance(5 * 60_000);
+      await expect(poll()).resolves.toMatchObject({ events: [] });
+    }
+    expect(emu.calls('DescribeInstanceStatus')).toHaveLength(1);
+    expect(hints()).toHaveLength(1);
+    emu.clock.advance(5 * 60_000);
+    await expect(poll()).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    expect(emu.calls('DescribeInstanceStatus')).toHaveLength(2);
+    expect(hints()).toHaveLength(2);
   });
 });

@@ -39,6 +39,9 @@ import {
 } from './shapes.js';
 import { packUserData } from './userdata.js';
 
+/** (A4) How long a scheduled-event scan the IAM policy refuses waits before it is tried again. */
+const scanDeniedBackoffMs = 3_600_000;
+
 export interface AwsComputeDeps {
   ec2: QueryClient;
   /** (A4) The event-intake queue's client, when the account names `eventQueueUrl`. */
@@ -174,6 +177,8 @@ export class AwsCompute implements ProviderImpl {
   readonly #ssmPrefixes: readonly string[];
   /** (A4, no queue) When the last DescribeInstanceStatus scan succeeded. */
   #scannedAt: number | undefined;
+  /** (A4) A failed scan's backoff: no scan before this time. */
+  #scanRetryAt: number | undefined;
   /** (A4) The scheduled events the last complete scan listed (a vanished one is completed). */
   #scheduled: ReadonlyMap<string, ScheduledEvent> = new Map();
   readonly #imageOwners: readonly string[];
@@ -934,7 +939,9 @@ export class AwsCompute implements ProviderImpl {
   /**
    * The account's EventBridge events from its intake queue (`eventQueueUrl`), authenticated by
    * account, region and source. Messages are deleted only by the batch's `ack`. Without a queue,
-   * the account's scheduled events (DescribeInstanceStatus) at most every 5 minutes.
+   * the account's scheduled events (DescribeInstanceStatus) at most every 5 minutes. A failed scan
+   * waits the same 5 minutes, and one the IAM policy refuses (a policy from before A4) an hour,
+   * logged once per hour with the fix: vps polls every 15 s and must not spend the EC2 budget.
    */
   async pollEvents(
     context: CallContext,
@@ -943,14 +950,31 @@ export class AwsCompute implements ProviderImpl {
     const { sqs } = this.deps;
     if (sqs === undefined || this.config.eventQueueUrl === undefined) {
       const now = this.context.clock.now();
-      if (this.#scannedAt !== undefined && now - this.#scannedAt < scheduledEventScanMs)
+      if (
+        (this.#scannedAt !== undefined && now - this.#scannedAt < scheduledEventScanMs) ||
+        (this.#scanRetryAt !== undefined && now < this.#scanRetryAt)
+      )
         return { events: [], received: 0, ack: async () => {} };
-      const { events, scheduled } = await scanScheduledEvents(
-        (action, params, signal) => this.call(action, params, signal),
-        context.signal,
-        now,
-        this.#scheduled,
-      );
+      let scan;
+      try {
+        scan = await scanScheduledEvents(
+          (action, params, signal) => this.call(action, params, signal),
+          context.signal,
+          now,
+          this.#scheduled,
+        );
+      } catch (error) {
+        const denied = isComputeError(error, 'ACCESS_DENIED');
+        this.#scanRetryAt = now + (denied ? scanDeniedBackoffMs : scheduledEventScanMs);
+        if (denied)
+          context.log.warn(
+            'provider-aws: the account may not call ec2:DescribeInstanceStatus; scheduled events are read again in an hour (rerun `aws iam-policy` and update the role or user policy)',
+            { provider: 'aws' },
+          );
+        throw error;
+      }
+      const { events, scheduled } = scan;
+      this.#scanRetryAt = undefined;
       this.#scannedAt = now;
       this.#scheduled = scheduled;
       // Not a queue: nothing more to read until the next scan, however many events it found.
