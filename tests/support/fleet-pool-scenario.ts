@@ -332,10 +332,29 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
     }, 90_000);
 
     it('pruning the pool from the document tears it down and leaves no orphans', async () => {
-      // Teardown waits for bookings (nothing is force-released): the tenant ends its own first.
-      for (const reservationId of reservations)
-        await api.reservations.release(dev.root, { tenantId: dev.rootTenantId, reservationId }).catch(() => undefined);
+      // Teardown drains: pruned with bookings still live, the substrate waits for them; nothing is force-released and
+      // nothing is deleted at the provider meanwhile.
+      const states = await Promise.all(
+        reservations.map(async (reservationId) => ({
+          reservationId,
+          state: (await api.reservations.get(dev.root, { tenantId: dev.rootTenantId, reservationId })).state,
+        })),
+      );
+      const active = states.filter((entry) => entry.state === 'active').map((entry) => entry.reservationId);
+      expect(active.length).toBeGreaterThan(0);
+      const booked = await liveAllocations(poolId);
       await apply([], true);
+      const waiting = await until('the substrate to wait for the live bookings', async () => {
+        await kick(poolId);
+        const row = await substrate(poolId);
+        return row?.state === 'deleting' && /Waiting for \d+ booking/.test(row.message ?? '') ? row : undefined;
+      }, 60_000, () => substrateState(poolId));
+      expect(waiting.message).toContain(`Waiting for ${booked.length} booking`);
+      expect(profile.clusters()).toContain(providerId);
+      expect(await liveAllocations(poolId)).toEqual(booked);
+      // The tenant ends its own bookings; then the teardown goes on.
+      for (const reservationId of active)
+        await api.reservations.release(dev.root, { tenantId: dev.rootTenantId, reservationId });
       await until('the substrate to be deleted', async () => {
         await kick(poolId);
         return (await substrate(poolId))?.state === 'deleted';
