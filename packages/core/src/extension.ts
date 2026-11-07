@@ -894,7 +894,7 @@ export interface ProviderAddressExpectation {
  * (provider addresses) Reserved public addresses on a provider account, idempotent and non-blocking like
  * `ProviderVolumes`. Outputs: `address`, `family`, `region`, `assignedTo` (the machine id; absent while
  * unassigned) and, where the provider has one, `fingerprint`: what tells this reservation apart from a later one at
- * the same address (DigitalOcean: its project or reservation time). `assignAddress` and `unassignAddress` return the assignment's state (`pending`/`ready`,
+ * the same address (DigitalOcean: a reserved IPv6's reservation time; a reserved IPv4 has none). `assignAddress` and `unassignAddress` return the assignment's state (`pending`/`ready`,
  * `deleting`/`deleted`). An address assigned to another machine is `CONFLICT` (never moved silently); an assigned
  * address is not deleted (`INVALID_STATE`); a machine in another region is `INVALID_INPUT`.
  */

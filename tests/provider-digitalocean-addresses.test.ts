@@ -58,12 +58,8 @@ describe('provider-digitalocean addresses: reserve', () => {
     expect(a).toEqual({
       id: expect.stringMatching(/^198\.51\.100\.\d+$/),
       state: 'ready',
-      outputs: {
-        address: a.id,
-        family: 'ipv4',
-        region: 'nyc3',
-        fingerprint: expect.stringMatching(/^project:/),
-      },
+      // No fingerprint: a reserved IPv4's project is shared by every reservation in it.
+      outputs: { address: a.id, family: 'ipv4', region: 'nyc3' },
     });
     expect(calls(emu, 'POST', /^\/v2\/reserved_ips$/)[0]!.body).toEqual({ region: 'nyc3' });
     const b = await impl.addresses.ensureAddress(v6, ctx());
@@ -80,26 +76,53 @@ describe('provider-digitalocean addresses: reserve', () => {
     expect(await impl.addresses.getAddress(a.id, ctx())).toEqual(a);
   });
 
-  it('never releases or takes over an address that is not the reservation it recorded', async () => {
-    const { emu, impl } = await setup();
-    const a = await impl.addresses.ensureAddress(v4, ctx());
-    const fingerprint = a.outputs!.fingerprint!;
-    // The address was released out of band and DO handed the IP to a reservation of the account owner.
-    emu.state.reservedIps.get(a.id)!.project_id = 'owner-project';
+  it('never releases or takes over an IPv6 address that is not the reservation it recorded', async () => {
+    let now = t0;
+    const { emu, impl } = await setup(new DoEmulator({ now: () => now }));
+    const b = await impl.addresses.ensureAddress(v6, ctx());
+    const fingerprint = b.outputs!.fingerprint!;
+    // Released out of band, and DO handed the IP to a later reservation of the account owner.
+    emu.state.reservedIpv6.delete(b.id);
+    now += 60_000;
+    seedAddress(emu.state, { family: 'v6', ip: b.id });
     const takeOver = await failure(
-      impl.addresses.ensureAddress({ ...v4, id: a.id, fingerprint }, ctx()),
+      impl.addresses.ensureAddress({ ...v6, id: b.id, fingerprint }, ctx()),
     );
     expect([takeOver.code, takeOver.details?.reason]).toEqual(['INVALID_STATE', 'notManaged']);
-    const release = await failure(impl.addresses.deleteAddress(a.id, ctx(), { region: 'nyc3', fingerprint }));
+    const release = await failure(impl.addresses.deleteAddress(b.id, ctx(), { region: 'nyc3', fingerprint }));
     expect([release.code, release.details?.reason]).toEqual(['INVALID_STATE', 'notManaged']);
-    const elsewhere = await failure(impl.addresses.deleteAddress(a.id, ctx(), { region: 'sfo3' }));
+    const elsewhere = await failure(impl.addresses.deleteAddress(b.id, ctx(), { region: 'sfo3' }));
     expect(elsewhere.details?.reason).toBe('notManaged');
-    expect(calls(emu, 'DELETE', /reserved_ips/)).toHaveLength(0);
+    expect(calls(emu, 'DELETE', /reserved_ipv6/)).toHaveLength(0);
     // What was recorded, matched: released.
-    const owner = emu.state.reservedIps.get(a.id)!.project_id as string;
+    const current = (await impl.addresses.getAddress(b.id, ctx()))!.outputs!.fingerprint!;
+    expect(current).not.toBe(fingerprint);
     expect(
-      await impl.addresses.deleteAddress(a.id, ctx(), { region: 'nyc3', fingerprint: `project:${owner}` }),
-    ).toEqual({ id: a.id, state: 'deleted' });
+      await impl.addresses.deleteAddress(b.id, ctx(), { region: 'nyc3', fingerprint: current }),
+    ).toEqual({ id: b.id, state: 'deleted' });
+  });
+
+  it('an IPv4 re-reserved in the same project shows no fingerprint to mistake for the first reservation', async () => {
+    const { emu, impl } = await setup();
+    const a = await impl.addresses.ensureAddress(v4, ctx());
+    const project = emu.state.reservedIps.get(a.id)!.project_id;
+    expect(project).toEqual(expect.any(String));
+    // Released out of band, then reserved again in the same (default) project: DO shows the same project.
+    emu.state.reservedIps.delete(a.id);
+    const again = seedAddress(emu.state, { ip: a.id });
+    expect(again.project_id).toBe(project);
+    const seen = (await impl.addresses.getAddress(a.id, ctx()))!;
+    expect(seen.outputs).toEqual({ address: a.id, family: 'ipv4', region: 'nyc3' });
+    // A fingerprint recorded from a project (or anything else) is never matched by an IPv4: refused, not released.
+    const release = await failure(
+      impl.addresses.deleteAddress(a.id, ctx(), { region: 'nyc3', fingerprint: `project:${project}` }),
+    );
+    expect([release.code, release.details?.reason]).toEqual(['INVALID_STATE', 'notManaged']);
+    const takeOver = await failure(
+      impl.addresses.ensureAddress({ ...v4, id: a.id, fingerprint: `project:${project}` }, ctx()),
+    );
+    expect(takeOver.details?.reason).toBe('notManaged');
+    expect(writes(emu)).toHaveLength(1);
   });
 
   it('refuses what it can before any request', async () => {

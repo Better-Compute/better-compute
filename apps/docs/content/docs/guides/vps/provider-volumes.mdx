@@ -132,12 +132,20 @@ while it is assigned.
 The reconciler never takes an address over from a machine it did not put it on: if the provider reports it on another
 machine, the assignment goes to `error` and nothing is moved.
 
-Since a reserved IP carries no tag, the row is the ownership record. It also keeps the provider's `fingerprint` from the
-reserve (on DigitalOcean the reserved IPv6's reservation time, or the reserved IPv4's project). If the address was
-released out of band and the provider later handed the same IP to a reservation of the account owner, the fingerprint
-or region no longer matches: the reconciler then neither unassigns nor releases that address, and a delete finishes the
-row (refunding its quota) with a warning in the log. The provider refuses such an address too (`INVALID_STATE`, reason
-`notManaged`).
+Since a reserved IP carries no tag, the row is the ownership record, and one address is recorded by at most one live
+row. Where the provider has one, the row also keeps the `fingerprint` from the reserve (on DigitalOcean a reserved
+IPv6's reservation time). A reserved IPv4 has none: its project is shared by every reservation in the project, so it
+cannot tell a re-reservation of the same IP apart.
+
+An address released at the provider outside better-compute is lost for good. The reconciler notices it on its next
+read (the IP is gone, or another reservation's fingerprint or region shows there), or when a later reserve of the same
+account is handed that IP. The row then goes to `error` saying so, forgets the provider address and its instance, and
+never calls the provider again: it is never re-adopted when the IP is handed out again, never assigned, and never
+released. `assign` is `INVALID_STATE`; `delete` finishes the row (refunding its quota) without a provider call. The
+provider refuses a mismatched address too (`INVALID_STATE`, reason `notManaged`).
+
+A volume deleted at the provider outside better-compute is not made again either: once a volume was created, the
+reconciler only reads it, and one the provider no longer has goes to `error` (its data is gone). Delete it.
 
 ### Lost reserves
 
