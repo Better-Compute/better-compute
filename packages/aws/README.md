@@ -195,6 +195,18 @@ The token is a password: it is never logged. IAM: `rds-db:connect` on `arn:aws:r
 
 `emfMetricsExporter({ registry })` writes the metrics registry as CloudWatch Embedded Metric Format lines on standard output (the `awslogs` driver ships them): counter deltas, gauge values, only the dimension labels. See the docs page "Operating on AWS" for EMF, ADOT, Amazon Managed Service for Prometheus and X-Ray.
 
+## Deployment templates
+
+`deploymentTemplates(options)` renders the reference deployment of the control plane on AWS as three CloudFormation JSON templates, and `better-compute aws deploy-templates --out <dir>` (`awsDeployTemplatesCommand`) writes them as new files. The CLI does not build the `aws` commands in: export them from the configuration module (`export const commands = [awsDeployTemplatesCommand()]`). It makes no AWS call. Deploy them in order; each imports the stacks before it through `${NetworkStack}-…` and `${DataStack}-…` exports:
+
+| Stack | Renderer | What it creates |
+| --- | --- | --- |
+| `network` | `networkTemplate` | A VPC across 2 or 3 zones, public and private subnets, NAT per zone (or one), the S3 gateway endpoint, interface endpoints for Secrets Manager, KMS, ECR, Logs and STS, flow logs |
+| `data` | `dataTemplate` | Aurora PostgreSQL (16 or later) Serverless v2 with IAM database authentication, TLS forced, `btree_gist` allowed, its own KMS key, a Secrets Manager-managed master password, reachable only from the exported client security group |
+| `control-plane` | `controlPlaneTemplate` | ECS Fargate `api`, `worker` and `gateway` services and a `migrate` task from one digest-pinned image; an ALB with an ACM certificate and WAF; an NLB in TCP passthrough for the gateway's mTLS; least-privilege task roles; the deployment secret and the sealed PKI bundle in Secrets Manager; one KMS key; S3 buckets for downloads (behind CloudFront), blobs, snapshots and the Object Lock audit archive; an EventBridge bus; log groups and alarms |
+
+Options are structural only (`name`, `zones`, `natGateways`, `readers`); runtime values (image, domains, certificate, task counts) are stack parameters. Every rendered template passes `lintTemplate` (references resolve, limits hold, no `NoEcho` parameters: the templates take no secrets). The deployment guide is [`deploy/aws/README.md`](../../deploy/aws/README.md).
+
 ## Implementation note
 
 SigV4 signing and the JSON and query protocol clients live in `src/internal/` for now, with the shapes `@better-compute/aws-core` takes on (A0). They move there once aws-core ships them.

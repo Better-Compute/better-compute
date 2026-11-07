@@ -76,6 +76,8 @@ const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts'],
+    // The AWS live suite runs only through vitest.aws-live.config.ts.
+    exclude: ['**/node_modules/**', '**/dist/**', '**/.git/**', 'tests/live/aws/**'],
     testTimeout: 30000,
     hookTimeout: 30000,
     fileParallelism: false,

@@ -1,0 +1,173 @@
+# The control plane on AWS
+
+Three CloudFormation stacks, rendered (not kept here) by `@better-compute/aws` so they cannot drift from the code
+that tests them. The docs page "Deploying on AWS" (`apps/docs/content/docs/operations/deploy-aws.mdx`) explains
+what each stack creates and why; this file is the runbook.
+
+| Stack | Template | Depends on |
+| --- | --- | --- |
+| `<name>-network` | `network.json`: VPC, subnets, NAT, VPC endpoints, flow logs | none |
+| `<name>-data` | `data.json`: Aurora PostgreSQL Serverless v2, IAM auth, KMS | network |
+| `<name>-control-plane` | `control-plane.json`: ECS Fargate api/worker/gateway, ALB + WAF, NLB, S3, KMS, alarms | network, data |
+
+The commands below use the AWS CLI v2 and `NAME=better-compute`, `REGION=us-east-1`. Nothing in this repository
+runs them.
+
+## 0. Render
+
+The CLI does not build the `aws` commands in yet. Add the one you need to your configuration module's `commands`
+(the same `better-compute.config.ts` as in step 1; rendering reads nothing else from it):
+
+```ts
+import { awsDeployTemplatesCommand } from '@better-compute/aws';
+export const commands = [awsDeployTemplatesCommand()];
+```
+
+```sh
+better-compute aws deploy-templates --out cfn --name "$NAME"      # --zones 2 --nat single --readers 0 for staging
+```
+
+`control-plane.json` is over CloudFormation's 51,200-byte inline limit, minified (`--compact`) or not: pass
+`--s3-bucket <bucket>` to `aws cloudformation deploy` (as below).
+
+## 1. Image and certificate
+
+Build an image whose entrypoint is the `better-compute` CLI, with your `better-compute.config.ts` (see the docs
+page for an AWS configuration) and the RDS certificate bundle in it, push it to ECR and note the digest:
+
+```sh
+IMAGE=<account>.dkr.ecr.$REGION.amazonaws.com/better-compute@sha256:<digest>
+```
+
+Request an ACM certificate (DNS validation) for the API domain in `$REGION` and note its ARN as `CERT`.
+
+## 2. Network and data
+
+```sh
+aws cloudformation deploy --stack-name "$NAME-network" --template-file cfn/network.json --capabilities CAPABILITY_IAM
+aws cloudformation deploy --stack-name "$NAME-data" --template-file cfn/data.json \
+  --parameter-overrides NetworkStack="$NAME-network" DataApi=Enabled
+```
+
+## 3. The database user (once)
+
+The processes connect as an IAM-authenticated user; the master password stays in Secrets Manager.
+
+```sh
+CLUSTER=$(aws cloudformation describe-stacks --stack-name "$NAME-data" --query "Stacks[0].Outputs[?OutputKey=='ClusterArn'].OutputValue" --output text)
+MASTER=$(aws cloudformation describe-stacks --stack-name "$NAME-data" --query "Stacks[0].Outputs[?OutputKey=='MasterUserSecretArn'].OutputValue" --output text)
+for sql in "CREATE ROLE bc_app LOGIN" "GRANT rds_iam TO bc_app" \
+           "GRANT CONNECT, CREATE ON DATABASE better_compute TO bc_app" "GRANT CREATE, USAGE ON SCHEMA public TO bc_app"; do
+  aws rds-data execute-statement --resource-arn "$CLUSTER" --secret-arn "$MASTER" --database better_compute --sql "$sql"
+done
+aws cloudformation deploy --stack-name "$NAME-data" --template-file cfn/data.json \
+  --parameter-overrides NetworkStack="$NAME-network" DataApi=Disabled
+```
+
+`btree_gist` is a trusted extension: the first migration creates it as `bc_app`.
+
+## 4. The control plane, at zero tasks
+
+```sh
+aws cloudformation deploy --stack-name "$NAME-control-plane" --template-file cfn/control-plane.json \
+  --s3-bucket <a bucket for templates> --capabilities CAPABILITY_IAM \
+  --parameter-overrides NetworkStack="$NAME-network" DataStack="$NAME-data" Image="$IMAGE" \
+    ApiDomainName=compute.example.com GatewayDomainName=gw.example.com CertificateArn="$CERT" \
+    ApiCount=0 WorkerCount=0 GatewayCount=0   # HostedZoneId=Z… writes the DNS aliases, AlarmEmail=… subscribes,
+                                              # AccessLogsBucket=… (prepared for log delivery) turns on access logs
+```
+
+## 5. The PKI bundle
+
+Create the bundle with `better-compute pki init` on an operator machine, sealed with the deployment secret. The
+secret goes into `pki init`'s environment only, inside a subshell: never echo it, print it or write it to a file,
+so it stays out of terminal scrollback and logs.
+
+```sh
+(
+  export BETTER_COMPUTE_SECRET="$(aws secretsmanager get-secret-value --secret-id <DeploymentSecretArn> \
+    --query SecretString --output text)"
+  better-compute pki init --trust-domain compute.example.com
+)
+```
+
+Then put it:
+
+```sh
+aws secretsmanager put-secret-value --secret-id <PkiBundleSecretArn> --secret-string file://.better-compute/pki.json
+```
+
+Then delete the local copy, or keep it offline. The gateway's serving certificate must name `GatewayDomainName`.
+
+## 6. Migrate, then scale up
+
+```sh
+aws ecs run-task --cluster "$NAME" --launch-type FARGATE --task-definition <MigrateTaskDefinitionArn> \
+  --network-configuration "awsvpcConfiguration={subnets=[<TaskSubnetIds>],securityGroups=[<MigrateSecurityGroupIds>],assignPublicIp=DISABLED}"
+aws ecs wait tasks-stopped --cluster "$NAME" --tasks <task arn>     # exit code 0 in describe-tasks
+aws cloudformation deploy --stack-name "$NAME-control-plane" --template-file cfn/control-plane.json \
+  --s3-bucket <bucket> --capabilities CAPABILITY_IAM \
+  --parameter-overrides ApiCount=3 WorkerCount=2 GatewayCount=3
+```
+
+`aws cloudformation deploy` keeps the previous value of every parameter `--parameter-overrides` does not name, so
+the image, domains and certificate stay as step 4 set them. Pass the same `cfn/control-plane.json` you deployed.
+
+Without `HostedZoneId`, point the API domain at `ApiLoadBalancerDnsName` and the gateway domain at
+`GatewayLoadBalancerDnsName`. Publish bcd binaries to `DownloadsBucketName`; they are served at `DownloadsUrl`.
+
+## Upgrades
+
+A release is a new image digest, and its expand migrations run before any process of it:
+
+1. Update the stack with `--parameter-overrides MigrateImage=<new digest>` alone (`aws cloudformation deploy`
+   keeps every other parameter's previous value). Only the migrate task definition changes.
+2. Run the migrate task (step 6) and wait for exit code 0.
+3. Update with `Image=<new digest>` and `MigrateImage=` (empty). The services roll with the deployment circuit
+   breaker, which rolls back a release whose tasks do not become healthy.
+
+## Deleting
+
+The database and both load balancers have deletion protection, and the keys, secrets, log groups and the blobs,
+snapshots and audit buckets are retained. Audit objects stay under Object Lock until their retention ends.
+
+Redeploying under the same `NAME` meets what was retained under fixed names: the secrets
+`bc-deploy/$NAME/secret` and `bc-deploy/$NAME/pki-bundle`, and the log groups
+`/better-compute/$NAME/{api,worker,gateway,migrate}`. A new stack adopts them rather than creating them again
+(below). The bucket names are generated, and the key alias goes with the stack.
+
+To restore a retained database (or its snapshot) under a new control-plane stack, adopt everything the old stack
+kept, under the same `NAME`. The restored database depends on all of it: data sealed with the old
+`BETTER_COMPUTE_SECRET` (the PKI bundle too) is unreadable under any other, snapshot records point at
+`s3://<old snapshots bucket>/…`, blobs and audit batches live in the old buckets under the old platform key, and
+tenant secret refs resolve under `better-compute/$NAME/`, the prefix the task roles are confined to. A new `NAME`
+would put every tenant secret outside that prefix, so a restore keeps the old one.
+
+1. Note the old stack's outputs: `DeploymentSecretArn`, `PkiBundleSecretArn`, `PlatformKeyArn`, `BlobsBucketName`,
+   `SnapshotsBucketName` and `AuditBucketName`.
+2. Deploy the control plane (step 4) with those values and the retained log groups adopted:
+
+   ```sh
+   aws cloudformation deploy --stack-name "$NAME-control-plane" --template-file cfn/control-plane.json \
+     --s3-bucket <bucket> --capabilities CAPABILITY_IAM \
+     --parameter-overrides NetworkStack="$NAME-network" DataStack="$NAME-data" Image="$IMAGE" \
+       ApiDomainName=compute.example.com GatewayDomainName=gw.example.com CertificateArn="$CERT" \
+       ApiCount=0 WorkerCount=0 GatewayCount=0 AdoptLogGroups=true \
+       ExistingDeploymentSecretArn=<DeploymentSecretArn> ExistingPkiBundleSecretArn=<PkiBundleSecretArn> \
+       ExistingPlatformKeyArn=<PlatformKeyArn> ExistingBlobsBucket=<BlobsBucketName> \
+       ExistingSnapshotsBucket=<SnapshotsBucketName> ExistingAuditBucket=<AuditBucketName>
+   ```
+
+   The stack then creates none of those: ECS injects the old secret and the old sealed bundle, the tasks get the
+   old bucket names, every role may decrypt with the old key (api and worker may also write with it, since it is
+   the adopted buckets' default encryption), and the new stack puts its TLS-only policy on the adopted buckets.
+   Skip step 5: the bundle is already in place. Then run the migrate task and scale up (step 6).
+
+Leave these parameters as they are on every later update. The stack never regenerates either secret by itself:
+the templates pin how they are generated, because CloudFormation would generate a new value if that ever changed.
+An adopted audit bucket keeps the Object Lock default retention it was created with: `AuditRetentionDays` applies
+only to an audit bucket the stack creates.
+
+## The live suite
+
+`tests/live/aws/` runs against a dedicated sandbox account only; see its README. It never runs in CI or by default.
