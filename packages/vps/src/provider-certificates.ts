@@ -14,7 +14,7 @@ import {
 } from '@better-compute/core';
 import { readAccount } from './accounts.js';
 import { canonical, fail, id, key, object, optional, sha256Hex, tenant } from './input.js';
-import { providerResourceName } from './networks.js';
+import { edgeResourceName } from './networks.js';
 import {
   assertNameFree,
   caller,
@@ -659,7 +659,7 @@ async function convergeCertificate(
     if (!(await run.write('provider_certificates', certificate, { ensure_requested: true }))) return;
   }
   const spec: ProviderCertificateSpec = {
-    name: providerResourceName(certificate.id),
+    name: edgeResourceName(certificate.id),
     kind: certificate.kind,
     ...(certificate.kind === 'managed' ? { domains: certificate.domains } : {}),
     ...(certificate.certificate_ref ? { certificate: certificate.certificate_ref as SecretRef } : {}),
@@ -715,7 +715,7 @@ async function teardownCertificate(
   const externalId = certificate.external_id;
   if (!externalId && certificate.ensure_requested) {
     // A create whose answer was lost and was not retried before the delete: vps has no id to delete. The row is
-    // deleted with a warning; the provider-side name (bc-<id>) is how an operator finds the certificate.
+    // deleted with a warning; the provider-side name (edgeResourceName) is how an operator finds the certificate.
     run.deps.log.warn('providerResources: deleting a certificate whose create answer was lost', {
       certificateId: certificate.id,
       providerAccountId: certificate.provider_account_id,

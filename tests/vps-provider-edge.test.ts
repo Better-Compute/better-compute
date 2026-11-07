@@ -19,6 +19,7 @@ import { pglite } from '@better-compute/postgres/pglite';
 import { capacityMigrations, capacityModule, setQuota } from '@better-compute/capacity';
 import {
   defineProvider,
+  edgeResourceName,
   instanceDnsRecordName,
   meterProviderResources,
   parseCreateInstance,
@@ -495,6 +496,23 @@ beforeEach(async () => {
   cloud.reset();
 });
 
+describe('provider names', () => {
+  it('a load balancer or certificate name fits a 51-character provider name and stays unique per id', async () => {
+    const { draftId } = await import('@better-compute/core');
+    // DigitalOcean's load balancer and certificate names: vps's part is [a-z0-9-], at most 51 characters.
+    const doName = /^[a-z0-9](?:[a-z0-9-]{0,49}[a-z0-9])?$/;
+    const lb = await draftId('plb', 'root', 'usr_alice', 'k');
+    const cert = await draftId('pcert', 'root', 'usr_alice', 'k');
+    for (const id of [lb, cert, 'plb_01jz0000000000000000000000']) {
+      expect(edgeResourceName(id), id).toMatch(doName);
+      expect(edgeResourceName(id)).toBe(edgeResourceName(id));
+    }
+    expect(edgeResourceName(lb)).toBe(`bc-plb-${lb.slice(4, 44)}`);
+    expect(edgeResourceName(lb)).not.toBe(edgeResourceName(await draftId('plb', 'root', 'usr_alice', 'k2')));
+    expect(edgeResourceName(cert)).toMatch(/^bc-pcert-/);
+  });
+});
+
 describe('api surface', () => {
   it('every list row has a get, so the list recipe knows its item kind', async () => {
     const { apiMethod, apiSurface } = await import('@better-compute/core');
@@ -519,8 +537,8 @@ describe('certificates', () => {
     const ready = await call('certificates', 'get', { tenantId: 'root', certificateId: created.id });
     expect(ready).toMatchObject({ state: 'ready', notAfter: '2027-02-03T00:00:00.000Z', fingerprint: 'ab12' });
     expect(cloud.calls).toEqual([
-      `ensureCertificate ${providerResourceName(created.id)}`,
-      `ensureCertificate ${providerResourceName(created.id)}`,
+      `ensureCertificate ${edgeResourceName(created.id)}`,
+      `ensureCertificate ${edgeResourceName(created.id)}`,
     ]);
     expect(events.map((event) => event.type)).toEqual(['providerCertificate.created', 'providerCertificate.ready']);
   });
@@ -582,7 +600,7 @@ describe('loadBalancers', () => {
     expect(created).toMatchObject({ name: 'web', scope: 'regional', region: 'nyc3', targets: { pool: true }, state: 'pending' });
     expect(await quotaUsed('loadBalancers')).toBe(1);
     await drain();
-    expect(cloud.calls).toEqual([`ensureLoadBalancer ${providerResourceName(created.id)} ${mine.machine}`]);
+    expect(cloud.calls).toEqual([`ensureLoadBalancer ${edgeResourceName(created.id)} ${mine.machine}`]);
     const ready = await call('loadBalancers', 'get', { tenantId: 'root', loadBalancerId: created.id });
     expect(ready).toMatchObject({ state: 'ready', address: expect.stringMatching(/^198\.51\.100\./) });
   });
@@ -599,7 +617,7 @@ describe('loadBalancers', () => {
     expect([...queue.keys()]).toEqual([lb.id]);
     await drain();
     expect(cloud.calls).toEqual([
-      `ensureLoadBalancer ${providerResourceName(lb.id)} ${[first.machine, second.machine].sort().join(',')}`,
+      `ensureLoadBalancer ${edgeResourceName(lb.id)} ${[first.machine, second.machine].sort().join(',')}`,
     ]);
     cloud.calls.length = 0;
     await db.query(`UPDATE instances SET state = 'deleted', desired_state = 'deleted' WHERE id = $1`, [first.instanceId]);
@@ -607,7 +625,7 @@ describe('loadBalancers', () => {
     await db.transaction((tx) => onInstanceDeleted(moduleContext(db), tx, first.instanceId, { machineDeleted: true }));
     expect(queue.has(lb.id)).toBe(true);
     await drain();
-    expect(cloud.calls).toEqual([`ensureLoadBalancer ${providerResourceName(lb.id)} ${second.machine}`]);
+    expect(cloud.calls).toEqual([`ensureLoadBalancer ${edgeResourceName(lb.id)} ${second.machine}`]);
   });
 
   it('named instances must be the tenant’s, on the account and in the region', async () => {
@@ -620,7 +638,7 @@ describe('loadBalancers', () => {
     const lb = await createLoadBalancer({ targets: { instanceIds: [mine.instanceId] } });
     expect(required).toContainEqual(expect.stringMatching(new RegExp(`^compute:instances:update .*instance/${mine.instanceId}$`)));
     await drain();
-    expect(cloud.calls).toEqual([`ensureLoadBalancer ${providerResourceName(lb.id)} ${mine.machine}`]);
+    expect(cloud.calls).toEqual([`ensureLoadBalancer ${edgeResourceName(lb.id)} ${mine.machine}`]);
   });
 
   it('terminates TLS with a certificate once it is ready; the certificate is not deleted while used', async () => {

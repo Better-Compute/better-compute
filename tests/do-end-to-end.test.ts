@@ -1,18 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   baseFirewallName,
+  certificateName,
   deploymentTag,
   digitaloceanProvider,
   dropletName,
   firewallName,
   labels,
+  loadBalancerName,
   networkDescription,
   networkMemberTag,
   resetBudgets,
   tagFor,
 } from '@better-compute/provider-digitalocean';
 import { closeFixtures, computeFixture, type ComputeFixture } from '@better-compute/testing';
-import { networkTag, providerResourceName, vps } from '@better-compute/vps';
+import { edgeResourceName, networkTag, providerResourceName, vps } from '@better-compute/vps';
 import { failAction } from './support/do-emulator/actions.js';
 import { seedDroplet } from './support/do-emulator/droplets.js';
 import { DoEmulator, type Json } from './support/do-emulator/index.js';
@@ -108,7 +110,7 @@ async function world(): Promise<World> {
     tenantId: tenants.root.id,
     poolId: pool.id,
     toTenantId: tenants.acme.id,
-    quota: { vcpu: 2000, memoryGiB: 20_000, diskGiB: 10_000, gpu: 64, addresses: 4 },
+    quota: { vcpu: 2000, memoryGiB: 20_000, diskGiB: 10_000, gpu: 64, addresses: 4, loadBalancers: 2 },
   });
   await api.flavors.create(root, {
     tenantId: tenants.root.id,
@@ -516,6 +518,77 @@ describe('provider-digitalocean through vps, end to end', () => {
     for (let round = 0; round < 6 && atDo().length > 0; round++)
       await w.tick('vps.provider-resources', 5_000);
     expect(atDo()).toEqual([]);
+  });
+
+  it('certificates.create and loadBalancers.create reach DigitalOcean under names it takes, through ready and delete', async () => {
+    const w = await world();
+    const tenantId = w.acmeTenant;
+    const converge = async (done: () => Promise<boolean>, rounds = 10) => {
+      for (let round = 0; round < rounds && !(await done()); round++)
+        await w.tick('vps.provider-resources', 5_000);
+    };
+    // A managed certificate names a zone of the tenant's.
+    const zone = await w.api.dnsZones.create(w.acme, {
+      tenantId,
+      poolId: w.poolId,
+      zone: 'acme-lb.example',
+      idempotencyKey: 'zone-lb',
+    });
+    await converge(async () => (await w.api.dnsZones.get(w.acme, { tenantId, zoneId: zone.id })).state === 'ready');
+    const certificate = await w.api.certificates.create(w.acme, {
+      tenantId,
+      poolId: w.poolId,
+      name: 'www',
+      kind: 'managed',
+      domains: ['www.acme-lb.example'],
+      idempotencyKey: 'cert-www',
+    });
+    const created = await w.api.instances.create(w.acme, createInput(w, { idempotencyKey: 'lb-vm' }));
+    expect(await settle(w, created.id, 'running')).toMatchObject({ state: 'running' });
+    const lb = await w.api.loadBalancers.create(w.acme, {
+      tenantId,
+      poolId: w.poolId,
+      name: 'web',
+      region: REGION,
+      targets: { instanceIds: [created.id] },
+      forwarding: [
+        { entryProtocol: 'http', entryPort: 80, targetProtocol: 'http', targetPort: 8080 },
+        { entryProtocol: 'https', entryPort: 443, targetProtocol: 'http', targetPort: 8080, certificateId: certificate.id },
+      ],
+      idempotencyKey: 'lb-web',
+    });
+    const lbView = () => w.api.loadBalancers.get(w.acme, { tenantId, loadBalancerId: lb.id });
+    const certView = () => w.api.certificates.get(w.acme, { tenantId, certificateId: certificate.id });
+    await converge(async () => (await lbView()).state === 'ready', 14);
+    expect(await certView()).toMatchObject({ state: 'ready' });
+    expect(await lbView()).toMatchObject({ state: 'ready', address: expect.stringMatching(/^192.0.2./) });
+
+    // DO holds both under vps's short name plus the deployment hash, and the load balancer reaches the droplet
+    // with the certificate DO issued.
+    const doCert = [...w.emu.state.certificates.values()];
+    expect(doCert).toEqual([
+      expect.objectContaining({
+        name: certificateName(edgeResourceName(certificate.id), 'default'),
+        type: 'lets_encrypt',
+        dns_names: ['www.acme-lb.example'],
+      }),
+    ]);
+    const doLb = [...w.emu.state.loadBalancers.values()];
+    expect(doLb).toHaveLength(1);
+    expect(doLb[0]).toMatchObject({
+      name: loadBalancerName(edgeResourceName(lb.id), 'default'),
+      droplet_ids: [dropletOf(w, created.id)!.id],
+    });
+    expect(doLb[0]!.forwarding_rules).toEqual(
+      expect.arrayContaining([expect.objectContaining({ entry_port: 443, certificate_id: doCert[0]!.id })]),
+    );
+
+    await w.api.loadBalancers.delete(w.acme, { tenantId, loadBalancerId: lb.id });
+    await converge(async () => (await lbView()).state === 'deleted');
+    expect(w.emu.state.loadBalancers.size).toBe(0);
+    await w.api.certificates.delete(w.acme, { tenantId, certificateId: certificate.id });
+    await converge(async () => (await certView()).state === 'deleted');
+    expect(w.emu.state.certificates.size).toBe(0);
   });
 
   it('a create DO refuses for capacity ends the instance in error with ProvisionFailed', async () => {

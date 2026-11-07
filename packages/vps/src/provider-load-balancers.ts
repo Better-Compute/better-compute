@@ -14,7 +14,7 @@ import {
 } from '@better-compute/core';
 import { readAccount } from './accounts.js';
 import { canonical, fail, id, int, key, object, optional, sha256Hex, tenant } from './input.js';
-import { providerResourceName } from './networks.js';
+import { edgeResourceName } from './networks.js';
 import { domainOf } from './provider-certificates.js';
 import {
   assertNameFree,
@@ -1135,7 +1135,7 @@ function loadBalancerSpec(
     domains.push({ name: domain.name, certificate: resolved });
   }
   const spec: ProviderLoadBalancerSpec = {
-    name: providerResourceName(lb.id),
+    name: edgeResourceName(lb.id),
     scope: lb.scope,
     forwarding,
     targets: lb.scope === 'regional' ? { machines: loaded.targets } : { loadBalancers: loaded.targets },
@@ -1219,7 +1219,7 @@ async function teardownLoadBalancer(
     // A create whose answer was lost: found by its name when the provider can look one up without creating it.
     if (loadBalancers.findLoadBalancer) {
       const found = await run.attempt(`find ${lb.id}`, () =>
-        loadBalancers.findLoadBalancer!(providerResourceName(lb.id), run.call(`find:${lb.id}`)),
+        loadBalancers.findLoadBalancer!(edgeResourceName(lb.id), run.call(`find:${lb.id}`)),
       );
       if (found === undefined) return;
       if (found !== 'missing' && found.state === 'error') {

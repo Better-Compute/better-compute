@@ -184,6 +184,21 @@ export function providerResourceName(resourceId: string, externalName?: string |
     .slice(0, 60)}`;
 }
 
+/**
+ * The provider-side name of a load balancer or certificate: `bc-`, the id's prefix, `-` and the first 40
+ * characters of its body (`bc-plb-…`, 47 characters; `bc-pcert-…`, 49). Their ids are draft ids (a 52-character
+ * base32 SHA-256), and a provider such as DigitalOcean appends its own deployment suffix to a name of at most 51
+ * characters, so `providerResourceName` (up to 63) does not fit. 40 base32 characters keep 200 bits of the hash:
+ * names stay unique per id. Lower-case `[a-z0-9-]`, deterministic, so a create whose answer was lost is found again.
+ */
+export function edgeResourceName(resourceId: string): string {
+  const at = resourceId.indexOf('_');
+  const clean = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const prefix = at > 0 ? clean(resourceId.slice(0, at)).slice(0, 6) : '';
+  const body = clean(at > 0 ? resourceId.slice(at + 1) : resourceId).slice(0, 40);
+  return prefix ? `bc-${prefix}-${body}` : `bc-${body}`;
+}
+
 // --- Views and input ---------------------------------------------------------------------------
 
 export type NetworkState = 'pending' | 'ready' | 'deleting' | 'deleted' | 'error';
