@@ -166,6 +166,17 @@ describe('spacesBlobStore', () => {
     expect((await failure(store.get('k'))).code).toBe('NOT_FOUND');
   });
 
+  it('never reports a delete done when the bucket is missing', async () => {
+    const { emu, store } = setup();
+    // A missing object is deleted already (S3 answers 204; some answer 404 NoSuchKey).
+    await store.delete('never-written');
+    emu.failNext('DELETE /bc-ops/', 404, 'NoSuchKey');
+    await store.delete('never-written');
+    emu.buckets.delete('bc-ops');
+    const refused = await failure(store.delete('k'));
+    expect([refused.code, refused.details?.reason]).toEqual(['NOT_FOUND', 'noSuchBucket']);
+  });
+
   it('refuses a bad configuration when it is built', () => {
     const base = {
       region: 'nyc3',

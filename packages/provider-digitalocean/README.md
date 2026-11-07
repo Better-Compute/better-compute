@@ -142,7 +142,7 @@ const blobStore = spacesBlobStore({
 
 - `get` answers `undefined` for a missing object. A missing bucket throws `NOT_FOUND`.
 - `put` sends a `Uint8Array`, or a stream of at most one part (default 16 MiB, at least 5 MiB), as one `PUT`. A longer stream goes as a multipart upload, which is aborted if anything fails (a part stored without an ETag included: `PROVIDER_ERROR`, `noEtag`), so at most one part is held in memory.
-- `delete` succeeds for a blob that is already gone.
+- `delete` succeeds for a blob that is already gone. A missing bucket throws `NOT_FOUND` (`noSuchBucket`), as for `get`: only `NoSuchKey` means the blob is gone.
 - `presign` signs a `GET` or `PUT` for 1 second to 7 days.
 
 Requests are path-style (`https://<region>.digitaloceanspaces.com/<bucket>/<key>`) and signed with SigV4 (`spaces/sigv4.ts`). The signer is hand-written on `node:crypto` (DO-D19) and tested against AWS's published vectors. `@better-compute/aws-core` is reserved for the AWS packages (`scripts/check-deps.mjs` rule 5), so this package does not use it.
@@ -235,6 +235,7 @@ An image index is `UNSUPPORTED`; reference one platform's manifest by digest.
 - The manifest is always read from the source registry. The source decides what a tag means, and the disk layer's digest comes from there.
 - Only the layer, by digest, is fetched from the mirror. A node verifies that digest, so a stale or tampered mirror cannot substitute content.
 - A mirror that lacks the layer, answers an error, would serve the bytes itself, or redirects off the allowed hosts is skipped. The source's presigned URL is used instead.
+- A mirror is a registry like any other: it is read only when the `registries` allowlist, and the resolution's own `registries` when given, include it, whether it was discovered or named in `mirrors`. One that is not allowed is skipped for the source, so list the mirrors next to their source.
 
 The `mirrors` option sets them:
 

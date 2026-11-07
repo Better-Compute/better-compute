@@ -61,6 +61,8 @@ export interface DocrImageSourceOptions {
    * stored in that region mirrors `<source>` there (`GET /v2/registries`, cached 5 minutes). A
    * resolution for a region reads the manifest from the source and the disk layer, by digest,
    * from the mirror; a mirror without the layer, or one that fails, falls back to the source.
+   * A mirror is read only when `registries` (and the resolution's own `registries`) allow it,
+   * however it was found; one that is not allowed is skipped for the source.
    */
   mirrors?: Readonly<Record<string, Readonly<Record<string, string>>>> | false;
   /**
@@ -85,7 +87,7 @@ export interface DocrResolveOptions {
   region?: string;
   /**
    * Narrows the source's `registries` for this resolution (a tenant's own registries, say): the
-   * reference's registry must be on both.
+   * reference's registry must be on both, and so must a mirror for it to be read.
    */
   registries?: readonly string[];
 }
@@ -455,10 +457,17 @@ export function docrImageSource(options: DocrImageSourceOptions): DocrImageSourc
     digest: string,
     region: string,
     signal: AbortSignal,
+    narrowed: readonly string[] | undefined,
   ): Promise<URL | undefined> {
     const source = parsed.name.slice(0, parsed.name.indexOf('/'));
     const mirror = await mirrorFor(source, region, signal);
     if (!mirror) return undefined;
+    // A mirror is a registry like any other: the operator's credential reads it only when the
+    // allowlist (and this resolution's narrowing) allows it, however it was found.
+    if (!registryAllowed(mirror) || (narrowed !== undefined && !narrowed.includes(mirror))) {
+      log.debug('digitalocean.registry.mirror-not-allowed', { region });
+      return undefined;
+    }
     const name = `${mirror}${parsed.name.slice(source.length)}`;
     try {
       const found = await blobRedirect(name, digest, signal);
@@ -560,7 +569,7 @@ export function docrImageSource(options: DocrImageSourceOptions): DocrImageSourc
     const region = resolveOptions.region;
     let target =
       region && regionSlugPattern.test(region)
-        ? await fromMirror(parsed, layer.digest!, region, signal)
+        ? await fromMirror(parsed, layer.digest!, region, signal, resolveOptions.registries)
         : undefined;
     if (!target) {
       const found = await blobRedirect(parsed.name, layer.digest!, signal);

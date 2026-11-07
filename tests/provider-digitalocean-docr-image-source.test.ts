@@ -310,14 +310,18 @@ describe('regional mirrors', () => {
   const ref = 'oci://registry.digitalocean.com/acme/images/ubuntu:24.04';
   const blobHost = (url: string) => new URL(url).host;
 
-  function mirrored(mirrors: DocrImageSourceOptions['mirrors']) {
+  // The mirrors are registries too: a resolution reads only those on the allowlist.
+  function mirrored(
+    mirrors: DocrImageSourceOptions['mirrors'],
+    registries: readonly string[] = ['acme', 'acme-ams3', 'acme-sgp1', 'acme-fra1'],
+  ) {
     const base = setup();
     const source = docrImageSource({
       token: 'secret://do/t',
       secrets,
       fetch: docrFetch(base.emu, base.docr),
       clock: base.clock,
-      registries: ['acme'],
+      registries,
       ...(mirrors !== undefined ? { mirrors } : {}),
     });
     base.docr.blobRegions.set('acme-ams3', 'ams3');
@@ -390,6 +394,33 @@ describe('regional mirrors', () => {
     const listings = () => emu.requests.filter((r) => r.url.pathname === '/v2/registries').length;
     expect(listings()).toBe(1);
     expect(blobReads(docr)).not.toContain('acme-fra1');
+  });
+
+  it('never reads a mirror the allowlist, or the resolution, does not allow', async () => {
+    // Discovered: acme-sgp1 matches <source>-<region> but is not on the allowlist.
+    const narrow = mirrored(undefined, ['acme']);
+    seedRegistry(narrow.emu, { name: 'acme-sgp1', region: 'sgp1' });
+    expect(blobHost((await narrow.source.resolve(ref, { region: 'sgp1' })).url)).toBe(
+      'docr-blobs.nyc3.digitaloceanspaces.com',
+    );
+    expect(blobReads(narrow.docr)).not.toContain('acme-sgp1');
+    // Named in the mirror map, but not allowed: skipped too.
+    const mapped = mirrored({ acme: { ams3: 'acme-ams3' } }, ['acme']);
+    expect(blobHost((await mapped.source.resolve(ref, { region: 'ams3' })).url)).toBe(
+      'docr-blobs.nyc3.digitaloceanspaces.com',
+    );
+    expect(blobReads(mapped.docr)).not.toContain('acme-ams3');
+    // Allowed by the source, but outside the resolution's own narrowing (a tenant's registries).
+    const wide = mirrored({ acme: { ams3: 'acme-ams3' } });
+    expect(
+      blobHost((await wide.source.resolve(ref, { region: 'ams3', registries: ['acme'] })).url),
+    ).toBe('docr-blobs.nyc3.digitaloceanspaces.com');
+    expect(blobReads(wide.docr)).not.toContain('acme-ams3');
+    expect(
+      blobHost(
+        (await wide.source.resolve(ref, { region: 'ams3', registries: ['acme', 'acme-ams3'] })).url,
+      ),
+    ).toBe('docr-blobs.ams3.digitaloceanspaces.com');
   });
 
   it('resolves from the source when the registry listing fails, and never lists with mirrors off', async () => {

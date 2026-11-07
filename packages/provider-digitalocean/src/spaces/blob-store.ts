@@ -8,6 +8,7 @@ import {
   type SecretRef,
   type SecretResolver,
 } from '@better-compute/core';
+import { readCappedBytes } from './capped.js';
 import {
   checkBucketName,
   checkObjectKey,
@@ -188,19 +189,26 @@ export function spacesBlobStore(options: SpacesBlobStoreOptions): BlobStore {
     }
   }
 
+  /**
+   * Refuses a 404 that is not a missing object: only NoSuchKey means "no blob", a missing bucket
+   * (NoSuchBucket, or anything else) is a broken deployment.
+   */
+  async function requireNoSuchKey(response: Response): Promise<void> {
+    const text = new TextDecoder().decode(await readCappedBytes(response, 64 * 1024));
+    if (xmlValue(text, 'Code') !== 'NoSuchKey')
+      throw new ComputeError('NOT_FOUND', `Spaces bucket ${bucket} not found`, undefined, {
+        provider: 'digitalocean',
+        service: 'spaces',
+        status: 404,
+        reason: 'noSuchBucket',
+      });
+  }
+
   return {
     async get(key) {
       const response = await s3.request('GET', bucket, full(key), { allow: [404] });
       if (response.status === 404) {
-        const text = await response.text();
-        // Only a missing object is "no blob": a missing bucket is a broken deployment.
-        if (xmlValue(text, 'Code') !== 'NoSuchKey')
-          throw new ComputeError('NOT_FOUND', `Spaces bucket ${bucket} not found`, undefined, {
-            provider: 'digitalocean',
-            service: 'spaces',
-            status: 404,
-            reason: 'noSuchBucket',
-          });
+        await requireNoSuchKey(response);
         return undefined;
       }
       return response.body ?? new ReadableStream({ start: (c) => c.close() });
@@ -235,7 +243,9 @@ export function spacesBlobStore(options: SpacesBlobStoreOptions): BlobStore {
 
     async delete(key) {
       const response = await s3.request('DELETE', bucket, full(key), { allow: [404] });
-      await response.body?.cancel();
+      // A missing object is deleted already; a missing bucket is not "done".
+      if (response.status === 404) await requireNoSuchKey(response);
+      else await response.body?.cancel();
     },
 
     async presign(key, presignOptions) {
