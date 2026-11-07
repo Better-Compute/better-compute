@@ -86,6 +86,28 @@ beforeAll(async () => {
 afterAll(closeFixtures);
 
 describe('cloud.resource.hours', () => {
+  it('bills the managed resource, not what lives in it: a child (a database user) bills no fee of its own', async () => {
+    const parent = await create(world);
+    const child = await world.api.cloudResources.create(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: world.poolId,
+      kind: 'fake.database-user',
+      name: `child-${parent.id.slice(-6)}`,
+      spec: { user: 'billing' },
+      parentId: parent.id,
+      idempotencyKey: `child-${parent.id}`,
+    });
+    await world.until(async () => (await stateOf(world, child.id)) === 'ready');
+    // The child has its provider id, so it would count as provisioned.
+    expect((await column(world, child.id)).provisioned).not.toBeNull();
+    await world.fixture.advance(3 * hourMs);
+    await world.tick('cloud.resources.usage', 1, graceMs);
+    expect(total(await windows(world, parent.id, 'cloud.resource.hours'))).toBeGreaterThan(2);
+    expect(await windows(world, child.id)).toEqual([]);
+    // Its watermark still advances: it is never scanned for those hours again.
+    expect((await column(world, child.id)).metered).not.toBeNull();
+  });
+
   it('is a root meter of the catalog better-iam is given', () => {
     expect(
       meterCatalog({ gpuModels: [] }).find((meter) => meter.key === 'cloud.resource.hours'),
