@@ -13,12 +13,14 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/better-compute/better-compute/daemon/internal/converge"
+	"github.com/better-compute/better-compute/daemon/internal/hostconfig"
 )
 
 // eksEndpoint is spelled as DescribeCluster writes it (an upper-case id); nodeadm writes it as given.
@@ -60,7 +62,7 @@ func eksSettings(ca string, extra string) string {
 // NodeConfig's taints.
 func nodeadmJoined(c *fakeCluster, server string) {
 	c.sys.Set(EksKubeletConf, "apiVersion: v1\nclusters:\n- cluster:\n    certificate-authority: /etc/kubernetes/pki/ca.crt\n    server: "+server+
-		"\n  name: kubernetes\nusers:\n- name: kubelet\n  user:\n    exec:\n      apiVersion: client.authentication.k8s.io/v1beta1\n      command: aws\n      args: [eks, get-token, --cluster-name, training, --region, us-east-1]\n")
+		"\n  name: kubernetes\nusers:\n- name: kubelet\n  user:\n    exec:\n      apiVersion: client.authentication.k8s.io/v1beta1\n      command: aws-iam-authenticator\n      args: [token, -i, training, --region, us-east-1]\n")
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	n := &nodeObject{}
@@ -180,5 +182,87 @@ func TestEksSettingsAreCheckedAgain(t *testing.T) {
 	p, err := parseSettings(json.RawMessage(eksSettings(ca, "")))
 	if err != nil || !p.eks || p.Server != eksEndpoint || p.endpoint != strings.TrimPrefix(eksEndpoint, "https://")+":443" {
 		t.Fatalf("parsed = %+v, %v", p, err)
+	}
+}
+
+// registeredAs makes the fake API server answer only for the Node name nodeadm registered (the
+// instance's EC2 private DNS name, via the kubelet's --hostname-override), and list it with its
+// providerID, as a VPC whose DHCP options set a custom domain-name leaves the kernel host name
+// different from the Node name.
+func registeredAs(c *fakeCluster, name, providerID string) {
+	inner := c.sys.Handler
+	c.sys.Handler = func(ctx context.Context, cmd hostconfig.Cmd) ([]byte, error) {
+		if cmd.Name == "kubectl" && len(cmd.Args) > 3 && cmd.Args[2] == "get" {
+			c.mu.Lock()
+			n := c.node
+			c.mu.Unlock()
+			if n == nil {
+				return nil, errors.New(`Error from server (NotFound)`)
+			}
+			if cmd.Args[3] == "nodes" {
+				other := map[string]any{"metadata": map[string]any{"name": "ip-10-0-9-9.ec2.internal"}, "spec": map[string]any{"providerID": "aws:///us-east-1a/i-0fffffffffffffff0"}}
+				self := map[string]any{"metadata": map[string]any{"name": name}, "spec": map[string]any{"providerID": providerID}}
+				return json.Marshal(map[string]any{"items": []any{other, self}})
+			}
+			if cmd.Args[3] == "node" && cmd.Args[4] != name {
+				return nil, fmt.Errorf(`Error from server (NotFound): nodes %q not found`, cmd.Args[4])
+			}
+		}
+		return inner(ctx, cmd)
+	}
+}
+
+func TestEksNodeNameIsTheRegisteredOneNotTheHostName(t *testing.T) {
+	const registered = "ip-10-0-1-5.ec2.internal"
+	for _, tc := range []struct {
+		name  string
+		setup func(c *fakeCluster)
+	}{
+		{"nodeadm's kubelet --hostname-override", func(c *fakeCluster) {
+			c.sys.Set(EksKubeletEnvironment, `NODEADM_KUBELET_ARGS="--node-ip=10.0.1.5 --hostname-override=`+registered+` --cloud-provider=external"`+"\n")
+		}},
+		{"the Node whose providerID names this instance", func(c *fakeCluster) {
+			c.sys.Set(InstanceIDFile, "i-0123456789abcdef0\n")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newFakeCluster(t)
+			c.sys.Set("/proc/sys/kernel/hostname", "ip-10-0-1-5.corp.example.com\n")
+			ca, _ := eksCA(t)
+			settings := eksSettings(ca, "")
+			nodeadmJoined(c, eksEndpoint)
+			registeredAs(c, registered, "aws:///us-east-1a/i-0123456789abcdef0")
+			tc.setup(c)
+			if _, err := settle(t, c.sys, JoinUnit{}, settings); err != nil {
+				t.Fatalf("settle: %v\ncommands: %v", err, c.sys.Commands())
+			}
+			state, ok, err := ReadState(c.sys)
+			if err != nil || !ok || state.NodeName != registered {
+				t.Fatalf("state = %+v %v %v", state, ok, err)
+			}
+			if c.node.Metadata.Labels["team"] != "ml" {
+				t.Fatalf("labels = %v", c.node.Metadata.Labels)
+			}
+		})
+	}
+
+	// JoinUnit.NodeName still overrides; and with neither source the host name is the guess.
+	c := newFakeCluster(t)
+	ca, _ := eksCA(t)
+	nodeadmJoined(c, eksEndpoint)
+	c.sys.Set(EksKubeletEnvironment, `NODEADM_KUBELET_ARGS="--hostname-override=`+registered+`"`+"\n")
+	if _, err := settle(t, c.sys, JoinUnit{NodeName: "custom-node"}, eksSettings(ca, "")); err != nil {
+		t.Fatal(err)
+	}
+	if state, _, _ := ReadState(c.sys); state.NodeName != "custom-node" {
+		t.Fatalf("override: %q", state.NodeName)
+	}
+	c = newFakeCluster(t)
+	nodeadmJoined(c, eksEndpoint)
+	if _, err := settle(t, c.sys, JoinUnit{}, eksSettings(ca, "")); err != nil {
+		t.Fatal(err)
+	}
+	if state, _, _ := ReadState(c.sys); state.NodeName != "gpu-node-7" {
+		t.Fatalf("host name fallback: %q", state.NodeName)
 	}
 }
