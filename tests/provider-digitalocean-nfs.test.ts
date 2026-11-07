@@ -442,6 +442,40 @@ describe('provider-digitalocean NFS shares: resize and delete', () => {
     expect(calls(emu, 'DELETE', /^\/v2\/nfs\//)).toHaveLength(1);
     expect(calls(emu, 'DELETE', /^\/v2\/nfs\//)[0]!.url.searchParams.get('region')).toBe('nyc3');
   });
+  it("never deletes, resizes, attaches or detaches another deployment's share, or deletes its snapshot", async () => {
+    const { emu, impl, vpc } = await setup();
+    const theirs = seedShare(emu.state, {
+      name: shareName('bc-pvol-x', 'other-deployment'),
+      vpc_ids: [vpc.id],
+    });
+    const theirsId = shareId('nyc3', theirs.id);
+    const snapshot = seedShareSnapshot(emu.state, {
+      share: theirs,
+      name: shareName('nightly', 'other-deployment'),
+    });
+    // An instance Droplet of ours that carries the share's tag (put on by hand, or by the other deployment).
+    const droplet = host(emu, vpc, {
+      tags: [deployment, tagFor(labels.instance, 'ins_1'), shareTag(theirs.id)],
+    });
+    for (const call of [
+      () => impl.volumes.deleteVolume(theirsId, ctx()),
+      () => impl.volumes.resizeVolume(theirsId, 500, ctx()),
+      () => impl.volumes.attachVolume(theirsId, String(droplet.id), ctx()),
+      () => impl.volumes.detachVolume(theirsId, String(droplet.id), ctx()),
+      () => impl.volumes.snapshotVolume(theirsId, 'bc-psnap-1', ctx()),
+      () => impl.volumes.deleteSnapshot(shareSnapshotId('nyc3', snapshot.id), ctx()),
+    ]) {
+      const error = await failure(call());
+      expect([error.code, error.details?.reason], String(call)).toEqual([
+        'INVALID_STATE',
+        'notManaged',
+      ]);
+    }
+    expect(writes(emu)).toHaveLength(0);
+    expect(emu.state.nfsShares.has(theirs.id)).toBe(true);
+    expect(emu.state.nfsSnapshots.has(snapshot.id)).toBe(true);
+    expect(tagged(emu.state.droplets.get(droplet.id)!, theirsId)).toBe(true);
+  });
 });
 
 describe('provider-digitalocean NFS shares: attach and detach', () => {
