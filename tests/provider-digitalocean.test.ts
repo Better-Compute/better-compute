@@ -2317,7 +2317,19 @@ describe('definition', () => {
         addresses: 'ok',
       },
       missing: [],
+      // A read-only probe cannot see write scopes: it names those it did not check, for the operator.
+      unverified: expect.arrayContaining([
+        'droplet:create',
+        'block_storage:create',
+        'block_storage:delete',
+        'block_storage_action:create',
+        'block_storage_snapshot:create',
+        'reserved_ip:create',
+        'reserved_ip:update',
+        'reserved_ip:delete',
+      ]),
     });
+    expect(report.unverified.every((scope) => !scope.endsWith(':read'))).toBe(true);
     // Single, read-only requests: one page of each, nothing that changes anything.
     expect(reads(emu).sort()).toEqual(
       [

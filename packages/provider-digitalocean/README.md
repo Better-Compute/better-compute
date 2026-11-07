@@ -49,7 +49,7 @@ await client.providerAccounts.create({
 });
 ```
 
-`digitaloceanProvider({ fetch, endpoint, deployment, inCallWaitMs, budget })` swaps the transport, the API endpoint (default `https://api.digitalocean.com/v2`; never taken from tenant config), the deployment name hashed into the deployment tag (default `default`), `inCallWaitMs` (accepted and checked, default 0, at most 20 000, but with no effect yet: every call starts its action and returns without waiting) and the request budget (see [Rate budget](#rate-budget)). `probeAccount(config, context, options?)` is a read-only check of what a token may do (the optional third argument is the same `DoProviderOptions`, for `fetch`, `endpoint` and `budget`): it reads `GET /account` and then one page of each of seven lists (Droplets, regions, sizes, VPCs, firewalls, account SSH keys and tags), and reports the read scopes the token lacks.
+`digitaloceanProvider({ fetch, endpoint, deployment, inCallWaitMs, budget })` swaps the transport, the API endpoint (default `https://api.digitalocean.com/v2`; never taken from tenant config), the deployment name hashed into the deployment tag (default `default`), `inCallWaitMs` (accepted and checked, default 0, at most 20 000, but with no effect yet: every call starts its action and returns without waiting) and the request budget (see [Rate budget](#rate-budget)). `probeAccount(config, context, options?)` is a read-only check of what a token may do (the optional third argument is the same `DoProviderOptions`, for `fetch`, `endpoint` and `budget`): it reads `GET /account` and then one page of each of nine lists (Droplets, regions, sizes, VPCs, firewalls, account SSH keys, tags, volumes and reserved IPs), reports the read scopes the token lacks (`missing`), and lists the write scopes it cannot check without writing (`unverified`).
 
 ## Token scopes
 
@@ -66,7 +66,7 @@ Create the token as a custom-scope token with at least:
 | `reserved_ip:read,create,update,delete`                                                                               | Reserving, assigning, unassigning and releasing reserved IPv4 and IPv6 addresses.                                                    |
 | `firewall:read,create,update,delete`                                                                                  | The base firewall and the firewall behind each tenant rule.                                                                          |
 
-A token without a scope fails the call that needs it with `ACCESS_DENIED` (`details.reason` `scope`); `probeAccount` names the missing read scopes up front.
+A token without a scope fails the call that needs it with `ACCESS_DENIED` (`details.reason` `scope`); `probeAccount` names the missing read scopes up front. It never writes (a trial create could bill), so a token with the read scopes but without `block_storage:create` or `reserved_ip:create` passes it and fails the first create; its `unverified` list names those scopes for the operator to check.
 
 ## Tag scheme
 
