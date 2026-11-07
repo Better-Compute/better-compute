@@ -1210,6 +1210,61 @@ describe('leak detection', () => {
     ]);
     expect(() => vps({ costs: { leakToleranceHours: -1 } })).toThrow(/leakToleranceHours/);
   });
+
+  /** A daily compute row (Cost Explorer's granularity): `hours` billed hours of the instance on `day`. */
+  function dailyCompute(
+    world: CostWorld,
+    instanceId: string,
+    day: number,
+    hours: number,
+    unit = 'Hrs',
+  ) {
+    world.ledger.rows.push(
+      costRow({
+        sourceRowId: `daily-${instanceId}-${day}`,
+        skuDescription: 'N2 Instance Core running in Americas',
+        usageStart: day,
+        usageEnd: day + DAY,
+        quantity: hours,
+        unit,
+        labels: { [instanceLabel]: instanceId },
+      }),
+    );
+  }
+
+  it('a daily row bills its hour quantity, not every hour of its day', async () => {
+    const world = await costWorld();
+    const vm = await freshVm(world);
+    const day1 = Math.floor((world.now() - 2 * DAY) / DAY) * DAY;
+    const day2 = day1 + DAY;
+    // day 1: 5 hours billed in a daily row, 5 metered: no leak (the row spans 24 hours)
+    dailyCompute(world, vm.id, day1, 5);
+    await running(world, vm.id, day1 + 2 * HOUR, day1 + 7 * HOUR);
+    // day 2: 5.2 hours billed (per-second billing), 2 metered: a leak of 6 - 2 hours
+    dailyCompute(world, vm.id, day2, 5.2);
+    await running(world, vm.id, day2 + 2 * HOUR, day2 + 4 * HOUR);
+    await world.scan();
+    expect((await world.events('billing.leak')).map((event) => event.data)).toEqual([
+      expect.objectContaining({
+        instanceId: vm.id,
+        day: new Date(day2).toISOString().slice(0, 10),
+        providerHours: 6,
+        meteredHours: 2,
+      }),
+    ]);
+  });
+
+  it('a daily row in a unit that is not hours still counts its whole span', async () => {
+    const world = await costWorld();
+    const vm = await freshVm(world);
+    const day = Math.floor((world.now() - 2 * DAY) / DAY) * DAY;
+    dailyCompute(world, vm.id, day, 5, 'gibibyte hour');
+    await running(world, vm.id, day + 2 * HOUR, day + 7 * HOUR);
+    await world.scan();
+    expect((await world.events('billing.leak')).map((event) => event.data.providerHours)).toEqual([
+      24,
+    ]);
+  });
 });
 
 describe('ingestion fix round 1 (F15-1, F15-2)', () => {

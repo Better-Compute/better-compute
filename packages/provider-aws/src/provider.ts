@@ -9,6 +9,8 @@ import { describeOfferingId } from './markets/purchases.js';
 import { AwsKubernetes, EksClient } from './eks/index.js';
 import { checkAwsAccount } from './federation.js';
 import { describeAwsAccount } from './onboarding.js';
+import { awsBilling } from './costs.js';
+import { finopsMembers } from './finops.js';
 import { instanceTypeCache, zoneCache } from './shapes.js';
 
 /**
@@ -44,6 +46,7 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
     },
     // What the tenant still sets up at AWS for this account (providerAccounts.get onboarding).
     describeAccount: (config, account) => describeAwsAccount(config, account, options),
+    billing: awsBilling,
     create: (config, context) => {
       validateAwsConfig(config);
       const account = accountCredentials(config, context, options);
@@ -180,7 +183,15 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
         ...(options.kubeTransport ? { kubeTransport: options.kubeTransport } : {}),
         ...(options.endpoints?.sts !== undefined ? { stsEndpoint: options.endpoints.sts } : {}),
       });
-      return compute;
+      // A11: costs (and list prices) beside the EC2 client, present only when the account has them. A member the
+      // EC2 client already has (another lane's listPrices, say) is a merge collision: refused, never overwritten.
+      const members = finopsMembers(config, context, options, account);
+      for (const name of Object.keys(members))
+        if (name in compute)
+          throw new Error(
+            `provider-aws: AwsCompute already has ${name}; the FinOps member collides`,
+          );
+      return Object.assign(compute, members);
     },
   });
 }

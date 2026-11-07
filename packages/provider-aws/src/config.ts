@@ -145,6 +145,12 @@ export const awsConfig = manifest({
     .describe(
       'EventBridge sources taken from the queue (default aws.ec2 and aws.health); anything else is dropped',
     ),
+  costs: field
+    .option(['off', 'region', 'account'])
+    .optional()
+    .describe(
+      "Read this account's costs from Cost Explorer (charged per request): region (only this region, for several regional accounts on one AWS account), account (every region), or off (default)",
+    ),
 });
 
 /** The validated account configuration. */
@@ -179,12 +185,14 @@ export interface AwsConfig {
   eksSubnetIds?: string[];
   eventQueueUrl?: string;
   eventSources?: ('aws.ec2' | 'aws.health' | 'aws.guardduty')[];
+  /** Cost Explorer reads (A11): absent or 'off' reads none. */
+  costs?: 'off' | 'region' | 'account';
 }
 
 export interface AwsProviderOptions {
   fetch?: typeof fetch;
   /** Tests and VPC endpoints; host options, never account config. */
-  endpoints?: Partial<Record<'ec2' | 'sts' | 'servicequotas' | 'pricing' | 'ssm' | 'eks' | 'sqs', string>>;
+  endpoints?: Partial<Record<'ec2' | 'sts' | 'servicequotas' | 'pricing' | 'ssm' | 'eks' | 'sqs' | 'ce', string>>;
   /**
    * (kubernetes) The transport to an EKS cluster's own Kubernetes API (`kubernetes.credentials`). Default:
    * `node:https` trusting only the cluster's CA.
@@ -229,6 +237,8 @@ export interface AwsProviderOptions {
   imageOwners?: readonly string[];
   /** How long one network call of a keyless account's `checkAccount` may take (default 10 000). */
   checkTimeoutMs?: number;
+  /** Cost Explorer reads (A11): how long a day read stays cached (default 24 h). */
+  costsCacheMs?: number;
 }
 
 function invalid(message: string, reason: string): ComputeError {
@@ -305,6 +315,17 @@ export function validateAwsConfig(config: AwsConfig): void {
     throw invalid(
       `pricing 'on-demand' needs the AWS Price List API, which ${config.region} (aws-us-gov) does not have: use 'off', or 'all' for Spot prices only`,
       'pricing',
+    );
+  // Cost Explorer: GovCloud has no endpoint (its costs are read from the linked commercial account), and the
+  // China endpoint (cn-northwest-1) is not the one aws-core's global host names. Refused, not left to fail later.
+  if (
+    config.costs !== undefined &&
+    config.costs !== 'off' &&
+    partitionOf(config.region).partition !== 'aws'
+  )
+    throw invalid(
+      `costs reads Cost Explorer in partition aws only; region ${config.region} is in ${partitionOf(config.region).partition}`,
+      'costs-partition',
     );
   if (config.discoverTag !== undefined) parseDiscoverTag(config.discoverTag);
   if (config.eventQueueUrl !== undefined) parseEventQueueUrl(config.eventQueueUrl, config.region);

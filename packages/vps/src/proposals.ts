@@ -46,6 +46,15 @@ export const generalPurposeFamilies: ReadonlySet<string> = new Set([
   'c3',
   'c3d',
   'c4',
+  // Amazon EC2's x86 general-purpose families (A11); Graviton is left out, as Compute Engine's Arm t2a is.
+  'm5',
+  'm5a',
+  'm6i',
+  'm6a',
+  'm7i',
+  'm7a',
+  'm8i',
+  'm8a',
 ]);
 
 /** A GiB of memory is weighed this many times against a vCPU when choosing the cheapest family. */
@@ -58,13 +67,21 @@ export const isProviderMeter = (key: string): boolean =>
 /**
  * The zone and machine family of an offer id spelled `zone/machine-type[@reservation]` (Compute Engine's):
  * `us-central1-a/n2-standard-4` is `{ region: 'us-central1', family: 'n2' }`. Any other spelling gives none, and the
- * flavor's meter is left unpriced.
+ * flavor's meter is left unpriced. Amazon EC2's `zone/family.size[@cr-…]` (`us-east-1a/m7i.large`) is
+ * `{ region: 'us-east-1', family: 'm7i' }`. Its Spot offers (`:spot`) are not priced from on-demand prices, and
+ * neither are Local Zone or Wavelength offers (`us-west-2-lax-1a/…`): they cost more than the parent region and have
+ * their own Price List regionCode, so the parent region's price would be a guess below cost.
  */
 export function offerPlacement(
   offerId: string | undefined,
 ): { region: string; family: string } | undefined {
   const match = /^([a-z]+(?:-[a-z]+)*\d+)-([a-z])\/([a-z0-9]+)-[^@/]+(?:@.*)?$/.exec(offerId ?? '');
-  return match ? { region: match[1]!, family: match[3]! } : undefined;
+  if (match) return { region: match[1]!, family: match[3]! };
+  const ec2 =
+    /^([a-z]{2}(?:-gov)?-[a-z]+-\d{1,2})[a-z]\/([a-z][a-z0-9-]*)\.[a-z0-9-]+(?:@cr-[0-9a-f]{8,17})?$/.exec(
+      offerId ?? '',
+    );
+  return ec2 ? { region: ec2[1]!, family: ec2[2]! } : undefined;
 }
 
 const cheapest = (prices: readonly ProviderListPrice[]): ProviderListPrice | undefined =>

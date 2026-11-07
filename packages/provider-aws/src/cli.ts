@@ -85,6 +85,10 @@ export function iamPolicy(
      * `better-compute:managed=true`.
      */
     eksAdoptClusters?: boolean;
+    /** (A11) Accounts with `costs`: Cost Explorer's GetCostAndUsage (it takes no resource ARNs). */
+    costs?: boolean;
+    /** (A11) List prices: the Price List's GetProducts (commercial partition only; no resource ARNs). */
+    prices?: boolean;
   } = {},
 ): IamPolicyDocument {
   const partition = options.partition ?? 'aws';
@@ -224,6 +228,28 @@ export function iamPolicy(
       Resource: options.ssmPrefixes.map(
         (prefix) => `arn:${partition}:ssm:${region}:${account}:parameter${prefix}*`,
       ),
+    });
+  }
+  if (options.costs === true) {
+    if (partition !== 'aws')
+      throw usage(
+        '--costs needs partition aws: provider-aws reads Cost Explorer in no other partition',
+      );
+    statements.push({
+      Sid: 'CostExplorer',
+      Effect: 'Allow',
+      Action: ['ce:GetCostAndUsage'],
+      Resource: '*',
+    });
+  }
+  if (options.prices === true) {
+    if (partition !== 'aws')
+      throw usage('--prices needs partition aws: the AWS Price List serves no other partition');
+    statements.push({
+      Sid: 'PriceList',
+      Effect: 'Allow',
+      Action: ['pricing:GetProducts'],
+      Resource: '*',
     });
   }
   if (options.kmsKeyArn !== undefined) {
@@ -649,7 +675,7 @@ export function awsIamPolicyCommand() {
     group: 'Providers' as const,
     summary: 'Print the IAM permissions policy an AWS provider account needs',
     description:
-      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; EBS volumes and snapshots created only tagged better-compute:managed=true and changed, attached, snapshotted or deleted only when they carry it and their better-compute:volume or better-compute:snapshot name, which RunInstances may never put on a volume, so never a root volume (attach and detach only on instances carrying better-compute:instance); public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; --ssm-prefix /a/,/b/ adds ssm:GetParameters on the host ssmImagePrefixes; ec2:DescribeInstanceStatus reads scheduled events, and --event-queue adds sqs:ReceiveMessage and sqs:DeleteMessage on the event intake queue (aws event-rules); --eks-cluster-role and --eks-node-role add managed Kubernetes on EKS (tagged clusters and node groups, the cluster-admin access entry of the account principal itself, iam:PassRole of the two roles to EKS); --phases A1,A2 adds tenant networks (VPC, subnet, gateway, security group and endpoint creates tagged better-compute:managed=true, changes and deletes only on resources so tagged, route and network ACL entry edits, and security group swaps on claimed instances). Capacity markets: capacity reservation, Capacity Block offering and Spot price reads, EC2 vCPU quota reads and launches into capacity reservations always; --spot adds Spot launches, --pricing the Price List, --allow-purchases buying Capacity Blocks and creating ODCRs (only tagged better-compute:managed=true).',
+      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; EBS volumes and snapshots created only tagged better-compute:managed=true and changed, attached, snapshotted or deleted only when they carry it and their better-compute:volume or better-compute:snapshot name, which RunInstances may never put on a volume, so never a root volume (attach and detach only on instances carrying better-compute:instance); public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; --costs adds ce:GetCostAndUsage for accounts that set costs, and --prices pricing:GetProducts for list prices; --ssm-prefix /a/,/b/ adds ssm:GetParameters on the host ssmImagePrefixes; ec2:DescribeInstanceStatus reads scheduled events, and --event-queue adds sqs:ReceiveMessage and sqs:DeleteMessage on the event intake queue (aws event-rules); --eks-cluster-role and --eks-node-role add managed Kubernetes on EKS (tagged clusters and node groups, the cluster-admin access entry of the account principal itself, iam:PassRole of the two roles to EKS); --phases A1,A2 adds tenant networks (VPC, subnet, gateway, security group and endpoint creates tagged better-compute:managed=true, changes and deletes only on resources so tagged, route and network ACL entry edits, and security group swaps on claimed instances). Capacity markets: capacity reservation, Capacity Block offering and Spot price reads, EC2 vCPU quota reads and launches into capacity reservations always; --spot adds Spot launches, --pricing the Price List, --allow-purchases buying Capacity Blocks and creating ODCRs (only tagged better-compute:managed=true).',
     target: 'none' as const,
     output: 'text' as const,
     flags: {
@@ -736,6 +762,15 @@ export function awsIamPolicyCommand() {
         value: 'ARN',
         description: 'The accounts eksNodeInstanceProfile (EC2 machines that join an EKS cluster)',
       },
+      costs: {
+        type: 'boolean' as const,
+        description:
+          'Add ce:GetCostAndUsage, for accounts that read costs (config costs; partition aws only)',
+      },
+      prices: {
+        type: 'boolean' as const,
+        description: 'Add pricing:GetProducts, for list prices (partition aws only)',
+      },
       out: outFlag,
     },
     async run(context: AwsCommandContext): Promise<void> {
@@ -786,6 +821,8 @@ export function awsIamPolicyCommand() {
           ...(text(context.flags['eks-node-instance-profile'])
             ? { eksNodeInstanceProfileArn: text(context.flags['eks-node-instance-profile'])! }
             : {}),
+          ...(context.flags.costs === true ? { costs: true } : {}),
+          ...(context.flags.prices === true ? { prices: true } : {}),
         }),
       );
     },
