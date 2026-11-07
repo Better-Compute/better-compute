@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   isComputeError,
+  type ComputeError,
   type CallContext,
   type KubernetesClusterSpec,
   type KubernetesNodePoolSpec,
@@ -479,6 +480,14 @@ describe('eks node groups', () => {
     c.emu.failNext('DescribeInstanceTypes', 'UnauthorizedOperation', 403);
     await settle(() => c.k8s.ensureNodePool(cid, { ...pool, name: 'cpu' }, c.ctx()), 'ready');
     expect(bodyOf(c, 'CreateNodegroup').amiType).toBe('AL2023_x86_64_STANDARD');
+    // A GPU family without accelerators and without the read: not a CPU AMI without drivers either.
+    for (const machineType of ['g5.xlarge', 'p5.48xlarge', 'g4dn.xlarge', 'gr6.4xlarge']) {
+      c.emu.failNext('DescribeInstanceTypes', 'UnauthorizedOperation', 403);
+      const unknown = await rejection(c.k8s.ensureNodePool(cid, { ...pool, name: 'gpu-bare', machineType }, c.ctx()));
+      expect(isComputeError(unknown, 'INVALID_STATE'), `${machineType}: ${String(unknown)}`).toBe(true);
+      expect((unknown as ComputeError).details).toMatchObject({ reason: 'instanceTypeUnknown' });
+    }
+    expect(c.eks.calls('CreateNodegroup')).toHaveLength(1);
   });
 
   it('resizes and re-bounds in place; anything else is INVALID_STATE', async () => {
@@ -758,6 +767,50 @@ describe('eks credentials', () => {
     expect(isComputeError(error, 'UNAVAILABLE')).toBe(true);
   });
 
+  it('keeps a new entry UNAVAILABLE while it propagates, past the first retry', async () => {
+    const s = await setup();
+    const id = await readyCluster(s);
+    s.eks.accessEntries.clear();
+    s.eks.propagationMs = 20_000;
+    const request = { subject: 'bc-u-erin', role: 'view', ttlSeconds: 600 } as const;
+    const first = await rejection(s.k8s.credentials(id, request, s.ctx()));
+    expect(isComputeError(first, 'UNAVAILABLE'), String(first)).toBe(true);
+    // The retry finds the entry and its policy in place, and the API server still refuses it.
+    s.emu.clock.advance(6_000);
+    const second = await rejection(s.k8s.credentials(id, request, s.ctx()));
+    expect(isComputeError(second, 'UNAVAILABLE'), String(second)).toBe(true);
+    expect(s.eks.calls('CreateAccessEntry')).toHaveLength(1);
+    s.emu.clock.advance(15_000);
+    await expect(s.k8s.credentials(id, request, s.ctx())).resolves.toMatchObject({ token: expect.any(String) });
+    // Long after the entry was made, a refusal is final.
+    s.emu.clock.advance(120_000);
+    s.kube.failWith = 403;
+    const denied = await rejection(s.k8s.credentials(id, request, s.ctx()));
+    expect(isComputeError(denied, 'ACCESS_DENIED'), String(denied)).toBe(true);
+  });
+
+  it('writes the guard and better-compute:edit again on a cluster recreated under its name', async () => {
+    for (const outOfBand of [true, false]) {
+      const s = await setup();
+      const id = await readyCluster(s);
+      await s.k8s.credentials(id, { subject: 'bc-u-alice', role: 'edit', ttlSeconds: 600 }, s.ctx());
+      expect(s.kube.admissionPolicies.has('better-compute-access-guard')).toBe(true);
+      // Gone: deleted by another process (or this one, after the cluster was already gone).
+      s.eks.clusters.delete('bc-k-one');
+      for (const key of [...s.eks.accessEntries.keys()]) if (key.startsWith('bc-k-one|')) s.eks.accessEntries.delete(key);
+      if (!outOfBand) await expect(s.k8s.deleteCluster(id, s.ctx())).resolves.toMatchObject({ state: 'deleted' });
+      for (const store of [s.kube.clusterRoles, s.kube.admissionPolicies, s.kube.admissionBindings, s.kube.bindings]) store.clear();
+      s.kube.namespaces.clear();
+      s.kube.serviceAccounts.clear();
+      s.emu.clock.advance(60_000);
+      const again = await readyCluster(s);
+      expect(again).toBe(id);
+      await s.k8s.credentials(id, { subject: 'bc-u-alice', role: 'edit', ttlSeconds: 600 }, s.ctx());
+      expect(s.kube.clusterRoles.has('better-compute:edit'), `outOfBand=${outOfBand}`).toBe(true);
+      expect(s.kube.admissionPolicies.has('better-compute-access-guard'), `outOfBand=${outOfBand}`).toBe(true);
+    }
+  });
+
   it('refuses an aws-auth-only cluster, a cluster not ready, and malformed requests', async () => {
     const s = await setup();
     const id = await readyCluster(s);
@@ -828,14 +881,17 @@ describe('eks IAM policy', () => {
       StringEquals: { 'aws:ResourceTag/better-compute:managed': 'true' },
     });
     expect(by('EksManageOwned').Action).toContain('eks:UpdateNodegroupVersion');
-    expect(by('EksManageOwned').Resource).toContain('arn:aws:eks:us-east-1:111111111111:cluster/*');
+    expect(by('EksManageOwned').Resource).toEqual([
+      'arn:aws:eks:us-east-1:111111111111:cluster/bc-k-*',
+      'arn:aws:eks:us-east-1:111111111111:nodegroup/bc-k-*/*/*',
+    ]);
     // Its own principal, and only on clusters (and entries) better-compute manages: never
     // cluster-admin on every cluster of a BYO account.
     expect(by('EksOwnAccessEntry')).toMatchObject({
       Action: ['eks:CreateAccessEntry', 'eks:AssociateAccessPolicy'],
       Resource: [
-        'arn:aws:eks:us-east-1:111111111111:cluster/*',
-        'arn:aws:eks:us-east-1:111111111111:access-entry/*/*/*/*/*',
+        'arn:aws:eks:us-east-1:111111111111:cluster/bc-k-*',
+        'arn:aws:eks:us-east-1:111111111111:access-entry/bc-k-*/*/*/*/*',
       ],
       Condition: {
         StringEquals: {
@@ -844,12 +900,59 @@ describe('eks IAM policy', () => {
         },
       },
     });
-    expect(by('EksCreateTagged').Resource).toContain('arn:aws:eks:us-east-1:111111111111:access-entry/*/*/*/*/*');
+    expect(by('EksCreateTagged').Resource).toEqual([
+      'arn:aws:eks:us-east-1:111111111111:cluster/bc-k-*',
+      'arn:aws:eks:us-east-1:111111111111:nodegroup/bc-k-*/*/*',
+      'arn:aws:eks:us-east-1:111111111111:access-entry/bc-k-*/*/*/*/*',
+    ]);
     // Adopting clusters better-compute did not create is an explicit opt-in.
     const adopt = iamPolicy({ region, account: '111111111111', eksClusterRoleArn: clusterRoleArn, eksAdoptClusters: true });
-    expect(adopt.Statement.find((statement) => statement.Sid === 'EksOwnAccessEntry')!.Condition).toEqual({
-      StringEquals: { 'eks:principalArn': '${aws:PrincipalArn}' },
+    const adopted = (sid: string) => adopt.Statement.find((statement) => statement.Sid === sid)!;
+    expect(adopted('EksOwnAccessEntry')).toMatchObject({
+      Resource: [
+        'arn:aws:eks:us-east-1:111111111111:cluster/*',
+        'arn:aws:eks:us-east-1:111111111111:access-entry/*/*/*/*/*',
+      ],
+      Condition: { StringEquals: { 'eks:principalArn': '${aws:PrincipalArn}' } },
     });
+    // Adopting reaches access entries (tag-on-create of its own entry), never another cluster's
+    // config, version or deletion.
+    expect(adopted('EksManageOwned').Resource).toEqual(by('EksManageOwned').Resource);
+    expect(adopted('EksCreateTagged').Resource).toEqual([
+      'arn:aws:eks:us-east-1:111111111111:cluster/bc-k-*',
+      'arn:aws:eks:us-east-1:111111111111:nodegroup/bc-k-*/*/*',
+      'arn:aws:eks:us-east-1:111111111111:access-entry/*/*/*/*/*',
+    ]);
+    // eks:TagResource is the way a managed tag would reach a cluster better-compute did not make
+    // (and then EksManageOwned would let the role delete it): never allowed on an unprefixed
+    // cluster or node group, adopting or not.
+    for (const document of [policy, adopt]) {
+      for (const statement of document.Statement) {
+        if (statement.Effect !== 'Allow') continue;
+        const actions = ([] as string[]).concat(statement.Action);
+        const resources = ([] as string[]).concat(statement.Resource);
+        if (!actions.some((action) => action === 'eks:TagResource' || action === 'eks:*' || action === '*')) continue;
+        for (const resource of resources)
+          expect(
+            [':cluster/bc-k-*', ':nodegroup/bc-k-*/*/*'].some((tail) => resource.endsWith(tail)) ||
+              resource.includes(':access-entry/'),
+            `${statement.Sid} tags ${resource}`,
+          ).toBe(true);
+      }
+      // No write statement reaches an unprefixed cluster or node group; only the adopt opt-in
+      // reaches unprefixed access entries (and their clusters, for CreateAccessEntry).
+      for (const statement of document.Statement) {
+        if (statement.Effect !== 'Allow' || ['EksRead', 'EksServiceLinkedRoles'].includes(statement.Sid)) continue;
+        if (!statement.Sid.startsWith('Eks')) continue;
+        for (const resource of ([] as string[]).concat(statement.Resource)) {
+          expect(resource.endsWith(':nodegroup/*/*/*'), `${statement.Sid}: ${resource}`).toBe(false);
+          if (document === policy || statement.Sid !== 'EksOwnAccessEntry')
+            expect(resource.endsWith(':cluster/*'), `${statement.Sid}: ${resource}`).toBe(false);
+          if (document === policy)
+            expect(resource.includes(':access-entry/*/'), `${statement.Sid}: ${resource}`).toBe(false);
+        }
+      }
+    }
     expect(by('EksAdminPolicyOnly')).toMatchObject({ Effect: 'Deny', Action: 'eks:AssociateAccessPolicy' });
     expect(by('EksClusterScopeOnly')).toMatchObject({ Effect: 'Deny' });
     expect(by('PassEksRoles')).toEqual({

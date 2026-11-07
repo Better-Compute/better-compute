@@ -29,6 +29,8 @@ export const adminPolicy = 'arn:aws:eks::aws:cluster-access-policy/AmazonEKSClus
 export interface EmuCluster {
   name: string;
   arn: string;
+  /** Epoch seconds, as DescribeCluster answers: a cluster recreated under its name has a new one. */
+  createdAt: number;
   version: string;
   platformVersion: string;
   status: 'CREATING' | 'ACTIVE' | 'DELETING' | 'FAILED' | 'UPDATING';
@@ -85,6 +87,8 @@ export interface EmuAccessEntry {
   principalArn: string;
   type: string;
   policies: { policyArn: string; accessScope: { type: string; namespaces?: string[] } }[];
+  /** The API server refuses the entry (401) until then: a new entry or association propagating. */
+  honouredFrom?: number;
 }
 
 const segments = (url: URL) => url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
@@ -136,6 +140,8 @@ export class EksEmulator {
   readonly updates = new Map<string, EmuUpdate>();
   /** `cluster|principalArn`. */
   readonly accessEntries = new Map<string, EmuAccessEntry>();
+  /** How long a created entry or associated policy takes to reach the API server (ms; 0 = at once). */
+  propagationMs = 0;
   /** Transitional states last this many reads of the resource. */
   delayTicks = 1;
   /** The next update (cluster or node group) fails with this message, its effect not applied. */
@@ -210,6 +216,7 @@ export class EksEmulator {
     return {
       name: cluster.name,
       arn: cluster.arn,
+      createdAt: cluster.createdAt,
       version: cluster.version,
       platformVersion: cluster.platformVersion,
       status: cluster.status,
@@ -500,7 +507,12 @@ export class EksEmulator {
           return this.#error('ResourceInUseException', 'The specified access entry resource is already in use on this cluster.', 409);
         if (!/^arn:aws:iam::\d{12}:(role|user)\//.test(body.principalArn ?? ''))
           return this.#error('InvalidParameterException', 'The principalArn is not an IAM role or user');
-        this.accessEntries.set(key, { principalArn: body.principalArn, type: body.type ?? 'STANDARD', policies: [] });
+        this.accessEntries.set(key, {
+          principalArn: body.principalArn,
+          type: body.type ?? 'STANDARD',
+          policies: [],
+          ...(this.propagationMs ? { honouredFrom: this.emu.now() + this.propagationMs } : {}),
+        });
         return json(200, { accessEntry: { principalArn: body.principalArn, type: body.type ?? 'STANDARD', clusterName: cluster.name } });
       }
       case 'DescribeAccessEntry':
@@ -517,6 +529,7 @@ export class EksEmulator {
           return this.#error('InvalidParameterException', 'Not an access policy ARN');
         entry.policies = entry.policies.filter((policy) => policy.policyArn !== body.policyArn);
         entry.policies.push({ policyArn: body.policyArn, accessScope: body.accessScope ?? { type: 'cluster' } });
+        if (this.propagationMs) entry.honouredFrom = this.emu.now() + this.propagationMs;
         return json(200, { clusterName: cluster.name, principalArn: entry.principalArn, associatedAccessPolicy: body });
       }
       default:
@@ -551,6 +564,7 @@ export class EksEmulator {
     const cluster: EmuCluster = {
       name,
       arn: `arn:aws:eks:${this.region}:${this.account}:cluster/${name}`,
+      createdAt: this.emu.now() / 1000,
       version,
       platformVersion: 'eks.1',
       status: 'CREATING',
@@ -760,7 +774,8 @@ export class EksKubeApi {
     const proven = this.verify(request.token, cluster.name);
     if ('refused' in proven) return ok(401, { kind: 'Status', reason: 'Unauthorized', message: 'Unauthorized' });
     const entry = this.eks.accessEntries.get(`${cluster.name}|${proven.principal}`);
-    if (!entry) return ok(401, { kind: 'Status', reason: 'Unauthorized', message: 'Unauthorized' });
+    if (!entry || (entry.honouredFrom !== undefined && this.emu.now() < entry.honouredFrom))
+      return ok(401, { kind: 'Status', reason: 'Unauthorized', message: 'Unauthorized' });
     if (!entry.policies.some((policy) => policy.policyArn === adminPolicy && policy.accessScope.type === 'cluster'))
       return ok(403, { kind: 'Status', reason: 'Forbidden', message: 'forbidden' });
     this.principals.push(proven.principal);

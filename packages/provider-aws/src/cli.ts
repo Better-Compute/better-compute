@@ -248,7 +248,15 @@ export function iamPolicy(
  * entry only for the caller's own principal (`eks:principalArn` = `aws:PrincipalArn`) and only the
  * cluster-admin access policy at cluster scope; iam:PassRole of the cluster and node roles to EKS;
  * and the EKS service-linked roles.
+ *
+ * Every write is scoped by name as well as by tag: the module names its clusters `bc-k-…`, and
+ * eks:TagResource (needed for tag-on-create) would otherwise let the role tag a cluster it did not
+ * make as managed, and so update, delete or make itself cluster-admin on it. Only
+ * `--eks-adopt-clusters` widens the own access entry (and tagging it on create) to every cluster.
  */
+/** The prefix of every cluster name the kubernetes module asks for (its store's provider name). */
+const clusterNamePrefix = 'bc-k-';
+
 function eksStatements(
   partition: AwsPartition,
   region: string,
@@ -274,10 +282,14 @@ function eksStatements(
     roles.push(value);
   }
   const eks = (resource: string) => `arn:${partition}:eks:${region}:${account}:${resource}`;
-  const clusters = eks('cluster/*');
-  const nodegroups = eks('nodegroup/*/*/*');
+  // Cluster names lead node group and access entry ARNs: nodegroup/<cluster>/<name>/<uuid>,
+  // access-entry/<cluster>/<type>/<account>/<principal>/<uuid>.
+  const clusters = eks(`cluster/${clusterNamePrefix}*`);
+  const nodegroups = eks(`nodegroup/${clusterNamePrefix}*/*/*`);
   const managed = { StringEquals: { [`aws:ResourceTag/${tags.managed}`]: 'true' } };
-  const accessEntries = eks('access-entry/*/*/*/*/*');
+  const accessEntries = eks(`access-entry/${clusterNamePrefix}*/*/*/*/*`);
+  const entryClusters = options.eksAdoptClusters ? eks('cluster/*') : clusters;
+  const entries = options.eksAdoptClusters ? eks('access-entry/*/*/*/*/*') : accessEntries;
   // The caller's own principal only; and unless the account adopts clusters, only on clusters (and
   // access entries) tagged managed: never cluster-admin on a cluster of the account it did not make.
   const ownEntry = {
@@ -307,7 +319,7 @@ function eksStatements(
       Sid: 'EksCreateTagged',
       Effect: 'Allow',
       Action: ['eks:CreateCluster', 'eks:CreateNodegroup', 'eks:TagResource'],
-      Resource: [clusters, nodegroups, accessEntries],
+      Resource: [clusters, nodegroups, entries],
       Condition: { StringEquals: { [`aws:RequestTag/${tags.managed}`]: 'true' } },
     },
     {
@@ -330,7 +342,7 @@ function eksStatements(
       Sid: 'EksOwnAccessEntry',
       Effect: 'Allow',
       Action: ['eks:CreateAccessEntry', 'eks:AssociateAccessPolicy'],
-      Resource: [clusters, accessEntries],
+      Resource: [entryClusters, entries],
       Condition: ownEntry,
     },
     {

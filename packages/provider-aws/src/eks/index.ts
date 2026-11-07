@@ -124,6 +124,9 @@ const busyState: Record<'create' | 'update' | 'delete', ProviderResourceState['s
 
 const segment = (value: string) => encodeURIComponent(value);
 
+/** How long after this process made the account principal's access entry a 401/403 is propagation. */
+export const accessPropagationMs = 60_000;
+
 export class AwsKubernetes implements ProviderKubernetes {
   /** EKS clusters are regional (D-EKS-4): the module refuses a zone as their location at create. */
   readonly regionalOnly = true;
@@ -144,10 +147,20 @@ export class AwsKubernetes implements ProviderKubernetes {
    * original update and changes nothing), while a retry of a request whose answer was lost does.
    */
   readonly #started = new Map<string, number>();
-  /** Clusters (by ARN) where the account principal's admin access entry was seen. */
+  /**
+   * Clusters where the account principal's admin access entry was seen, and those where this
+   * process wrote the access guard and better-compute:edit: keyed by ARN and creation time, since a
+   * cluster recreated under its name (out of band, then by ensureCluster) has the same ARN and none
+   * of what was written on the old one.
+   */
   readonly #admitted = new Set<string>();
-  /** Clusters (by ARN) where this process wrote the access guard and better-compute:edit. */
   readonly #guarded = new Set<string>();
+  /**
+   * When this process created the account principal's access entry or associated its policy, per
+   * cluster key: EKS takes seconds or more to honour it, so until accessPropagationMs after that a
+   * 401/403 is UNAVAILABLE, on the retries as well as on the call that made it.
+   */
+  readonly #granted = new Map<string, number>();
 
   constructor(options: AwsKubernetesOptions) {
     this.#client = options.client;
@@ -331,6 +344,7 @@ export class AwsKubernetes implements ProviderKubernetes {
     if (!found) {
       this.#updates.forget(`cluster:${cluster}`);
       this.#updates.forget(`pool:${cluster}/`);
+      this.#forgetAccess(name);
       return resourceState(cluster, 'deleted');
     }
     if (found.status === 'DELETING') return resourceState(cluster, 'deleting');
@@ -360,11 +374,15 @@ export class AwsKubernetes implements ProviderKubernetes {
       if (isBusy(error)) return resourceState(cluster, 'deleting', { message: error.message });
       throw error;
     }
-    if (found.arn) {
-      this.#admitted.delete(found.arn);
-      this.#guarded.delete(found.arn);
-    }
+    this.#forgetAccess(name);
     return resourceState(cluster, 'deleting');
+  }
+
+  /** Forgets what this process saw or wrote on clusters of this name (every creation of it). */
+  #forgetAccess(name: string): void {
+    const of = (key: string) => key.startsWith(`${name}@`) || key.includes(`:cluster/${name}@`);
+    for (const set of [this.#admitted, this.#guarded]) for (const key of [...set]) if (of(key)) set.delete(key);
+    for (const key of [...this.#granted.keys()]) if (of(key)) this.#granted.delete(key);
   }
 
   async #deleteGroup(cluster: string, group: string, signal: AbortSignal): Promise<'deleting' | 'deleted' | 'busy'> {
@@ -575,7 +593,7 @@ export class AwsKubernetes implements ProviderKubernetes {
         undefined,
         { provider: 'aws', service: 'eks', reason: 'authenticationMode' },
       );
-    const key = found.arn ?? cluster;
+    const key = `${found.arn ?? name}@${String(found.createdAt ?? '')}`;
     const { token, fresh } = await this.#clusterToken(name, key, context);
     let credentials: KubernetesCredentials;
     try {
@@ -609,7 +627,8 @@ export class AwsKubernetes implements ProviderKubernetes {
 
   /**
    * The account principal's eksToken for a cluster, its admin access entry made first when this
-   * process has not seen it yet (`fresh`: just made, so an authorization failure is transient).
+   * process has not seen it yet (`fresh`: granted less than accessPropagationMs ago, so an
+   * authorization failure is transient).
    */
   async #clusterToken(
     name: string,
@@ -617,18 +636,22 @@ export class AwsKubernetes implements ProviderKubernetes {
     context: CallContext,
   ): Promise<{ token: string; fresh: boolean }> {
     const { signal } = context;
-    let fresh = false;
     if (!this.#admitted.has(key)) {
       const principalArn = principalArnOf((await this.#identity(context)).arn, this.#principalRoles);
-      fresh = await ensureAdminAccess({
+      const changed = await ensureAdminAccess({
         client: this.#client,
         cluster: name,
         principalArn,
         partition: partitionOf(this.#region).partition,
         signal,
       });
+      if (changed) this.#granted.set(key, this.#clock.now());
       this.#admitted.add(key);
     }
+    // Until accessPropagationMs after this process granted access, an authorization failure is transient.
+    const granted = this.#granted.get(key);
+    const fresh = granted !== undefined && this.#clock.now() - granted < accessPropagationMs;
+    if (granted !== undefined && !fresh) this.#granted.delete(key);
     const token = await eksToken({
       cluster: name,
       credentials: this.#credentials,
@@ -649,7 +672,7 @@ export class AwsKubernetes implements ProviderKubernetes {
     const { signal } = context;
     const found = await this.#client.cluster(name, signal);
     if (!found || found.status === 'DELETING') return;
-    const key = found.arn ?? cluster;
+    const key = `${found.arn ?? name}@${String(found.createdAt ?? '')}`;
     const { token, fresh } = await this.#clusterToken(name, key, context);
     try {
       await revokeCredentials({

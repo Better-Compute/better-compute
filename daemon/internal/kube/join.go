@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -20,9 +21,15 @@ const (
 	// KubeletConf is the kubelet's kubeconfig, written by kubeadm join: its presence means joined.
 	KubeletConf = "/etc/kubernetes/kubelet.conf"
 	// EksKubeletConf is the kubelet's kubeconfig on an EKS node (mode "eks"), written by nodeadm: its
-	// user is an exec credential plugin (`aws eks get-token`) with the instance role, and its CA is
+	// user is an exec credential plugin (aws-iam-authenticator) with the instance role, and its CA is
 	// /etc/kubernetes/pki/ca.crt.
 	EksKubeletConf = "/var/lib/kubelet/kubeconfig"
+	// EksKubeletEnvironment is the kubelet's environment file nodeadm writes: its arguments carry
+	// --hostname-override, the Node name nodeadm registers (the instance's EC2 private DNS name).
+	EksKubeletEnvironment = "/etc/eks/kubelet/environment"
+	// InstanceIDFile holds the EC2 instance id on Nitro instances (the DMI board asset tag): the
+	// Node's spec.providerID is aws:///<zone>/<instance id>.
+	InstanceIDFile = "/sys/devices/virtual/dmi/id/board_asset_tag"
 	// StateFile records what the unit manages: the cluster, the Node name, the labels and taints it
 	// set, and whether the device plugin may run (Manager reads it, unprivileged: 0644). Everything
 	// the unit writes lives in root's hostconfig.StateDir: under bcd helper it runs as root on the
@@ -567,7 +574,7 @@ func (u JoinUnit) planEks(ctx context.Context, sys hostconfig.System, p *parsed)
 	}
 	name := state.NodeName
 	if name == "" {
-		if name, err = u.nodeName(sys); err != nil {
+		if name, err = u.eksNodeName(ctx, sys); err != nil {
 			return nil, err
 		}
 	}
@@ -599,7 +606,78 @@ func (u JoinUnit) planEks(ctx context.Context, sys hostconfig.System, p *parsed)
 	return actions, nil
 }
 
-var nodeNameInvalid = strings.NewReplacer("_", "-", " ", "-")
+var (
+	nodeNameInvalid = strings.NewReplacer("_", "-", " ", "-")
+	ec2InstanceID   = regexp.MustCompile(`^i-[0-9a-f]{8,17}$`)
+)
+
+// eksNodeName is the Node name nodeadm registered, which is not the kernel host name in a VPC whose
+// DHCP options set a custom domain-name (ip-10-0-1-5.corp.example.com, registered as
+// ip-10-0-1-5.ec2.internal): JoinUnit.NodeName when set; else the kubelet's --hostname-override in
+// nodeadm's environment file; else the one Node whose providerID names this instance (listed with
+// the kubelet's credentials); else the host name.
+func (u JoinUnit) eksNodeName(ctx context.Context, sys hostconfig.System) (string, error) {
+	if u.NodeName != "" {
+		return u.nodeName(sys)
+	}
+	if b, err := sys.ReadFile(EksKubeletEnvironment); err == nil {
+		if name := hostnameOverride(string(b)); name != "" {
+			return validNodeName(name)
+		}
+	}
+	if b, err := sys.ReadFile(InstanceIDFile); err == nil {
+		if id := strings.TrimSpace(string(b)); ec2InstanceID.MatchString(id) {
+			out, err := sys.Run(ctx, kubectl(sys, "get", "nodes", "-o", "json"))
+			if err != nil {
+				// The API server unreachable: retry rather than guess.
+				return "", fmt.Errorf("list Nodes for instance %s: %w", id, err)
+			}
+			var list struct {
+				Items []nodeObject `json:"items"`
+			}
+			if err := json.Unmarshal(out, &list); err != nil {
+				return "", fmt.Errorf("Nodes: %w", err)
+			}
+			var found []string
+			for _, n := range list.Items {
+				if strings.HasSuffix(n.Spec.ProviderID, "/"+id) && strings.HasPrefix(n.Spec.ProviderID, "aws://") {
+					found = append(found, n.Metadata.Name)
+				}
+			}
+			switch len(found) {
+			case 1:
+				return validNodeName(found[0])
+			case 0:
+				return "", fmt.Errorf("no Node has the providerID of instance %s yet (registering)", id)
+			default:
+				return "", terminal("Nodes %s all name instance %s", strings.Join(found, ", "), id)
+			}
+		}
+	}
+	return u.nodeName(sys)
+}
+
+// hostnameOverride reads --hostname-override (=value or a separate value) from kubelet arguments.
+func hostnameOverride(env string) string {
+	fields := strings.FieldsFunc(env, func(r rune) bool { return strings.ContainsRune(" \t\n\"'", r) })
+	for i, f := range fields {
+		if v, ok := strings.CutPrefix(f, "--hostname-override="); ok {
+			return v
+		}
+		if f == "--hostname-override" && i+1 < len(fields) {
+			return fields[i+1]
+		}
+	}
+	return ""
+}
+
+func validNodeName(name string) (string, error) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if len(name) > 253 || !dnsSubdomain.MatchString(name) {
+		return "", terminal("the Node name %q is not valid; set one", name)
+	}
+	return name, nil
+}
 
 func (u JoinUnit) nodeName(sys hostconfig.System) (string, error) {
 	name := u.NodeName
@@ -726,10 +804,12 @@ func joinConfiguration(api string, p *parsed, token, name string, labels map[str
 
 type nodeObject struct {
 	Metadata struct {
+		Name   string            `json:"name,omitempty"`
 		Labels map[string]string `json:"labels"`
 	} `json:"metadata"`
 	Spec struct {
-		Taints []struct {
+		ProviderID string `json:"providerID,omitempty"`
+		Taints     []struct {
 			Key    string `json:"key"`
 			Value  string `json:"value"`
 			Effect string `json:"effect"`

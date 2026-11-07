@@ -63,6 +63,15 @@ const writeVerbs = ['create', 'delete', 'deletecollection', 'patch', 'update'];
  * The cluster objects credentials rely on: `better-compute:edit` (aggregating `view` and
  * `better-compute:edit-writes`, the built-in edit's writes without `impersonate` on
  * serviceaccounts and without `serviceaccounts/token`), and the access guard policy and binding.
+ *
+ * Known gap: `better-compute:edit` reaches subjects through a ClusterRoleBinding and keeps the
+ * built-in edit's get/list/watch on secrets, so an edit subject can READ every Secret, in
+ * kube-system and bc-access too. The guard is admission and sees no reads, so it covers only
+ * writes and connects there. On EKS, add-ons keep sensitive Secrets in kube-system (webhook TLS
+ * keys, and any legacy service-account-token Secret of a privileged service account, which is a
+ * way to cluster-admin): grant edit only to subjects trusted with those. Closing it needs secrets
+ * read bound per namespace (RoleBindings that skip guardedNamespaces, kept in step with namespaces
+ * and role changes), which the driver does not do yet.
  */
 export function accessManifests(): {
   clusterRoles: Record<string, unknown>[];
