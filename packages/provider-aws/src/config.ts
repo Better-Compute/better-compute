@@ -68,7 +68,7 @@ export const awsConfig = manifest({
     .option(['off', 'auto'])
     .default('off')
     .describe(
-      'EFA (Elastic Fabric Adapter): auto launches an EFA-capable type with one EFA interface per network card (needs subnetId or a network)',
+      'EFA (Elastic Fabric Adapter): auto launches an EFA-capable type with one EFA interface per network card (needs subnetId or a network); a type with several cards then gets no public IPv4 address, whatever associatePublicIp says',
     ),
   discoverTag: field
     .string({ maxLength: 512 })

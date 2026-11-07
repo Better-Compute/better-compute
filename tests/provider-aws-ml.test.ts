@@ -359,6 +359,22 @@ describe('EFA', () => {
     expect(sent.some((entry) => entry.AssociatePublicIpAddress === 'true')).toBe(false);
   });
 
+  it('says once, as a warning, that a multi-card EFA launch has no public address', async () => {
+    const logs: unknown[][] = [];
+    const w = world({ efa: 'auto', subnetId: subnet }, logs);
+    expect(w.config.associatePublicIp).toBe(true);
+    await w.compute.create(request('us-east-1a/p5.48xlarge'), w.call('a'));
+    await w.compute.create(request('us-east-1a/p5.48xlarge'), w.call('b'));
+    const warned = logs.filter(([level, message]) => level === 'warn' && /public/.test(String(message)));
+    expect(warned).toHaveLength(1);
+    expect(warned[0]![2]).toMatchObject({ instanceType: 'p5.48xlarge', interfaces: 32, reason: 'efa-public-ip' });
+    // Without associatePublicIp there is nothing to say.
+    const quiet: unknown[][] = [];
+    const off = world({ efa: 'auto', subnetId: subnet, associatePublicIp: false }, quiet);
+    await off.compute.create(request('us-east-1a/p5.48xlarge'), off.call());
+    expect(quiet.filter(([level, message]) => level === 'warn' && /public/.test(String(message)))).toEqual([]);
+  });
+
   it('a single-card EFA type keeps its public address', async () => {
     const w = world({ efa: 'auto', subnetId: subnet });
     w.ec2emu.types.set('hpc6a.48xlarge', {

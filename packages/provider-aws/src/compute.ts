@@ -1193,6 +1193,23 @@ export class AwsCompute implements ProviderImpl {
         undefined,
         { provider: 'aws', reason: 'efa-subnet' },
       );
+    // EC2 takes a public address only on a launch with one interface: a multi-card EFA machine has
+    // none even with associatePublicIp. Said once per account and type, never silently.
+    if (
+      efaInterfaces > 1 &&
+      this.config.associatePublicIp &&
+      !this.#warned.has(`efa-public-ip:${offer.instanceType}`)
+    ) {
+      this.#warned.add(`efa-public-ip:${offer.instanceType}`);
+      this.context.log.warn(
+        'aws: EFA machines with several interfaces get no public IPv4 address',
+        {
+          instanceType: offer.instanceType,
+          interfaces: efaInterfaces,
+          reason: 'efa-public-ip',
+        },
+      );
+    }
     const params: QueryParams = {
       ClientToken: clientToken(context.idempotencyKey),
       MinCount: 1,
