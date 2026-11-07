@@ -28,6 +28,78 @@ All notable changes to the better-compute packages are documented here. The form
   service account per subject in `bc-access`, bound to `view`/`edit`/`cluster-admin`, with a bound TokenRequest
   token, minted over the cluster's Kubernetes API trusting only the cluster CA. New options `containerEndpoint` and
   `kubeTransport`. See the provider-gcp README, "Managed Kubernetes (GKE)", for the IAM roles.
+- **Amazon Web Services** (new packages `@better-compute/provider-aws`, `@better-compute/aws-core` and
+  `@better-compute/aws`, all left out of releases until the AWS program is ready; `core`, `vps`, `capacity`,
+  `server`, `pki`, `inventory`, `gateway`, bcd; plan `docs/superpowers/plans/2026-10-18-aws-integration-program.md`).
+  No AWS SDK: `aws-core` signs SigV4 requests and resolves endpoints and credentials.
+  - **EC2 instances** through provider pools: offers with vCPU quota headroom, create/get/delete with `ClientToken`
+    idempotency and eventual-consistency retries, power, reinstall by replace-root-volume (SSM images resolved to an
+    AMI of a trusted owner, the architecture checked), discover/claim/release for `instances.attach`. Accounts take
+    a platform-assigned ExternalId, or go keyless through web identity federation (`aws onboarding-template`,
+    `providerAccounts.get` shows the onboarding; instances name the AWS role their workloads assume, and the workload
+    broker mints `sts.amazonaws.com` tokens only for an allowed role). `aws iam-policy` renders tag-scoped (ABAC)
+    policies per phase, and `aws trust-policy` the cross-account trust.
+  - **Networks**: VPCs with zone-scoped subnets, a network range, private service access (`privateAccess`),
+    firewall rules as security groups and network ACL denies.
+  - **EBS volumes and snapshots** through the `providerVolumes` flow (types, IOPS, throughput, forced detach).
+  - **Capacity markets**: Spot offers, launches and reclaims (metered as spot); On-Demand Capacity Reservations and
+    Capacity Blocks as reservations and offers; `providerAccounts.reservationOfferings`, `purchaseReservation`,
+    `purchases` and `purchaseProposals` buy capacity root-only, confirmed and exactly once across lost answers.
+    Offer prices from the Price List and Spot price history; Local Zone offers stay unpriced.
+  - **EKS**: `ProviderImpl.kubernetes` on EKS (managed node groups that follow control-plane upgrades, Neuron groups
+    tainted, per-subject access entries) and bcd's `k8s-join` mode `eks`; `providerAccounts.clusters`.
+  - **Provider events** (`ProviderImpl.pollEvents`, the `vps.provider-events` worker): EventBridge intake through SQS
+    (`aws event-rules`) or scheduled-event polling; Spot interruption and rebalance notices reach capacity as
+    `noticeNodeInterruption`, and bcd reports the IMDS notice as a node condition.
+  - **EC2 hosts**: bcd's IMDSv2 client, `bcd join --attestor cloud-iid` (verified with `packages/pki`), the `cloud`
+    inventory section (`cloud.*` and `efa.count` labels); instances never reach EC2's metadata service.
+  - **Shared filesystems** (new `filesystems` group: `create`, `list`, `get`, `delete`; `ProviderFilesystems`): EFS
+    and FSx for Lustre on a network, mounted by instances at boot, billed as `filesystem.<kind>.gib.hours`. EFA
+    launches and placement groups; Capacity Blocks proposed 48 h before pending calendar reservations.
+  - **FinOps**: month-to-date spend and a spend guard, list prices from the Price List, cost allocation tags, a tag
+    policy, budget templates, `aws organization-accounts`, `aws quotas`, `aws quota-request` and
+    `aws governance-policy`.
+  - **Running better-compute on AWS** (`@better-compute/aws`): Secrets Manager, Parameter Store, KMS sealing, S3 blob
+    and snapshot stores, EventBridge/SNS/SQS/Kinesis/Firehose sinks, ACM Private CA and KMS-key certificate
+    authorities, RDS IAM auth tokens, a CloudWatch EMF exporter, and `aws deploy-templates` (ECS Fargate behind ALB
+    with WAF and an NLB passthrough). See the docs page "Operating on AWS".
+- **DigitalOcean** (`@better-compute/provider-digitalocean`, still left out of releases; new package
+  `@better-compute/cloud-resources`, released as `better-compute/cloud-resources`; `core`, `vps`, `capacity`,
+  `events`, `mcp`, `console`, `admin`, bcd; plan `docs/superpowers/plans/2026-10-18-digitalocean-program.md`).
+  - **Provider volumes, snapshots and addresses** (new groups `providerVolumes`, `providerSnapshots`,
+    `providerAddresses`; provider-neutral contracts with conformance cases): Block Storage volumes and snapshots,
+    reserved IPv4 and IPv6 addresses, `deleteWithInstance`, metered by `vps.ancillary-usage`. NFS shares are shared
+    provider volumes on many instances of a tenant network (`vps.share.gib.hours`).
+  - **Images and machines**: catalog images resolved per tenant, Spot offers declared by the provider with
+    `PoolPolicy.replacePreempted`, Bare Metal GPUs as metal hosts (`digitaloceanMetal`), Droplet metadata in bcd's
+    inventory.
+  - **DOKS**: `ProviderImpl.kubernetes` on DigitalOcean Kubernetes (CPU, GPU and Spot GPU node pools, autoscaling,
+    in-place upgrades, per-subject credentials through the cluster's own API); DOKS worker Droplets are never
+    discovered, claimed or deleted.
+  - **Managed services** (`cloudResources` group: `kinds`, `catalog`, `signals`, `create`, `list`, `get`, `update`,
+    `delete`, `discover`, `adopt`, `release`): one governed, audited, metered API for a provider's managed services
+    (Managed Databases, App Platform, Functions, 1-Click apps, Partner Network Connect, Spaces, CDN, Container
+    Registry, and the AI platform: dedicated inference booked against the GPU quota, inference keys behind a metered
+    proxy, knowledge bases, guardrails, agents). IAM decides on `cloud-resource/{id}` by kind and family; secret
+    outputs are sealed and returned as SecretRefs; `cloud.resource.hours` plus sampled kind meters.
+  - **Edge** (new groups `certificates`, `loadBalancers`, `dnsZones`, `dnsRecords`; `networks.natGateway`,
+    `networks.peer`, `networks.routes`): Let's Encrypt and custom certificates, regional load balancers
+    (`vps.load-balancer.hours`), DNS zones and records (`instances.create({ dns })`), NAT gateways, VPC peerings,
+    VPC routes and BYOIP addresses (preview).
+  - **Operations**: OAuth account connection (`providerAccounts.connectSetup`, `connect`), `check` (with the
+    credential's rate limit), `findings`, `billing` (the account's own bill) and `billing.leaks`; external host metrics
+    of provider-pool VMs without bcd (`vps.external-metrics`); the admin panel's Provider accounts module.
+- **Kubernetes fleet pools** (`@better-compute/kubernetes`, `fleet`, `provider-kubernetes`, `testing`, `server`;
+  docs guide "Kubernetes fleet pools"). A GPU pool's `policy.substrate` names one of the owner's provider accounts
+  and the node shapes it wants; the `kubernetes.substrates` reconciler creates (or adopts) a GKE, EKS or DOKS cluster
+  and its node pools, runs bcd on the nodes as a DaemonSet, and the nodes join the pool, booked with
+  `binding: 'kubernetes'` reservations. The substrate owns only the nodes its tokens admitted, matches them to their
+  Kubernetes Node by name and uid, ends the bookings of a node that is gone, holds a version bump under
+  `upgrades: 'drain'` until bookings end, and revokes its cluster-admin identity when an adopted cluster is torn down.
+  New method `kubernetesSubstrates.get`. FleetConfig documents gain `kubernetesClusters` (plan, export and
+  `fleet.apply` create clusters, node pools and substrate pools); the same document runs on GKE, EKS and DOKS.
+  `kubernetesProviderConformanceCases` in `@better-compute/testing` check every provider, including what a
+  credential's role allows.
 
 ## 0.3.0 (2026-10-20)
 
