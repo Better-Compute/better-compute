@@ -14,7 +14,8 @@ import { fixture, type DoState, type Json } from './state.js';
 // 201 with an action `in-progress`, which completes after `emulator.nfsActionReads` reads of the
 // share and only then changes it; a second action while one runs is the `pending event` 422.
 // `failNfsAction` makes the next action of a type end `errored`, changing nothing. A share name is
-// unique per region (the `422-name-in-use` fixture). Snapshots outlive their share.
+// unique per region (the `422-name-in-use` fixture) unless `emulator.nfsUniqueNames` is cleared.
+// Snapshots outlive their share.
 
 const templates = fixture('nfs');
 const shareTemplate = templates.share as Json;
@@ -174,9 +175,10 @@ function create(emulator: DoEmulator, context: RouteContext): RouteResult {
     const vpc = state.vpcs.get(String(vpcId));
     if (!vpc || vpc.region !== region.slug) return emulator.error('422-unknown');
   }
-  for (const share of state.nfsShares.values())
-    if (share.name === body.name && share.region === region.slug && share.status !== 'DELETED')
-      return emulator.error('422-name-in-use');
+  if (emulator.nfsUniqueNames)
+    for (const share of state.nfsShares.values())
+      if (share.name === body.name && share.region === region.slug && share.status !== 'DELETED')
+        return emulator.error('422-name-in-use');
   const share = seedShare(state, {
     name: body.name,
     region: region.slug,

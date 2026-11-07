@@ -102,6 +102,11 @@ export class DoEmulator {
   nfsCreateReads = 0;
   /** How many reads of an NFS share a share action takes to complete; at 0 it completes when it starts. */
   nfsActionReads = 0;
+  /**
+   * Whether a share name is unique per region (the `422-name-in-use` fixture). DO is assumed to refuse a second share of
+   * a name (unverified, D1/D2); a test clears it to see what the provider does with duplicates.
+   */
+  nfsUniqueNames = true;
   /** How many reads of a reserved IP an assign or unassign takes to complete; at 0, at once. */
   addressActionReads = 0;
   /** How many reserved IPs (v4 and v6) the account may hold. */

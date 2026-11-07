@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { isComputeError, type ComputeError } from '@better-compute/core';
+import { isComputeError, type ComputeError, type Logger } from '@better-compute/core';
 import {
   deploymentTag,
   labels,
@@ -14,7 +14,7 @@ import {
 } from '@better-compute/provider-digitalocean';
 import { DoEmulator, type Json, type RecordedRequest } from './support/do-emulator/index.js';
 import { seedDroplet } from './support/do-emulator/droplets.js';
-import { seedShare } from './support/do-emulator/nfs.js';
+import { seedShare, seedShareSnapshot } from './support/do-emulator/nfs.js';
 import { seedVpc } from './support/do-emulator/vpcs.js';
 import { build, ctx, doAccount, freshBudgets } from './support/do-harness.js';
 
@@ -85,6 +85,15 @@ async function setup(emu = emulator()): Promise<{ emu: DoEmulator; impl: DoCompu
 
 beforeEach(freshBudgets);
 
+/** A logger that keeps what the provider logs: [message, fields]. */
+function recorder(): { events: [string, Record<string, unknown> | undefined][]; log: Logger } {
+  const events: [string, Record<string, unknown> | undefined][] = [];
+  const keep = (message: string, fields?: Record<string, unknown>) => {
+    events.push([message, fields]);
+  };
+  return { events, log: { debug: keep, info: keep, warn: keep, error: keep } };
+}
+
 describe('provider-digitalocean NFS shares: ensure and get', () => {
   it('names a share by the vps name and the deployment, and keeps the hash stable', () => {
     expect(provName).toMatch(/^bc-pvol-1-[0-9a-f]{12}$/);
@@ -137,7 +146,8 @@ describe('provider-digitalocean NFS shares: ensure and get', () => {
 
   it('is pending while the share is CREATING, with no mount source yet', async () => {
     const emu = emulator();
-    emu.nfsCreateReads = 2;
+    // Three reads: the list the create confirms its share by (no older one of the name), then two gets.
+    emu.nfsCreateReads = 3;
     const { impl } = await setup(emu);
     const made = await impl.volumes.ensureVolume(spec, ctx());
     expect(made.state).toBe('pending');
@@ -233,6 +243,125 @@ describe('provider-digitalocean NFS shares: ensure and get', () => {
     emu.failNext({ method: 'POST', path: /^\/nfs$/ }, 500, { id: 'server_error', message: 'x' });
     const error = await failure(impl.volumes.ensureVolume({ ...spec, name: 'bc-pvol-9' }, ctx()));
     expect(error.code).toBe('UNAVAILABLE');
+  });
+
+  it('keeps the oldest of two shares of one name and deletes the younger, in ensure and in find', async () => {
+    // DO refusing a second share of a name is unverified (D1/D2): with duplicates, exactly one survives.
+    const { emu, vpc } = await setup();
+    emu.nfsUniqueNames = false;
+    const { events, log } = recorder();
+    const impl = await build(emu, doAccount, {}, { log });
+    // The younger one sorts first by id: the age decides, not the id.
+    const oldest = seedShare(emu.state, {
+      id: 'ffffffff-0000-4000-8000-000000000001',
+      name: provName,
+      vpc_ids: [vpc.id],
+      created_at: '2026-11-05T09:00:00Z',
+    });
+    const younger = seedShare(emu.state, {
+      id: '00000000-0000-4000-8000-000000000001',
+      name: provName,
+      vpc_ids: [vpc.id],
+      created_at: '2026-11-05T09:30:00Z',
+    });
+    const got = await impl.volumes.ensureVolume(spec, ctx());
+    expect(got.id).toBe(shareId('nyc3', oldest.id));
+    expect([...emu.state.nfsShares.keys()]).toEqual([oldest.id]);
+    expect(calls(emu, 'POST', /^\/v2\/nfs$/)).toHaveLength(0);
+    expect(calls(emu, 'DELETE', /^\/v2\/nfs\//).map((r) => r.url.pathname)).toEqual([
+      `/v2/nfs/${younger.id}`,
+    ]);
+    expect(events).toContainEqual([
+      'digitalocean.duplicateShareReaped',
+      { kept: oldest.id, deleted: younger.id, region: 'nyc3' },
+    ]);
+    const again = seedShare(emu.state, {
+      name: provName,
+      vpc_ids: [vpc.id],
+      created_at: '2026-11-05T09:45:00Z',
+    });
+    expect((await impl.volumes.findVolume('bc-pvol-1', 'nyc3', ctx(), 'shared'))?.id).toBe(
+      shareId('nyc3', oldest.id),
+    );
+    expect(emu.state.nfsShares.has(again.id)).toBe(false);
+    expect(emu.state.nfsShares.has(oldest.id)).toBe(true);
+  });
+
+  it('never deletes a younger duplicate some Droplet carries the tag of', async () => {
+    const { emu, vpc } = await setup();
+    emu.nfsUniqueNames = false;
+    const { events, log } = recorder();
+    const impl = await build(emu, doAccount, {}, { log });
+    const oldest = seedShare(emu.state, {
+      name: provName,
+      vpc_ids: [vpc.id],
+      created_at: '2026-11-05T09:00:00Z',
+    });
+    const held = seedShare(emu.state, {
+      name: provName,
+      vpc_ids: [vpc.id],
+      created_at: '2026-11-05T09:30:00Z',
+    });
+    host(emu, vpc, { tags: [deployment, tagFor(labels.instance, 'ins_1'), shareTag(held.id)] });
+    expect((await impl.volumes.ensureVolume(spec, ctx())).id).toBe(shareId('nyc3', oldest.id));
+    expect(emu.state.nfsShares.has(held.id)).toBe(true);
+    expect(calls(emu, 'DELETE', /^\/v2\/nfs\//)).toHaveLength(0);
+    expect(events.map(([message]) => message)).toContain('digitalocean.duplicateShareHeld');
+  });
+
+  it('a create DO lets through beside an older share of the name keeps the older one', async () => {
+    const { emu, impl, vpc } = await setup();
+    emu.nfsUniqueNames = false;
+    let older: Json | undefined;
+    emu.beforeAction('POST /nfs', ({ state }) => {
+      older = seedShare(state, {
+        name: provName,
+        vpc_ids: [vpc.id],
+        created_at: '2026-11-05T09:59:00Z',
+      });
+    });
+    const got = await impl.volumes.ensureVolume(spec, ctx());
+    expect(got.id).toBe(shareId('nyc3', older!.id));
+    expect([...emu.state.nfsShares.keys()]).toEqual([older!.id]);
+    expect(calls(emu, 'POST', /^\/v2\/nfs$/)).toHaveLength(1);
+    expect(calls(emu, 'DELETE', /^\/v2\/nfs\//)).toHaveLength(1);
+  });
+
+  it('a share of the wrong shape, listed or just created, is a provider error, never an id', async () => {
+    const { emu, impl } = await setup();
+    seedShare(emu.state, { id: 'share-1', name: provName });
+    for (const call of [
+      impl.volumes.ensureVolume(spec, ctx()),
+      impl.volumes.findVolume('bc-pvol-1', 'nyc3', ctx(), 'shared'),
+    ]) {
+      const error = await failure(call);
+      expect([error.code, error.details?.reason]).toEqual(['PROVIDER_ERROR', 'badBody']);
+    }
+    expect(writes(emu)).toHaveLength(0);
+
+    // A create whose reply names a share with a non-UUID id, or in another region.
+    for (const reshape of [
+      (share: Json) => ({ ...share, id: 'share-2' }),
+      (share: Json) => ({ ...share, region: 'sfo3' }),
+    ]) {
+      const fresh = emulator();
+      subnet(fresh);
+      const inner = fresh.fetch;
+      fresh.fetch = async (input, init) => {
+        const response = await inner(input, init);
+        const url = new URL(String(input));
+        if ((init?.method ?? 'GET').toUpperCase() !== 'POST' || url.pathname !== '/v2/nfs')
+          return response;
+        const body = (await response.json()) as Json;
+        return new Response(JSON.stringify({ share: reshape(body.share as Json) }), {
+          status: response.status,
+          headers: response.headers,
+        });
+      };
+      const shaped = await build(fresh);
+      const error = await failure(shaped.volumes.ensureVolume(spec, ctx()));
+      expect([error.code, error.details?.reason]).toEqual(['PROVIDER_ERROR', 'badBody']);
+    }
   });
 
   it('findVolume with kind shared finds our share by name, never another deployment', async () => {
@@ -369,7 +498,11 @@ describe('provider-digitalocean NFS shares: attach and detach', () => {
     const fetch = async (input: string | URL | Request, init?: RequestInit) => {
       const response = await emu.fetch(input, init);
       const last = emu.requests.at(-1)!;
-      if (race && last.method === 'POST' && /^\/v2\/tags\/bc-nfs-[^/]+\/resources$/.test(last.url.pathname)) {
+      if (
+        race &&
+        last.method === 'POST' &&
+        /^\/v2\/tags\/bc-nfs-[^/]+\/resources$/.test(last.url.pathname)
+      ) {
         const run = race;
         race = undefined;
         run();
@@ -500,9 +633,11 @@ describe('provider-digitalocean NFS shares: attach and detach', () => {
       seen.push((await impl.volumes.detachVolume(id, String(gone[0]!.id), ctx())).state);
     expect(seen.at(-1)).toBe('deleted');
     expect(shareOf(emu, id).vpc_ids).toEqual([vpc.id, kept.id]);
-    expect(shareActions(emu, 'detach').map((r) => (r.body as Json).params.vpc_id).sort()).toEqual(
-      [other.id, third.id].sort(),
-    );
+    expect(
+      shareActions(emu, 'detach')
+        .map((r) => (r.body as Json).params.vpc_id)
+        .sort(),
+    ).toEqual([other.id, third.id].sort());
     // Nothing left to prune: no writes.
     const before = writes(emu).length;
     expect((await impl.volumes.detachVolume(id, String(gone[1]!.id), ctx())).state).toBe('deleted');

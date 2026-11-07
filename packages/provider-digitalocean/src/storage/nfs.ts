@@ -41,7 +41,13 @@ import type { DoShare, DoShareAction, DoShareSnapshot } from './types.js';
 //
 // Ids. Every share call names the region (`?region=`), so a share's provider id is
 // `nfs:<region>:<uuid>`; nothing else in the provider has that shape, which is how `DoVolumes`
-// tells shares from block volumes.
+// tells shares from block volumes. A share DO answers with whose id is not a UUID, or that is in
+// another region, is `PROVIDER_ERROR` (`badBody`): never an id vps would store and fail on later.
+//
+// Duplicates. Whether DO refuses a second share of a name in a region is unverified, so `ensure`
+// and `find` keep the oldest share of the name (then the lowest id) and delete each younger one no
+// Droplet carries the tag of (`digitalocean.duplicateShareReaped`); a create lists again after it,
+// so one that raced an earlier create whose answer was lost gives way to the older share.
 //
 // Actions (resize, snapshot, attach, detach) answer with an action that has no id and no list to
 // poll. No state outlives a call (ruling R4): a call reads the share and acts on what it sees; DO
@@ -59,6 +65,15 @@ const regionPattern = /^[a-z][a-z0-9]{0,15}$/;
 const sharePrefix = 'nfs:';
 const snapshotNamePattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}$/;
 const maxSnapshotName = 255;
+
+/** Oldest first by `created_at`, then by id: the order in which one of several resources of a name survives. */
+function byAge(
+  a: { created_at: string; id: string },
+  b: { created_at: string; id: string },
+): number {
+  const at = Date.parse(a.created_at) - Date.parse(b.created_at);
+  return Number.isFinite(at) && at !== 0 ? at : String(a.id).localeCompare(String(b.id));
+}
 
 function fail(
   code: 'INVALID_INPUT' | 'INVALID_STATE' | 'UNSUPPORTED' | 'CONFLICT' | 'NOT_FOUND',
@@ -280,7 +295,26 @@ export class DoShares {
     return share;
   }
 
-  /** The shares named `name` in `region` (at most one at DO; a list to be safe). */
+  /**
+   * A share DO answered with must have a UUID id and be in the region asked for: its provider id (`shareId`) is
+   * stored by vps, and an id `parseShareId` refuses would make every later call on it fail while the share leaks.
+   * Anything else is `PROVIDER_ERROR` (`badBody`), never an id.
+   */
+  protected wellFormed(share: DoShare, region: string): DoShare {
+    if (typeof share.id !== 'string' || !uuidPattern.test(share.id) || share.region !== region)
+      throw new ComputeError(
+        'PROVIDER_ERROR',
+        `DigitalOcean answered with a share that is not a share in ${region} (its id or region has an unexpected shape)`,
+        undefined,
+        { provider: 'digitalocean', reason: 'badBody' },
+      );
+    return share;
+  }
+
+  /**
+   * The shares named `name` in `region`, oldest first (then by id). DO refusing a second share of a name is
+   * unverified (D1/D2), so there may be more than one; `survivor` keeps the oldest.
+   */
   protected async byName(name: string, region: string, signal: AbortSignal): Promise<DoShare[]> {
     const out: DoShare[] = [];
     for await (const share of this.client.pages<DoShare>('/nfs', 'shares', {
@@ -289,8 +323,45 @@ export class DoShares {
       budget: 'observe',
     }))
       if (share.name === name && share.region === region && share.status !== 'DELETED')
-        out.push(share);
-    return out;
+        out.push(this.wellFormed(share, region));
+    return out.sort(byAge);
+  }
+
+  /**
+   * The oldest of the shares of one name (all ours by name), and exactly one survivor: each younger one (a create
+   * retried after an answer was lost while the list lagged) is deleted, unless some Droplet carries its tag (then it
+   * stays, logged, for an operator: it may hold data). A duplicate that is busy is left for the next call.
+   */
+  protected async survivor(found: DoShare[], signal: AbortSignal): Promise<DoShare | undefined> {
+    const [oldest, ...others] = [...found].sort(byAge);
+    for (const duplicate of others) {
+      if (!this.owned(duplicate)) continue;
+      const fields = { kept: oldest!.id, deleted: duplicate.id, region: duplicate.region };
+      if ((await this.holders(duplicate, signal)).length > 0) {
+        this.log.warn('digitalocean.duplicateShareHeld', {
+          kept: oldest!.id,
+          held: duplicate.id,
+          region: duplicate.region,
+        });
+        continue;
+      }
+      try {
+        await this.client.request('DELETE', `/nfs/${encodeURIComponent(duplicate.id)}`, {
+          query: { region: duplicate.region },
+          signal,
+          budget: 'mutate',
+        });
+      } catch (error) {
+        if (isComputeError(error, 'CONFLICT') && error.details?.reason === 'actionPending') {
+          this.log.warn('digitalocean.duplicateShareBusy', fields);
+          continue;
+        }
+        if (!isComputeError(error, 'NOT_FOUND')) throw error;
+      }
+      this.log.info('digitalocean.duplicateShareReaped', fields);
+      await this.dropTag(duplicate.id, signal);
+    }
+    return oldest;
   }
 
   /**
@@ -395,7 +466,7 @@ export class DoShares {
   async ensure(spec: ProviderVolumeSpec, ctx: CallContext): Promise<ProviderResourceState> {
     const name = this.validate(spec);
     const { signal } = ctx;
-    const [existing] = await this.byName(name, spec.region, signal);
+    const existing = await this.survivor(await this.byName(name, spec.region, signal), signal);
     if (existing) return shareState(existing);
     // The network's VPC in the region: never a default VPC, never another network's.
     const vpc = await vpcForNetwork(this.client, spec.network!, spec.region, signal);
@@ -410,7 +481,7 @@ export class DoShares {
     } catch (error) {
       // A racing create of the same name won, or an answer that never arrived may have made it.
       if (!isComputeError(error, 'CONFLICT') && !isComputeError(error, 'UNAVAILABLE')) throw error;
-      const [landed] = await this.byName(name, spec.region, signal);
+      const landed = await this.survivor(await this.byName(name, spec.region, signal), signal);
       if (!landed) throw error;
       return shareState(landed);
     }
@@ -421,8 +492,13 @@ export class DoShares {
         undefined,
         { provider: 'digitalocean', reason: 'badBody' },
       );
+    this.wellFormed(created, spec.region);
     this.log.info('digitalocean.shareCreated', { share: created.id, region: created.region });
-    return shareState(created);
+    // An earlier create whose answer was lost may have made a share of the name the list above did not show yet: the
+    // oldest survives, and the one just made (no Droplet has it yet) goes. The list may not show this one yet either.
+    const listed = await this.byName(name, spec.region, signal);
+    const all = listed.some((share) => share.id === created.id) ? listed : [...listed, created];
+    return shareState((await this.survivor(all, signal))!);
   }
 
   async find(
@@ -431,7 +507,10 @@ export class DoShares {
     ctx: CallContext,
   ): Promise<ProviderResourceState | undefined> {
     if (!vpsNamePattern.test(name) || !this.config.regions.includes(region)) return undefined;
-    const [found] = await this.byName(shareName(name, this.deployment), region, ctx.signal);
+    const found = await this.survivor(
+      await this.byName(shareName(name, this.deployment), region, ctx.signal),
+      ctx.signal,
+    );
     return found ? shareState(found) : undefined;
   }
 
@@ -742,10 +821,7 @@ export class DoShares {
     }))
       if (snapshot.name === name && snapshot.share_id === share.id && snapshot.status !== 'DELETED')
         out.push(snapshot);
-    return out.sort((a, b) => {
-      const at = Date.parse(a.created_at) - Date.parse(b.created_at);
-      return Number.isFinite(at) && at !== 0 ? at : a.id.localeCompare(b.id);
-    });
+    return out.sort(byAge);
   }
 
   protected async destroySnapshot(snapshot: DoShareSnapshot, signal: AbortSignal): Promise<void> {
