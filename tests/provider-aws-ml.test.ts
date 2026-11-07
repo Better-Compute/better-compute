@@ -504,6 +504,25 @@ describe('Graviton', () => {
     );
     expect(w.runs()).toHaveLength(1);
   });
+
+  it('refuses a reinstall onto an AMI of the other architecture before replacing the root volume', async () => {
+    const w = world();
+    w.ec2emu.images.set('ami-0aaaaaaaaaaaaaaa1', { rootDevice: '/dev/xvda', arch: 'arm64' });
+    const machine = await w.compute.create(
+      { ...request('us-east-1a/m7g.large'), image: 'ami-0aaaaaaaaaaaaaaa1' },
+      w.call(),
+    );
+    const replaces = () => w.emu.calls('CreateReplaceRootVolumeTask');
+    await expect(
+      w.compute.reinstall(machine.id, 'ami-0123456789abcdef0', w.call('ins_1:r1')),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'image-arch' } });
+    expect(replaces()).toHaveLength(0);
+    await w.compute.reinstall(machine.id, 'ami-0aaaaaaaaaaaaaaa1', w.call('ins_1:r2'));
+    expect(replaces()).toHaveLength(1);
+    // An alias resolves the build of the machine's own architecture: nothing to refuse.
+    await w.compute.reinstall(machine.id, 'ubuntu-24.04', w.call('ins_1:r3'));
+    expect(replaces()).toHaveLength(2);
+  });
 });
 
 describe('aws iam-policy --phases A10', () => {

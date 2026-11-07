@@ -1544,6 +1544,17 @@ export class AwsCompute implements ProviderImpl {
       (type ? (await this.#types([type], context.signal)).get(type)?.arch[0] : undefined) ??
       'x86_64';
     const imageId = resolveImage(image, arch === 'arm64' ? 'arm64' : 'x86_64', this.#ssmPrefixes);
+    // (A10) As at create: an AMI the machine's architecture cannot boot is refused before the root
+    // volume is replaced (EC2 would fail the task with the old volume already detached).
+    await this.#rootDevice(image, imageId, context.signal);
+    const imageArch = this.#rootDevices.get(imageId)?.arch;
+    if (imageArch && imageArch !== arch)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `image ${imageId} is built for ${imageArch.slice(0, 16)}, not ${arch}${type ? ` (${type.slice(0, 64)})` : ''}`,
+        undefined,
+        { provider: 'aws', reason: 'image-arch' },
+      );
     await this.call(
       'CreateReplaceRootVolumeTask',
       {
