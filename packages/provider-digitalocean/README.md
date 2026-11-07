@@ -190,9 +190,13 @@ which only DigitalOcean's billing knows (P9 reconciles it).
 Token scopes: `database:read`, `database:create`, `database:update` and `database:delete`, plus `tag:create` for
 adopt and release; the App Platform, Functions and Add-Ons scopes for those kinds. The App, Functions and Add-Ons
 bodies follow the API reference and are not yet checked against recorded responses. A cluster's `vpc` (a VPC uuid)
-is accepted only on the tenant's own account and cannot change in place. Not modelled yet: Standard and Advanced
-editions, a tenant network (`net_…`) as a cluster's VPC and Vector Databases. The 1-Click body follows the API
-reference too.
+is accepted only on the tenant's own account and cannot change in place. A cluster's `network` (a tenant network,
+`net_…`) is accepted on any account: only the tenant's own networks, checked at the API and again before every
+ensure; `vpc` and `network` together are refused (`vpcAndNetwork`), and a change is `replaceRequired`. Every kind
+serves `find` (read-only), as its `ensure` finds its resource: the key tag (clusters), the key env (apps), the label
+(namespaces), the name suffix (add-ons, attachments) or the child of an owned cluster or namespace, so a create
+whose answer was lost is deleted rather than forgotten. Not modelled yet: Standard and Advanced editions and Vector
+Databases. The 1-Click body follows the API reference too.
 
 ## Rate budget
 
