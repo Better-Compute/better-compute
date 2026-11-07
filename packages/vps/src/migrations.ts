@@ -59,7 +59,7 @@ import {
  * networks (NAT gateways, peerings, routes: network-edge.ts) and BYOIP addresses (provider-resources.ts).
  */
 const providerEdgeMigration: Migration = {
-  name: 'vps/0104_provider_edge',
+  name: 'vps/0120_provider_edge',
   sql: `${providerDnsSql}${networkEdgesSql}${providerAddressByoipSql}`,
 };
 

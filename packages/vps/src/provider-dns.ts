@@ -49,7 +49,7 @@ export const maxDnsRecordsPerZone = 500;
 const recordTypes = ['A', 'AAAA', 'CNAME', 'TXT', 'MX', 'SRV', 'CAA', 'NS'] as const;
 type RecordType = (typeof recordTypes)[number];
 
-/** (DO P4) DNS zones and records on a provider account: part of vps/0104_provider_edge (migrations.ts). */
+/** (DO P4) DNS zones and records on a provider account: part of vps/0120_provider_edge (migrations.ts). */
 export const providerDnsSql = `
 CREATE TABLE provider_dns_zones (
   id text PRIMARY KEY,

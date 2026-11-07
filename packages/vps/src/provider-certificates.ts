@@ -51,7 +51,7 @@ export const maxCertificateDomains = 100;
 
 /** (DO P4) TLS certificates on a provider account, as SecretRefs only. */
 export const providerCertificatesMigration: Migration = {
-  name: 'vps/0102_provider_certificates',
+  name: 'vps/0118_provider_certificates',
   sql: `
 CREATE TABLE provider_certificates (
   id text PRIMARY KEY,

@@ -76,7 +76,7 @@ const maxDomains = 20;
  * offer region (`nyc3/...`), and an instance without an offer is never a target (its region is unknown).
  */
 export const providerLoadBalancersMigration: Migration = {
-  name: 'vps/0103_provider_load_balancers',
+  name: 'vps/0119_provider_load_balancers',
   sql: `
 CREATE TABLE provider_load_balancers (
   id text PRIMARY KEY,

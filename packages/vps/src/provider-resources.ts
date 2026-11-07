@@ -620,7 +620,7 @@ export function parseCreateProviderAddress(raw: unknown): CreateProviderAddressI
 const byoipPrefixPattern =
   /^(?:\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
 
-/** (DO P4) The column BYOIP addresses record their prefix in (vps/0104, the lane's migration slot). */
+/** (DO P4) The column BYOIP addresses record their prefix in (vps/0120). */
 export const providerAddressByoipSql = `
 ALTER TABLE provider_addresses ADD COLUMN byoip_prefix text;
 ALTER TABLE provider_addresses ADD CONSTRAINT provider_addresses_byoip_ipv4

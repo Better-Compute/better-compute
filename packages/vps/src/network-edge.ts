@@ -14,7 +14,7 @@ export const maxRoutesPerSubnet = 32;
 export const maxPeeringsPerNetwork = 16;
 
 /**
- * The SQL of the edge table, run in vps/0104 (with the DNS tables: the lane's migration block).
+ * The SQL of the edge table, run in vps/0120 (with the DNS tables: the lane's migration block).
  * `subnet_id` is the subnet a gateway or route belongs to, and a peering's own side; a peering's
  * row lives on the network that asked first (`network_id`), names the other side in
  * `peer_network_id`/`peer_subnet_id`, and is shown on both networks. One live gateway per subnet,
