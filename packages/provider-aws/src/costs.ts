@@ -150,10 +150,15 @@ export const awsBilling = Object.freeze({
  * has more than 15 digits, is 0; so is a negative amount that rounds to nothing.
  */
 export function costMicros(amount: string): number {
+  return readCostMicros(amount) ?? 0;
+}
+
+/** `costMicros`, but undefined for anything that is not a decimal amount it can read (where 0 would hide it). */
+export function readCostMicros(amount: string): number | undefined {
   const match = /^(-)?(\d{1,15})(?:\.(\d*))?(?:[eE]([+-]?\d{1,3}))?$/.exec(
     typeof amount === 'string' ? amount.trim() : '',
   );
-  if (!match) return 0;
+  if (!match) return undefined;
   const [, sign, written, writtenFraction = '', exponent = '0'] = match;
   // The decimal point sits after `point` of the digits once the exponent has moved it.
   const all = written! + writtenFraction;
@@ -162,7 +167,7 @@ export function costMicros(amount: string): number {
   const at = Math.max(point, 1);
   const whole = padded.slice(0, at).replace(/^0+(?=\d)/, '');
   const fraction = padded.slice(at);
-  if (whole.length > 15) return 0;
+  if (whole.length > 15) return undefined;
   const digits = (fraction + '0000000').slice(0, 7);
   let value = Number(whole) * 1e6 + Number(digits.slice(0, 6));
   if (Number(digits[6]) >= 5) value += 1;

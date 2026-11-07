@@ -1,16 +1,23 @@
 import { ComputeError, systemClock } from '@better-compute/core';
 import { awsCliClient, type AwsCliOptions } from './finops-cli.js';
-import { costMicros } from './costs.js';
+import { readCostMicros } from './costs.js';
 
 // Month-to-date spend of an AWS account from Cost Explorer: the A12 live suite's spend guard refuses to start a
 // run when the sandbox account is over its budget (BETTER_COMPUTE_AWS_LIVE_BUDGET_USD). One GetCostAndUsage
 // request (charged), DAILY over the current UTC month including today, summed. The spend is gross: credits and
-// refunds are left out, so an account living on promotional credits (net about $0) still trips the guard.
+// refunds are left out, so an account living on promotional credits (net about $0) still trips the guard. An answer
+// it cannot read (no days, a day without a total, an amount or currency it cannot parse) refuses the run: it is
+// never counted as $0 spent.
 
 const DAY = 86_400_000;
 /** Record types that lower the bill without lowering what was burned. */
 const offsetRecordTypes = ['Credit', 'Refund'];
 const dayText = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+const unreadable = (message: string) =>
+  new ComputeError('PROVIDER_ERROR', `Cost Explorer spend is unreadable: ${message}`, undefined, {
+    provider: 'aws',
+    reason: 'spend-unreadable',
+  });
 
 export interface AwsSpendOptions extends AwsCliOptions {
   region: string;
@@ -49,6 +56,7 @@ export async function awsMonthToDateCost(options: AwsSpendOptions): Promise<AwsS
       : gross;
   let amountMicros = 0;
   let currency: string | undefined;
+  let days = 0;
   const seen = new Set<string>();
   let token: string | undefined;
   for (let page = 0; ; page++) {
@@ -68,14 +76,17 @@ export async function awsMonthToDateCost(options: AwsSpendOptions): Promise<AwsS
       },
       { signal: options.signal ?? AbortSignal.timeout(30_000) },
     );
-    for (const result of response.ResultsByTime ?? []) {
-      const total = result.Total?.UnblendedCost;
-      if (!total?.Amount) continue;
-      const unit = total.Unit ?? '';
+    for (const result of Array.isArray(response.ResultsByTime) ? response.ResultsByTime : []) {
+      const total = result?.Total?.UnblendedCost;
+      const micros = typeof total?.Amount === 'string' ? readCostMicros(total.Amount) : undefined;
+      if (micros === undefined) throw unreadable('a day without a readable UnblendedCost amount');
+      const unit = typeof total?.Unit === 'string' ? total.Unit : '';
+      if (!/^[A-Z]{3}$/.test(unit)) throw unreadable('a day without a currency');
       if (currency !== undefined && unit !== currency)
         throw new ComputeError('PROVIDER_ERROR', 'Cost Explorer answered spend in two currencies');
       currency = unit;
-      amountMicros += costMicros(total.Amount);
+      amountMicros += micros;
+      days++;
     }
     const next = response.NextPageToken || undefined;
     if (!next) break;
@@ -84,7 +95,9 @@ export async function awsMonthToDateCost(options: AwsSpendOptions): Promise<AwsS
     seen.add(next);
     token = next;
   }
-  return { amountMicros, currency: currency ?? 'USD', from: dayText(from), to: dayText(to) };
+  // The period always holds today: an answer without a single day was not read.
+  if (days === 0 || currency === undefined) throw unreadable('no days in the answer');
+  return { amountMicros, currency, from: dayText(from), to: dayText(to) };
 }
 
 /**

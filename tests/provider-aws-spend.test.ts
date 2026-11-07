@@ -93,6 +93,71 @@ describe('provider-aws month-to-date spend', () => {
     });
   });
 
+  it('a month without spend reads as zero from the days Cost Explorer answers', async () => {
+    const { ce, options } = world();
+    ce.lines.length = 0;
+    await expect(
+      assertAwsSpendBelow({ ...options, account: platformAccount, limitUsd: 1 }),
+    ).resolves.toMatchObject({ amountMicros: 0, currency: 'USD' });
+  });
+
+  it('an unreadable answer refuses to start, never reads as $0 spent', async () => {
+    const answers: unknown[] = [
+      {},
+      { ResultsByTime: [] },
+      { ResultsByTime: [{ TimePeriod: { Start: '2026-10-01', End: '2026-10-02' }, Total: {} }] },
+      {
+        ResultsByTime: [
+          {
+            TimePeriod: { Start: '2026-10-01', End: '2026-10-02' },
+            Total: { UnblendedCost: { Amount: 'n/a', Unit: 'USD' } },
+          },
+        ],
+      },
+      {
+        ResultsByTime: [
+          {
+            TimePeriod: { Start: '2026-10-01', End: '2026-10-02' },
+            Total: { UnblendedCost: { Amount: '1.5' } },
+          },
+        ],
+      },
+    ];
+    for (const answer of answers) {
+      const { emu, options } = world();
+      emu.register(/^ce\./, {
+        service: 'ce',
+        protocol: 'json',
+        handle: () =>
+          new Response(JSON.stringify(answer), {
+            status: 200,
+            headers: { 'content-type': 'application/x-amz-json-1.1' },
+          }),
+      });
+      const refused = await assertAwsSpendBelow({
+        ...options,
+        account: platformAccount,
+        limitUsd: 5,
+      }).catch((error: unknown) => error);
+      expect(isComputeError(refused, 'PROVIDER_ERROR'), JSON.stringify(answer)).toBe(true);
+      expect((refused as { details?: { reason?: string } }).details?.reason).toBe(
+        'spend-unreadable',
+      );
+    }
+  });
+
+  it('spend in another currency cannot be compared: QUOTA_EXCEEDED', async () => {
+    const { ce, options } = world();
+    ce.currency = 'EUR';
+    const refused = await assertAwsSpendBelow({
+      ...options,
+      account: platformAccount,
+      limitUsd: 1_000,
+    }).catch((error: unknown) => error);
+    expect(isComputeError(refused, 'QUOTA_EXCEEDED')).toBe(true);
+    expect(String((refused as Error).message)).toMatch(/1\.75 EUR, not USD/);
+  });
+
   it('refuses to start over the budget, and on a malformed account or budget', async () => {
     const { options } = world();
     await expect(

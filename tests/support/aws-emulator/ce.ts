@@ -58,6 +58,8 @@ export interface CostAllocationTag {
 export class CeEmulator {
   readonly lines: CeLine[] = [];
   readonly tags: CostAllocationTag[] = [];
+  /** The account's billing currency: lines without their own `currency`, and days without usage. */
+  currency = 'USD';
   /** Groups per page (AWS pages by its own size; tests make it small). */
   pageSize = 1000;
   /** Every GetCostAndUsage request body. */
@@ -163,6 +165,15 @@ export class CeEmulator {
         seen.quantity += Number(line.quantity ?? '0');
         groups.set(id, seen);
       }
+      // Without GroupBy, AWS answers every day of the period, a day without usage as a zero Total.
+      if (groupBy.length === 0 && groups.size === 0)
+        groups.set('', {
+          day,
+          keys: [],
+          cost: 0,
+          quantity: 0,
+          line: { day, account: '', region: '', service: '', usageType: '', cost: '0' },
+        });
       all.push(...groups.values());
     }
     const metricsOf = (group: (typeof all)[number]) =>
@@ -171,7 +182,7 @@ export class CeEmulator {
           metric,
           metric === 'UsageQuantity'
             ? { Amount: group.quantity.toFixed(10), Unit: group.line.unit ?? 'N/A' }
-            : { Amount: group.cost.toFixed(10), Unit: group.line.currency ?? 'USD' },
+            : { Amount: group.cost.toFixed(10), Unit: group.line.currency ?? this.currency },
         ]),
       );
     const start = Number(body.NextPageToken ?? '0');
