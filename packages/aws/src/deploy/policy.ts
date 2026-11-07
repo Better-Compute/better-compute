@@ -27,14 +27,17 @@ export function serviceTrust(service: string) {
 /** `arn:${AWS::Partition}:<rest>` (Sub syntax in `rest`). */
 export const arn = (rest: string) => cfnSub(`arn:\${AWS::Partition}:${rest}`);
 
-/** A bucket policy statement that refuses every request not made over TLS. */
-export function denyInsecureTransport(bucket: string): PolicyStatement {
+/**
+ * A bucket policy statement that refuses every request not made over TLS: `bucket` is the bucket's
+ * logical id, or its two ARNs (the bucket and `/*`) when the template may adopt an existing one.
+ */
+export function denyInsecureTransport(bucket: string | readonly [unknown, unknown]): PolicyStatement {
   return {
     Sid: 'DenyInsecureTransport',
     Effect: 'Deny',
     Principal: '*',
     Action: 's3:*',
-    Resource: [cfnSub(`\${${bucket}.Arn}`), cfnSub(`\${${bucket}.Arn}/*`)],
+    Resource: typeof bucket === 'string' ? [cfnSub(`\${${bucket}.Arn}`), cfnSub(`\${${bucket}.Arn}/*`)] : [...bucket],
     Condition: { Bool: { 'aws:SecureTransport': 'false' } },
   };
 }

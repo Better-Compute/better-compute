@@ -192,6 +192,19 @@ describe('deploy/aws/README.md', () => {
       for (const option of line.match(/(?<=\s)--[a-z0-9-]+/g) ?? []) expect(deployOptions.has(option), `${option} in: ${line}`).toBe(true);
   });
 
+  it('restores under the same name, adopting every retained resource the template can adopt', async () => {
+    const text = await readFile(join(import.meta.dirname, '..', 'deploy', 'aws', 'README.md'), 'utf8');
+    const template = deploymentTemplates().find((entry) => entry.stack === 'control-plane')!.template;
+    const adoptable = Object.keys(template.Parameters!).filter((name) => name.startsWith('Existing') || name.startsWith('Adopt'));
+    expect(adoptable.length).toBeGreaterThanOrEqual(7);
+    const restore = (await commands()).find((line) => line.includes('ExistingDeploymentSecretArn='))!;
+    for (const name of adoptable) expect(restore, name).toContain(`${name}=`);
+    // A new NAME moves the tenant-secret prefix (better-compute/<name>/) away from every stored SecretRef.
+    expect(text).not.toMatch(/deploy under a new `NAME`/);
+    // Deleting a secret only schedules it: the runbook never asks for that before a redeploy.
+    expect(text).not.toMatch(/delete that secret/);
+  });
+
   it('never prints the deployment secret: it goes straight into an environment variable', async () => {
     const reads = (await commands()).filter((line) => line.includes('get-secret-value'));
     expect(reads.length).toBeGreaterThan(0);

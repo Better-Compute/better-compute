@@ -42,6 +42,10 @@ export const pinnedImagePattern = '^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$'
 const cachingOptimized = '658327ea-f89d-4fab-a63d-7e88639e58f6';
 const securityHeaders = '67f7725c-6f97-4210-82d7-5512b31e9d03';
 
+/** The buckets a stack deletion keeps, which a restore adopts instead of creating. */
+const retainedBuckets = ['BlobsBucket', 'SnapshotsBucket', 'AuditBucket'] as const;
+type RetainedBucket = (typeof retainedBuckets)[number];
+
 const apiPort = 3000;
 const gatewayPort = 8443;
 
@@ -56,10 +60,30 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
   const publicSubnets = cfnSplit(',', cfnImport('PublicSubnetIds'));
   const vpcId = cfnImport('VpcId');
   const databaseClients = cfnImport('DatabaseClientSecurityGroupId', 'DataStack');
-  const bucketArn = (bucket: string, path = '') => cfnSub(`\${${bucket}.Arn}${path}`);
+  // A restore adopts the earlier stack's retained buckets (Existing<Bucket>): the restored database holds
+  // s3://<old bucket>/… snapshot URLs and blob keys, so new buckets would orphan every stored object.
+  const isRetained = (bucket: string): bucket is RetainedBucket => (retainedBuckets as readonly string[]).includes(bucket);
+  const bucketArn = (bucket: string, path = '') =>
+    isRetained(bucket)
+      ? cfnIf(`HasExisting${bucket}`, arn(`s3:::\${Existing${bucket}}${path}`), cfnSub(`\${${bucket}.Arn}${path}`))
+      : cfnSub(`\${${bucket}.Arn}${path}`);
+  const bucketName = (bucket: string) =>
+    isRetained(bucket) ? cfnIf(`HasExisting${bucket}`, cfnRef(`Existing${bucket}`), cfnRef(bucket)) : cfnRef(bucket);
 
   /** BETTER_COMPUTE_SECRET: the retained secret of an earlier stack when one is named, otherwise the generated one. */
   const deploymentSecret = cfnIf('HasExistingDeploymentSecret', cfnRef('ExistingDeploymentSecretArn'), cfnRef('DeploymentSecret'));
+  /** The sealed PKI bundle: likewise the retained secret of an earlier stack when one is named. */
+  const pkiBundle = cfnIf('HasExistingPkiBundleSecret', cfnRef('ExistingPkiBundleSecretArn'), cfnRef('PkiBundleSecret'));
+  /** The platform key, plus the earlier stack's retained one on a restore (it encrypts every retained secret and object). */
+  const platformKeys = [keyArn, cfnIf('HasExistingPlatformKey', cfnRef('ExistingPlatformKeyArn'), cfnNoValue)];
+  const secretArnPattern = '^$|^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$';
+  const existingBucket = (bucket: string): CfnParameter => ({
+    Type: 'String',
+    Description: `Restores: the earlier stack's retained ${bucket} bucket (its ${title(bucket)}BucketName), used instead of creating one (empty: create)`,
+    Default: '',
+    AllowedPattern: '^$|^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$',
+    ConstraintDescription: 'empty, or an S3 bucket name',
+  });
 
   const parameters: Record<string, CfnParameter> = {
     NetworkStack: { Type: 'String', Description: 'The network stack name', AllowedPattern: stackNamePattern },
@@ -145,15 +169,32 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
       Description:
         'Restores and redeploys: the retained BETTER_COMPUTE_SECRET of an earlier stack (its DeploymentSecretArn), used instead of generating a new one (empty: generate)',
       Default: '',
-      AllowedPattern: '^$|^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$',
+      AllowedPattern: secretArnPattern,
       ConstraintDescription: 'empty, or a Secrets Manager secret ARN',
     },
-    ExistingDeploymentSecretKeyArn: {
+    ExistingPkiBundleSecretArn: {
       Type: 'String',
-      Description: 'The KMS key that encrypts ExistingDeploymentSecretArn (the earlier stack\'s retained PlatformKeyArn), or empty',
+      Description: "Restores: the earlier stack's retained sealed PKI bundle secret (its PkiBundleSecretArn), used instead of creating one (empty: create)",
+      Default: '',
+      AllowedPattern: secretArnPattern,
+      ConstraintDescription: 'empty, or a Secrets Manager secret ARN',
+    },
+    ExistingPlatformKeyArn: {
+      Type: 'String',
+      Description:
+        "Restores: the earlier stack's retained PlatformKeyArn, which encrypts its retained secrets, buckets and tenant secrets; every role may decrypt with it (empty: none)",
       Default: '',
       AllowedPattern: '^$|^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/[0-9a-f-]+$',
       ConstraintDescription: 'empty, or a KMS key ARN',
+    },
+    ExistingBlobsBucket: existingBucket('blobs'),
+    ExistingSnapshotsBucket: existingBucket('snapshots'),
+    ExistingAuditBucket: existingBucket('audit'),
+    AdoptLogGroups: {
+      Type: 'String',
+      Description: "Restores under the same name: 'true' writes to the retained /better-compute/<name>/* log groups instead of creating them",
+      Default: 'false',
+      AllowedValues: ['false', 'true'],
     },
   };
 
@@ -211,6 +252,7 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
   };
   resources.PkiBundleSecret = {
     Type: 'AWS::SecretsManager::Secret',
+    Condition: 'CreatePkiBundleSecret',
     DeletionPolicy: 'Retain',
     UpdateReplacePolicy: 'Retain',
     Properties: {
@@ -230,9 +272,12 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
       { ServerSideEncryptionByDefault: { SSEAlgorithm: 'aws:kms', KMSMasterKeyID: keyArn }, BucketKeyEnabled: true },
     ],
   };
+  // The retained buckets are created only when no earlier stack's bucket is adopted (Create<Bucket>).
   const privateBucket = (part: string, extra: Record<string, unknown>, retain: boolean): CfnResource => ({
     Type: 'AWS::S3::Bucket',
-    ...(retain ? { DeletionPolicy: 'Retain' as const, UpdateReplacePolicy: 'Retain' as const } : {}),
+    ...(retain
+      ? { Condition: `Create${title(part)}Bucket`, DeletionPolicy: 'Retain' as const, UpdateReplacePolicy: 'Retain' as const }
+      : {}),
     Properties: {
       PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true },
       OwnershipControls: { Rules: [{ ObjectOwnership: 'BucketOwnerEnforced' }] },
@@ -254,9 +299,13 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
       Tags: tags(part),
     },
   });
+  // Created for an adopted bucket too: the old stack's bucket policy went with it.
   const tlsOnlyPolicy = (bucket: string, extra: readonly PolicyStatement[] = []): CfnResource => ({
     Type: 'AWS::S3::BucketPolicy',
-    Properties: { Bucket: cfnRef(bucket), PolicyDocument: policyDocument([denyInsecureTransport(bucket), ...extra]) },
+    Properties: {
+      Bucket: bucketName(bucket),
+      PolicyDocument: policyDocument([denyInsecureTransport([bucketArn(bucket), bucketArn(bucket, '/*')]), ...extra]),
+    },
   });
   resources.DownloadsBucket = privateBucket(
     'downloads',
@@ -337,6 +386,7 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
   for (const role of ['api', 'worker', 'gateway', 'migrate'] as const)
     resources[`${title(role)}LogGroup`] = {
       Type: 'AWS::Logs::LogGroup',
+      Condition: 'CreateLogGroups',
       DeletionPolicy: 'Retain',
       UpdateReplacePolicy: 'Retain',
       Properties: {
@@ -374,13 +424,14 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
     // (gatewayServices.secret). The broker only releases a ref bound to the asking node's current work, sealed
     // to the node (JWE); the store calls GetSecretValue and nothing else.
     { Sid: 'ResolveSecrets', Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: secretPrefix },
-    { Sid: 'DecryptWithPlatformKey', Effect: 'Allow', Action: 'kms:Decrypt', Resource: keyArn },
+    { Sid: 'DecryptWithPlatformKey', Effect: 'Allow', Action: 'kms:Decrypt', Resource: platformKeys },
     // NodeSpec signs snapshot download URLs wherever it renders.
     { Sid: 'ReadSnapshots', Effect: 'Allow', Action: 's3:GetObject', Resource: objects('SnapshotsBucket') },
     listBuckets('ListSnapshots', 'SnapshotsBucket'),
   ];
   // Writing secrets and KMS-encrypted objects asks KMS for data keys as the caller; only api and worker write.
-  const encrypt: PolicyStatement = { Sid: 'EncryptWithPlatformKey', Effect: 'Allow', Action: ['kms:GenerateDataKey', 'kms:Encrypt'], Resource: keyArn };
+  // An adopted bucket's default encryption names the old key, so writers may use it too.
+  const encrypt: PolicyStatement = { Sid: 'EncryptWithPlatformKey', Effect: 'Allow', Action: ['kms:GenerateDataKey', 'kms:Encrypt'], Resource: platformKeys };
   const writeSecrets: PolicyStatement = {
     Sid: 'WriteSecrets',
     Effect: 'Allow',
@@ -439,12 +490,8 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
         {
           PolicyName: 'inject-secrets',
           PolicyDocument: policyDocument([
-            { Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: [deploymentSecret, cfnRef('PkiBundleSecret')] },
-            {
-              Effect: 'Allow',
-              Action: 'kms:Decrypt',
-              Resource: [keyArn, cfnIf('HasExistingDeploymentSecretKey', cfnRef('ExistingDeploymentSecretKeyArn'), cfnNoValue)],
-            },
+            { Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: [deploymentSecret, pkiBundle] },
+            { Effect: 'Allow', Action: 'kms:Decrypt', Resource: platformKeys },
           ]),
         },
       ],
@@ -638,9 +685,9 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
     { Name: 'BC_DATABASE_USER', Value: cfnRef('DatabaseUser') },
     { Name: 'BC_EVENT_BUS', Value: cfnRef('EventBus') },
     { Name: 'BC_DOWNLOADS_BUCKET', Value: cfnRef('DownloadsBucket') },
-    { Name: 'BC_BLOBS_BUCKET', Value: cfnRef('BlobsBucket') },
-    { Name: 'BC_SNAPSHOTS_BUCKET', Value: cfnRef('SnapshotsBucket') },
-    { Name: 'BC_AUDIT_BUCKET', Value: cfnRef('AuditBucket') },
+    { Name: 'BC_BLOBS_BUCKET', Value: bucketName('BlobsBucket') },
+    { Name: 'BC_SNAPSHOTS_BUCKET', Value: bucketName('SnapshotsBucket') },
+    { Name: 'BC_AUDIT_BUCKET', Value: bucketName('AuditBucket') },
     { Name: 'BC_AUDIT_RETENTION_DAYS', Value: cfnSub('${AuditRetentionDays}') },
     { Name: 'BC_KMS_KEY_ARN', Value: keyArn },
   ];
@@ -675,7 +722,7 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
             Environment: environment(role),
             Secrets: [
               { Name: 'BETTER_COMPUTE_SECRET', ValueFrom: deploymentSecret },
-              { Name: 'BC_PKI_BUNDLE', ValueFrom: cfnRef('PkiBundleSecret') },
+              { Name: 'BC_PKI_BUNDLE', ValueFrom: pkiBundle },
             ],
             ReadonlyRootFilesystem: true,
             LinuxParameters: { InitProcessEnabled: true, Capabilities: { Drop: ['ALL'] } },
@@ -683,7 +730,8 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
             LogConfiguration: {
               LogDriver: 'awslogs',
               Options: {
-                'awslogs-group': cfnRef(`${title(role)}LogGroup`),
+                // Adopted log groups are named, not referenced: they are not this stack's resources.
+                'awslogs-group': cfnIf('CreateLogGroups', cfnRef(`${title(role)}LogGroup`), `/better-compute/${name}/${role}`),
                 'awslogs-region': cfnRef('AWS::Region'),
                 'awslogs-stream-prefix': role,
                 mode: 'non-blocking',
@@ -838,7 +886,16 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
       HasAccessLogs: { 'Fn::Not': [cfnEquals(cfnRef('AccessLogsBucket'), '')] },
       HasExistingDeploymentSecret: { 'Fn::Not': [cfnEquals(cfnRef('ExistingDeploymentSecretArn'), '')] },
       CreateDeploymentSecret: cfnEquals(cfnRef('ExistingDeploymentSecretArn'), ''),
-      HasExistingDeploymentSecretKey: { 'Fn::Not': [cfnEquals(cfnRef('ExistingDeploymentSecretKeyArn'), '')] },
+      HasExistingPkiBundleSecret: { 'Fn::Not': [cfnEquals(cfnRef('ExistingPkiBundleSecretArn'), '')] },
+      CreatePkiBundleSecret: cfnEquals(cfnRef('ExistingPkiBundleSecretArn'), ''),
+      HasExistingPlatformKey: { 'Fn::Not': [cfnEquals(cfnRef('ExistingPlatformKeyArn'), '')] },
+      ...Object.fromEntries(
+        retainedBuckets.flatMap((bucket) => [
+          [`HasExisting${bucket}`, { 'Fn::Not': [cfnEquals(cfnRef(`Existing${bucket}`), '')] }],
+          [`Create${bucket}`, cfnEquals(cfnRef(`Existing${bucket}`), '')],
+        ]),
+      ),
+      CreateLogGroups: cfnEquals(cfnRef('AdoptLogGroups'), 'false'),
     },
     Resources: resources,
     Outputs: {
@@ -847,13 +904,13 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
       GatewayLoadBalancerDnsName: { Description: 'Point GatewayDomainName here', Value: cfnGetAtt('GatewayLoadBalancer', 'DNSName') },
       DownloadsUrl: { Description: 'The bcd downloads CDN', Value: cfnSub('https://${DownloadsDistribution.DomainName}') },
       DownloadsBucketName: { Description: 'Publish bcd binaries here', Value: cfnRef('DownloadsBucket') },
-      BlobsBucketName: { Description: 'Support bundles and other blobs', Value: cfnRef('BlobsBucket') },
-      SnapshotsBucketName: { Description: 'Sandbox snapshots', Value: cfnRef('SnapshotsBucket') },
-      AuditBucketName: { Description: 'The Object Lock audit archive', Value: cfnRef('AuditBucket') },
+      BlobsBucketName: { Description: 'Support bundles and other blobs', Value: bucketName('BlobsBucket') },
+      SnapshotsBucketName: { Description: 'Sandbox snapshots', Value: bucketName('SnapshotsBucket') },
+      AuditBucketName: { Description: 'The Object Lock audit archive', Value: bucketName('AuditBucket') },
       EventBusName: { Description: 'The EventBridge bus for eventBridgeSink', Value: cfnRef('EventBus') },
       PlatformKeyArn: { Description: 'The platform KMS key', Value: keyArn },
       DeploymentSecretArn: { Description: 'BETTER_COMPUTE_SECRET', Value: deploymentSecret },
-      PkiBundleSecretArn: { Description: 'Put the sealed PKI bundle here', Value: cfnRef('PkiBundleSecret') },
+      PkiBundleSecretArn: { Description: 'Put the sealed PKI bundle here', Value: pkiBundle },
       AlarmTopicArn: { Description: 'Alarm notifications', Value: cfnRef('AlarmTopic') },
       ClusterName: { Description: 'The ECS cluster', Value: cfnRef('Cluster') },
       MigrateTaskDefinitionArn: { Description: 'Run once per deploy: aws ecs run-task', Value: cfnRef('MigrateTask') },

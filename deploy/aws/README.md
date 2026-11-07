@@ -131,25 +131,42 @@ A release is a new image digest, and its expand migrations run before any proces
 The database and both load balancers have deletion protection, and the keys, secrets, log groups and the blobs,
 snapshots and audit buckets are retained. Audit objects stay under Object Lock until their retention ends.
 
-Redeploying under the same `NAME` collides with what was retained under fixed names: the secrets
+Redeploying under the same `NAME` meets what was retained under fixed names: the secrets
 `bc-deploy/$NAME/secret` and `bc-deploy/$NAME/pki-bundle`, and the log groups
-`/better-compute/$NAME/{api,worker,gateway,migrate}`. The bucket names are generated, and the key alias goes with
-the stack.
+`/better-compute/$NAME/{api,worker,gateway,migrate}`. A new stack adopts them rather than creating them again
+(below). The bucket names are generated, and the key alias goes with the stack.
 
-To restore a retained database (or its snapshot) under a new control-plane stack, the processes need the old
-`BETTER_COMPUTE_SECRET`: everything sealed with it, the PKI bundle included, is unreadable under a new one. Adopt
-it instead of generating one:
+To restore a retained database (or its snapshot) under a new control-plane stack, adopt everything the old stack
+kept, under the same `NAME`. The restored database depends on all of it: data sealed with the old
+`BETTER_COMPUTE_SECRET` (the PKI bundle too) is unreadable under any other, snapshot records point at
+`s3://<old snapshots bucket>/…`, blobs and audit batches live in the old buckets under the old platform key, and
+tenant secret refs resolve under `better-compute/$NAME/`, the prefix the task roles are confined to. A new `NAME`
+would put every tenant secret outside that prefix, so a restore keeps the old one.
 
-1. Note the old stack's `DeploymentSecretArn` and `PlatformKeyArn` outputs (the key encrypts the secret).
-2. Copy the sealed bundle out of the old `bc-deploy/$NAME/pki-bundle` into a file only you can read, export the old
-   log groups if you need them, then delete that secret and those log groups (or deploy under a new `NAME`).
-3. Deploy the control plane (step 4) with `ExistingDeploymentSecretArn=<old DeploymentSecretArn>
-   ExistingDeploymentSecretKeyArn=<old PlatformKeyArn>`. The stack then creates no deployment secret, and ECS
-   injects the old one.
-4. In step 5, put the old sealed bundle instead of running `pki init`.
+1. Note the old stack's outputs: `DeploymentSecretArn`, `PkiBundleSecretArn`, `PlatformKeyArn`, `BlobsBucketName`,
+   `SnapshotsBucketName` and `AuditBucketName`.
+2. Deploy the control plane (step 4) with those values and the retained log groups adopted:
 
-Leave both parameters as they are on every later update. The stack never regenerates either secret by itself: the
-templates pin how they are generated, because CloudFormation would generate a new value if that ever changed.
+   ```sh
+   aws cloudformation deploy --stack-name "$NAME-control-plane" --template-file cfn/control-plane.json \
+     --s3-bucket <bucket> --capabilities CAPABILITY_IAM \
+     --parameter-overrides NetworkStack="$NAME-network" DataStack="$NAME-data" Image="$IMAGE" \
+       ApiDomainName=compute.example.com GatewayDomainName=gw.example.com CertificateArn="$CERT" \
+       ApiCount=0 WorkerCount=0 GatewayCount=0 AdoptLogGroups=true \
+       ExistingDeploymentSecretArn=<DeploymentSecretArn> ExistingPkiBundleSecretArn=<PkiBundleSecretArn> \
+       ExistingPlatformKeyArn=<PlatformKeyArn> ExistingBlobsBucket=<BlobsBucketName> \
+       ExistingSnapshotsBucket=<SnapshotsBucketName> ExistingAuditBucket=<AuditBucketName>
+   ```
+
+   The stack then creates none of those: ECS injects the old secret and the old sealed bundle, the tasks get the
+   old bucket names, every role may decrypt with the old key (api and worker may also write with it, since it is
+   the adopted buckets' default encryption), and the new stack puts its TLS-only policy on the adopted buckets.
+   Skip step 5: the bundle is already in place. Then run the migrate task and scale up (step 6).
+
+Leave these parameters as they are on every later update. The stack never regenerates either secret by itself:
+the templates pin how they are generated, because CloudFormation would generate a new value if that ever changed.
+An adopted audit bucket keeps the Object Lock default retention it was created with: `AuditRetentionDays` applies
+only to an audit bucket the stack creates.
 
 ## The live suite
 

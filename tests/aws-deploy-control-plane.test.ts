@@ -37,6 +37,16 @@ const statementsOf = (role: string): Statement[] => {
 };
 const actionsOf = (role: string) => statementsOf(role).flatMap((statement) => [statement.Action].flat());
 const deploymentSecret = { 'Fn::If': ['HasExistingDeploymentSecret', { Ref: 'ExistingDeploymentSecretArn' }, { Ref: 'DeploymentSecret' }] };
+const pkiBundle = { 'Fn::If': ['HasExistingPkiBundleSecret', { Ref: 'ExistingPkiBundleSecretArn' }, { Ref: 'PkiBundleSecret' }] };
+const platformKeys = [
+  { 'Fn::GetAtt': ['PlatformKey', 'Arn'] },
+  { 'Fn::If': ['HasExistingPlatformKey', { Ref: 'ExistingPlatformKeyArn' }, { Ref: 'AWS::NoValue' }] },
+];
+/** The created-bucket branch of a resource that may name a retained bucket instead. */
+const created = (resource: unknown): unknown => {
+  const choice = (resource as { 'Fn::If'?: [string, unknown, unknown] })['Fn::If'];
+  return choice && /^HasExisting\w+Bucket$/.test(choice[0]) ? choice[2] : resource;
+};
 
 describe('control-plane template', () => {
   it('lints clean', () => {
@@ -94,7 +104,7 @@ describe('control-plane template', () => {
       expect(entry.LogConfiguration.LogDriver).toBe('awslogs');
       expect(entry.Secrets).toEqual([
         { Name: 'BETTER_COMPUTE_SECRET', ValueFrom: deploymentSecret },
-        { Name: 'BC_PKI_BUNDLE', ValueFrom: { Ref: 'PkiBundleSecret' } },
+        { Name: 'BC_PKI_BUNDLE', ValueFrom: pkiBundle },
       ]);
       for (const variable of entry.Environment) expect(variable.Name).not.toMatch(/SECRET|PASSWORD|TOKEN|KEY$/);
     }
@@ -115,12 +125,12 @@ describe('control-plane template', () => {
   it('adopts a retained deployment secret instead of generating one, for a restore or redeploy', () => {
     const parameters = template.Parameters!;
     expect(parameters.ExistingDeploymentSecretArn!.Default).toBe('');
-    expect(parameters.ExistingDeploymentSecretKeyArn!.Default).toBe('');
+    expect(parameters.ExistingPlatformKeyArn!.Default).toBe('');
     const secretPattern = new RegExp(parameters.ExistingDeploymentSecretArn!.AllowedPattern!);
     expect(secretPattern.test('')).toBe(true);
     expect(secretPattern.test('arn:aws:secretsmanager:us-east-1:123456789012:secret:bc-deploy/better-compute/secret-AbCdEf')).toBe(true);
     expect(secretPattern.test('bc-deploy/better-compute/secret')).toBe(false);
-    const keyPattern = new RegExp(parameters.ExistingDeploymentSecretKeyArn!.AllowedPattern!);
+    const keyPattern = new RegExp(parameters.ExistingPlatformKeyArn!.AllowedPattern!);
     expect(keyPattern.test('')).toBe(true);
     expect(keyPattern.test('arn:aws:kms:us-east-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab')).toBe(true);
     expect(keyPattern.test('alias/old')).toBe(false);
@@ -136,11 +146,8 @@ describe('control-plane template', () => {
     expect(template.Outputs!.DeploymentSecretArn!.Value).toEqual(deploymentSecret);
     // ECS injects it, so the execution role may read it and decrypt with the key that sealed it.
     const inject = (props('ExecutionRole').Policies as { PolicyDocument: { Statement: Statement[] } }[])[0]!.PolicyDocument.Statement;
-    expect(inject.find((statement) => statement.Action === 'secretsmanager:GetSecretValue')!.Resource).toEqual([deploymentSecret, { Ref: 'PkiBundleSecret' }]);
-    expect(inject.find((statement) => statement.Action === 'kms:Decrypt')!.Resource).toEqual([
-      { 'Fn::GetAtt': ['PlatformKey', 'Arn'] },
-      { 'Fn::If': ['HasExistingDeploymentSecretKey', { Ref: 'ExistingDeploymentSecretKeyArn' }, { Ref: 'AWS::NoValue' }] },
-    ]);
+    expect(inject.find((statement) => statement.Action === 'secretsmanager:GetSecretValue')!.Resource).toEqual([deploymentSecret, pkiBundle]);
+    expect(inject.find((statement) => statement.Action === 'kms:Decrypt')!.Resource).toEqual(platformKeys);
     expect(lintTemplate(template)).toEqual([]);
   });
 
@@ -234,7 +241,7 @@ describe('control-plane template', () => {
         statementsOf(role)
           .filter((statement) => [statement.Action].flat().includes('s3:GetObject'))
           .flatMap((statement) => [statement.Resource].flat())
-          .map((resource) => objectPath.exec((resource as { 'Fn::Sub'?: string })['Fn::Sub'] ?? '')?.[1])
+          .map((resource) => objectPath.exec((created(resource) as { 'Fn::Sub'?: string })['Fn::Sub'] ?? '')?.[1])
           .filter((bucket): bucket is string => bucket !== undefined),
       );
     const listedBuckets = (role: string) =>
@@ -242,7 +249,7 @@ describe('control-plane template', () => {
         statementsOf(role)
           .filter((statement) => [statement.Action].flat().includes('s3:ListBucket'))
           .flatMap((statement) => [statement.Resource].flat())
-          .map((resource) => /^\$\{(\w+)\.Arn\}$/.exec((resource as { 'Fn::Sub'?: string })['Fn::Sub'] ?? '')?.[1]),
+          .map((resource) => /^\$\{(\w+)\.Arn\}$/.exec((created(resource) as { 'Fn::Sub'?: string })['Fn::Sub'] ?? '')?.[1]),
       );
     expect([...readBuckets('ApiTaskRole')].sort()).toEqual(['BlobsBucket', 'DownloadsBucket', 'SnapshotsBucket']);
     expect([...readBuckets('WorkerTaskRole')].sort()).toEqual(['BlobsBucket', 'SnapshotsBucket']);
@@ -252,6 +259,65 @@ describe('control-plane template', () => {
     // Listing stays on the bucket ARN itself; nobody lists the audit archive.
     for (const role of ['ApiTaskRole', 'WorkerTaskRole', 'GatewayTaskRole']) expect(listedBuckets(role).has('AuditBucket'), role).toBe(false);
     expect(listedBuckets('GatewayTaskRole').has('BlobsBucket')).toBe(false);
+  });
+
+  it('restores under the same name by adopting the retained PKI bundle, buckets, key and log groups', () => {
+    // A restored database stores snapshot URLs as s3://<old bucket>/…, tenant secrets under better-compute/<name>/
+    // and objects encrypted with the old platform key: a restore must point at all of them, not create new ones.
+    const parameters = template.Parameters!;
+    for (const parameter of ['ExistingPkiBundleSecretArn', 'ExistingBlobsBucket', 'ExistingSnapshotsBucket', 'ExistingAuditBucket'])
+      expect(parameters[parameter]!.Default, parameter).toBe('');
+    expect(parameters.AdoptLogGroups).toMatchObject({ Default: 'false', AllowedValues: ['false', 'true'] });
+    const bucketPattern = new RegExp(parameters.ExistingSnapshotsBucket!.AllowedPattern!);
+    expect(bucketPattern.test('better-compute-control-plan-snapshotsbucket-1a2b3c4d5e6f')).toBe(true);
+    expect(bucketPattern.test('arn:aws:s3:::x')).toBe(false);
+
+    // The PKI bundle: the retained secret, injected as BC_PKI_BUNDLE, readable by the execution role.
+    expect(resource('PkiBundleSecret').Condition).toBe('CreatePkiBundleSecret');
+    expect(template.Outputs!.PkiBundleSecretArn!.Value).toEqual(pkiBundle);
+    const text = JSON.stringify(template);
+    expect(text.split(JSON.stringify({ Ref: 'PkiBundleSecret' })).length - 1).toBe(text.split(JSON.stringify(pkiBundle)).length - 1);
+
+    // The buckets: not created, their names in the environment and outputs, IAM on their ARNs.
+    for (const [id, variable, output] of [
+      ['BlobsBucket', 'BC_BLOBS_BUCKET', 'BlobsBucketName'],
+      ['SnapshotsBucket', 'BC_SNAPSHOTS_BUCKET', 'SnapshotsBucketName'],
+      ['AuditBucket', 'BC_AUDIT_BUCKET', 'AuditBucketName'],
+    ] as const) {
+      const chosen = { 'Fn::If': [`HasExisting${id}`, { Ref: `Existing${id}` }, { Ref: id }] };
+      expect(resource(id).Condition, id).toBe(`Create${id}`);
+      expect(template.Conditions![`Create${id}`], id).toEqual({ 'Fn::Equals': [{ Ref: `Existing${id}` }, ''] });
+      for (const task of ['ApiTask', 'WorkerTask', 'GatewayTask', 'MigrateTask']) expect(container(task).Environment, task).toContainEqual({ Name: variable, Value: chosen });
+      expect(template.Outputs![output]!.Value, output).toEqual(chosen);
+      // A retained bucket lost its policy with the old stack: the new one still refuses plain HTTP on it.
+      const policy = props(`${id}Policy`);
+      expect(policy.Bucket, id).toEqual(chosen);
+      expect(JSON.stringify(policy.PolicyDocument), id).toContain('arn:${AWS::Partition}:s3:::${Existing' + id + '}/*');
+      expect(resource(`${id}Policy`).Condition, id).toBeUndefined();
+    }
+    const snapshotReads = statementsOf('GatewayTaskRole').find((statement) => [statement.Action].flat().includes('s3:GetObject'))!;
+    expect(snapshotReads.Resource).toEqual({
+      'Fn::If': ['HasExistingSnapshotsBucket', { 'Fn::Sub': 'arn:${AWS::Partition}:s3:::${ExistingSnapshotsBucket}/*' }, { 'Fn::Sub': '${SnapshotsBucket.Arn}/*' }],
+    });
+    const audit = statementsOf('WorkerTaskRole').find((statement) => [statement.Action].flat().includes('s3:PutObjectRetention'))!;
+    expect(JSON.stringify(audit.Resource)).toContain('${ExistingAuditBucket}/*');
+
+    // The old platform key: every role decrypts with it (old objects and tenant secrets), api and worker write with it.
+    for (const role of ['ApiTaskRole', 'WorkerTaskRole', 'GatewayTaskRole'])
+      expect(statementsOf(role).find((statement) => statement.Action === 'kms:Decrypt')!.Resource, role).toEqual(platformKeys);
+    for (const role of ['ApiTaskRole', 'WorkerTaskRole'])
+      expect(statementsOf(role).find((statement) => [statement.Action].flat().includes('kms:GenerateDataKey'))!.Resource, role).toEqual(platformKeys);
+
+    // The log groups, retained under fixed names: adopted by name instead of created again.
+    expect(template.Conditions!.CreateLogGroups).toEqual({ 'Fn::Equals': [{ Ref: 'AdoptLogGroups' }, 'false'] });
+    for (const role of ['api', 'worker', 'gateway', 'migrate']) {
+      const id = `${role[0]!.toUpperCase()}${role.slice(1)}`;
+      expect(resource(`${id}LogGroup`).Condition).toBe('CreateLogGroups');
+      expect(container(`${id}Task`).LogConfiguration.Options['awslogs-group']).toEqual({
+        'Fn::If': ['CreateLogGroups', { Ref: `${id}LogGroup` }, `/better-compute/better-compute/${role}`],
+      });
+    }
+    expect(lintTemplate(template)).toEqual([]);
   });
 
   it('sends ALB and S3 server access logs to an operator-prepared bucket, when one is named', () => {
@@ -319,7 +385,7 @@ describe('control-plane template', () => {
       });
       expect(bucket.Properties!.BucketEncryption, id).toBeDefined();
       expect(bucket.Properties!.OwnershipControls, id).toEqual({ Rules: [{ ObjectOwnership: 'BucketOwnerEnforced' }] });
-      const policy = ofType(template, 'AWS::S3::BucketPolicy').find(([, entry]) => JSON.stringify(entry.Properties!.Bucket) === JSON.stringify({ Ref: id }));
+      const policy = ofType(template, 'AWS::S3::BucketPolicy').find(([, entry]) => JSON.stringify(created(entry.Properties!.Bucket)) === JSON.stringify({ Ref: id }));
       expect(JSON.stringify(policy?.[1].Properties!.PolicyDocument), id).toContain('aws:SecureTransport');
     }
     expect(props('AuditBucket')).toMatchObject({
