@@ -282,6 +282,52 @@ describe('instance topology', () => {
     expect(reads()).toBe(2);
   });
 
+  it('a throttled read is asked again within minutes, not after the hour', async () => {
+    const w = world();
+    const id = await running(w, 'us-east-1a/p5.48xlarge', 'ins_1');
+    w.placement.topology.set(id, ['nn-1111111111111111a', 'nn-2222222222222222b']);
+    w.placement.failNext.set('DescribeInstanceTopology', 'RequestLimitExceeded');
+    expect((await w.compute.get(id, w.call()))?.labels).not.toHaveProperty(
+      'topology.aws/network-node-1',
+    );
+    w.emu.clock.advance(61_000);
+    expect((await w.compute.get(id, w.call()))?.labels).toMatchObject({
+      'topology.aws/network-node-1': 'nn-1111111111111111a',
+    });
+  });
+
+  it('list and discover carry the same topology labels as get, read in one batch', async () => {
+    const w = world();
+    const ids = [
+      await running(w, 'us-east-1a/p5.48xlarge', 'ins_1'),
+      await running(w, 'us-east-1a/p5.48xlarge', 'ins_2'),
+      await running(w, 'us-east-1a/m7i.large', 'ins_3'),
+    ];
+    w.placement.topology.set(ids[0]!, ['nn-1111111111111111a', 'nn-2222222222222222b']);
+    w.placement.topology.set(ids[1]!, ['nn-1111111111111111a', 'nn-3333333333333333c']);
+    const collect = async (iterable: AsyncIterable<{ id: string; labels?: Record<string, string> }>) => {
+      const out = new Map<string, Record<string, string> | undefined>();
+      for await (const machine of iterable) out.set(machine.id, machine.labels);
+      return out;
+    };
+    const listed = await collect(w.compute.list(w.call()));
+    const reads = () => w.placement.calls.filter((c) => c.action === 'DescribeInstanceTopology');
+    // One read for both EFA machines, none for the m7i.
+    expect(reads()).toHaveLength(1);
+    expect([...reads()[0]!.params.keys()].filter((key) => key.startsWith('InstanceId.'))).toHaveLength(2);
+    expect(listed.get(ids[0]!)).toMatchObject({ 'topology.aws/network-node-2': 'nn-2222222222222222b' });
+    expect(listed.get(ids[1]!)).toMatchObject({ 'topology.aws/network-node-2': 'nn-3333333333333333c' });
+    expect(listed.get(ids[2]!)).not.toHaveProperty('topology.aws/network-node-1');
+    const discovered = await collect(w.compute.discover(w.call()));
+    for (const id of ids) {
+      const got = await w.compute.get(id, w.call());
+      expect(listed.get(id)).toEqual(got?.labels);
+      expect(discovered.get(id)).toEqual(got?.labels);
+    }
+    // All from the cache.
+    expect(reads()).toHaveLength(1);
+  });
+
   it('never reads topology for a machine type without EFA, or one not running', async () => {
     const w = world();
     const small = await running(w, 'us-east-1a/m7i.large', 'ins_1');

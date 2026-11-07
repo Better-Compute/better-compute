@@ -1406,14 +1406,31 @@ export class AwsCompute implements ProviderImpl {
       if (failure instanceof ComputeError) throw failure;
       if (failure === 'error') return { ...machine, state: 'error' };
     }
-    // (A10) A running machine of an EFA family carries the network nodes above it.
-    if (machine.state === 'running' && machine.machineType) {
-      const info = (
-        await this.#types([machine.machineType], context.signal).catch(() => undefined)
-      )?.get(machine.machineType);
-      if (info?.efa) return this.#topology.label(machine, context.signal);
-    }
-    return machine;
+    return (await this.#withTopology([machine], context.signal))[0]!;
+  }
+
+  /**
+   * (A10) Running machines of an EFA family carry the network nodes above them; get, list and
+   * discover all label this way (list and discover read up to 100 machines at once).
+   */
+  async #withTopology(
+    machines: readonly ExternalMachine[],
+    signal: AbortSignal,
+  ): Promise<ExternalMachine[]> {
+    const running = machines.filter(
+      (machine) => machine.state === 'running' && machine.machineType,
+    );
+    if (running.length === 0) return [...machines];
+    const types = await this.#types(
+      [...new Set(running.map((machine) => machine.machineType!))],
+      signal,
+    ).catch(() => undefined);
+    const efa = running.filter((machine) => types?.get(machine.machineType!)?.efa);
+    if (efa.length === 0) return [...machines];
+    const labelled = new Map(
+      (await this.#topology.labelAll(efa, signal)).map((machine) => [machine.id, machine]),
+    );
+    return machines.map((machine) => labelled.get(machine.id) ?? machine);
   }
 
   async delete(id: string, context: CallContext): Promise<void> {
@@ -1599,9 +1616,11 @@ export class AwsCompute implements ProviderImpl {
         { Filter: filters, MaxResults: 1000, NextToken: token },
         context.signal,
       );
+      const page: ExternalMachine[] = [];
       for (const reservation of doc.items('reservationSet'))
         for (const instance of reservation.items('instancesSet'))
-          yield await this.machine(instance, context.signal);
+          page.push(await this.machine(instance, context.signal));
+      yield* await this.#withTopology(page, context.signal);
       token = doc.textOf('nextToken') || undefined;
       if (token && seen.has(token))
         throw new ComputeError(
