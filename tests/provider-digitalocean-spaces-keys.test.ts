@@ -55,15 +55,15 @@ const mutations = (w: StorageWorld) =>
 describe('do.spaces-key', () => {
   it('creates a key once and returns its secret only from the create', async () => {
     const w = await world();
-    await bucket(w, 'tenant-a-assets', 'ten_a');
-    await bucket(w, 'tenant-a-logs', 'ten_a');
-    const spec = { grants: ['nyc3/tenant-a-assets:readwrite', 'nyc3/tenant-a-logs:read'] };
+    await bucket(w, `${own}tenant-a-assets`, 'ten_a');
+    await bucket(w, `${own}tenant-a-logs`, 'ten_a');
+    const spec = { grants: [`nyc3/${own}tenant-a-assets:readwrite`, `nyc3/${own}tenant-a-logs:read`] };
     const first = await w.ensure('do.spaces-key', 'bc-key1', spec, w.ctx(), { labels: tenantA });
     expect(first.state).toBe('ready');
     expect(first.outputs).toEqual({
       accessKeyId: first.id,
       name: `${own}key1`,
-      grants: 'tenant-a-assets:readwrite,tenant-a-logs:read',
+      grants: `${own}tenant-a-assets:readwrite,${own}tenant-a-logs:read`,
     });
     expect(first.secretOutputs?.secretKey).toBe(w.spaces.keys.get(first.id));
     // The secret never sits in the plain outputs.
@@ -83,43 +83,43 @@ describe('do.spaces-key', () => {
     expect(posts[0]!.body).toEqual({
       name: `${own}key1`,
       grants: [
-        { bucket: 'tenant-a-assets', permission: 'readwrite' },
-        { bucket: 'tenant-a-logs', permission: 'read' },
+        { bucket: `${own}tenant-a-assets`, permission: 'readwrite' },
+        { bucket: `${own}tenant-a-logs`, permission: 'read' },
       ],
     });
   });
 
   it('changes grants in place', async () => {
     const w = await world();
-    await bucket(w, 'tenant-a-assets', 'ten_a');
-    await bucket(w, 'tenant-a-logs', 'ten_a');
+    await bucket(w, `${own}tenant-a-assets`, 'ten_a');
+    await bucket(w, `${own}tenant-a-logs`, 'ten_a');
     const created = await w.ensure(
       'do.spaces-key',
       'bc-key1',
-      { grants: ['nyc3/tenant-a-assets:read'] },
+      { grants: [`nyc3/${own}tenant-a-assets:read`] },
       w.ctx(),
       { labels: tenantA },
     );
     const changed = await w.ensure(
       'do.spaces-key',
       'bc-key1',
-      { grants: ['nyc3/tenant-a-assets:readwrite', 'nyc3/tenant-a-logs:read'] },
+      { grants: [`nyc3/${own}tenant-a-assets:readwrite`, `nyc3/${own}tenant-a-logs:read`] },
       w.ctx(),
       { id: created.id, labels: tenantA },
     );
     expect(changed.id).toBe(created.id);
-    expect(changed.outputs?.grants).toBe('tenant-a-assets:readwrite,tenant-a-logs:read');
+    expect(changed.outputs?.grants).toBe(`${own}tenant-a-assets:readwrite,${own}tenant-a-logs:read`);
     expect(spacesKeys(w.emu).get(created.id)!.grants).toEqual([
-      { bucket: 'tenant-a-assets', permission: 'readwrite' },
-      { bucket: 'tenant-a-logs', permission: 'read' },
+      { bucket: `${own}tenant-a-assets`, permission: 'readwrite' },
+      { bucket: `${own}tenant-a-logs`, permission: 'read' },
     ]);
   });
 
   it("refuses a grant on another tenant's, the operator's, an unmarked or a missing bucket, sending nothing", async () => {
     const w = await world();
-    await bucket(w, 'tenant-a-assets', 'ten_a');
+    await bucket(w, `${own}tenant-a-assets`, 'ten_a');
     // The operator's bucket (a spacesBlobStore bucket it adopted): marked, with no tenant.
-    await bucket(w, 'operator-blobs');
+    await bucket(w, `${own}operator-blobs`);
     w.spaces.seedBucket('hand-made');
     const staging = w.spaces.seedBucket('staging-assets');
     staging.objects.set(bucketMarkerKey, {
@@ -132,8 +132,8 @@ describe('do.spaces-key', () => {
       ),
     });
     const cases: [string, string][] = [
-      ['nyc3/tenant-a-assets:readwrite', 'otherTenant'],
-      ['nyc3/operator-blobs:read', 'otherTenant'],
+      [`nyc3/${own}tenant-a-assets:readwrite`, 'otherTenant'],
+      [`nyc3/${own}operator-blobs:read`, 'otherTenant'],
       ['nyc3/hand-made:read', 'grantBucket'],
       ['nyc3/staging-assets:read', 'grantBucket'],
       ['nyc3/no-such-bucket:read', 'grantBucket'],
@@ -148,11 +148,11 @@ describe('do.spaces-key', () => {
     expect(spacesKeys(w.emu).size).toBe(0);
 
     // A regrant onto another tenant's bucket is refused before the PUT too.
-    await bucket(w, 'tenant-b-assets', 'ten_b');
+    await bucket(w, `${own}tenant-b-assets`, 'ten_b');
     const key = await w.ensure(
       'do.spaces-key',
       'bc-key-b',
-      { grants: ['nyc3/tenant-b-assets:read'] },
+      { grants: [`nyc3/${own}tenant-b-assets:read`] },
       w.ctx(),
       { labels: tenantB },
     );
@@ -160,7 +160,7 @@ describe('do.spaces-key', () => {
       w.ensure(
         'do.spaces-key',
         'bc-key-b',
-        { grants: ['nyc3/tenant-b-assets:read', 'nyc3/tenant-a-assets:readwrite'] },
+        { grants: [`nyc3/${own}tenant-b-assets:read`, `nyc3/${own}tenant-a-assets:readwrite`] },
         w.ctx(),
         { id: key.id, labels: tenantB },
       ),
@@ -168,7 +168,7 @@ describe('do.spaces-key', () => {
     expect(regrant.details?.reason).toBe('otherTenant');
     expect(w.emu.requests.some((r) => r.method === 'PUT')).toBe(false);
     expect(spacesKeys(w.emu).get(key.id)!.grants).toEqual([
-      { bucket: 'tenant-b-assets', permission: 'read' },
+      { bucket: `${own}tenant-b-assets`, permission: 'read' },
     ]);
   });
 
@@ -192,14 +192,14 @@ describe('do.spaces-key', () => {
 
   it('never changes the grants of a key it does not manage, even when named by id', async () => {
     const w = await world();
-    await bucket(w, 'tenant-a-assets', 'ten_a');
+    await bucket(w, `${own}tenant-a-assets`, 'ten_a');
     const foreign = seedSpacesKey(w.emu, {
       name: 'ci-deploy',
       access_key: 'DOFOREIGN0001',
       grants: [{ bucket: 'ci-cache', permission: 'read' }],
     });
     const refused = await failure(
-      w.ensure('do.spaces-key', 'bc-key1', { grants: ['nyc3/tenant-a-assets:read'] }, w.ctx(), {
+      w.ensure('do.spaces-key', 'bc-key1', { grants: [`nyc3/${own}tenant-a-assets:read`] }, w.ctx(), {
         id: foreign.access_key,
         labels: tenantA,
       }),
@@ -230,8 +230,8 @@ describe('do.spaces-key', () => {
         spacesFetch: w.spaces.fetch,
       },
     );
-    await bucket(w, 'tenant-a-assets', 'ten_a');
-    const spec = { grants: ['nyc3/tenant-a-assets:read'] };
+    await bucket(w, `${own}tenant-a-assets`, 'ten_a');
+    const spec = { grants: [`nyc3/${own}tenant-a-assets:read`] };
     const lost = await failure(lossy.ensure('do.spaces-key', 'bc-key1', spec, w.ctx(), { labels: tenantA }));
     expect(lost.code).toBe('UNAVAILABLE');
     const [orphan] = [...spacesKeys(w.emu).keys()];
@@ -249,8 +249,8 @@ describe('do.spaces-key', () => {
 
   it('two racing creates of one key leave exactly one live key', async () => {
     const w = await world();
-    await bucket(w, 'tenant-a-assets', 'ten_a');
-    const spec = { grants: ['nyc3/tenant-a-assets:read'] };
+    await bucket(w, `${own}tenant-a-assets`, 'ten_a');
+    const spec = { grants: [`nyc3/${own}tenant-a-assets:read`] };
     // Two runs with no recorded id (a claim expired): each creates a key, then reaps.
     const [one, two] = await Promise.all([
       w.ensure('do.spaces-key', 'bc-k1', spec, w.ctx('r1'), { labels: tenantA }),
@@ -280,12 +280,12 @@ describe('do.spaces-key', () => {
 
   it('never reaps a key newer than its own', async () => {
     const w = await world();
-    await bucket(w, 'tenant-a-assets', 'ten_a');
+    await bucket(w, `${own}tenant-a-assets`, 'ten_a');
     w.clock.advance(60_000);
     // Another run's key, made after this run's create.
     const newer = { name: `${own}k2`, access_key: 'DONEWER00001', created_at: new Date(w.clock.now() + 5000).toISOString() };
     seedSpacesKey(w.emu, newer);
-    const state = await w.ensure('do.spaces-key', 'bc-k2', { grants: ['nyc3/tenant-a-assets:read'] }, w.ctx(), {
+    const state = await w.ensure('do.spaces-key', 'bc-k2', { grants: [`nyc3/${own}tenant-a-assets:read`] }, w.ctx(), {
       labels: tenantA,
     });
     expect(spacesKeys(w.emu).has('DONEWER00001')).toBe(true);
@@ -294,15 +294,15 @@ describe('do.spaces-key', () => {
 
   it('refuses an id that names another key of this deployment, sending nothing', async () => {
     const w = await world();
-    await bucket(w, 'tenant-a-assets', 'ten_a');
-    await bucket(w, 'tenant-b-assets', 'ten_b');
-    const bKey = await w.ensure('do.spaces-key', 'bc-key-b', { grants: ['nyc3/tenant-b-assets:read'] }, w.ctx(), {
+    await bucket(w, `${own}tenant-a-assets`, 'ten_a');
+    await bucket(w, `${own}tenant-b-assets`, 'ten_b');
+    const bKey = await w.ensure('do.spaces-key', 'bc-key-b', { grants: [`nyc3/${own}tenant-b-assets:read`] }, w.ctx(), {
       labels: tenantB,
     });
     const before = mutations(w).length;
     // Tenant A's request carries tenant B's key id: its grants must not land on B's key.
     const refused = await failure(
-      w.ensure('do.spaces-key', 'bc-key-a', { grants: ['nyc3/tenant-a-assets:readwrite'] }, w.ctx(), {
+      w.ensure('do.spaces-key', 'bc-key-a', { grants: [`nyc3/${own}tenant-a-assets:readwrite`] }, w.ctx(), {
         id: bKey.id,
         labels: tenantA,
       }),
@@ -310,18 +310,18 @@ describe('do.spaces-key', () => {
     expect([refused.code, refused.details?.reason]).toEqual(['INVALID_STATE', 'idMismatch']);
     expect(mutations(w).slice(before)).toHaveLength(0);
     expect(spacesKeys(w.emu).get(bKey.id)!.grants).toEqual([
-      { bucket: 'tenant-b-assets', permission: 'read' },
+      { bucket: `${own}tenant-b-assets`, permission: 'read' },
     ]);
   });
 
   it('reaps duplicate keys with its name after a create', async () => {
     const w = await world();
-    await bucket(w, 'tenant-a-assets', 'ten_a');
+    await bucket(w, `${own}tenant-a-assets`, 'ten_a');
     for (const access_key of ['DOYOUNGER0001', 'DOOLDER00001'])
       seedSpacesKey(w.emu, {
         name: `${own}dup`,
         access_key,
-        grants: [{ bucket: 'tenant-a-assets', permission: 'read' }],
+        grants: [{ bucket: `${own}tenant-a-assets`, permission: 'read' }],
       });
     seedSpacesKey(w.emu, { name: `${own}other`, access_key: 'DOOTHER000001' });
     // The duplicates are older than the key the create makes.
@@ -329,7 +329,7 @@ describe('do.spaces-key', () => {
     const state = await w.ensure(
       'do.spaces-key',
       'bc-dup',
-      { grants: ['nyc3/tenant-a-assets:read'] },
+      { grants: [`nyc3/${own}tenant-a-assets:read`] },
       w.ctx(),
       { labels: tenantA },
     );
@@ -364,11 +364,11 @@ describe('do.spaces-key', () => {
 
   it('gets, deletes, and refuses to delete a key it does not manage', async () => {
     const w = await world();
-    await bucket(w, 'tenant-a-assets', 'ten_a');
+    await bucket(w, `${own}tenant-a-assets`, 'ten_a');
     const created = await w.ensure(
       'do.spaces-key',
       'bc-key1',
-      { grants: ['nyc3/tenant-a-assets:read'] },
+      { grants: [`nyc3/${own}tenant-a-assets:read`] },
       w.ctx(),
       { labels: tenantA },
     );
@@ -391,7 +391,7 @@ describe('do.spaces-key', () => {
 
   it("never deletes or regrants another deployment's bc- key", async () => {
     const w = await world();
-    await bucket(w, 'tenant-a-assets', 'ten_a');
+    await bucket(w, `${own}tenant-a-assets`, 'ten_a');
     const theirs = seedSpacesKey(w.emu, {
       name: `${managedNamePrefix('staging')}key1`,
       access_key: 'DOSTAGING0001',
@@ -404,7 +404,7 @@ describe('do.spaces-key', () => {
       expect(refused.code).toBe('INVALID_STATE');
       expect(refused.details?.reason).toBe('managedByAnother');
       const regrant = await failure(
-        w.ensure('do.spaces-key', 'bc-key1', { grants: ['nyc3/tenant-a-assets:readwrite'] }, w.ctx(), {
+        w.ensure('do.spaces-key', 'bc-key1', { grants: [`nyc3/${own}tenant-a-assets:readwrite`] }, w.ctx(), {
           id: key.access_key,
           labels: tenantA,
         }),

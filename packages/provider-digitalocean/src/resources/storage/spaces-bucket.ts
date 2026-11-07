@@ -4,26 +4,36 @@ import { readCappedBytes } from '../../spaces/capped.js';
 import { spacesRegionPattern, xmlValue, xmlValues, type SpacesClient } from '../../spaces/s3.js';
 import {
   hasCode,
+  managedByAnother,
   notManaged,
   storageError,
   type DoResourceKind,
   type DoResourceState,
+  type ManagedNames,
 } from './kind.js';
 
 // `do.spaces-bucket`: a tenant Spaces bucket, managed over the S3 API with the account's Spaces
-// key pair. Bucket names are global and untaggable, so ownership is a marker object
-// (`.better-compute/owner`) naming this deployment: `ensure` never takes over a bucket without
-// it (adopt is an explicit operation), and `delete` refuses a bucket without it, or with anything
-// in it besides the marker. Tenant data is never deleted to delete a bucket. `adopt` writes the
-// marker on an unmarked bucket, `release` removes it; neither touches another deployment's.
+// key pair. Bucket names are global and untaggable. A bucket `ensure` creates is named for this
+// deployment (`bc-<deployment hash>-…`, ManagedNames, like Spaces keys and registries), and that
+// name is its proof of ownership: nothing a tenant can write changes it. The marker object
+// (`.better-compute/owner`) sits inside the bucket, where the tenant's `readwrite` keys can delete
+// or rewrite it, so it carries the tenant and resource for the tenant checks (and ownership of an
+// adopted bucket, whose name is not ours). A tenant that breaks its marker loses its own access
+// (every tenant check fails closed) but never makes its bucket, or the CDN endpoint in front of
+// it, undeletable: `delete` of a bucket with this deployment's name proceeds without the marker.
+// A bucket named for another deployment (another `bc-` prefix) is `managedByAnother` everywhere.
 //
-// The marker also names the cloud resource and the tenant (`better-compute-resource`, `-tenant`
-// from the request's labels): an ensure carrying another tenant's labels is refused, and
+// `ensure` never takes over a bucket without the marker (adopt is an explicit operation), and
+// `delete` refuses a bucket with anything in it besides the marker: tenant data is never deleted
+// to delete a bucket. `adopt` writes the marker on an unmarked bucket (an operator call only,
+// unless `allowTenantAdopt`); `release` removes it from an adopted bucket (a bucket with this
+// deployment's name cannot be released: its name keeps it ours).
+//
+// The marker names the cloud resource and the tenant (`better-compute-resource`, `-tenant` from
+// the request's labels): an ensure carrying another tenant's labels is refused, and
 // `do.spaces-key` grants and `do.cdn-endpoint` origins are checked against it. Only a 404 means a
 // bucket is gone: a 403 (a narrowed or revoked account key) fails closed, so a row is never dropped
-// while its bucket stays up. A delete cut off between the marker delete and the bucket delete (a
-// crash) leaves an empty, unmarked bucket that every retry refuses as `notManaged`: `adopt` then
-// `delete` converges it.
+// while its bucket stays up.
 
 /** The object that marks a bucket as this deployment's. */
 export const bucketMarkerKey = '.better-compute/owner';
@@ -150,6 +160,8 @@ export function spacesBucketKind(deps: {
   /** The account's S3 client for a region; throws INVALID_CONFIG when the account has no Spaces keys. */
   spaces: (region: string) => SpacesClient;
   deploymentTag: string;
+  /** This deployment's names: a created bucket is named with its prefix, which proves it ours. */
+  names: ManagedNames;
   /** The account's DigitalOcean API client: a delete looks for CDN endpoints in front of the bucket. */
   client: DoClient;
   /**
@@ -192,6 +204,12 @@ export function spacesBucketKind(deps: {
 
   const ownership = (s3: SpacesClient, bucket: string, signal: AbortSignal) =>
     bucketOwnership(s3, bucket, deps.deploymentTag, signal);
+
+  /** Refuses (nothing sent) a bucket named for another deployment. */
+  function refuseForeignName(bucket: string): void {
+    if (deps.names.owner(bucket) === 'other')
+      throw managedByAnother(`Bucket ${bucket} is named for another better-compute deployment`);
+  }
 
   /** Whether the bucket is there: only a 404 says no; a 403 or a 301 fails closed. */
   async function present(
@@ -321,8 +339,12 @@ export function spacesBucketKind(deps: {
     updatable: ['acl', 'versioning'],
 
     async ensure({ name, spec, id, labels }, ctx: CallContext) {
-      // The bucket an earlier ensure (or an adopt) answered wins over the derived name.
-      const target = parseBucketId(id ?? `${spec.region}/${name}`);
+      // The bucket an earlier ensure (or an adopt) answered wins over the derived name, which
+      // carries this deployment's prefix (the requested `bc-` name, through ManagedNames).
+      const target = parseBucketId(
+        id ?? `${spec.region}/${deps.names.provider(name, 'A Spaces bucket')}`,
+      );
+      refuseForeignName(target.bucket);
       if (target.region !== spec.region)
         throw storageError(
           'INVALID_STATE',
@@ -407,6 +429,7 @@ export function spacesBucketKind(deps: {
 
     async adopt(id, labels, ctx) {
       const target = parseBucketId(id);
+      refuseForeignName(target.bucket);
       const s3 = deps.spaces(target.region);
       const status = await head(s3, target.bucket, ctx.signal);
       if (status === 301)
@@ -442,6 +465,14 @@ export function spacesBucketKind(deps: {
 
     async release(id, ctx) {
       const target = parseBucketId(id);
+      refuseForeignName(target.bucket);
+      // Its name keeps a bucket of this deployment ours whatever the marker says.
+      if (deps.names.owner(target.bucket) === 'this')
+        throw storageError(
+          'UNSUPPORTED',
+          `Bucket ${target.bucket} is owned by its name; it cannot be released`,
+          'adopt',
+        );
       const s3 = deps.spaces(target.region);
       if ((await head(s3, target.bucket, ctx.signal)) !== 200) return;
       const owner = await ownership(s3, target.bucket, ctx.signal);
@@ -459,13 +490,23 @@ export function spacesBucketKind(deps: {
 
     async delete(id, ctx) {
       const target = parseBucketId(id);
+      refuseForeignName(target.bucket);
       const s3 = deps.spaces(target.region);
       if (!(await present(s3, target, ctx.signal))) return { id, state: 'deleted' };
       const found = await readMarker(s3, target.bucket, deps.deploymentTag, ctx.signal);
-      if (found.owner !== 'mine')
+      // The name proves a bucket ensure made ours: a marker its tenant deleted or rewrote (or a
+      // delete cut off after the marker went) does not keep it running.
+      const ownName = deps.names.owner(target.bucket) === 'this';
+      if (found.owner !== 'mine' && !ownName)
         throw notManaged(
           `Bucket ${target.bucket} is not one this deployment manages; it was left alone`,
         );
+      if (found.owner !== 'mine')
+        ctx.log.warn('digitalocean.spaces-bucket.marker-lost', {
+          bucket: target.bucket,
+          region: target.region,
+          marker: found.owner,
+        });
       // A CDN endpoint is this deployment's only through its origin's marker: deleting the bucket
       // under one would leave an endpoint nothing could delete.
       const origin = `${target.bucket}.${target.region}.digitaloceanspaces.com`;
@@ -522,15 +563,16 @@ export function spacesBucketKind(deps: {
         await s3.request('DELETE', target.bucket, undefined, { signal: ctx.signal, allow: [404] });
       } catch (error) {
         // An object arrived between the listing and the delete, or the delete failed: the bucket
-        // stays, marked as ours, so the next delete finds it managed.
-        await putMarker(s3, target.bucket, found.body ?? markerFor(), ctx.signal).catch(
-          (restore: unknown) =>
+        // stays, marked as ours, so the next delete finds it managed. (A bucket whose marker was
+        // lost is ours by its name; no marker is made up for it.)
+        if (found.owner === 'mine' && found.body)
+          await putMarker(s3, target.bucket, found.body, ctx.signal).catch((restore: unknown) =>
             ctx.log.warn('digitalocean.spaces-bucket.marker-restore-failed', {
               bucket: target.bucket,
               region: target.region,
               code: isComputeError(restore) ? restore.code : 'UNKNOWN',
             }),
-        );
+          );
         throw error;
       }
       ctx.log.info('digitalocean.spaces-bucket.deleted', {

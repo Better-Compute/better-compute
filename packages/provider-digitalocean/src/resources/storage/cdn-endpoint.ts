@@ -1,13 +1,21 @@
 import { field, manifest, type CallContext } from '@better-compute/core';
 import type { DoClient } from '../../client/http.js';
 import { spacesBucketPattern, spacesRegionPattern, type SpacesClient } from '../../spaces/s3.js';
-import { hasCode, storageError, type DoResourceKind, type DoResourceState } from './kind.js';
+import {
+  hasCode,
+  storageError,
+  type DoResourceKind,
+  type DoResourceState,
+  type ManagedNames,
+} from './kind.js';
 import { bucketOwnership, otherTenant, readMarker, sameTenant } from './spaces-bucket.js';
 
 // `do.cdn-endpoint`: DigitalOcean's CDN in front of a Spaces bucket (`/v2/cdn/endpoints`). The
-// origin must be a bucket this deployment manages (its marker object, see do.spaces-bucket), on
-// `ensure` and on `delete`: endpoints carry no names or tags, so the origin bucket is what ties
-// one to better-compute. DO allows one endpoint per origin, which is what makes `ensure`
+// origin must be a bucket this deployment manages, on `ensure` and on `delete`: endpoints carry
+// no names or tags, so the origin bucket is what ties one to better-compute. For `delete` and
+// `purge` that is the bucket's name (this deployment's prefix, which a tenant cannot change) or
+// its marker (an adopted bucket), so a tenant that deletes its bucket's marker never makes the
+// endpoint undeletable; `ensure` and `adopt` also need the marker, for its tenant. DO allows one endpoint per origin, which is what makes `ensure`
 // idempotent: it looks the endpoint up by origin.
 //
 // An endpoint lives in its origin bucket (`parent: 'do.spaces-bucket'`): `ensure` requires the
@@ -90,6 +98,8 @@ export function cdnEndpointKind(deps: {
   client: DoClient;
   spaces: (region: string) => SpacesClient;
   deploymentTag: string;
+  /** This deployment's names: a bucket with its prefix is a managed origin by its name alone. */
+  names: ManagedNames;
 }): CdnEndpointKind {
   const { client } = deps;
 
@@ -100,7 +110,15 @@ export function cdnEndpointKind(deps: {
     const match = originPattern.exec(origin);
     if (!match)
       throw storageError('INVALID_INPUT', `${origin} is not a Spaces origin`, 'origin');
-    return bucketOwnership(deps.spaces(match[2]!), match[1]!, deps.deploymentTag, signal);
+    // The name proves a bucket ensure made; only an adopted bucket's ownership is its marker.
+    if (deps.names.owner(match[1]!) === 'this') return 'mine';
+    const marked = await bucketOwnership(
+      deps.spaces(match[2]!),
+      match[1]!,
+      deps.deploymentTag,
+      signal,
+    );
+    return marked === 'missing' && deps.names.owner(match[1]!) === 'other' ? 'other' : marked;
   }
 
   /**

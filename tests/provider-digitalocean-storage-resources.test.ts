@@ -200,7 +200,7 @@ describe('doStorageKinds, for the provider-wide dispatcher', () => {
     // The spec is validated and defaulted here too (acl, versioning).
     const created = await bucketKind.ensure(
       env,
-      { kind: 'do.spaces-bucket', name: 'tenant-a-assets', spec: { region: 'nyc3' }, labels },
+      { kind: 'do.spaces-bucket', name: `${own}tenant-a-assets`, spec: { region: 'nyc3' }, labels },
       w.ctx(),
     );
     expect(created.outputs).toMatchObject({ acl: 'private', versioning: 'off' });
@@ -209,10 +209,9 @@ describe('doStorageKinds, for the provider-wide dispatcher', () => {
       acl: 'private',
       versioning: false,
     });
-    await bucketKind.release!(env, created.id, w.ctx());
-    // A released bucket is unmarked: only the operator (no tenant label) adopts it back.
-    const { 'better-compute-tenant': _tenant, ...operator } = labels;
-    expect((await bucketKind.adopt!(env, created.id, operator, w.ctx())).state).toBe('ready');
+    // Named for this deployment, it is owned by its name: adopt is a no-op, release is refused.
+    expect((await bucketKind.adopt!(env, created.id, labels, w.ctx())).state).toBe('ready');
+    expect((await failure(bucketKind.release!(env, created.id, w.ctx()))).code).toBe('UNSUPPORTED');
     expect((await bucketKind.delete(env, created.id, w.ctx())).state).toBe('deleted');
     expect(
       (await failure(bucketKind.ensure(env, { kind: 'do.spaces-bucket', name: 'x', spec: {} }, w.ctx())))
@@ -282,7 +281,7 @@ describe('do.spaces-bucket adopt and release', () => {
       labels,
     });
     expect(updated.outputs?.acl).toBe('private');
-    expect(w.spaces.buckets.has('bc-r-crs01abc')).toBe(false);
+    expect(w.spaces.buckets.has(`${own}r-crs01abc`)).toBe(false);
     expect(w.spaces.buckets.get('hand-made')!.acl).toBe('private');
 
     const moved = await failure(
@@ -314,17 +313,28 @@ describe('do.spaces-bucket adopt and release', () => {
     ).toBe('NOT_FOUND');
   });
 
-  it('releases a bucket: the marker goes, the bucket and its data stay', async () => {
+  it('releases an adopted bucket: the marker goes, the bucket and its data stay', async () => {
     const w = await world();
-    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
-    await w.resources.release('do.spaces-bucket', 'nyc3/tenant-a-assets', w.ctx());
-    const bucket = w.spaces.buckets.get('tenant-a-assets')!;
+    w.spaces.seedBucket('hand-made');
+    await w.resources.adopt('do.spaces-bucket', 'nyc3/hand-made', {}, w.ctx());
+    await w.resources.release('do.spaces-bucket', 'nyc3/hand-made', w.ctx());
+    const bucket = w.spaces.buckets.get('hand-made')!;
     expect(bucket.objects.has(bucketMarkerKey)).toBe(false);
     // Releasing again is a no-op; deleting a released bucket is refused.
-    await w.resources.release('do.spaces-bucket', 'nyc3/tenant-a-assets', w.ctx());
-    const refused = await failure(w.resources.delete('do.spaces-bucket', 'nyc3/tenant-a-assets', w.ctx()));
+    await w.resources.release('do.spaces-bucket', 'nyc3/hand-made', w.ctx());
+    const refused = await failure(w.resources.delete('do.spaces-bucket', 'nyc3/hand-made', w.ctx()));
     expect(refused.details?.reason).toBe('notManaged');
-    expect(w.spaces.buckets.has('tenant-a-assets')).toBe(true);
+    expect(w.spaces.buckets.has('hand-made')).toBe(true);
+  });
+
+  it('never releases a bucket named for this deployment: its name keeps it managed', async () => {
+    const w = await world();
+    await w.ensure('do.spaces-bucket', `${own}tenant-a-assets`, { region: 'nyc3' }, w.ctx());
+    const refused = await failure(
+      w.resources.release('do.spaces-bucket', `nyc3/${own}tenant-a-assets`, w.ctx()),
+    );
+    expect([refused.code, refused.details?.reason]).toEqual(['UNSUPPORTED', 'adopt']);
+    expect(w.spaces.buckets.get(`${own}tenant-a-assets`)!.objects.has(bucketMarkerKey)).toBe(true);
   });
 });
 
@@ -351,23 +361,23 @@ describe('refusals and discovery', () => {
 
   it('a known key id wins over a create, for the key of its own name only', async () => {
     const w = await world();
-    await w.ensure('do.spaces-bucket', 'b-one', { region: 'nyc3' }, w.ctx(), { labels });
-    const created = await w.ensure('do.spaces-key', 'bc-key1', { grants: ['nyc3/b-one:read'] }, w.ctx(), {
+    await w.ensure('do.spaces-bucket', `${own}b-one`, { region: 'nyc3' }, w.ctx(), { labels });
+    const created = await w.ensure('do.spaces-key', 'bc-key1', { grants: [`nyc3/${own}b-one:read`] }, w.ctx(), {
       labels,
     });
     const again = await w.ensure(
       'do.spaces-key',
       'bc-key1',
-      { grants: ['nyc3/b-one:readwrite'] },
+      { grants: [`nyc3/${own}b-one:readwrite`] },
       w.ctx(),
       { id: created.id, labels },
     );
     expect(again.id).toBe(created.id);
-    expect(again.outputs?.grants).toBe('b-one:readwrite');
+    expect(again.outputs?.grants).toBe(`${own}b-one:readwrite`);
     expect(again.secretOutputs).toBeUndefined();
     // The id of a key made for another name (another resource's) is refused, not regranted.
     const crossed = await failure(
-      w.ensure('do.spaces-key', 'bc-key-renamed-row', { grants: ['nyc3/b-one:read'] }, w.ctx(), {
+      w.ensure('do.spaces-key', 'bc-key-renamed-row', { grants: [`nyc3/${own}b-one:read`] }, w.ctx(), {
         id: created.id,
         labels,
       }),
@@ -381,7 +391,7 @@ describe('refusals and discovery', () => {
     seedSpacesKey(w.emu, {
       name: `${own}mine`,
       access_key: 'DOMINE000001',
-      grants: [{ bucket: 'b-one', permission: 'read' }],
+      grants: [{ bucket: `${own}b-one`, permission: 'read' }],
     });
     expect(await collect(w.resources.discover('do.spaces-key', w.ctx()))).toEqual([
       {
@@ -394,7 +404,7 @@ describe('refusals and discovery', () => {
         name: `${own}mine`,
         managedBy: 'this',
         // A key records bucket names but not their regions: its spec cannot be read back.
-        outputs: { accessKeyId: 'DOMINE000001', name: `${own}mine`, grants: 'b-one:read' },
+        outputs: { accessKeyId: 'DOMINE000001', name: `${own}mine`, grants: `${own}b-one:read` },
       },
     ]);
 
@@ -408,35 +418,35 @@ describe('refusals and discovery', () => {
       spec: { region: 'ams3' },
     });
 
-    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx(), { labels });
+    await w.ensure('do.spaces-bucket', `${own}tenant-a-assets`, { region: 'nyc3' }, w.ctx(), { labels });
     const ours = await w.ensure(
       'do.cdn-endpoint',
       'bc-cdn1',
-      { origin: 'tenant-a-assets.nyc3.digitaloceanspaces.com' },
+      { origin: `${own}tenant-a-assets.nyc3.digitaloceanspaces.com` },
       w.ctx(),
-      { parent: 'nyc3/tenant-a-assets', labels },
+      { parent: `nyc3/${own}tenant-a-assets`, labels },
     );
     w.spaces.seedBucket('hand-made');
     seedCdnEndpoint(w.emu, { origin: 'hand-made.nyc3.digitaloceanspaces.com' });
     const endpoints = await collect(w.resources.discover('do.cdn-endpoint', w.ctx()));
     expect(endpoints.map((e) => [e.name, e.managedBy])).toEqual([
-      ['tenant-a-assets.nyc3.digitaloceanspaces.com', 'this'],
+      [`${own}tenant-a-assets.nyc3.digitaloceanspaces.com`, 'this'],
       ['hand-made.nyc3.digitaloceanspaces.com', undefined],
     ]);
     expect(endpoints[0]).toMatchObject({
       id: ours.id,
-      spec: { origin: 'tenant-a-assets.nyc3.digitaloceanspaces.com', ttl: 3600 },
+      spec: { origin: `${own}tenant-a-assets.nyc3.digitaloceanspaces.com`, ttl: 3600 },
     });
   });
 
   it('adopts a CDN endpoint only in front of a bucket it manages', async () => {
     const w = await world();
-    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx(), { labels });
-    const mine = seedCdnEndpoint(w.emu, { origin: 'tenant-a-assets.nyc3.digitaloceanspaces.com' });
+    await w.ensure('do.spaces-bucket', `${own}tenant-a-assets`, { region: 'nyc3' }, w.ctx(), { labels });
+    const mine = seedCdnEndpoint(w.emu, { origin: `${own}tenant-a-assets.nyc3.digitaloceanspaces.com` });
     expect(await w.resources.adopt('do.cdn-endpoint', mine.id, labels, w.ctx())).toMatchObject({
       id: mine.id,
       state: 'ready',
-      spec: { origin: 'tenant-a-assets.nyc3.digitaloceanspaces.com', ttl: 3600 },
+      spec: { origin: `${own}tenant-a-assets.nyc3.digitaloceanspaces.com`, ttl: 3600 },
     });
     w.spaces.seedBucket('hand-made');
     const theirs = seedCdnEndpoint(w.emu, { origin: 'hand-made.nyc3.digitaloceanspaces.com' });

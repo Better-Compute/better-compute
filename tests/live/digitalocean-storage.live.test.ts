@@ -42,7 +42,8 @@ import {
 // What it settles (marked unverified in the package README): HEAD answering 403 for a name another
 // account holds and 301 from another region's endpoint; the grant format of Spaces keys; one CDN
 // endpoint per origin; the registry's presigned blob redirect; and the token scopes the storage
-// families need. Everything it makes is named `bc-live-<hex>-…`, and the sweeper deletes only that.
+// families need. Everything it makes is named for this run's deployment (`live-<hex>`, so
+// `bc-<its hash>-…`), and the sweeper deletes only that.
 
 const env = process.env;
 const flag = (value: string | undefined): boolean =>
@@ -54,11 +55,12 @@ const enabled =
 const endpoint = 'https://api.digitalocean.com/v2';
 const run = randomBytes(4).toString('hex');
 const prefix = `bc-live-${run}`;
-const bucket = `${prefix}-assets`;
+// Buckets, keys and registries carry the deployment in their provider-side names (bc-<hash>-…):
+// this run's.
+const owned = managedNamePrefix(`live-${run}`);
+const bucket = `${owned}live-${run}-assets`;
 const keyName = `${prefix}-key`;
 const registryName = prefix;
-// Keys and registries carry the deployment in their provider-side names (bc-<hash>-…): this run's.
-const owned = managedNamePrefix(`live-${run}`);
 const registryId = `${owned}${registryName.slice('bc-'.length)}`;
 const region = env.BC_DO_SPACES_REGION || 'nyc3';
 const otherRegion = env.BC_DO_SPACES_OTHER_REGION || (region === 'ams3' ? 'sgp1' : 'ams3');
@@ -169,7 +171,7 @@ async function sweep(): Promise<string[]> {
       '/cdn/endpoints?per_page=200',
     );
     for (const e of body?.endpoints ?? [])
-      if (e.origin.startsWith(`${prefix}-`)) await api('DELETE', `/cdn/endpoints/${e.id}`);
+      if (e.origin.startsWith(`${bucket}.`)) await api('DELETE', `/cdn/endpoints/${e.id}`);
   });
   await attempt('the bucket', async () => {
     const s3 = s3For(region);

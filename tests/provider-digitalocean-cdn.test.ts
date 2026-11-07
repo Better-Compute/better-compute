@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { isComputeError, type ComputeError } from '@better-compute/core';
 import {
   bucketMarkerKey,
+  managedNamePrefix,
   resetBudgets,
   type CdnEndpointKind,
 } from '@better-compute/provider-digitalocean';
@@ -11,6 +12,9 @@ import { storageWorld, type StorageWorld } from './support/do-storage-harness.js
 // The `do.cdn-endpoint` kind: DigitalOcean's CDN in front of a bucket better-compute manages.
 
 beforeEach(() => resetBudgets());
+
+// Buckets ensure makes are named for this deployment: bc-<deployment hash>-….
+const own = managedNamePrefix('default');
 
 async function failure(promise: Promise<unknown>): Promise<ComputeError> {
   try {
@@ -22,17 +26,17 @@ async function failure(promise: Promise<unknown>): Promise<ComputeError> {
   throw new Error('expected the call to fail');
 }
 
-const origin = 'tenant-a-assets.nyc3.digitaloceanspaces.com';
+const origin = `${own}tenant-a-assets.nyc3.digitaloceanspaces.com`;
 const cert = '0f8a2d6e-3b1c-4a5d-9e7f-1a2b3c4d5e6f';
 
 const tenantA = { 'better-compute-tenant': 'ten_a', 'better-compute-resource': 'crs_cdn_a' };
 const tenantB = { 'better-compute-tenant': 'ten_b', 'better-compute-resource': 'crs_cdn_b' };
 /** Tenant A's request: its endpoint lives in its own bucket row. */
-const asA = { parent: 'nyc3/tenant-a-assets', labels: tenantA };
+const asA = { parent: `nyc3/${own}tenant-a-assets`, labels: tenantA };
 
 async function world(): Promise<StorageWorld> {
   const w = await storageWorld(undefined, undefined, ({ emu }) => registerCdn(emu));
-  await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx(), {
+  await w.ensure('do.spaces-bucket', `${own}tenant-a-assets`, { region: 'nyc3' }, w.ctx(), {
     labels: { 'better-compute-tenant': 'ten_a', 'better-compute-resource': 'crs_bucket_a' },
   });
   return w;
@@ -45,8 +49,8 @@ describe('do.cdn-endpoint', () => {
     expect(created.state).toBe('ready');
     expect(created.outputs).toEqual({
       origin,
-      endpoint: 'tenant-a-assets.nyc3.cdn.digitaloceanspaces.com',
-      url: 'https://tenant-a-assets.nyc3.cdn.digitaloceanspaces.com',
+      endpoint: `${own}tenant-a-assets.nyc3.cdn.digitaloceanspaces.com`,
+      url: `https://${own}tenant-a-assets.nyc3.cdn.digitaloceanspaces.com`,
       ttl: '3600',
     });
     const again = await w.ensure('do.cdn-endpoint', 'bc-cdn1', { origin }, w.ctx(), asA);
@@ -94,12 +98,12 @@ describe('do.cdn-endpoint', () => {
       w.ensure('do.cdn-endpoint', 'bc-cdn1', { origin }, w.ctx(), { labels: tenantA }),
     );
     expect([noParent.code, noParent.details?.reason]).toEqual(['INVALID_INPUT', 'parent']);
-    await w.ensure('do.spaces-bucket', 'tenant-a-other', { region: 'nyc3' }, w.ctx(), {
+    await w.ensure('do.spaces-bucket', `${own}tenant-a-other`, { region: 'nyc3' }, w.ctx(), {
       labels: tenantA,
     });
     const crossed = await failure(
       w.ensure('do.cdn-endpoint', 'bc-cdn1', { origin }, w.ctx(), {
-        parent: 'nyc3/tenant-a-other',
+        parent: `nyc3/${own}tenant-a-other`,
         labels: tenantA,
       }),
     );
@@ -118,7 +122,7 @@ describe('do.cdn-endpoint', () => {
     ]) {
       const refused = await failure(
         w.ensure('do.cdn-endpoint', 'bc-cdn-b', spec, w.ctx(), {
-          parent: 'nyc3/tenant-a-assets',
+          parent: `nyc3/${own}tenant-a-assets`,
           labels: tenantB,
         }),
       );
@@ -128,7 +132,7 @@ describe('do.cdn-endpoint', () => {
     const byId = await failure(
       w.ensure('do.cdn-endpoint', 'bc-cdn-b', { origin, ttl: 600 }, w.ctx(), {
         id: created.id,
-        parent: 'nyc3/tenant-a-assets',
+        parent: `nyc3/${own}tenant-a-assets`,
         labels: tenantB,
       }),
     );
@@ -142,13 +146,13 @@ describe('do.cdn-endpoint', () => {
 
   it("never adopts another tenant's endpoint, or one in front of the operator's bucket", async () => {
     const w = await world();
-    await w.ensure('do.spaces-bucket', 'tenant-b-assets', { region: 'nyc3' }, w.ctx(), {
+    await w.ensure('do.spaces-bucket', `${own}tenant-b-assets`, { region: 'nyc3' }, w.ctx(), {
       labels: { 'better-compute-tenant': 'ten_b', 'better-compute-resource': 'crs_bucket_b' },
     });
     // An operator bucket: marked by this deployment, with no tenant.
-    await w.ensure('do.spaces-bucket', 'operator-site', { region: 'nyc3' }, w.ctx());
-    const theirs = seedCdnEndpoint(w.emu, { origin: 'tenant-b-assets.nyc3.digitaloceanspaces.com' });
-    const ops = seedCdnEndpoint(w.emu, { origin: 'operator-site.nyc3.digitaloceanspaces.com' });
+    await w.ensure('do.spaces-bucket', `${own}operator-site`, { region: 'nyc3' }, w.ctx());
+    const theirs = seedCdnEndpoint(w.emu, { origin: `${own}tenant-b-assets.nyc3.digitaloceanspaces.com` });
+    const ops = seedCdnEndpoint(w.emu, { origin: `${own}operator-site.nyc3.digitaloceanspaces.com` });
     const before = w.emu.requests.length;
     for (const endpoint of [theirs, ops]) {
       const refused = await failure(w.resources.adopt('do.cdn-endpoint', endpoint.id, tenantA, w.ctx()));
@@ -193,13 +197,24 @@ describe('do.cdn-endpoint', () => {
     expect(cdnEndpoints(w.emu).has(foreign.id)).toBe(true);
   });
 
-  it('a bucket that lost its marker loses the right to its endpoint', async () => {
+  it('an endpoint stays deletable when its tenant deletes the bucket marker', async () => {
     const w = await world();
     const created = await w.ensure('do.cdn-endpoint', 'bc-cdn1', { origin }, w.ctx(), asA);
-    w.spaces.buckets.get('tenant-a-assets')!.objects.delete(bucketMarkerKey);
-    expect((await failure(w.resources.delete('do.cdn-endpoint', created.id, w.ctx()))).code).toBe(
-      'INVALID_STATE',
+    // The marker is an object a tenant's readwrite key can delete; the bucket's name is not.
+    w.spaces.buckets.get(`${own}tenant-a-assets`)!.objects.delete(bucketMarkerKey);
+    // The tenant checks fail closed: no repointing or adopting through a markerless origin.
+    expect(
+      (await failure(w.ensure('do.cdn-endpoint', 'bc-cdn1', { origin, ttl: 600 }, w.ctx(), asA))).details
+        ?.reason,
+    ).toBe('unmanagedOrigin');
+    expect((await failure(w.resources.adopt('do.cdn-endpoint', created.id, tenantA, w.ctx()))).details?.reason).toBe(
+      'notManaged',
     );
+    // But the endpoint, in front of a bucket named for this deployment, is still purged and deleted.
+    const kind = w.resources.kinds().find((k) => k.kind === 'do.cdn-endpoint') as CdnEndpointKind;
+    await kind.purge(created.id, ['index.html'], w.ctx());
+    expect((await w.resources.delete('do.cdn-endpoint', created.id, w.ctx())).state).toBe('deleted');
+    expect(cdnEndpoints(w.emu).size).toBe(0);
   });
 
   it('purges cached paths of a managed endpoint', async () => {

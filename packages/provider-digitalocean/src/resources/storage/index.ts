@@ -111,10 +111,11 @@ export function storageKindHandlers(
     spacesBucketKind({
       spaces,
       deploymentTag: tag,
+      names,
       client,
       ...(options.spacesTenantBucketAdopt ? { allowTenantAdopt: true } : {}),
     }),
-    cdnEndpointKind({ client, spaces, deploymentTag: tag }),
+    cdnEndpointKind({ client, spaces, deploymentTag: tag, names }),
     containerRegistryKind(client, names),
     registryGcKind(client, names),
   ];
