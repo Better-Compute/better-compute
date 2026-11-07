@@ -1,15 +1,16 @@
 ---
 title: Volumes and addresses
-description: Block volumes, their snapshots and reserved public addresses on a provider account, as typed resources next to instances, and what happens to them when an instance is deleted.
+description: Block volumes, shared (NFS) volumes, their snapshots and reserved public addresses on a provider account, as typed resources next to instances, and what happens to them when an instance is deleted.
 metaTitle: Provider volumes, snapshots and reserved IPs
 icon: HardDrive
 status: new
 packages: ['@better-compute/vps', '@better-compute/core', '@better-compute/provider-digitalocean']
-sources: ['packages/vps/src/provider-resources.ts', 'packages/vps/src/provider-resource-usage.ts', 'packages/vps/src/lifecycle.ts', 'packages/core/src/extension.ts', 'packages/core/src/catalog.ts', 'packages/events/src/catalog.ts', 'packages/provider-digitalocean/src/storage/volumes.ts', 'packages/provider-digitalocean/src/edge/addresses.ts', 'packages/provider-digitalocean/src/compute/droplets.ts', 'tests/vps-provider-resources.test.ts', 'tests/do-end-to-end.test.ts', 'tests/provider-digitalocean-volumes.test.ts', 'tests/provider-digitalocean-addresses.test.ts']
+sources: ['packages/vps/src/provider-resources.ts', 'packages/vps/src/provider-resource-usage.ts', 'packages/vps/src/lifecycle.ts', 'packages/core/src/extension.ts', 'packages/core/src/catalog.ts', 'packages/events/src/catalog.ts', 'packages/provider-digitalocean/src/storage/volumes.ts', 'packages/provider-digitalocean/src/storage/nfs.ts', 'packages/vps/src/shared-mounts.ts', 'packages/provider-digitalocean/src/edge/addresses.ts', 'packages/provider-digitalocean/src/compute/droplets.ts', 'tests/vps-provider-resources.test.ts', 'tests/do-end-to-end.test.ts', 'tests/provider-digitalocean-volumes.test.ts', 'tests/provider-digitalocean-nfs.test.ts', 'tests/provider-digitalocean-addresses.test.ts']
 ---
 
 A tenant on a provider pool can keep data and an address that outlive any one instance: a **provider volume** is a
-block volume on the pool's provider account, a **provider snapshot** is a point-in-time copy of one, and a **provider
+block volume on the pool's provider account (or a [shared NFS volume](#shared-nfs-volumes) many instances mount),
+a **provider snapshot** is a point-in-time copy of one, and a **provider
 address** is a reserved public IP. All three are typed resources of the `vps` module, listed and authorized like
 instances, and converged on the provider by one reconciler, `vps.provider-resources`.
 
@@ -18,7 +19,7 @@ machine's own disks: those live on a node, these live in the cloud account.
 
 | Provider     | Volumes                       | Snapshots                 | Addresses                     |
 | ------------ | ----------------------------- | ------------------------- | ----------------------------- |
-| DigitalOcean | Block Storage (`kind: block`) | Volume snapshots          | Reserved IPv4 and IPv6        |
+| DigitalOcean | Block Storage (`kind: block`) and Network File Storage (`kind: shared`) | Volume and share snapshots | Reserved IPv4 and IPv6 |
 | Others       | When the provider implements `ProviderImpl.volumes` | With volumes | When it implements `ProviderImpl.addresses` |
 
 A pool whose provider implements neither answers `UNSUPPORTED` to every create.
@@ -83,14 +84,87 @@ The other methods of `providerVolumes`:
 | Method     | What it does                                                                                       |
 | ---------- | -------------------------------------------------------------------------------------------------- |
 | `get`, `list` | One volume, or the tenant's (filter by `poolId` or `projectId`; `includeDeleted` adds deleted ones). |
-| `attach`   | Attaches it to an instance. A volume is attached to one instance at a time: a second instance is `CONFLICT`, never a silent move. |
-| `detach`   | Detaches it. The volume stays.                                                                     |
+| `attach`   | Attaches it to an instance. A block volume is attached to one instance at a time: a second instance is `CONFLICT`, never a silent move. A [shared volume](#shared-nfs-volumes) takes many. |
+| `detach`   | Detaches it (from `instanceId`, required for a shared volume). The volume stays.                    |
 | `resize`   | Grows it to `sizeGiB`. A smaller size is `INVALID_INPUT`: volumes only grow.                        |
 | `snapshot` | Takes a snapshot (`name`, `idempotencyKey`). At most 25 snapshots that are not deleted per volume. |
 | `delete`   | Deletes it at the provider. `INVALID_STATE` while it is attached: detach it first.                 |
 
 Attach refuses before any provider call: an instance of another tenant is `ACCESS_DENIED`; one on another provider
 account or in another region is `INVALID_INPUT`; an instance being deleted is `INVALID_STATE`.
+
+## Shared (NFS) volumes
+
+A volume with `kind: 'shared'` is a network file share: one filesystem that many instances mount at once over NFS.
+On DigitalOcean it is a Network File Storage share. A share has no access control of its own beyond the network it is
+reachable from, so a shared volume always names a [tenant network](/docs/guides/vps/networking) and is reachable only
+from that network's instances.
+
+```ts title="shared.ts"
+const shared = await compute.api.providerVolumes.create(token, {
+  tenantId: 'ten_01jz…',
+  poolId: 'pool_01jz…',
+  name: 'assets',
+  region: 'nyc3',
+  sizeGiB: 50,
+  kind: 'shared',
+  networkId: 'net_01jz…', // required: the share lives in this network's subnet in nyc3
+  idempotencyKey: 'assets-1',
+});
+await compute.api.providerVolumes.attach(token, { tenantId: shared.tenantId, volumeId: shared.id, instanceId: 'inst_a…' });
+await compute.api.providerVolumes.attach(token, { tenantId: shared.tenantId, volumeId: shared.id, instanceId: 'inst_b…' });
+// get → { kind: 'shared', networkId, attachments: [{ instanceId: 'inst_a…', state: 'ready', … }, …],
+//         device: '10.110.0.5:/2633050/…', mount: { source: '10.110.0.5:/2633050/…', type: 'nfs4' }, … }
+```
+
+How it differs from a block volume:
+
+- **The network.** `networkId` must be a network of the tenant, on the pool's provider account, provisioned, with a
+  subnet in the volume's region (`INVALID_INPUT` otherwise; `INVALID_STATE` while the network or that subnet is not
+  ready yet, or the network is being deleted). The share is made in that subnet, never in the region's default VPC.
+  `networkId` on a block volume is `INVALID_INPUT`. A network a shared volume is on is not deleted
+  (`networks.delete` answers `INVALID_STATE` until the volume is deleted), and neither is a subnet of it in the
+  volume's region (`networks.removeSubnet` answers `INVALID_STATE`, with the volumes in `details.volumeIds`).
+  A provider that makes no shared volumes is `UNSUPPORTED` (`reason: 'sharedVolumes'`).
+- **Many instances.** `attach` adds the instance (attaching one it is on returns the volume); the instance must be on
+  the volume's network (`INVALID_INPUT` otherwise). The view lists every attachment in `attachments` (a block volume
+  keeps the single `attachment`). `detach` names the instance, `{ volumeId, instanceId }` (`INVALID_INPUT` without
+  it). `delete` is `INVALID_STATE` while any instance still has it.
+- **No filesystem choice.** A share is a filesystem already: leave `filesystem` out (`none` is accepted and
+  ignored). `deleteWithInstance` is always `false`: deleting an instance detaches it from the share and keeps the
+  share.
+- **Size.** It grows like a block volume and books `diskGiB` quota the same way. DigitalOcean shares are 50 to 16384
+  GiB: a smaller size is `INVALID_INPUT` (`reason: 'size'`) at create, before any quota is booked.
+- **Billing.** A shared volume bills `vps.share.gib.hours` (its GiB), not `vps.volume.gib.hours`, so a rate card
+  prices shares apart from block storage.
+- **Snapshots.** `snapshot` works as for a block volume; `providerSnapshots.restore` of a shared volume's snapshot is
+  `UNSUPPORTED` (`reason: 'sharedRestore'`) for now.
+
+On DigitalOcean, attaching tags the Droplet `bc-nfs-<16 hex>` (the record of which Droplets have the share) and adds
+the Droplet's VPC to the share when it is not there yet; that VPC must be one of the same network. Detaching removes
+the tag and takes the VPC off the share once no tagged Droplet is left in it; the share's last VPC stays. When an
+instance on the share is deleted, the detach that follows finds its Droplet gone and takes off every VPC no tagged
+Droplet is left in; deleting the share removes its tag. The hourly drift pass asks every ready
+attachment of a settled shared volume again (an attach is idempotent), which puts back a VPC a racing detach took off.
+
+### Mounting a shared volume
+
+`device` (and `mount.source`) is the NFS source, `<host>:<path>`. better-compute does not mount it in the guest
+yet; `sharedVolumeMount` from `@better-compute/vps` makes the lines for cloud-init or `/etc/fstab`:
+
+```ts title="mount.ts"
+import { sharedVolumeMount } from '@better-compute/vps';
+
+const mount = sharedVolumeMount(shared.mount!.source, '/mnt/assets'); // { readOnly: true } mounts it ro
+mount.cloudConfig; // ['10.110.0.5:/2633050/…', '/mnt/assets', 'nfs4', 'defaults,_netdev,nofail', '0', '0']
+mount.fstab; //       '10.110.0.5:/2633050/… /mnt/assets nfs4 defaults,_netdev,nofail 0 0'
+```
+
+Put `cloudConfig` in the `mounts:` list of an instance's cloud-config user data (the image needs an NFS client, such
+as `nfs-common` on Ubuntu). `_netdev` waits for the network and `nofail` lets the guest boot while the share is
+unreachable. The helper refuses a source that is not `<host>:<absolute path>`, and a mount path that is relative, has
+`.` or `..` segments or would cover part of the system (`/`, `/etc`, `/usr`, …), as for a sandbox volume's mount.
+Mounting by bcd on pool members is planned, as for block volumes.
 
 ## Snapshots
 
@@ -185,8 +259,8 @@ is gone) leaves its machine running. Its volumes are only detached, `deleteWithI
   gets nothing (`QUOTA_EXCEEDED`, fail closed). The booking is refunded once the provider has deleted the resource.
   Snapshots book no quota.
 - On a metered pool, each resource bills from the moment it was `ready` until it is deleted, in whole-hour usage
-  windows written by `vps.ancillary-usage`: a snapshot `vps.snapshot.gib.hours` (its GiB), a volume
-  `vps.volume.gib.hours` (its GiB) and an address `vps.address.hours` (one per hour). One that never became ready never
+  windows written by `vps.ancillary-usage`: a snapshot `vps.snapshot.gib.hours` (its GiB), a block volume
+  `vps.volume.gib.hours` (its GiB), a shared volume `vps.share.gib.hours` (its GiB) and an address `vps.address.hours` (one per hour). One that never became ready never
   bills; a BYO account's pool (platform fee) bills none of them. Volumes, snapshots and addresses are all metered by
   the `vps.ancillary-usage` pass (usage source kinds `volume`, `snapshot` and `address`).
 - Events: `providerVolume.*` (created, updated, ready, attached, detached, resized, error, deleting, deleted),

@@ -996,6 +996,12 @@ export interface ProviderVolumeSpec {
   iops?: number;
   /** Provisioned throughput in MiB/s, for the types that take it (EBS gp3). */
   throughputMiBps?: number;
+  /**
+   * (v1.x, `kind: 'shared'`) The tenant network the share is reachable from: a network file share is reached over
+   * a private network, so a provider that needs one (DigitalOcean) refuses a shared volume without it
+   * (`INVALID_INPUT`, reason `network`). Block volumes ignore it.
+   */
+  network?: NetworkRef;
 }
 
 /** (provider volumes) Options of `ProviderVolumes.detachVolume`. */
@@ -1016,8 +1022,24 @@ export interface ProviderDetachOptions {
  * otherwise); a volume in another region than the machine is `INVALID_INPUT` before any write; a volume attached to
  * another machine is `CONFLICT`; an attached volume is not deleted (`INVALID_STATE`); `resizeVolume` only grows
  * (`INVALID_INPUT` for a smaller size).
+ *
+ * A `kind: 'shared'` volume (a network file share) attaches to many machines at once: `attachVolume` makes it
+ * reachable from the machine and returns its outputs with `attachedTo` naming that machine; `getVolume` reports no
+ * `attachedTo`. Its `device` is the NFS source the guest mounts (`<host>:<path>`), `filesystem` is `nfs`, and
+ * `kind` is `shared`. A shared volume that any machine still has attached is not deleted (`INVALID_STATE`).
  */
 export interface ProviderVolumes {
+  /**
+   * (v1.x) The volume kinds the provider makes; absent: `block` only. A caller refuses a `kind: 'shared'` volume
+   * (`UNSUPPORTED`) on a provider that does not list `shared`, before anything is booked.
+   */
+  readonly kinds?: readonly ProviderVolumeSpec['kind'][];
+  /**
+   * (v1.x) Refuses a spec `ensureVolume` would refuse before any request (`INVALID_INPUT`, `UNSUPPORTED`: a size
+   * the provider does not make, a share without a network), synchronously and with no provider call, so a caller
+   * refuses it before anything is booked. Optional: without it the refusal comes from `ensureVolume`.
+   */
+  checkVolume?(spec: ProviderVolumeSpec): void;
   ensureVolume(spec: ProviderVolumeSpec, context: CallContext): Promise<ProviderResourceState>;
   /** The volume as it is; undefined when it does not exist. */
   getVolume(volumeId: string, context: CallContext): Promise<ProviderResourceState | undefined>;
@@ -1031,6 +1053,8 @@ export interface ProviderVolumes {
     name: string,
     region: string,
     context: CallContext,
+    /** (v1.x) The kind the volume was ensured as; absent: `block`. */
+    kind?: ProviderVolumeSpec['kind'],
   ): Promise<ProviderResourceState | undefined>;
   /** With `instanceId`, only a machine whose ownership label names that instance is attached to. */
   attachVolume(

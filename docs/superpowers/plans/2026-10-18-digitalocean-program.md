@@ -814,6 +814,49 @@ Spending stays under the test account's cap; the sweeper leaves no `better-compu
   custom image import.
 - **NFS.** `ProviderVolumes` with `kind: 'shared'`: one share per pool or tenant, mounted by cloud-init / bcd on each
   member, and access points per tenant. Quota is in GiB.
+
+  **NFS half, as built (tasks 5 and 6; lane do-nfs, 2026-11-05).** Decisions taken unattended, on the plan's defaults:
+
+  - **D1 API shape.** DO's NFS endpoints as remembered from the public reference (no spec clone offline):
+    `POST/GET /nfs`, `GET/DELETE /nfs/{id}?region=`, `POST /nfs/{id}/actions` (`resize`, `snapshot`, `attach`,
+    `detach`, with `params`), `GET /nfs/snapshots?region=&share_id=`, `GET/DELETE /nfs/snapshots/{id}?region=`. The
+    fixture `tests/fixtures/digitalocean/nfs.json` is marked `unverified` until the live suite records it; the
+    `nfs:read` probe scope name is unverified too.
+  - **D2 Ownership by name.** Shares and share snapshots carry no tags (assumed): the provider name is
+    `<vps name>-<12 hex of the deployment>` (a vps name longer than 51 characters keeps 38 and gains 12 hex of its
+    own hash). Ids are `nfs:<region>:<uuid>` and `nfssnap:<region>:<uuid>` (DO needs the region on every call). The
+    live suite sweeps shares and share snapshots by that suffix, and the shares' Droplet tags with the run's tags.
+  - **D3 A share needs a network.** Additive core field `ProviderVolumeSpec.network?: NetworkRef`; `findVolume` takes
+    an optional `kind`. vps requires `networkId` for `kind: 'shared'` (the tenant's, provisioned, with a subnet in
+    the region) and sends the network's provider name; the share is made in that network's VPC, never a default or
+    unmanaged VPC (NFS access is VPC membership: fail closed). `networks.delete` refuses while a shared volume is on
+    the network.
+  - **D4 Attach.** The Droplet must be an instance of this deployment, in the share's region, in a VPC of the same
+    network (vps checks `instances.network_id` first). The provider tags it `bc-nfs-<16 hex>` and adds its VPC to the
+    share when missing. Detach untags, and takes the VPC off once no tagged Droplet is left in it (the share's last
+    VPC stays). A share any Droplet carries the tag of is not deleted. A detach of a Droplet that is gone prunes every
+    VPC of a better-compute network no tagged Droplet is in (never the share's first VPC), and a share delete removes
+    its `bc-nfs-*` tag (best effort), so a deleted Droplet's VPC no longer stays on the share.
+  - **D5 Limits.** 50..16384 GiB (minimum unverified), grows only, no filesystem, no labels (no tags on shares),
+    restore from a share snapshot `UNSUPPORTED` (`sharedRestore`, in the provider and in vps).
+  - **D6 Outputs.** `region`, `sizeGiB`, `kind: shared`, `host`, `mountPath`, `device = <host>:<mountPath>` (the NFS
+    source a guest mounts, passed on only when it is a plain address or host name and an absolute path), `vpcs`.
+  - **vps.** Migration `vps/0105_provider_shared_volumes` (`provider_volumes.kind`, `network_id`;
+    `provider_volume_attachments.shared`; one live attachment per block volume, one per (volume, instance) for a
+    shared one). A shared volume attaches to many instances of its network; `detach` takes `instanceId`; views carry
+    `kind`, `networkId`, `attachments[]` and `mount { source, type: 'nfs4' }`. `sharedVolumeMount(source, path)`
+    makes the cloud-config `mounts` entry and the fstab line (`nfs4`, `_netdev,nofail`).
+  - **Review fixes (2026-11-06).** Unique share names are unverified, so `ensure` and `find` keep the oldest share of
+    a name (then the lowest id) and delete each younger one no Droplet carries the tag of
+    (`digitalocean.duplicateShareReaped`; a held one is logged, `duplicateShareHeld`); a create lists again after it,
+    so a create that raced an older one gives way. A share DO answers with whose id is not a UUID or that is in
+    another region is `PROVIDER_ERROR` `badBody`, never an id. A FAILED share detaches (and prunes) as soon as the
+    Droplet is untagged, with no VPC action, so it can be deleted. The account delete refuses (`INVALID_STATE`,
+    `volumeIds`) while any provider volume row names the account, instead of a foreign-key error.
+  - **Deferred.** The bcd mount hook on pool members (as P2's block mount), per-tenant access points, and a pool-wide
+    share mounted into every member at join. `DoVolumes.kinds` advertises `shared` whatever the account probe's `nfs`
+    family says (a region without NFS refuses the create in the reconciler, late but closed). The NFS API shape, the
+    50 GiB minimum, unique names, untagged shares and the `nfs:read` scope wait on the opt-in live suite.
 - **DOCR.**
   - An OCI `ImageSource` auth helper: a registry token from `GET /v2/registry/docker-credentials`, sealed and
     short-lived.

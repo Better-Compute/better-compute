@@ -26,6 +26,7 @@ import { vpsFilesystemsMigration } from './filesystems.js';
 import { purchaseProposalsMigration } from './purchase-proposals.js';
 import {
   providerAddressesMigration,
+  providerSharedVolumesMigration,
   providerSnapshotsMigration,
   providerVolumesMigration,
 } from './provider-resources.js';
@@ -247,4 +248,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   providerVolumesMigration,
   providerSnapshotsMigration,
   providerAddressesMigration,
+  providerSharedVolumesMigration,
 ]);

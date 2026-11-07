@@ -1272,6 +1272,23 @@ describe('reconcile', () => {
       gone,
       account.id,
     ]);
+    // A provider volume row (here a deleted shared one, on the deleted network) names the account and the network: a
+    // refusal, never a foreign-key error from the network and account deletes.
+    await db.query(
+      `INSERT INTO provider_volumes (id, tenant_id, pool_id, provider_account_id, name, region, size_gib, kind,
+         network_id, state, desired_state, created_by, idempotency_key, request_hash, version)
+       VALUES ('pvol_hist', 'root', $1, $2, 'hist', 'us-central1', 100, 'shared', $3, 'deleted', 'deleted',
+         'alice', 'k-hist', '\\x00', 1)`,
+      [pool.id, account.id, network.id],
+    );
+    const held = await deleteAccount().catch((error: unknown) => error);
+    expect(held).toBeInstanceOf(ComputeError);
+    expect(held).toMatchObject({ code: 'INVALID_STATE', details: { volumeIds: ['pvol_hist'] } });
+    expect(String((held as Error).message)).toContain('pvol_hist');
+    await db.query(`UPDATE provider_volumes SET state = 'ready', desired_state = 'present'`);
+    const live = await deleteAccount().catch((error: unknown) => error);
+    expect(String((live as Error).message)).toMatch(/pvol_hist: delete them first/);
+    await db.query(`DELETE FROM provider_volumes WHERE id = 'pvol_hist'`);
     await expect(deleteAccount()).resolves.toEqual({ deleted: true });
     const left = await db.query(
       `SELECT id FROM networks WHERE provider_account_id = $1

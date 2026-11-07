@@ -89,7 +89,7 @@ describe('provider-digitalocean volumes: ensure and get', () => {
   it('refuses what DO would refuse before any request', async () => {
     const { emu, impl } = await setup();
     const refusals: [Parameters<typeof impl.volumes.ensureVolume>[0], string, string][] = [
-      [{ ...spec, kind: 'shared' }, 'UNSUPPORTED', 'sharedVolume'],
+      [{ ...spec, kind: 'shared', sizeGiB: 100 }, 'INVALID_INPUT', 'network'],
       [{ ...spec, region: 'sfo3' }, 'INVALID_INPUT', 'region'],
       [{ ...spec, name: 'Bad_Name' }, 'INVALID_INPUT', 'name'],
       [{ ...spec, name: `v${'a'.repeat(64)}` }, 'INVALID_INPUT', 'name'],

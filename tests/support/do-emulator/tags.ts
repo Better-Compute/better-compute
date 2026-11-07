@@ -97,6 +97,18 @@ export function registerTags(emulator: DoEmulator): void {
     return { status: 204 };
   });
 
+  // DELETE /v2/tags/{name}: the tag object goes, and every Droplet loses it (204).
+  emulator.route('DELETE', /^\/tags\/([^/]+)$/, (context) => {
+    const key = decodeURIComponent(context.match[1]!).toLowerCase();
+    if (!context.state.tags.has(key)) return emulator.error('not-found');
+    context.state.tags.delete(key);
+    for (const droplet of context.state.droplets.values())
+      droplet.tags = ((droplet.tags as string[] | undefined) ?? []).filter(
+        (t) => t.toLowerCase() !== key,
+      );
+    return { status: 204 };
+  });
+
   emulator.route('DELETE', /^\/tags\/([^/]+)\/resources$/, (context) => {
     const tag = context.state.tags.get(decodeURIComponent(context.match[1]!).toLowerCase());
     if (!tag) return emulator.error('not-found');

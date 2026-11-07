@@ -12,11 +12,14 @@ import { billingModeOf, poolAccountTenantSql } from './billing.js';
 // | Resource | Source kind | Meter                  | Per hour                                    |
 // | -------- | ----------- | ---------------------- | ------------------------------------------- |
 // | volume   | `volume`    | vps.volume.gib.hours   | its GiB (what the provider reports, else asked) |
+// | share    | `volume`    | vps.share.gib.hours    | its GiB (a `kind: 'shared'` volume, DO P6)     |
 // | snapshot | `snapshot`  | vps.snapshot.gib.hours | its GiB (what the provider reported)        |
 // | address  | `address`   | vps.address.hours      | 1                                           |
 //
 // `usage_windows.source_kind` accepts `volume` and `address` from core/0044 on (the kubernetes module's rewrite of
-// that CHECK lists them too), so every kind is metered by default.
+// that CHECK lists them too), so every kind is metered by default. A network file share (a `kind: 'shared'` volume)
+// is priced unlike a block volume, so it bills on a meter of its own; its tags are a block volume's (the D19 tag keys
+// `meterSource` keeps have no kind).
 
 /** The provider resources metered by default. */
 export const defaultProviderResourceKinds: readonly ProviderResourceKind[] = Object.freeze([
@@ -34,6 +37,9 @@ interface Metered {
   /** SQL for one hour's quantity of row `r`. */
   quantity: string;
   tag: string;
+  /** SQL for row `r`'s kind; `sharedMeter` bills a `shared` one. */
+  kind?: string;
+  sharedMeter?: string;
 }
 
 const metered: Record<ProviderResourceKind, Metered> = {
@@ -43,6 +49,8 @@ const metered: Record<ProviderResourceKind, Metered> = {
     meter: 'vps.volume.gib.hours',
     quantity: 'coalesce(r.observed_size_gib, r.size_gib)',
     tag: 'provider-volume',
+    kind: 'r.kind',
+    sharedMeter: 'vps.share.gib.hours',
   },
   snapshot: {
     table: 'provider_snapshots',
@@ -72,6 +80,7 @@ interface Due {
   provider: string | null;
   region: string;
   quantity: string;
+  kind: string | null;
   metered: number;
   ended: number | null;
 }
@@ -93,7 +102,7 @@ async function meterKind(
   const { rows } = await tx.query<Due>(
     `SELECT r.id, r.tenant_id, r.project_id, r.pool_id, p.class AS pool_class, p.owner_tenant_id AS pool_owner,
             p.policy, ${poolAccountTenantSql} AS account_tenant, a.provider, r.region,
-            (${kind.quantity})::text AS quantity,
+            (${kind.quantity})::text AS quantity, ${kind.kind ?? 'NULL::text'} AS kind,
             (extract(epoch FROM coalesce(r.metered_until, r.ready_at)) * 1000)::float8 AS metered,
             (extract(epoch FROM r.deleted_at) * 1000)::float8 AS ended
        FROM ${kind.table} r
@@ -127,13 +136,14 @@ async function meterKind(
     const tags: UsageTags = { pool: row.pool_id, source: kind.tag, region: row.region };
     if (row.provider) tags.provider = row.provider;
     if (row.project_id) tags.project = row.project_id;
+    const meter = row.kind === 'shared' && kind.sharedMeter ? kind.sharedMeter : kind.meter;
     windows += await meterSource(
       tx,
       {
         sourceKind: kind.sourceKind,
         sourceId: row.id,
         tenantId: row.tenant_id,
-        lines: [{ meter: kind.meter, perHour }],
+        lines: [{ meter, perHour }],
         from,
         to: until,
         tags,

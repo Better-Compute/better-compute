@@ -384,6 +384,7 @@ import {
   parseProviderAddressRef,
   parseProviderSnapshotRef,
   parseProviderVolumeRef,
+  parseDetachProviderVolume,
   parseResizeProviderVolume,
   parseRestoreProviderSnapshot,
   parseSnapshotProviderVolume,
@@ -407,6 +408,7 @@ import {
   type ProviderSnapshotRef,
   type ProviderSnapshotView,
   type ProviderVolumeRef,
+  type DetachProviderVolumeInput,
   type ProviderVolumeView,
   type ResizeProviderVolumeInput,
   type RestoreProviderSnapshotInput,
@@ -649,7 +651,7 @@ export type VpsApi = {
     list: MethodDefinition<ListProviderVolumesInput, { items: ProviderVolumeView[] }>;
     get: MethodDefinition<ProviderVolumeRef, ProviderVolumeView>;
     attach: MethodDefinition<AttachProviderVolumeInput, ProviderVolumeView>;
-    detach: MethodDefinition<ProviderVolumeRef, ProviderVolumeView>;
+    detach: MethodDefinition<DetachProviderVolumeInput, ProviderVolumeView>;
     resize: MethodDefinition<ResizeProviderVolumeInput, ProviderVolumeView>;
     snapshot: MethodDefinition<SnapshotProviderVolumeInput, ProviderSnapshotView>;
     delete: MethodDefinition<ProviderVolumeRef, ProviderVolumeView>;
@@ -2249,7 +2251,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         action: 'compute:volumes:manage',
         kind: 'mutation',
         resource: providerVolumeResource,
-        validate: describedBy(providerResourceSchemas.volume, parseProviderVolumeRef),
+        validate: describedBy(providerResourceSchemas.detachVolume, parseDetachProviderVolume),
         handler: (context, input) =>
           detachProviderVolume(networkDeps(context), context.sql, input),
       }),

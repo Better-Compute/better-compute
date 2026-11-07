@@ -19,6 +19,8 @@ import {
   probeAccount,
   spotPriceOf,
   spotShape,
+  shareName,
+  shareTag,
   type DoCompute,
   type CatalogImageSource,
   type DoConfig,
@@ -38,7 +40,8 @@ import {
 // turn on the catalog import case, which keeps a custom image (billed storage) until the sweep.
 //
 // Every resource carries this run's identity: Droplets the deployment tag of `live-<hex>`,
-// networks, VPCs and rules the name prefix `bc-live-<hex>-`. The sweeper deletes only what carries
+// networks, VPCs and rules the name prefix `bc-live-<hex>-`, NFS shares and their snapshots (which
+// carry no tags) the name suffix `-<12 hex>` of the deployment. The sweeper deletes only what carries
 // it, then asserts nothing does.
 
 const env = process.env;
@@ -247,6 +250,11 @@ interface Snapshot {
   name: string;
   tags?: string[] | null;
 }
+interface Share {
+  id: string;
+  name: string;
+  region: string;
+}
 
 const lower = (tags: readonly string[] | undefined) => (tags ?? []).map((t) => t.toLowerCase());
 
@@ -287,6 +295,20 @@ const runSnapshots = async () =>
   (await listAll<Snapshot>('/snapshots?resource_type=volume', 'snapshots')).filter((s) =>
     lower(s.tags ?? []).includes(deployTag),
   );
+/**
+ * The run's NFS shares and share snapshots in the run's region. They carry no tags: the provider names
+ * them `<vps name>-<12 hex of the deployment>` (DO P6 D2), and the deployment is this run's alone.
+ */
+const shareSuffix = shareName('x', deployment).slice(1);
+const runShares = async () =>
+  (await listAll<Share>(`/nfs?region=${encodeURIComponent(region)}`, 'shares')).filter((share) =>
+    share.name.endsWith(shareSuffix),
+  );
+const runShareSnapshots = async () =>
+  (
+    await listAll<Share>(`/nfs/snapshots?region=${encodeURIComponent(region)}`, 'snapshots')
+  ).filter((snapshot) => snapshot.name.endsWith(shareSuffix));
+
 /** The reserved IPs this run reserved that still exist. */
 async function runAddresses(): Promise<string[]> {
   const out: string[] = [];
@@ -332,7 +354,16 @@ async function deleteIfEmpty(name: string): Promise<void> {
  */
 async function sweep(): Promise<{
   left: Record<
-    'droplets' | 'images' | 'firewalls' | 'vpcs' | 'tags' | 'volumes' | 'snapshots' | 'addresses',
+    | 'droplets'
+    | 'images'
+    | 'firewalls'
+    | 'vpcs'
+    | 'tags'
+    | 'volumes'
+    | 'snapshots'
+    | 'addresses'
+    | 'shares'
+    | 'shareSnapshots',
     string[]
   >;
   errors: string[];
@@ -405,6 +436,36 @@ async function sweep(): Promise<{
   for (const image of (await attempt('list the run images', runImages)) ?? [])
     await attempt(`delete image ${image.id}`, () => api('DELETE', `/images/${image.id}`, [204, 404]));
 
+  // Shares sit in the run's VPCs, so they go before the VPCs. A share's Droplet tag (bc-nfs-<hex>)
+  // outlives its Droplets: it is deleted with the run's other tags once nothing carries it.
+  for (const snapshot of (await attempt('list the run share snapshots', runShareSnapshots)) ?? [])
+    await attempt(`delete share snapshot ${snapshot.name}`, () =>
+      api(
+        'DELETE',
+        `/nfs/snapshots/${encodeURIComponent(snapshot.id)}?region=${encodeURIComponent(snapshot.region)}`,
+        [204, 404],
+      ),
+    );
+  for (const share of (await attempt('list the run shares', runShares)) ?? []) {
+    ownTags.add(shareTag(share.id));
+    await attempt(`delete share ${share.name}`, () =>
+      until(
+        `share ${share.name} to be deleted`,
+        async () =>
+          (
+            await api(
+              'DELETE',
+              `/nfs/${encodeURIComponent(share.id)}?region=${encodeURIComponent(share.region)}`,
+              [204, 404, 409, 422],
+            )
+          ).status,
+        (status) => status === 204 || status === 404,
+        120_000,
+        5_000,
+      ),
+    );
+  }
+
   for (const firewall of (await attempt('list the run firewalls', runFirewalls)) ?? [])
     await attempt(`delete firewall ${firewall.name}`, () =>
       api('DELETE', `/firewalls/${encodeURIComponent(firewall.id)}`, [204, 404]),
@@ -444,6 +505,10 @@ async function sweep(): Promise<{
     volumes: ((await attempt('re-list volumes', runVolumes)) ?? []).map((v) => v.name),
     snapshots: ((await attempt('re-list snapshots', runSnapshots)) ?? []).map((v) => v.name),
     addresses: (await attempt('re-list reserved IPs', runAddresses)) ?? [],
+    shares: ((await attempt('re-list shares', runShares)) ?? []).map((share) => share.name),
+    shareSnapshots: ((await attempt('re-list share snapshots', runShareSnapshots)) ?? []).map(
+      (snapshot) => snapshot.name,
+    ),
   };
   return { left, errors };
 }
@@ -480,6 +545,8 @@ describe.skipIf(!enabled)('provider-digitalocean live', () => {
           volumes: [],
           snapshots: [],
           addresses: [],
+          shares: [],
+          shareSnapshots: [],
         },
         errors: [`sweep: ${String(error)}`],
       };

@@ -11,6 +11,7 @@ import type { DoClient } from '../client/http.js';
 import type { DoAction, DoDroplet } from '../compute/types.js';
 import type { DoConfig } from '../config.js';
 import { deploymentTag, labels, parseMachineId, tagFor } from '../ids.js';
+import { DoShares, isShareId, isShareSnapshotId } from './nfs.js';
 import type { DoSnapshot, DoVolume } from './types.js';
 
 // Block Storage volumes as provider volumes (P2). A volume is found by its name, which is unique
@@ -34,6 +35,9 @@ import type { DoSnapshot, DoVolume } from './types.js';
 // oldest of ours and deletes the others (as Droplet creates do, DO-D4). A snapshot outlives its
 // volume; `ensureVolume` with `snapshotId` restores one of ours into a new volume, which keeps the
 // snapshot's filesystem (no `filesystem_type` is sent, and the one DO reports is not compared).
+//
+// `kind: 'shared'` volumes are Network File Storage shares (P6, ./nfs.ts): `ensureVolume` and
+// every call given a share id (`nfs:<region>:<uuid>`) go to `DoShares`.
 
 /** DO's largest volume, in GiB. */
 export const maxVolumeGiB = 16_384;
@@ -154,12 +158,15 @@ export class DoVolumes implements ProviderVolumes {
   protected readonly log: Logger;
   /** This deployment's tag: with the managed tag, what makes a volume ours. */
   protected readonly deploymentTag: string;
+  /** Network File Storage shares: the `kind: 'shared'` volumes. */
+  readonly shares: DoShares;
 
   constructor(client: DoClient, config: DoConfig, deployment: string, log: Logger) {
     this.client = client;
     this.config = config;
     this.log = log;
     this.deploymentTag = deploymentTag(deployment);
+    this.shares = new DoShares(client, config, deployment, log);
   }
 
   /** Whether better-compute may act on the volume: managed, and in this deployment. */
@@ -249,12 +256,6 @@ export class DoVolumes implements ProviderVolumes {
 
   /** Refuses what DO would refuse, before any request. */
   protected validate(spec: ProviderVolumeSpec): string[] {
-    if (spec.kind === 'shared')
-      throw fail(
-        'UNSUPPORTED',
-        'shared (NFS) volumes are not supported on DigitalOcean yet',
-        'sharedVolume',
-      );
     if (spec.kind !== 'block')
       throw fail(
         'INVALID_INPUT',
@@ -312,7 +313,17 @@ export class DoVolumes implements ProviderVolumes {
     return state(found.id, 'ready', volumeOutputs(found));
   }
 
+  /** Block Storage volumes, and (P6) Network File Storage shares. */
+  readonly kinds = ['block', 'shared'] as const;
+
+  /** What `ensureVolume` refuses before any request, with no request. */
+  checkVolume(spec: ProviderVolumeSpec): void {
+    if (spec.kind === 'shared') this.shares.check(spec);
+    else this.validate(spec);
+  }
+
   async ensureVolume(spec: ProviderVolumeSpec, ctx: CallContext): Promise<ProviderResourceState> {
+    if (spec.kind === 'shared') return this.shares.ensure(spec, ctx);
     const tags = this.validate(spec);
     const { signal } = ctx;
     const [existing] = await this.byName(spec.name, spec.region, signal);
@@ -375,13 +386,16 @@ export class DoVolumes implements ProviderVolumes {
     name: string,
     region: string,
     ctx: CallContext,
+    kind?: ProviderVolumeSpec['kind'],
   ): Promise<ProviderResourceState | undefined> {
+    if (kind === 'shared') return this.shares.find(name, region, ctx);
     if (!volumeNamePattern.test(name) || !this.config.regions.includes(region)) return undefined;
     const found = (await this.byName(name, region, ctx.signal)).find((volume) => this.owned(volume.tags));
     return found ? state(found.id, 'ready', volumeOutputs(found)) : undefined;
   }
 
   async getVolume(id: string, ctx: CallContext): Promise<ProviderResourceState | undefined> {
+    if (isShareId(id)) return this.shares.get(id, ctx);
     if (!uuidPattern.test(id)) return undefined;
     const volume = await this.volume(id.toLowerCase(), ctx.signal);
     return volume ? state(volume.id, 'ready', volumeOutputs(volume)) : undefined;
@@ -462,6 +476,7 @@ export class DoVolumes implements ProviderVolumes {
     ctx: CallContext,
     instanceId?: string,
   ): Promise<ProviderResourceState> {
+    if (isShareId(volumeId)) return this.shares.attach(volumeId, machineId, ctx, instanceId);
     const id = parseVolumeId(volumeId);
     const dropletId = parseMachineId(machineId);
     const { signal } = ctx;
@@ -486,6 +501,7 @@ export class DoVolumes implements ProviderVolumes {
     machineId: string,
     ctx: CallContext,
   ): Promise<ProviderResourceState> {
+    if (isShareId(volumeId)) return this.shares.detach(volumeId, machineId, ctx);
     const id = parseVolumeId(volumeId);
     const dropletId = parseMachineId(machineId);
     const { signal } = ctx;
@@ -535,6 +551,7 @@ export class DoVolumes implements ProviderVolumes {
     sizeGiB: number,
     ctx: CallContext,
   ): Promise<ProviderResourceState> {
+    if (isShareId(volumeId)) return this.shares.resize(volumeId, sizeGiB, ctx);
     const id = parseVolumeId(volumeId);
     if (!Number.isInteger(sizeGiB) || sizeGiB < 1 || sizeGiB > maxVolumeGiB)
       throw fail(
@@ -558,6 +575,7 @@ export class DoVolumes implements ProviderVolumes {
   }
 
   async deleteVolume(volumeId: string, ctx: CallContext): Promise<ProviderResourceState> {
+    if (isShareId(volumeId)) return this.shares.delete(volumeId, ctx);
     const id = parseVolumeId(volumeId);
     const { signal } = ctx;
     const volume = await this.volume(id, signal);
@@ -656,6 +674,7 @@ export class DoVolumes implements ProviderVolumes {
     name: string,
     ctx: CallContext,
   ): Promise<ProviderResourceState> {
+    if (isShareId(volumeId)) return this.shares.snapshot(volumeId, name, ctx);
     const id = parseVolumeId(volumeId);
     if (!snapshotNamePattern.test(name))
       throw fail(
@@ -697,6 +716,7 @@ export class DoVolumes implements ProviderVolumes {
   }
 
   async getSnapshot(id: string, ctx: CallContext): Promise<ProviderResourceState | undefined> {
+    if (isShareSnapshotId(id)) return this.shares.getSnapshot(id, ctx);
     if (!uuidPattern.test(id)) return undefined;
     const snapshot = await this.snapshot(id.toLowerCase(), ctx.signal);
     if (!snapshot || snapshot.resource_type !== 'volume') return undefined;
@@ -704,6 +724,7 @@ export class DoVolumes implements ProviderVolumes {
   }
 
   async deleteSnapshot(snapshotId: string, ctx: CallContext): Promise<ProviderResourceState> {
+    if (isShareSnapshotId(snapshotId)) return this.shares.deleteSnapshot(snapshotId, ctx);
     if (!uuidPattern.test(snapshotId))
       throw fail(
         'INVALID_INPUT',

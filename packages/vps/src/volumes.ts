@@ -191,6 +191,9 @@ function mountPath(value: unknown, where: string): string {
   return path;
 }
 
+/** (DO P6) The same check for any guest mount path (a shared provider volume's mount): the normalised path. */
+export const guestMountPath: (value: unknown, where: string) => string = mountPath;
+
 /** A template's `volumes` as the caller wrote them (resolved against the tenant's volumes on write). */
 export function parseTemplateVolumes(value: unknown): TemplateVolumeInput[] {
   if (!Array.isArray(value) || value.length > maxTemplateVolumes)

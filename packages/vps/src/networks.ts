@@ -1615,7 +1615,10 @@ async function instancesOn(
   return rows.map((row) => row.id);
 }
 
-/** `networks.removeSubnet`: refused while instances use the subnet (INVALID_STATE, `details.instanceIds`). */
+/**
+ * `networks.removeSubnet`: refused while instances use the subnet (INVALID_STATE, `details.instanceIds`), or while a
+ * shared volume of the network lives in the subnet's region (INVALID_STATE, `details.volumeIds`).
+ */
 export async function removeSubnet(
   deps: NetworkDeps,
   tx: SqlTx,
@@ -1637,6 +1640,21 @@ export async function removeSubnet(
       `Subnet ${subnet.name} is used by ${instanceIds.length} instance(s)`,
       undefined,
       { instanceIds },
+    );
+  // (DO P6) A shared volume is made in one of the network's VPCs in its region, its only access path, and the row
+  // does not say which: every subnet of the network in that region stays while the share lives (fail closed).
+  // `createProviderVolume` locks these subnets FOR SHARE, so this sees a share created concurrently.
+  const sharedVolumes = await tx.query<{ id: string }>(
+    `SELECT id FROM provider_volumes
+      WHERE network_id = $1 AND region = $2 AND state <> 'deleted' ORDER BY id LIMIT 100`,
+    [network.id, subnet.region],
+  );
+  if (sharedVolumes.rows.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Subnet ${subnet.name} carries ${sharedVolumes.rows.length} shared volume(s) of network ${network.name} in ${subnet.region}`,
+      undefined,
+      { volumeIds: sharedVolumes.rows.map((volume) => volume.id) },
     );
   await tx.query(
     `UPDATE network_subnets SET desired_state = 'deleted', state = 'deleting', message = NULL WHERE id = $1`,
@@ -1685,6 +1703,18 @@ export async function deleteNetwork(
       `Network ${row.name} has ${filesystems.rows.length} filesystem(s) on it`,
       undefined,
       { filesystemIds: filesystems.rows.map((fs) => fs.id) },
+    );
+  // (DO P6) A shared volume is reached over the network: it goes first.
+  const sharedVolumes = await tx.query<{ id: string }>(
+    `SELECT id FROM provider_volumes WHERE network_id = $1 AND state <> 'deleted' ORDER BY id LIMIT 100`,
+    [row.id],
+  );
+  if (sharedVolumes.rows.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Network ${row.name} has ${sharedVolumes.rows.length} shared volume(s) on it`,
+      undefined,
+      { volumeIds: sharedVolumes.rows.map((volume) => volume.id) },
     );
   await tx.query(
     `UPDATE network_firewall_rules SET desired_state = 'deleted', state = CASE WHEN state = 'deleted' THEN state ELSE 'deleting' END,

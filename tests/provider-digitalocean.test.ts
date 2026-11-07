@@ -2209,11 +2209,13 @@ describe('definition', () => {
     emu.failNext({ method: 'GET', path }, 403, emu.error('forbidden').body as object);
 
   it('passes every case of the ProviderImpl contract', async () => {
+    const emulators: DoEmulator[] = [];
     const report = await runConformance(providerConformanceCases(), () => {
       // Each case gets the token's whole budget: the volume and address cases alone make a
       // few dozen requests on one manual clock.
       freshBudgets();
       const emu = emulator();
+      emulators.push(emu);
       // A create needs an SSH key: the account's default one.
       const key = seedSshKey(emu.state, 'ops', testKey);
       const hand = seedDroplet(emu.state, { name: 'legacy', tags: [] });
@@ -2229,12 +2231,23 @@ describe('definition', () => {
         offerId: 'nyc3/s-1vcpu-1gb',
         // The volume and address cases attach and assign across regions too (INVALID_INPUT).
         otherRegionOfferId: 'sfo3/s-1vcpu-1gb',
+        // (P6) The opt-in shared-volume case: a tenant network, two Droplets on it and an NFS share.
+        sharedVolumes: true,
         image: 'ubuntu-24-04-x64',
         context: { secrets, account: platformAccount },
       };
     });
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
     expect(report.passed).toHaveLength(providerConformanceCases().length);
+    // The shared-volume case ran: one share made, attached to two Droplets (by tag), and deleted.
+    const shared = emulators.filter((emu) =>
+      emu.requests.some((r) => r.method === 'POST' && r.url.pathname === '/v2/nfs'),
+    );
+    expect(shared).toHaveLength(1);
+    expect(shared[0]!.state.nfsShares.size).toBe(0);
+    expect(
+      shared[0]!.requests.filter((r) => r.method === 'DELETE' && /^\/v2\/nfs\/[^/]+$/.test(r.url.pathname)),
+    ).toHaveLength(1);
   });
 
   it('is a well-formed definition with the documented capabilities', async () => {
@@ -2318,6 +2331,7 @@ describe('definition', () => {
         tags: 'ok',
         storage: 'ok',
         addresses: 'ok',
+        nfs: 'ok',
       },
       missing: [],
       // A read-only probe cannot see write scopes: it names those it did not check, for the operator.
@@ -2340,6 +2354,7 @@ describe('definition', () => {
         'GET /v2/account/keys',
         'GET /v2/droplets',
         'GET /v2/firewalls',
+        'GET /v2/nfs',
         'GET /v2/regions',
         'GET /v2/reserved_ips',
         'GET /v2/sizes',
@@ -2350,6 +2365,53 @@ describe('definition', () => {
     );
     for (const r of emu.requests.filter((r) => r.url.pathname !== '/v2/account'))
       expect(r.url.searchParams.get('per_page')).toBe('1');
+    // NFS lists per region: the probe names the account's first.
+    const nfs = emu.requests.find((r) => r.url.pathname === '/v2/nfs');
+    expect(nfs?.url.searchParams.get('region')).toBe('nyc3');
+  });
+
+  it('probeAccount reports nfs denied, and block storage still ok, when the token may not read NFS shares', async () => {
+    const emu = emulator();
+    forbidden(emu, /^\/nfs$/);
+    const report = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
+    expect(report.families.storage).toBe('ok');
+    expect(report.families.nfs).toBe('denied');
+    expect(report.missing).toEqual(['nfs:read']);
+  });
+
+  it('probeAccount reports nfs unavailable, never failing, when the region has no NFS or the list is refused', async () => {
+    for (const status of [400, 404, 422]) {
+      const emu = emulator();
+      emu.failNext({ method: 'GET', path: /^\/nfs$/ }, status, {
+        id: 'unprocessable_entity',
+        message: 'NFS is not available in this region',
+      });
+      const report = await probeAccount(doAccount as DoConfig, probeContext, { fetch: emu.fetch });
+      expect(report.families, String(status)).toEqual({
+        compute: 'ok',
+        networks: 'ok',
+        keys: 'ok',
+        tags: 'ok',
+        storage: 'ok',
+        addresses: 'ok',
+        nfs: 'unavailable',
+      });
+      expect(report.missing).toEqual([]);
+    }
+    // An account with no region to ask about is not asked.
+    const emu = emulator();
+    const report = await probeAccount({ ...(doAccount as DoConfig), regions: [] }, probeContext, {
+      fetch: emu.fetch,
+    });
+    expect(report.families.nfs).toBe('unavailable');
+    expect(emu.requests.some((r) => r.url.pathname === '/v2/nfs')).toBe(false);
+    // A server error is still not a verdict about anything.
+    const broken = emulator();
+    broken.failNext({ method: 'GET', path: /^\/nfs$/ }, 500, broken.error('server-error').body);
+    expect(
+      (await failure(probeAccount(doAccount as DoConfig, probeContext, { fetch: broken.fetch })))
+        .details,
+    ).toMatchObject({ status: 500 });
   });
 
   it('probeAccount reports denied families from 403s and lists the missing scopes', async () => {
@@ -2366,6 +2428,7 @@ describe('definition', () => {
       tags: 'denied',
       storage: 'ok',
       addresses: 'denied',
+      nfs: 'ok',
     });
     expect(report.missing).toEqual(['sizes:read', 'firewall:read', 'tag:read', 'reserved_ip:read']);
     expect(report.account.status).toBe('active');
@@ -2421,6 +2484,7 @@ describe('definition: scoped account bodies and timeouts', () => {
       tags: 'ok',
       storage: 'ok',
       addresses: 'ok',
+      nfs: 'ok',
     });
     expect(report.missing).toEqual(['droplet:read']);
     expect(report.account.dropletLimit).toBeUndefined();
