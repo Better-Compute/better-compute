@@ -314,7 +314,7 @@ export class AwsVolumes implements ProviderVolumes {
    * consistency window is gone.
    */
   readonly #missing = new Map<string, number>();
-  /** id → when this process learned the volume or snapshot is gone (it deleted it, or saw it deleted). */
+  /** id → when this process learned the resource is gone (it deleted it, saw it deleted, or missed it for the window). */
   readonly #gone = new Map<string, number>();
 
   constructor(
@@ -786,7 +786,19 @@ export class AwsVolumes implements ProviderVolumes {
     } catch (error) {
       if (!isComputeError(error, 'NOT_FOUND')) throw error;
     }
-    if (!item) throw fail('NOT_FOUND', `instance ${machineId} does not exist`, 'machine');
+    if (!item) {
+      // vps attaches as soon as RunInstances answered, and EC2 often does not show a new instance
+      // yet: retried (UNAVAILABLE) until it shows, or it has been missing for the whole window. A
+      // terminated instance still reads terminated for a while (instance-state below).
+      if (this.#mayLag(machineId))
+        throw fail(
+          'UNAVAILABLE',
+          `instance ${machineId} is not visible to EC2 reads yet; it is retried`,
+          'instance-not-visible',
+        );
+      throw fail('NOT_FOUND', `instance ${machineId} does not exist`, 'machine');
+    }
+    this.#seen(machineId);
     const devices = item
       .items('blockDeviceMapping')
       .map((mapping) => mapping.textOf('deviceName') ?? '')

@@ -589,7 +589,12 @@ describe('provider-aws volumes: attach, detach', () => {
       'INVALID_STATE',
       'instance-state',
     );
-    await rejects(volumes.attachVolume(volume.id, 'i-0000000000000dead', call()), 'NOT_FOUND');
+    // EC2 may not show a just-launched instance yet: retried, not a final NOT_FOUND (see below).
+    await rejects(
+      volumes.attachVolume(volume.id, 'i-0000000000000dead', call()),
+      'UNAVAILABLE',
+      'instance-not-visible',
+    );
     await rejects(volumes.attachVolume(volume.id, 'srv-1', call()), 'INVALID_INPUT');
     const theirs = ebs.addVolume({ tags: { Name: 'x' } });
     await rejects(
@@ -598,6 +603,33 @@ describe('provider-aws volumes: attach, detach', () => {
       'not-managed',
     );
     expect(emu.calls('AttachVolume')).toHaveLength(0);
+  });
+
+  it('an instance EC2 does not show yet (just launched) is retried, then attached; one missing for the window is NOT_FOUND', async () => {
+    const { volumes, call, ebs, ec2, emu, managed } = world();
+    const volume = ebs.addVolume({ tags: managed });
+    // vps attaches as soon as RunInstances answered; the by-id read lags the launch.
+    const instance = owned(ec2);
+    instance.notFoundById = 1;
+    await rejects(
+      volumes.attachVolume(volume.id, instance.id, call(), 'ins_1'),
+      'UNAVAILABLE',
+      'instance-not-visible',
+    );
+    expect(emu.calls('AttachVolume')).toHaveLength(0);
+    expect((await volumes.attachVolume(volume.id, instance.id, call(), 'ins_1')).state).toBe(
+      'pending',
+    );
+    expect(emu.calls('AttachVolume')).toHaveLength(1);
+    // An instance no read shows for the whole consistency window does not exist.
+    const other = ebs.addVolume({ tags: { ...managed, 'better-compute:volume': 'bc-v-two' } });
+    const dead = 'i-0000000000000dead';
+    await rejects(volumes.attachVolume(other.id, dead, call()), 'UNAVAILABLE', 'instance-not-visible');
+    emu.clock.advance(60_000);
+    await rejects(volumes.attachVolume(other.id, dead, call()), 'UNAVAILABLE', 'instance-not-visible');
+    emu.clock.advance(60_000);
+    await rejects(volumes.attachVolume(other.id, dead, call()), 'NOT_FOUND', 'machine');
+    expect(emu.calls('AttachVolume')).toHaveLength(1);
   });
 
   it('a volume attached to another machine is CONFLICT; a pending instance or volume waits', async () => {
