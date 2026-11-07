@@ -139,3 +139,53 @@ func TestEC2HostWatchesSpotNoticesOnlyOnSpot(t *testing.T) {
 		t.Fatal("no interruption from the spot notice")
 	}
 }
+
+// On EC2, 169.254.169.254 (and fd00:ec2::254) is AWS's metadata service: bcd's own guest metadata
+// service bound there would make it a local address, so the host's cloud section, spot watch and
+// cloud-iid join would read bcd's instead and get nothing. bcd node refuses to start (fail closed).
+func TestNodeRefusesGuestMetadataOnTheAWSAddressOnEC2(t *testing.T) {
+	for _, listen := range []string{"169.254.169.254:80", "[fd00:ec2::254]:80"} {
+		hits := fakeCloud(t, "Amazon EC2")
+		file := joinConfig(t)
+		appendFile(t, file, "\n[imds]\nlisten = \""+listen+"\"\n")
+		code, _, stderr := runBCD("node", "--config", file)
+		if code != exitFailure || !strings.Contains(stderr, "EC2's own instance metadata service") {
+			t.Fatalf("bcd node with [imds] listen %s on EC2 = %d, %q", listen, code, stderr)
+		}
+		if hits.Load() != 0 {
+			t.Fatalf("%d metadata requests", hits.Load())
+		}
+	}
+	// Off EC2, and on EC2 with another address, the listen is not refused for this.
+	for _, tc := range []struct{ vendor, listen string }{{"QEMU", "169.254.169.254:80"}, {"Amazon EC2", "10.0.0.1:80"}} {
+		fakeCloud(t, tc.vendor)
+		file := joinConfig(t)
+		appendFile(t, file, "\n[imds]\nlisten = \""+tc.listen+"\"\n")
+		if _, _, stderr := runBCD("node", "--config", file); strings.Contains(stderr, "EC2's own instance metadata service") {
+			t.Fatalf("%s %s refused: %q", tc.vendor, tc.listen, stderr)
+		}
+	}
+}
+
+func TestCloudMetadataAddrsOnlyOnEC2(t *testing.T) {
+	fakeCloud(t, "QEMU")
+	if got := cloudMetadata(); got != nil {
+		t.Fatalf("metadata addresses off EC2: %v", got)
+	}
+	fakeCloud(t, "Amazon EC2")
+	if got := strings.Join(cloudMetadata(), ","); got != "169.254.169.254,fd00:ec2::254" {
+		t.Fatalf("metadata addresses on EC2: %q", got)
+	}
+}
+
+func appendFile(t *testing.T, file, text string) {
+	t.Helper()
+	f, err := os.OpenFile(file, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(text); err != nil {
+		t.Fatal(err)
+	}
+}

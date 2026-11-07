@@ -32,6 +32,30 @@ import (
 // DefaultEndpoint is the instance metadata service.
 const DefaultEndpoint = "http://169.254.169.254"
 
+// MetadataAddrs are the addresses the instance metadata service answers on: IPv4, and IPv6 on Nitro
+// instances that enable it. On an EC2 VPS host no instance may reach them (they answer for the
+// host), and bcd's own guest metadata service must not take them (the host could no longer reach
+// AWS's).
+func MetadataAddrs() []string { return []string{"169.254.169.254", "fd00:ec2::254"} }
+
+// IsMetadataAddr reports whether a listen address ("host:port") names one of MetadataAddrs.
+func IsMetadataAddr(listen string) bool {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		host = strings.Trim(listen, "[]")
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, a := range MetadataAddrs() {
+		if ip.Equal(net.ParseIP(a)) {
+			return true
+		}
+	}
+	return false
+}
+
 // TokenTTLSeconds is the IMDSv2 session token lifetime bcd asks for (the maximum, 6 h).
 const TokenTTLSeconds = 21600
 

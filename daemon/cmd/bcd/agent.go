@@ -439,6 +439,10 @@ func runNode(fs *flag.FlagSet, _, stderr io.Writer) int {
 		return exitFailure
 	}
 	log := newLogger(cfg, stderr)
+	if err := guestIMDSConflict(cfg.IMDSListen); err != nil {
+		fmt.Fprintf(stderr, "bcd node: %v\n", err)
+		return exitFailure
+	}
 	var imds func(ctx context.Context, a *agent.Agent)
 	if cfg.IMDSListen != "" {
 		imds = func(ctx context.Context, a *agent.Agent) {
@@ -575,6 +579,8 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		// On EC2 (DMI): the "cloud" inventory section and, on spot, the interruption notice.
 		if c := cloudHost(); c != nil {
 			opts.Cloud = c
+			// No instance reaches the host's own metadata service (its IID and role credentials).
+			opts.CloudMetadata = cloudMetadata()
 		}
 	}
 	if d, err := time.ParseDuration(os.Getenv("BCD_RENEW_AFTER")); devBuild && err == nil {

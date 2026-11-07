@@ -85,8 +85,10 @@ func eui64(mac net.HardwareAddr) string {
 // without IPAM addresses or a MAC) are left out and returned in failed: they must not run. guarded
 // maps each address the rules bind to its instance's tap (address → instance id): only those may
 // name an instance to the metadata service or an instance tunnel. host are the host's own addresses
-// on the instances' bridges: no tap may send from them or claim them.
-func firewallRuleset(specs []*agentv1.InstanceSpec, host []string) (ruleset string, failed map[string]string, guarded map[string]string) {
+// on the instances' bridges: no tap may send from them or claim them. cloudMetadata are the addresses
+// of the cloud's own metadata service when the host is a cloud instance (Options.CloudMetadata): no
+// tap may reach them, whatever its policy.
+func firewallRuleset(specs []*agentv1.InstanceSpec, host, cloudMetadata []string) (ruleset string, failed map[string]string, guarded map[string]string) {
 	failed, guarded = map[string]string{}, map[string]string{}
 	var claims, guard, input, forward, output, sshForward, sshOutput []string
 	anyNIC := false
@@ -251,6 +253,21 @@ func firewallRuleset(specs []*agentv1.InstanceSpec, host []string) (ruleset stri
 				taps = append(taps, `iifname "bc*" ip saddr `+a+` drop`, `iifname "bc*" ether type arp arp saddr ip `+a+` drop`)
 			default:
 				taps = append(taps, `iifname "bc*" ip6 saddr `+a+` drop`, `iifname "bc*" icmpv6 type nd-neighbor-advert icmpv6 taddr `+a+` drop`)
+			}
+		}
+		// On a cloud instance (an EC2 *.metal VPS host, AWS A6) the cloud's metadata service answers
+		// for the host: its identity document and instance-profile credentials. The host routes a
+		// tap's packets onwards (input) and a bridge may hold an uplink (forward), so both drop them
+		// before any policy accepts. bcd never serves its own metadata service on these addresses on
+		// a cloud (bcd node refuses such an [imds] listen), so nothing an instance needs is lost.
+		for _, a := range cloudMetadata {
+			ip := net.ParseIP(a)
+			switch {
+			case ip == nil:
+			case ip.To4() != nil:
+				taps = append(taps, `iifname "bc*" ip daddr `+ip.String()+` drop`)
+			default:
+				taps = append(taps, `iifname "bc*" ip6 daddr `+ip.String()+` drop`)
 			}
 		}
 	}

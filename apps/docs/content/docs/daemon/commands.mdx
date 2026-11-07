@@ -129,12 +129,27 @@ separation](/docs/daemon#privilege-separation). A host build running as an ordin
 starts anyway, but claims no GPU binding capability and fails every GPU hold at once as `node-unprivileged`
 (da60bbd).
 
+On an EC2 instance (a `*.metal` VPS host included), `169.254.169.254` and `fd00:ec2::254` belong to AWS's
+instance metadata service, which answers for the host: its identity document and its instance-profile
+credentials. `bcd node` then:
+
+- refuses to start with `[imds] listen` on either address (`[imds] listen "169.254.169.254:80" is EC2's own
+  instance metadata service on this EC2 host`). Bound there, bcd's own service would make the address local, so
+  the host's `cloud` section, spot interruption notices and `cloud-iid` join would read bcd's service instead of
+  AWS's. Serve the instances' metadata on another address, such as the host's address on the instances' bridge.
+- drops every instance tap's packets to both addresses, whatever the instance's network policy, before any policy
+  rule accepts them.
+
+Also launch the instance with `HttpTokens=required` and an `HttpPutResponseHopLimit` of 1 (2 when bcd runs in a
+container without host networking): IMDSv1 answers any packet the host forwards, and IMDSv2 answers a token
+request only within the hop limit.
+
 It logs JSON lines to standard error (`[log]`), and runs until SIGINT or SIGTERM. Exits:
 
 - `0` on a signal, or after a [self-update](/docs/daemon/install#self-update) swapped the binary slots, in which
   case `main` execs the entrypoint (the new binary) with the same arguments.
 - `1` when it cannot start (`bcd node: agent: this node has not joined (run bcd join)`, a journal of another node,
-  an invalid `[kubernetes]` value) or when the certificate is revoked (`agent: this node's certificate was
+  an invalid `[kubernetes]` value, `[imds] listen` on AWS's metadata address on EC2) or when the certificate is revoked (`agent: this node's certificate was
   revoked`).
 
 ```bash

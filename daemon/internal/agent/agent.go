@@ -136,6 +136,10 @@ type Options struct {
 	// Cloud is the cloud instance this node is (EC2: cloud/aws), reported as the "cloud" inventory
 	// section; nil off a cloud.
 	Cloud Cloud
+	// CloudMetadata are the addresses of the cloud's own metadata service when this node is a cloud
+	// instance (EC2: aws.MetadataAddrs). No instance may reach them: they answer for the host (its
+	// identity document, its instance-profile credentials). Nil off a cloud.
+	CloudMetadata []string
 	// CloudRetry is the first wait before the cloud metadata is read again (default 5 s, doubling).
 	CloudRetry time.Duration
 }

@@ -167,7 +167,7 @@ strings, integers and booleans. Unknown keys, duplicate keys and wrong types are
 | `[site] bmc_networks` | unset; CIDRs `site.httpProxy` never reaches |
 | `[websocket] url`, `proxy_ca_file`, `audience` | unset (gRPC only); a `wss://` URL moves the session and renewals to the WebSocket fallback |
 | `[plugins] dir`, `user`, `privileged`, `sandbox`, `cgroup`, `memory_max`, `pids_max` | no plugins; per-plugin uids, none, `true` |
-| `[imds] listen` | unset (VPS hosts: the metadata service's address) |
+| `[imds] listen` | unset (VPS hosts: the metadata service's address; on EC2 never `169.254.169.254` or `fd00:ec2::254`, which are AWS's, and `bcd node` refuses them there) |
 | `[instances] balloon_floor_percent` | 50 (10–100): the share of its memory a ballooned guest always keeps; bcd inflates balloons only while the host is short of memory or stalls on it (PSI), idle guests first, and never below the floor or the guest's use plus 10% |
 | `[kubernetes] allowed_clusters`, `gpu_api` | none (k8s-join refused under bcd helper), `device-plugin` |
 | `[host] units` | `true`; `false` when the GPU operator (or another tool) owns the host's configuration |
