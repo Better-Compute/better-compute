@@ -11,8 +11,12 @@ import { ec2Error, ec2Response, el, items } from './xml.js';
 // RunInstances is patched with the VPC and security groups of its subnet. Like EC2, deletes refuse
 // a resource still in use with DependencyViolation. Knobs: associating (CIDR associations stay
 // `associating` for that many reads), pendingVpcReads (a new VPC reads `pending`), ruleLimit (rules
-// per security group), naclEntryLimit (entries per direction), groupsPerInterface and tagLagReads
-// (a new VPC is missing from tag-filtered DescribeVpcs for that many reads, as AWS tag reads lag).
+// per security group), naclEntryLimit (entries per direction), groupsPerInterface, tagLimit (tags per
+// resource, 50 as EC2's), endpointDeleteFailures (DeleteVpcEndpoints reports these ids unsuccessful)
+// and tagLagReads (a new VPC is missing from tag-filtered DescribeVpcs for that many reads, as AWS
+// tag reads lag). Custom route tables and network ACLs (CreateRouteTable, CreateNetworkAcl, both
+// idempotent by ClientToken) take subnets by AssociateRouteTable and ReplaceNetworkAclAssociation;
+// a subnet without one uses the VPC's main table and default ACL.
 
 type Tags = Map<string, string>;
 
@@ -31,6 +35,8 @@ export interface EmuVpc {
   tags: Tags;
   dnsSupport: boolean;
   dnsHostnames: boolean;
+  /** The account's default VPC (DescribeVpcs filter isDefault). */
+  isDefault?: boolean;
 }
 
 export interface EmuSubnet {
@@ -40,6 +46,10 @@ export interface EmuSubnet {
   zone: string;
   mapPublicIp: boolean;
   tags: Tags;
+  /** An explicit route table association (the main table otherwise). */
+  routeTableId?: string;
+  /** The network ACL the subnet is associated with (the VPC's default otherwise). */
+  aclId?: string;
 }
 
 export interface EmuSecurityGroup {
@@ -202,6 +212,12 @@ export class VpcEmulator {
   ruleLimit = 60;
   naclEntryLimit = 20;
   groupsPerInterface = 5;
+  /** Tags a resource may carry (CreateTags past it fails with TagLimitExceeded). */
+  tagLimit = 50;
+  /** Endpoint ids DeleteVpcEndpoints reports in its unsuccessful set (and keeps). */
+  readonly endpointDeleteFailures = new Set<string>();
+  /** ClientToken → the route table or network ACL it created. */
+  readonly #tokens = new Map<string, string>();
   /** Page size of DescribeSecurityGroupRules (small, so tests page). */
   pageSize = 1000;
   readonly #inner: ServiceHandler;
@@ -259,6 +275,32 @@ export class VpcEmulator {
 
   mainRouteTable(vpcId: string): EmuRouteTable {
     return [...this.routeTables.values()].find((table) => table.vpcId === vpcId && table.main)!;
+  }
+
+  /** The route table better-compute made for a VPC's network (test helper). */
+  networkRouteTable(vpcId: string): EmuRouteTable | undefined {
+    return [...this.routeTables.values()].find(
+      (table) => table.vpcId === vpcId && !table.main && table.tags.has('better-compute:network'),
+    );
+  }
+
+  /** The network ACL better-compute made for a VPC's network (test helper). */
+  networkNacl(vpcId: string): EmuNacl | undefined {
+    return [...this.nacls.values()].find(
+      (acl) => acl.vpcId === vpcId && !acl.isDefault && acl.tags.has('better-compute:network'),
+    );
+  }
+
+  /** The account's default VPC (isDefault), with a subnet (test helper). */
+  addDefaultVpc(cidr = '172.31.0.0/16'): { vpc: EmuVpc; subnet: EmuSubnet } {
+    const made = this.addForeignVpc(cidr);
+    made.vpc.isDefault = true;
+    return made;
+  }
+
+  /** The network ACL a subnet uses: its association, else the default ACL. */
+  #aclOf(subnet: EmuSubnet): string {
+    return subnet.aclId ?? this.defaultNacl(subnet.vpcId).id;
   }
 
   /** A VPC better-compute did not make (an adopted one), with a subnet. */
@@ -348,7 +390,7 @@ export class VpcEmulator {
             `${el('associationId', block.associationId)}${el('cidrBlock', block.cidr)}<cidrBlockState>${el('state', block.state)}</cidrBlockState>`,
         ),
       ),
-      el('isDefault', false),
+      el('isDefault', vpc.isDefault === true),
       tagSet(vpc.tags),
     ].join('');
   }
@@ -394,7 +436,7 @@ export class VpcEmulator {
         `${el('ruleNumber', entry.number)}${el('protocol', entry.protocol)}${el('ruleAction', entry.action)}${el('egress', entry.egress)}${el('cidrBlock', entry.cidr)}${el('ipv6CidrBlock', entry.ipv6Cidr)}${entry.from !== undefined ? `<portRange>${el('from', entry.from)}${el('to', entry.to)}</portRange>` : ''}`,
     );
     const associations = [...this.subnets.values()]
-      .filter((subnet) => subnet.vpcId === acl.vpcId && acl.isDefault)
+      .filter((subnet) => subnet.vpcId === acl.vpcId && this.#aclOf(subnet) === acl.id)
       .map(
         (subnet) =>
           `${el('networkAclAssociationId', `aclassoc-${subnet.id.slice(7)}`)}${el('networkAclId', acl.id)}${el('subnetId', subnet.id)}`,
@@ -443,7 +485,9 @@ export class VpcEmulator {
                   ? [vpc.state]
                   : name === 'cidr-block-association.cidr-block'
                     ? vpc.cidrs.map((block) => block.cidr)
-                    : undefined,
+                    : name === 'isDefault'
+                      ? [String(vpc.isDefault === true)]
+                      : undefined,
             ) &&
             !(byTag && vpc.tagHiddenReads-- > 0),
         );
@@ -501,6 +545,8 @@ export class VpcEmulator {
           [...this.subnets.values()].some((subnet) => subnet.vpcId === id) ||
           [...this.igws.values()].some((igw) => igw.vpcId === id) ||
           [...this.endpoints.values()].some((endpoint) => endpoint.vpcId === id) ||
+          [...this.routeTables.values()].some((table) => table.vpcId === id && !table.main) ||
+          [...this.nacls.values()].some((acl) => acl.vpcId === id && !acl.isDefault) ||
           [...this.groups.values()].some((group) => group.vpcId === id && group.name !== 'default');
         if (blocking)
           return ec2Error(
@@ -589,25 +635,66 @@ export class VpcEmulator {
                 ? [String(table.main)]
                 : name === 'route-table-id'
                   ? [table.id]
-                  : undefined,
+                  : name === 'association.subnet-id'
+                    ? [...this.subnets.values()]
+                        .filter((subnet) => subnet.routeTableId === table.id)
+                        .map((subnet) => subnet.id)
+                    : undefined,
           ),
         );
         return ec2Response(
           action,
           items(
             'routeTableSet',
-            found.map(
-              (table) =>
-                `${el('routeTableId', table.id)}${el('vpcId', table.vpcId)}${items(
-                  'routeSet',
-                  table.routes.map(
-                    (route) =>
-                      `${el('destinationCidrBlock', route.destination)}${el('gatewayId', route.gatewayId)}${el('state', 'active')}`,
-                  ),
-                )}${items('associationSet', table.main ? [`${el('routeTableAssociationId', `rtbassoc-${table.id.slice(4)}`)}${el('routeTableId', table.id)}${el('main', true)}`] : [])}${tagSet(table.tags)}`,
-            ),
+            found.map((table) => this.#routeTableXml(table)),
           ),
         );
+      }
+      case 'CreateRouteTable': {
+        const vpc = this.vpcs.get(p.get('VpcId') ?? '');
+        if (!vpc) return ec2Error('InvalidVpcID.NotFound', 'no such vpc');
+        const token = p.get('ClientToken');
+        const known = token ? this.routeTables.get(this.#tokens.get(token) ?? '') : undefined;
+        const table: EmuRouteTable = known ?? {
+          id: this.#id('rtb'),
+          vpcId: vpc.id,
+          main: false,
+          routes: vpc.cidrs.map((block) => ({ destination: block.cidr, gatewayId: 'local' })),
+          tags: tagsOf(p, 'route-table'),
+        };
+        this.routeTables.set(table.id, table);
+        if (token) this.#tokens.set(token, table.id);
+        return ec2Response(action, `<routeTable>${this.#routeTableXml(table)}</routeTable>`);
+      }
+      case 'DeleteRouteTable': {
+        const id = p.get('RouteTableId') ?? '';
+        const table = this.routeTables.get(id);
+        if (!table) return ec2Error('InvalidRouteTableID.NotFound', 'no such route table');
+        if (table.main || [...this.subnets.values()].some((subnet) => subnet.routeTableId === id))
+          return ec2Error(
+            'DependencyViolation',
+            `The routeTable '${id}' has dependencies and cannot be deleted.`,
+          );
+        this.routeTables.delete(id);
+        return ec2Response(action, el('return', true));
+      }
+      case 'AssociateRouteTable': {
+        const table = this.routeTables.get(p.get('RouteTableId') ?? '');
+        if (!table) return ec2Error('InvalidRouteTableID.NotFound', 'no such route table');
+        const subnet = this.subnets.get(p.get('SubnetId') ?? '');
+        if (!subnet) return ec2Error('InvalidSubnetID.NotFound', 'no such subnet');
+        if (subnet.vpcId !== table.vpcId)
+          return ec2Error(
+            'InvalidParameterValue',
+            'the route table and subnet are in different VPCs',
+          );
+        if (subnet.routeTableId !== undefined)
+          return ec2Error(
+            'Resource.AlreadyAssociated',
+            `the subnet ${subnet.id} is already associated with a route table`,
+          );
+        subnet.routeTableId = table.id;
+        return ec2Response(action, el('associationId', `rtbassoc-${subnet.id.slice(7)}`));
       }
       case 'CreateRoute':
       case 'ReplaceRoute': {
@@ -906,7 +993,11 @@ export class VpcEmulator {
                   ? [String(acl.isDefault)]
                   : name === 'network-acl-id'
                     ? [acl.id]
-                    : undefined,
+                    : name === 'association.subnet-id'
+                      ? [...this.subnets.values()]
+                          .filter((subnet) => this.#aclOf(subnet) === acl.id)
+                          .map((subnet) => subnet.id)
+                      : undefined,
             ),
         );
         return ec2Response(
@@ -916,6 +1007,57 @@ export class VpcEmulator {
             found.map((acl) => this.#naclXml(acl)),
           ),
         );
+      }
+      case 'CreateNetworkAcl': {
+        const vpc = this.vpcs.get(p.get('VpcId') ?? '');
+        if (!vpc) return ec2Error('InvalidVpcID.NotFound', 'no such vpc');
+        const token = p.get('ClientToken');
+        const known = token ? this.nacls.get(this.#tokens.get(token) ?? '') : undefined;
+        const acl: EmuNacl = known ?? {
+          id: this.#id('acl'),
+          vpcId: vpc.id,
+          isDefault: false,
+          entries: [],
+          tags: tagsOf(p, 'network-acl'),
+        };
+        this.nacls.set(acl.id, acl);
+        if (token) this.#tokens.set(token, acl.id);
+        return ec2Response(action, `<networkAcl>${this.#naclXml(acl)}</networkAcl>`);
+      }
+      case 'DeleteNetworkAcl': {
+        const id = p.get('NetworkAclId') ?? '';
+        const acl = this.nacls.get(id);
+        if (!acl) return ec2Error('InvalidNetworkAclID.NotFound', 'no such network ACL');
+        if (acl.isDefault)
+          return ec2Error('InvalidParameterValue', 'the default network ACL cannot be deleted');
+        if ([...this.subnets.values()].some((subnet) => subnet.aclId === id))
+          return ec2Error(
+            'DependencyViolation',
+            `The networkAcl '${id}' has dependencies and cannot be deleted.`,
+          );
+        this.nacls.delete(id);
+        return ec2Response(action, el('return', true));
+      }
+      case 'ReplaceNetworkAclAssociation': {
+        const acl = this.nacls.get(p.get('NetworkAclId') ?? '');
+        if (!acl) return ec2Error('InvalidNetworkAclID.NotFound', 'no such network ACL');
+        const association = p.get('AssociationId') ?? '';
+        const subnet = [...this.subnets.values()].find(
+          (candidate) => `aclassoc-${candidate.id.slice(7)}` === association,
+        );
+        if (!subnet)
+          return ec2Error(
+            'InvalidAssociationID.NotFound',
+            `The association ID '${association}' does not exist`,
+          );
+        if (subnet.vpcId !== acl.vpcId)
+          return ec2Error(
+            'InvalidParameterValue',
+            'the network ACL and subnet are in different VPCs',
+          );
+        if (acl.isDefault) delete subnet.aclId;
+        else subnet.aclId = acl.id;
+        return ec2Response(action, el('newAssociationId', association));
       }
       case 'CreateNetworkAclEntry':
       case 'ReplaceNetworkAclEntry': {
@@ -1032,6 +1174,12 @@ export class VpcEmulator {
       case 'DeleteVpcEndpoints': {
         const unsuccessful: string[] = [];
         for (const id of listOf(p, 'VpcEndpointId')) {
+          if (this.endpointDeleteFailures.has(id) && this.endpoints.has(id)) {
+            unsuccessful.push(
+              `${el('resourceId', id)}<error>${el('code', 'InvalidVpcEndpoint.InUse')}${el('message', 'in use')}</error>`,
+            );
+            continue;
+          }
           if (!this.endpoints.delete(id))
             unsuccessful.push(
               `${el('resourceId', id)}<error>${el('code', 'InvalidVpcEndpoint.NotFound')}${el('message', 'not found')}</error>`,
@@ -1103,6 +1251,16 @@ export class VpcEmulator {
         if (ids.every((id) => id.startsWith('i-'))) return this.#inner.handle(request);
         for (const id of ids)
           if (!this.#taggable(id)) return ec2Error('InvalidID', `The ID '${id}' is not valid`);
+        if (action === 'CreateTags')
+          for (const id of ids) {
+            const after = new Set(this.#taggable(id)!.keys());
+            for (let n = 1; p.has(`Tag.${n}.Key`); n++) after.add(p.get(`Tag.${n}.Key`)!);
+            if (after.size > this.tagLimit)
+              return ec2Error(
+                'TagLimitExceeded',
+                'The maximum number of Tags for a resource has been reached.',
+              );
+          }
         for (const id of ids) {
           const tags = this.#taggable(id)!;
           for (let n = 1; p.has(`Tag.${n}.Key`); n++) {
@@ -1146,6 +1304,30 @@ export class VpcEmulator {
     }
     instance.groups = groups;
     return ec2Response(action, el('return', true));
+  }
+
+  #routeTableXml(table: EmuRouteTable): string {
+    const routes = items(
+      'routeSet',
+      table.routes.map(
+        (route) =>
+          `${el('destinationCidrBlock', route.destination)}${el('gatewayId', route.gatewayId)}${el('state', 'active')}`,
+      ),
+    );
+    const associations = [
+      ...(table.main
+        ? [
+            `${el('routeTableAssociationId', `rtbassoc-${table.id.slice(4)}`)}${el('routeTableId', table.id)}${el('main', true)}`,
+          ]
+        : []),
+      ...[...this.subnets.values()]
+        .filter((subnet) => subnet.routeTableId === table.id)
+        .map(
+          (subnet) =>
+            `${el('routeTableAssociationId', `rtbassoc-${subnet.id.slice(7)}`)}${el('routeTableId', table.id)}${el('subnetId', subnet.id)}${el('main', false)}`,
+        ),
+    ];
+    return `${el('routeTableId', table.id)}${el('vpcId', table.vpcId)}${routes}${items('associationSet', associations)}${tagSet(table.tags)}`;
   }
 
   #endpointXml(endpoint: EmuEndpoint): string {

@@ -827,7 +827,7 @@ export const networkSchemas = {
       privateAccess: {
         type: 'boolean',
         description:
-          'Reach the cloud’s own services privately: Private Google Access on GCE, S3 and DynamoDB gateway endpoints on AWS. Default false',
+          'Reach the cloud’s own services privately: Private Google Access on GCE, S3 and DynamoDB gateway endpoints on AWS. Not on an adopted network. Default false',
       },
     },
     ['tenantId', 'networkId', 'name', 'region', 'cidr'],
@@ -1524,6 +1524,15 @@ export async function addSubnet(
     throw new ComputeError(
       'INVALID_INPUT',
       `Provider account ${provider.accountId} has region-wide subnets: a subnet names no zone`,
+    );
+  // Private service access changes routing the whole VPC shares (AWS gateway endpoints), and an
+  // adopted VPC is never changed: only a network better-compute made takes it.
+  if (input.privateAccess === true && network.external_name !== null)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `Network ${network.id} is adopted (${network.external_name}): privateAccess needs a network better-compute made`,
+      undefined,
+      { field: 'privateAccess', hint: 'leave privateAccess off on an adopted network' },
     );
   const overlap = await tx.query<{ name: string; cidr: string }>(
     `SELECT name, cidr::text AS cidr FROM network_subnets

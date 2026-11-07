@@ -179,7 +179,7 @@ async function world() {
     }
     return api.networks.get(acme, { tenantId, networkId });
   };
-  return { api, acme, tenantId, zonalPool, regionalPool, network, addSubnet, converge };
+  return { api, root, acme, tenantId, zonalPool, regionalPool, network, addSubnet, converge };
 }
 
 describe('vps networks on a zone-scoped provider', () => {
@@ -285,6 +285,34 @@ describe('private service access on a subnet', () => {
         privateAccess: 'yes',
       }),
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it('an adopted network refuses privateAccess at the API: the VPC is not better-compute’s', async () => {
+    const w = await world();
+    const adopted = await w.api.networks.adopt(w.root, {
+      tenantId: w.tenantId,
+      poolId: w.zonalPool,
+      externalNetwork: 'vpc-0123456789abcdef0',
+      name: 'legacy',
+    });
+    await expect(
+      w.addSubnet(adopted.id, {
+        region: 'us-west-2',
+        zone: 'us-west-2a',
+        cidr: '172.31.32.0/24',
+        privateAccess: true,
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      message: expect.stringMatching(/adopted/),
+    });
+    const view = await w.addSubnet(adopted.id, {
+      region: 'us-west-2',
+      zone: 'us-west-2a',
+      cidr: '172.31.32.0/24',
+      privateAccess: false,
+    });
+    expect(view.subnets[0]).not.toHaveProperty('privateAccess');
   });
 });
 
