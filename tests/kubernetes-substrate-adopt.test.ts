@@ -227,6 +227,15 @@ describe('substrate: adopt', () => {
       const error = await attempt.catch((thrown: unknown) => thrown);
       expect(isComputeError(error, 'INVALID_STATE')).toBe(true);
     }
+    // Nor are tenant credentials minted on an adopted cluster: their service accounts and bindings would outlive the
+    // substrate on a cluster better-compute no longer manages (teardown revokes only the substrate's own identity).
+    const calls = world.cloud.calls.length;
+    const refused = await world.api.kubernetesClusters
+      .credentials(world.root, { ...ref, role: 'view' })
+      .catch((thrown: unknown) => thrown);
+    expect(isComputeError(refused, 'INVALID_STATE')).toBe(true);
+    expect(String((refused as Error).message)).toMatch(/adopted/);
+    expect(world.cloud.calls.slice(calls).filter((call) => call.startsWith('credentials bc-u-'))).toEqual([]);
     await world.fixture.advance(3 * 3_600_000);
     const metered = await world.fixture.compute.context.sql.transaction((tx) =>
       meterClusters(tx, world!.fixture.compute.context.clock.now()),

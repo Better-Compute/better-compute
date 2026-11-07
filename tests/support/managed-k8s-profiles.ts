@@ -2,7 +2,7 @@ import { systemClock, type ProviderDefinition } from '@better-compute/core';
 import { awsProvider } from '@better-compute/provider-aws';
 import { digitaloceanProvider, resetBudgets } from '@better-compute/provider-digitalocean';
 import { gcpProvider } from '@better-compute/provider-gcp';
-import { AwsEmulator } from './aws-emulator/index.js';
+import { AwsEmulator, platformKeys } from './aws-emulator/index.js';
 import { Ec2Emulator } from './aws-emulator/ec2.js';
 import { DoEmulator } from './do-emulator/index.js';
 import { DoksEmulator } from './doks-emulator.js';
@@ -190,7 +190,14 @@ export function eksProfile(): ManagedKubernetesProfile {
       });
       return providerId('tenant-own');
     },
-    secrets: () => [],
+    // The ambient secret key, any STS-minted keys, and the eksTokens (the account principal's cluster-admin bearers).
+    secrets: () => [
+      platformKeys.secretAccessKey,
+      ...[...emu.sts.identities.values()].flatMap((identity) =>
+        identity.sessionToken === undefined ? [identity.secret] : [identity.secret, identity.sessionToken],
+      ),
+      ...kube.bearers,
+    ],
     accessObjects: (server) => kube.clusters.find(server)?.subjectObjects() ?? [],
   };
 }

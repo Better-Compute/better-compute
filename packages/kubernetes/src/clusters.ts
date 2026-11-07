@@ -627,7 +627,7 @@ const callContext = (deps: KubernetesDeps, idempotencyKey: string, signal?: Abor
  * `compute:kubernetes:connect` on the cluster; `edit` also needs `compute:kubernetes:update` and `admin`
  * `compute:kubernetes:delete` on it, decided here with the caller's own credential. The provider mints a token for
  * the caller's subject outside any transaction; the token is rendered into the kubeconfig and never stored, logged
- * or published.
+ * or published. An adopted cluster (a pool substrate's `cluster: { adopt }`) gets none (INVALID_STATE).
  */
 export async function issueCredentials(
   deps: KubernetesDeps,
@@ -659,6 +659,16 @@ export async function issueCredentials(
       account: await readAccount(tx, row.provider_account_id),
     };
   });
+  // An adopted cluster is not better-compute's: a credential's service account and binding (cluster-admin for
+  // `admin`) would stay there after the substrate is torn down, and teardown revokes only its own identity. The
+  // tenant reaches its own cluster with the provider's credentials.
+  if (cluster.adopted)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Cluster ${cluster.id} was adopted by pool ${cluster.substrate_pool_id}'s substrate; better-compute issues no credentials for a cluster it does not own: use the provider's own`,
+      undefined,
+      { poolId: cluster.substrate_pool_id, reason: 'adopted' },
+    );
   const usable =
     cluster.desired_state === 'present' &&
     cluster.provider_id !== null &&

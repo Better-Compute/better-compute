@@ -302,7 +302,7 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
         listed: kube.nodeList(server).map((node) => node.name),
         nodes: (
           await dev.database.query(
-            `SELECT n.id, n.connectivity, n.provision_state, n.no_schedule_reasons, k.node_name
+            `SELECT n.id, n.connectivity, n.provision_state, n.no_schedule_reasons, k.kubernetes_node
                FROM nodes n LEFT JOIN kubernetes_substrate_nodes k ON k.node_id = n.id WHERE n.pool_id = $1`,
             [poolId],
           )
@@ -395,6 +395,18 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
       });
     }, 120_000);
 
+    it('issues no tenant credential on the adopted cluster (it would outlive the substrate there)', async () => {
+      const { cluster_id: clusterId } = await substrate(poolId);
+      const refused = await api.kubernetesClusters
+        .credentials(dev.root, { tenantId: dev.rootTenantId, clusterId, role: 'admin' })
+        .catch((error: unknown) => error);
+      expect(refused).toMatchObject({ code: 'INVALID_STATE', details: { reason: 'adopted' } });
+      // Only the substrate's own subject holds access there.
+      expect(
+        profile.accessObjects(server).filter((object) => object.startsWith('ServiceAccount/') && !object.includes(substrateSubject)),
+      ).toEqual([]);
+    });
+
     it('pruning the pool leaves the cluster and its own node pool, and nothing of ours', async () => {
       await apply([], true);
       await until('the substrate to be deleted', async () => {
@@ -410,10 +422,25 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
       expect(await liveAllocations(poolId)).toEqual([]);
     }, 120_000);
 
-    it('never wrote a provider secret or a minted token to a log line or a substrate row', async () => {
-      const { rows } = await dev.database.query(`SELECT * FROM kubernetes_pool_substrates`);
-      const stored = JSON.stringify(rows) + logs.join('\n');
-      for (const secret of [...profile.secrets(), ...kube.tokens]) expect(stored).not.toContain(secret);
+    it('never wrote a provider secret or a minted token to a log line, a row, an event or an audit record', async () => {
+      const tables = [
+        'kubernetes_pool_substrates',
+        'kubernetes_clusters',
+        'kubernetes_node_pools',
+        'kubernetes_substrate_nodes',
+        'outbox',
+        'audit_events',
+      ];
+      let stored = logs.join('\n');
+      for (const table of tables) {
+        const { rows } = await dev.database.query(`SELECT * FROM ${table}`);
+        stored += JSON.stringify(rows);
+      }
+      // The check reads what it should: this run's events are there, and there are secrets to look for.
+      expect(stored).toContain('kubernetes.substrate.');
+      const secrets = [...profile.secrets(), ...kube.tokens];
+      expect(secrets.length).toBeGreaterThan(0);
+      for (const secret of secrets) expect(stored).not.toContain(secret);
     });
   });
 }

@@ -199,7 +199,9 @@ subject is left in it (only if better-compute made it). GKE, EKS and DOKS all im
 `better-compute:edit` ClusterRoles and the access-guard admission policy stay, since they grant nothing on their own
 (an EKS access entry the tenant made stays too). If bcd or that access cannot be removed from an adopted cluster (a
 refused credential, a failed delete), the substrate stays `deleting` and retries every 2 minutes. It never leaves a
-privileged DaemonSet or a cluster-admin identity behind unannounced.
+privileged DaemonSet or a cluster-admin identity behind unannounced. For the same reason `kubernetesClusters.credentials`
+refuses an adopted cluster (`INVALID_STATE`): a kubeconfig's service account and binding would outlive the substrate
+on a cluster better-compute no longer manages. Reach your own cluster with the provider's credentials.
 
 | Provider | Adopt id                    | What the cluster needs                                                                                                                                  |
 | -------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
