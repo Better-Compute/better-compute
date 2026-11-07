@@ -1343,7 +1343,8 @@ describe('leak detection', () => {
           accountId: world.accountId,
           instanceId: vm.id,
           tenantId: world.acmeTenant,
-          day: new Date(start).toISOString().slice(0, 10),
+          // The period's first UTC day: the month the row bills.
+          day: `${new Date(start).toISOString().slice(0, 7)}-01`,
           providerHours: hours,
           meteredHours: 120,
         },
@@ -1353,6 +1354,28 @@ describe('leak detection', () => {
       await world.fixture.advance(6 * HOUR);
       await world.scan();
       expect(await world.events('billing.leak')).toHaveLength(1);
+    });
+
+    it('a later read of the period with another start (the final invoice after the preview) raises no second leak', async () => {
+      const world = await costWorld({}, { periodRows: true });
+      const vm = await freshVm(world);
+      const tenDaysAgo = new Date(world.now() - 10 * DAY);
+      const monthStart = Date.UTC(tenDaysAgo.getUTCFullYear(), tenDaysAgo.getUTCMonth(), 1);
+      const end = world.now();
+      periodRow(world, vm.id, monthStart, end, Math.floor((end - monthStart) / HOUR));
+      await running(world, vm.id, end - 5 * DAY, end);
+      await world.scan();
+      const month = `${new Date(monthStart).toISOString().slice(0, 7)}-01`;
+      expect((await world.events('billing.leak')).map((event) => event.data.day)).toEqual([month]);
+      // The same row read again (a newer export) says the usage started a day later.
+      const row = world.ledger.rows[0]!;
+      row.usageStart = monthStart + DAY;
+      row.exportTime = end + HOUR;
+      row.quantity += 6;
+      await world.fixture.advance(6 * HOUR);
+      row.usageEnd = world.now();
+      await world.scan();
+      expect((await world.events('billing.leak')).map((event) => event.data.day)).toEqual([month]);
     });
 
     it('hours metered over the span raise nothing; 5% of the hours is tolerated', async () => {

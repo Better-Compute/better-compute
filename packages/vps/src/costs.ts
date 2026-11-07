@@ -1072,8 +1072,10 @@ export const periodLeakShare = 0.05;
  * billing period so far, so the hours it bills (its quantity, in an hour unit; other units are not checked) are
  * compared with the hours the instance's intervals (`running`, and `stopped` when the provider bills those) cover
  * of the row's span. Every row whose span overlaps the window is checked, since a month's row starts on its first
- * day. The rows of one instance and period start are summed; a gap over `max(toleranceHours, 5%)` of the billed
- * hours raises `billing.leak` once per instance and period (`day` = the period's first UTC day).
+ * day. The rows of one instance and billing month (the UTC month of their start) are summed; a gap over
+ * `max(toleranceHours, 5%)` of the billed hours raises `billing.leak` once per instance and period (`day` = the
+ * period's first UTC day, `YYYY-MM-01`), never the row's own start: a later read of the month whose start differs
+ * (the final invoice after the preview) is the same period, not another leak.
  */
 async function detectPeriodLeaks(
   deps: Pick<CostsDeps, 'events' | 'clock'>,
@@ -1117,7 +1119,7 @@ async function detectPeriodLeaks(
     billed.set(row.instance_id, entry);
     const start = Number(row.start_ms);
     const end = Number(row.end_ms);
-    const day = dayOf(start);
+    const day = `${dayOf(start).slice(0, 7)}-01`;
     const period = entry.periods.get(day);
     entry.periods.set(
       day,
