@@ -11,21 +11,21 @@ A resource's provider-side name is `bc-r-` and 24 characters of its id, and it c
 
 Every call is decided on `compute-cloud-resource/{id}` (or the tenant, for listings) with the attributes `kind`, `family` (`data`, `platform`, `ai`, `storage`, `network`, `edge`, `observability`), `provider`, `providerAccountId`, `poolId`, `region` and `projectId`. One action set serves every family; a policy narrows it by attribute: `StringEquals: { 'resource.family': 'data' }` allows a team managed databases without allowing App Platform.
 
-0 of 11 methods are served by @better-compute/server 0.3.0; the others are planned for the phase shown.
+All 11 methods are served by @better-compute/server 0.3.0.
 
-| Method                  | Kind     | Authorization                                               | Phase | Status  |
-| ----------------------- | -------- | ----------------------------------------------------------- | ----- | ------- |
-| [`kinds`](#kinds)       | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | planned |
-| [`catalog`](#catalog)   | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | planned |
-| [`signals`](#signals)   | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | planned |
-| [`create`](#create)     | mutation | `compute:cloud-resources:create` @ `compute-cloud-resource` | v1.0  | planned |
-| [`list`](#list)         | read     | `compute:cloud-resources:read` @ `compute-tenant` + items   | v1.0  | planned |
-| [`get`](#get)           | read     | `compute:cloud-resources:read` @ `compute-cloud-resource`   | v1.0  | planned |
-| [`update`](#update)     | mutation | `compute:cloud-resources:update` @ `compute-cloud-resource` | v1.0  | planned |
-| [`delete`](#delete)     | mutation | `compute:cloud-resources:delete` @ `compute-cloud-resource` | v1.0  | planned |
-| [`discover`](#discover) | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | planned |
-| [`adopt`](#adopt)       | mutation | `compute:cloud-resources:create` @ `compute-cloud-resource` | v1.0  | planned |
-| [`release`](#release)   | mutation | `compute:cloud-resources:delete` @ `compute-cloud-resource` | v1.0  | planned |
+| Method                  | Kind     | Authorization                                               | Phase | Status     |
+| ----------------------- | -------- | ----------------------------------------------------------- | ----- | ---------- |
+| [`kinds`](#kinds)       | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | registered |
+| [`catalog`](#catalog)   | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | registered |
+| [`signals`](#signals)   | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | registered |
+| [`create`](#create)     | mutation | `compute:cloud-resources:create` @ `compute-cloud-resource` | v1.0  | registered |
+| [`list`](#list)         | read     | `compute:cloud-resources:read` @ `compute-tenant` + items   | v1.0  | registered |
+| [`get`](#get)           | read     | `compute:cloud-resources:read` @ `compute-cloud-resource`   | v1.0  | registered |
+| [`update`](#update)     | mutation | `compute:cloud-resources:update` @ `compute-cloud-resource` | v1.0  | registered |
+| [`delete`](#delete)     | mutation | `compute:cloud-resources:delete` @ `compute-cloud-resource` | v1.0  | registered |
+| [`discover`](#discover) | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | registered |
+| [`adopt`](#adopt)       | mutation | `compute:cloud-resources:create` @ `compute-cloud-resource` | v1.0  | registered |
+| [`release`](#release)   | mutation | `compute:cloud-resources:delete` @ `compute-cloud-resource` | v1.0  | registered |
 
 ## kinds
 
@@ -36,7 +36,14 @@ Returns the kinds the pool's provider serves: for each its `family`, the JSON Sc
 - **Kind:** read
 - **Authorization:** `compute:cloud-resources:read` @ `compute-tenant`
 - **Module:** `cloud-resources`
-- **Phase:** v1.0 (planned)
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`   | string | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## catalog
 
@@ -47,7 +54,15 @@ Returns the installable applications the pool's provider lists (DigitalOcean's 1
 - **Kind:** read
 - **Authorization:** `compute:cloud-resources:read` @ `compute-tenant`
 - **Module:** `cloud-resources`
-- **Phase:** v1.0 (planned)
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field        | Type                            | Required | Constraints                                                       |
+| ------------ | ------------------------------- | -------- | ----------------------------------------------------------------- |
+| `tenantId`   | string                          | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`     | string                          | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `installsOn` | one of `instance`, `kubernetes` |          |                                                                   |
 
 ## signals
 
@@ -58,7 +73,15 @@ Returns the read-only signals the pool's provider raises about its resources (Di
 - **Kind:** read
 - **Authorization:** `compute:cloud-resources:read` @ `compute-tenant`
 - **Module:** `cloud-resources`
-- **Phase:** v1.0 (planned)
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field        | Type   | Required | Constraints                                                       |
+| ------------ | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`     | string | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `resourceId` | string |          | at most 56 characters; matches `^crs_[0-9a-hjkmnp-tv-z]{26,52}$`  |
 
 ## create
 
@@ -80,7 +103,21 @@ The resource id derives from the tenant, the caller and `idempotencyKey`. A retr
 - **Kind:** mutation
 - **Authorization:** `compute:cloud-resources:create` @ `compute-cloud-resource`
 - **Module:** `cloud-resources`
-- **Phase:** v1.0 (planned)
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field            | Type   | Required | Constraints                                                        |
+| ---------------- | ------ | -------- | ------------------------------------------------------------------ |
+| `tenantId`       | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `projectId`      | string |          | at most 56 characters; matches `^prj_[0-9a-hjkmnp-tv-z]{26,52}$`   |
+| `poolId`         | string | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$`  |
+| `kind`           | string | yes      | at most 64 characters; matches `^[a-z0-9]+(?:[.-][a-z0-9]+)*$`     |
+| `name`           | string | yes      | at most 63 characters; matches `^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$` |
+| `description`    | string |          | at most 256 characters                                             |
+| `parentId`       | string |          | at most 56 characters; matches `^crs_[0-9a-hjkmnp-tv-z]{26,52}$`   |
+| `spec`           | object | yes      |                                                                    |
+| `idempotencyKey` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
 
 ## list
 
@@ -91,7 +128,18 @@ Returns the tenant's resources, oldest first; `poolId`, `projectId`, `kind` and 
 - **Kind:** read
 - **Authorization:** `compute:cloud-resources:read` @ `compute-tenant` + items
 - **Module:** `cloud-resources`
-- **Phase:** v1.0 (planned)
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field            | Type                                                                           | Required | Constraints                                                       |
+| ---------------- | ------------------------------------------------------------------------------ | -------- | ----------------------------------------------------------------- |
+| `tenantId`       | string                                                                         | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`         | string                                                                         |          | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `projectId`      | string                                                                         |          | at most 56 characters; matches `^prj_[0-9a-hjkmnp-tv-z]{26,52}$`  |
+| `kind`           | string                                                                         |          | at most 64 characters; matches `^[a-z0-9]+(?:[.-][a-z0-9]+)*$`    |
+| `family`         | one of `storage`, `network`, `edge`, `data`, `platform`, `ai`, `observability` |          |                                                                   |
+| `includeDeleted` | boolean                                                                        |          | default `false`                                                   |
 
 ## get
 
@@ -102,7 +150,14 @@ Returns one resource with its spec, `providerId` once the provider accepted it, 
 - **Kind:** read
 - **Authorization:** `compute:cloud-resources:read` @ `compute-cloud-resource`
 - **Module:** `cloud-resources`
-- **Phase:** v1.0 (planned)
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field        | Type   | Required | Constraints                                                      |
+| ------------ | ------ | -------- | ---------------------------------------------------------------- |
+| `tenantId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`       |
+| `resourceId` | string | yes      | at most 56 characters; matches `^crs_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## update
 
@@ -113,7 +168,16 @@ Merges `spec` onto the stored spec and validates the result with the kind's mani
 - **Kind:** mutation
 - **Authorization:** `compute:cloud-resources:update` @ `compute-cloud-resource`
 - **Module:** `cloud-resources`
-- **Phase:** v1.0 (planned)
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field         | Type        | Required | Constraints                                                      |
+| ------------- | ----------- | -------- | ---------------------------------------------------------------- |
+| `tenantId`    | string      | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`       |
+| `resourceId`  | string      | yes      | at most 56 characters; matches `^crs_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `spec`        | object      |          |                                                                  |
+| `description` | string,null |          | at most 256 characters                                           |
 
 ## delete
 
@@ -124,7 +188,14 @@ Marks the resource and every resource living in it for deletion and returns it `
 - **Kind:** mutation
 - **Authorization:** `compute:cloud-resources:delete` @ `compute-cloud-resource`
 - **Module:** `cloud-resources`
-- **Phase:** v1.0 (planned)
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field        | Type   | Required | Constraints                                                      |
+| ------------ | ------ | -------- | ---------------------------------------------------------------- |
+| `tenantId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`       |
+| `resourceId` | string | yes      | at most 56 characters; matches `^crs_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## discover
 
@@ -135,7 +206,15 @@ Lists the kind's resources on the tenant's own account (at most 500): each with 
 - **Kind:** read
 - **Authorization:** `compute:cloud-resources:read` @ `compute-tenant`
 - **Module:** `cloud-resources`
-- **Phase:** v1.0 (planned)
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`   | string | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `kind`     | string | yes      | at most 64 characters; matches `^[a-z0-9]+(?:[.-][a-z0-9]+)*$`    |
 
 ## adopt
 
@@ -146,7 +225,20 @@ Takes over an unmanaged resource of the tenant's own account and returns it `pen
 - **Kind:** mutation
 - **Authorization:** `compute:cloud-resources:create` @ `compute-cloud-resource`
 - **Module:** `cloud-resources`
-- **Phase:** v1.0 (planned)
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field            | Type   | Required | Constraints                                                        |
+| ---------------- | ------ | -------- | ------------------------------------------------------------------ |
+| `tenantId`       | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `projectId`      | string |          | at most 56 characters; matches `^prj_[0-9a-hjkmnp-tv-z]{26,52}$`   |
+| `poolId`         | string | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$`  |
+| `kind`           | string | yes      | at most 64 characters; matches `^[a-z0-9]+(?:[.-][a-z0-9]+)*$`     |
+| `providerId`     | string | yes      | at most 200 characters                                             |
+| `name`           | string | yes      | at most 63 characters; matches `^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$` |
+| `description`    | string |          | at most 256 characters                                             |
+| `idempotencyKey` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
 
 ## release
 
@@ -157,4 +249,11 @@ Lets a resource go: the reconciler removes its ownership labels at the provider 
 - **Kind:** mutation
 - **Authorization:** `compute:cloud-resources:delete` @ `compute-cloud-resource`
 - **Module:** `cloud-resources`
-- **Phase:** v1.0 (planned)
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field        | Type   | Required | Constraints                                                      |
+| ------------ | ------ | -------- | ---------------------------------------------------------------- |
+| `tenantId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`       |
+| `resourceId` | string | yes      | at most 56 characters; matches `^crs_[0-9a-hjkmnp-tv-z]{26,52}$` |

@@ -485,19 +485,19 @@ Every call is authenticated (except public methods), refused before any database
 
 ### `cloudResources` (cloud-resources)
 
-| Method                    | Kind     | Authorization                                               | Phase | Status  |
-| ------------------------- | -------- | ----------------------------------------------------------- | ----- | ------- |
-| `cloudResources.kinds`    | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | planned |
-| `cloudResources.catalog`  | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | planned |
-| `cloudResources.signals`  | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | planned |
-| `cloudResources.create`   | mutation | `compute:cloud-resources:create` @ `compute-cloud-resource` | v1.0  | planned |
-| `cloudResources.list`     | read     | `compute:cloud-resources:read` @ `compute-tenant` + items   | v1.0  | planned |
-| `cloudResources.get`      | read     | `compute:cloud-resources:read` @ `compute-cloud-resource`   | v1.0  | planned |
-| `cloudResources.update`   | mutation | `compute:cloud-resources:update` @ `compute-cloud-resource` | v1.0  | planned |
-| `cloudResources.delete`   | mutation | `compute:cloud-resources:delete` @ `compute-cloud-resource` | v1.0  | planned |
-| `cloudResources.discover` | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | planned |
-| `cloudResources.adopt`    | mutation | `compute:cloud-resources:create` @ `compute-cloud-resource` | v1.0  | planned |
-| `cloudResources.release`  | mutation | `compute:cloud-resources:delete` @ `compute-cloud-resource` | v1.0  | planned |
+| Method                    | Kind     | Authorization                                               | Phase | Status     |
+| ------------------------- | -------- | ----------------------------------------------------------- | ----- | ---------- |
+| `cloudResources.kinds`    | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | registered |
+| `cloudResources.catalog`  | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | registered |
+| `cloudResources.signals`  | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | registered |
+| `cloudResources.create`   | mutation | `compute:cloud-resources:create` @ `compute-cloud-resource` | v1.0  | registered |
+| `cloudResources.list`     | read     | `compute:cloud-resources:read` @ `compute-tenant` + items   | v1.0  | registered |
+| `cloudResources.get`      | read     | `compute:cloud-resources:read` @ `compute-cloud-resource`   | v1.0  | registered |
+| `cloudResources.update`   | mutation | `compute:cloud-resources:update` @ `compute-cloud-resource` | v1.0  | registered |
+| `cloudResources.delete`   | mutation | `compute:cloud-resources:delete` @ `compute-cloud-resource` | v1.0  | registered |
+| `cloudResources.discover` | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | registered |
+| `cloudResources.adopt`    | mutation | `compute:cloud-resources:create` @ `compute-cloud-resource` | v1.0  | registered |
+| `cloudResources.release`  | mutation | `compute:cloud-resources:delete` @ `compute-cloud-resource` | v1.0  | registered |
 
 ### `kubernetesSubstrates` (kubernetes)
 

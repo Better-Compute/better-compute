@@ -179,6 +179,17 @@
       ]
     },
     {
+      "name": "cloud-resources",
+      "groups": ["cloudResources"],
+      "migrations": [
+        "cloud-resources/0001_resources",
+        "cloud-resources/0002_metering",
+        "cloud-resources/0003_identity",
+        "cloud-resources/0004_ensure_sent",
+        "cloud-resources/0005_network_ids"
+      ]
+    },
+    {
       "name": "events",
       "groups": ["webhooks"],
       "migrations": [
@@ -210,6 +221,8 @@
     "capacity.reservations",
     "capacity.rollup",
     "capacity.usage",
+    "cloud.resources",
+    "cloud.resources.usage",
     "command-sweeper",
     "drain",
     "event-subscribers",

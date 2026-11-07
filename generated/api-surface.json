@@ -820,9 +820,68 @@
       "resource": "compute-cloud-resource",
       "alternatives": [],
       "list": false,
-      "status": "planned",
+      "status": "registered",
       "phase": "v1.0",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The project the resource belongs to"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool on the tenant’s own account"
+          },
+          "kind": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$",
+            "maxLength": 64,
+            "description": "The resource’s kind"
+          },
+          "providerId": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "The provider’s id of the resource, as cloudResources.discover lists it"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$",
+            "maxLength": 63,
+            "description": "The resource name, unique per kind in the tenant, e.g. orders-db"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "What the resource is for"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "kind",
+          "providerId",
+          "name",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
     },
     "cloudResources.catalog": {
       "route": "POST /api/compute/cloudResources/catalog",
@@ -831,9 +890,37 @@
       "resource": "compute-tenant",
       "alternatives": [],
       "list": false,
-      "status": "planned",
+      "status": "registered",
       "phase": "v1.0",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool owned by or offered to the tenant, whose account serves cloud resources"
+          },
+          "installsOn": {
+            "enum": [
+              "instance",
+              "kubernetes"
+            ],
+            "description": "Only what installs there: instance (an image) or kubernetes (a cluster add-on)"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId"
+        ],
+        "additionalProperties": false
+      }
     },
     "cloudResources.create": {
       "route": "POST /api/compute/cloudResources/create",
@@ -842,9 +929,73 @@
       "resource": "compute-cloud-resource",
       "alternatives": [],
       "list": false,
-      "status": "planned",
+      "status": "registered",
       "phase": "v1.0",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The project the resource belongs to"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool owned by or offered to the tenant, whose account serves cloud resources"
+          },
+          "kind": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$",
+            "maxLength": 64,
+            "description": "A kind the pool’s provider serves (cloudResources.kinds), e.g. do.database.pg"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$",
+            "maxLength": 63,
+            "description": "The resource name, unique per kind in the tenant, e.g. orders-db"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "What the resource is for"
+          },
+          "parentId": {
+            "type": "string",
+            "pattern": "^crs_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "For a kind with a parent (a database user): the resource it lives in"
+          },
+          "spec": {
+            "type": "object",
+            "description": "The kind’s spec, validated by its manifest (kinds lists its schema)"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "kind",
+          "name",
+          "spec",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
     },
     "cloudResources.delete": {
       "route": "POST /api/compute/cloudResources/delete",
@@ -853,9 +1004,30 @@
       "resource": "compute-cloud-resource",
       "alternatives": [],
       "list": false,
-      "status": "planned",
+      "status": "registered",
       "phase": "v1.0",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "resourceId": {
+            "type": "string",
+            "pattern": "^crs_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The cloud resource"
+          }
+        },
+        "required": [
+          "tenantId",
+          "resourceId"
+        ],
+        "additionalProperties": false
+      }
     },
     "cloudResources.discover": {
       "route": "POST /api/compute/cloudResources/discover",
@@ -864,9 +1036,37 @@
       "resource": "compute-tenant",
       "alternatives": [],
       "list": false,
-      "status": "planned",
+      "status": "registered",
       "phase": "v1.0",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool on the tenant’s own account"
+          },
+          "kind": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$",
+            "maxLength": 64,
+            "description": "The kind to look for"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "kind"
+        ],
+        "additionalProperties": false
+      }
     },
     "cloudResources.get": {
       "route": "POST /api/compute/cloudResources/get",
@@ -875,9 +1075,30 @@
       "resource": "compute-cloud-resource",
       "alternatives": [],
       "list": false,
-      "status": "planned",
+      "status": "registered",
       "phase": "v1.0",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "resourceId": {
+            "type": "string",
+            "pattern": "^crs_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The cloud resource"
+          }
+        },
+        "required": [
+          "tenantId",
+          "resourceId"
+        ],
+        "additionalProperties": false
+      }
     },
     "cloudResources.kinds": {
       "route": "POST /api/compute/cloudResources/kinds",
@@ -886,9 +1107,30 @@
       "resource": "compute-tenant",
       "alternatives": [],
       "list": false,
-      "status": "planned",
+      "status": "registered",
       "phase": "v1.0",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool owned by or offered to the tenant, whose account serves cloud resources"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId"
+        ],
+        "additionalProperties": false
+      }
     },
     "cloudResources.list": {
       "route": "POST /api/compute/cloudResources/list",
@@ -897,9 +1139,58 @@
       "resource": "compute-tenant",
       "alternatives": [],
       "list": true,
-      "status": "planned",
+      "status": "registered",
       "phase": "v1.0",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "Only this pool’s resources"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "Only this project’s resources"
+          },
+          "kind": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$",
+            "maxLength": 64,
+            "description": "Only this kind"
+          },
+          "family": {
+            "enum": [
+              "storage",
+              "network",
+              "edge",
+              "data",
+              "platform",
+              "ai",
+              "observability"
+            ],
+            "description": "Only this family"
+          },
+          "includeDeleted": {
+            "type": "boolean",
+            "default": false,
+            "description": "Include deleted and released resources"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
     },
     "cloudResources.release": {
       "route": "POST /api/compute/cloudResources/release",
@@ -908,9 +1199,30 @@
       "resource": "compute-cloud-resource",
       "alternatives": [],
       "list": false,
-      "status": "planned",
+      "status": "registered",
       "phase": "v1.0",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "resourceId": {
+            "type": "string",
+            "pattern": "^crs_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The cloud resource"
+          }
+        },
+        "required": [
+          "tenantId",
+          "resourceId"
+        ],
+        "additionalProperties": false
+      }
     },
     "cloudResources.signals": {
       "route": "POST /api/compute/cloudResources/signals",
@@ -919,9 +1231,36 @@
       "resource": "compute-tenant",
       "alternatives": [],
       "list": false,
-      "status": "planned",
+      "status": "registered",
       "phase": "v1.0",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool owned by or offered to the tenant, whose account serves cloud resources"
+          },
+          "resourceId": {
+            "type": "string",
+            "pattern": "^crs_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "Only the signals about this cloud resource"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId"
+        ],
+        "additionalProperties": false
+      }
     },
     "cloudResources.update": {
       "route": "POST /api/compute/cloudResources/update",
@@ -930,9 +1269,42 @@
       "resource": "compute-cloud-resource",
       "alternatives": [],
       "list": false,
-      "status": "planned",
+      "status": "registered",
       "phase": "v1.0",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "resourceId": {
+            "type": "string",
+            "pattern": "^crs_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The cloud resource"
+          },
+          "spec": {
+            "type": "object",
+            "description": "Merged onto the stored spec; a change to a field the kind cannot change in place is refused (replaceRequired)"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 256,
+            "description": "What the resource is for; null clears it"
+          }
+        },
+        "required": [
+          "tenantId",
+          "resourceId"
+        ],
+        "additionalProperties": false
+      }
     },
     "commandBatches.approve": {
       "route": "POST /api/compute/commandBatches/approve",
