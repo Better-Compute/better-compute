@@ -1,4 +1,4 @@
-The records of a tenant's [DNS zone](/docs/reference/api/dnsZones). Every method names the zone and is decided on it: reading takes `compute:dns:read`, everything else `compute:dns:manage`, on `provider-dns-zone/{zoneId}`. Records book no quota (at most 500 per zone) and do not bill. The provider's ownership marker (`_better-compute`) and its apex NS and SOA records are never touched.
+The records of a tenant's [DNS zone](/docs/reference/api/dns-zones). Every method names the zone and is decided on it: reading takes `compute:dns:read`, everything else `compute:dns:manage`, on `provider-dns-zone/{zoneId}`. Records book no quota (at most 500 per zone) and do not bill. The provider's ownership marker (`_better-compute`) and its apex NS and SOA records are never touched.
 
 ## create
 

@@ -1,4 +1,4 @@
-DNS zones on a provider account (DigitalOcean Domains first), with their [records](/docs/reference/api/dnsRecords). Every call records what the tenant wants and returns at once; the `vps.provider-resources` reconciler converges the provider through `ProviderImpl.dns`. Reading takes `compute:dns:read`, everything else `compute:dns:manage`, on `provider-dns-zone/{id}`. Zones book no quota (at most 50 per tenant) and do not bill.
+DNS zones on a provider account (DigitalOcean Domains first), with their [records](/docs/reference/api/dns-records). Every call records what the tenant wants and returns at once; the `vps.provider-resources` reconciler converges the provider through `ProviderImpl.dns`. Reading takes `compute:dns:read`, everything else `compute:dns:manage`, on `provider-dns-zone/{id}`. Zones book no quota (at most 50 per tenant) and do not bill.
 
 ## create
 
