@@ -188,6 +188,22 @@ describe('vps.external-metrics', () => {
     );
   });
 
+  it('writes no rows for an instance deleted while the provider was read', async () => {
+    const { emu, fixture, all, rows, run } = await world({ externalMetrics: true, instances: 2 });
+    const [gone, kept] = all as [{ id: string }, { id: string }];
+    // The instance is deleted between the page of live instances and the write (pglite runs queries in order, so
+    // the update lands before the write's transaction).
+    emu.beforeAction('GET /monitoring/metrics/droplet/*', () => {
+      void fixture.database.query(`UPDATE instances SET state = 'deleted' WHERE id = $1`, [gone.id]);
+    });
+    await run();
+    const stored = await rows();
+    expect(stored.length).toBe(3);
+    expect(new Set(stored.map((row: { instance_id: string }) => row.instance_id))).toEqual(
+      new Set([kept.id]),
+    );
+  });
+
   it('drops the rows of an instance that is no longer live', async () => {
     const { fixture, created, rows, run } = await world();
     await run();

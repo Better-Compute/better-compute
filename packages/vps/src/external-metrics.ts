@@ -197,11 +197,14 @@ async function readAccountMetrics(
       [account.id],
     );
     if (kept.length === 0) return;
-    // A sample older than the stored one is ignored.
+    // A sample older than the stored one is ignored. Only instances still live on this account are written: one
+    // deleted, moved or gone during the read (which may take most of a minute) gets no rows back, and a row the
+    // DELETE above just purged is not written again (nor can a vanished instance fail the write on its key).
     await tx.query(
       `INSERT INTO instance_external_metrics (instance_id, metric, source, account_id, value, at)
        SELECT s.instance_id, s.metric, $1, $2, s.value, to_timestamp(s.at / 1000)
          FROM unnest($3::text[], $4::text[], $5::float8[], $6::float8[]) AS s(instance_id, metric, value, at)
+         JOIN instances i ON i.id = s.instance_id AND i.provider_account_id = $2 AND ${liveInstance('i.')}
        ON CONFLICT (instance_id, metric) DO UPDATE
          SET value = EXCLUDED.value, at = EXCLUDED.at, source = EXCLUDED.source,
              account_id = EXCLUDED.account_id, updated_at = compute_now()
