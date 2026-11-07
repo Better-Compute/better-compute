@@ -1144,7 +1144,8 @@ in one region: a fleet in several regions is several accounts.
   a resource with it, filtered to the caller's own linked account), which [provider costs](#billing) read. Cost
   Explorer groups only by active cost allocation tags: activate them in the payer account with
   `better-compute aws cost-allocation-tags --activate --yes`, or nothing is attributed to instances and budgets track
-  nothing. `listPrices` reads the AWS Price List (partition `aws`), splitting each family's instance price into vCPU
+  nothing. Costs are read in partition `aws` only, and need `vps({ costs: { lookbackDays } })` of 3 or more (the
+  default): a shorter window is refused. `listPrices` reads the AWS Price List (partition `aws`), splitting each family's instance price into vCPU
   and GiB prices that compose back to it, for price proposals. `aws iam-policy --costs --prices` adds the permissions.
 - **Governance.** These commands run as the operator's own AWS identity; `aws governance-policy` prints its IAM
   policy, with each action that changes AWS opt-in. `aws organization-accounts` renders FleetConfig provider accounts

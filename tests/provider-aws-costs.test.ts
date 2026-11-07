@@ -266,6 +266,26 @@ describe('provider-aws costs (Cost Explorer)', () => {
     );
   });
 
+  it('a window up to now that cannot cover two full days is refused, not read as nothing', async () => {
+    const { emu, ce, read, today } = await world();
+    ce.lines.push(line({ day: '2026-09-30' }), line({ day: '2026-09-29' }));
+    emu.clock.advance(6 * 3_600_000);
+    const now = today + 6 * 3_600_000;
+    // vps lookbackDays 1 and 2: from is inside a day, so only 0 or 1 full days precede today
+    for (const days of [1, 2]) {
+      const refused = await read(now - days * DAY, now).catch((error: unknown) => error);
+      expect(isComputeError(refused, 'INVALID_CONFIG')).toBe(true);
+      expect((refused as { details?: { reason?: string } }).details?.reason).toBe('costs-window');
+      expect((refused as Error).message).toContain('lookbackDays');
+    }
+    expect(ce.queries).toHaveLength(0);
+    // the default (3) reads each finished day twice
+    expect(await read(now - 3 * DAY, now)).toHaveLength(2);
+    // a window that ends in the past is read as asked, however short
+    const past = await read(Date.UTC(2026, 8, 29), Date.UTC(2026, 8, 30));
+    expect(past.map((record) => record.usageStart)).toEqual([Date.UTC(2026, 8, 29)]);
+  });
+
   it('row ids are stable across reads and amounts are exact micros', async () => {
     const { emu, ce, read, today } = await world();
     ce.lines.push(line({ cost: '0.1' }), line({ cost: '0.2', usageType: 'BoxUsage:c7i.large' }));

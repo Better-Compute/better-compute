@@ -440,6 +440,16 @@ export function costExplorerCosts(
     const start = ceilDay(window.from);
     // The current UTC day is incomplete in Cost Explorer: never read.
     const end = Math.min(ceilDay(window.to), floorDay(now));
+    // A window reaching today must hold two full days before it, so each day is read twice (the day after, while
+    // Cost Explorer still fills it in, and once more): vps's lookbackDays 1 or 2 would read nothing or each day
+    // once. Refused, never yielded as no rows.
+    if (ceilDay(window.to) >= floorDay(now) && floorDay(now) - start < 2 * DAY)
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'AWS costs need a window of two full days before today: set vps({ costs: { lookbackDays } }) to 3 or more',
+        undefined,
+        { provider: 'aws', reason: 'costs-window' },
+      );
     if (end <= start) return;
     const stale = (day: number) => {
       const cached = days.get(day);
