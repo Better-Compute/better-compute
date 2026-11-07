@@ -12,6 +12,8 @@ export interface EksIssue {
 export interface EksCluster {
   name: string;
   arn?: string;
+  /** When the cluster was created (epoch seconds; a timestamp string in some answers). */
+  createdAt?: number | string;
   version?: string;
   platformVersion?: string;
   endpoint?: string;

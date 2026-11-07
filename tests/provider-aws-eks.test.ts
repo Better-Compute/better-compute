@@ -734,6 +734,50 @@ describe('eks credentials', () => {
     expect(isComputeError(error, 'UNAVAILABLE')).toBe(true);
   });
 
+  it('keeps a new entry UNAVAILABLE while it propagates, past the first retry', async () => {
+    const s = await setup();
+    const id = await readyCluster(s);
+    s.eks.accessEntries.clear();
+    s.eks.propagationMs = 20_000;
+    const request = { subject: 'bc-u-erin', role: 'view', ttlSeconds: 600 } as const;
+    const first = await rejection(s.k8s.credentials(id, request, s.ctx()));
+    expect(isComputeError(first, 'UNAVAILABLE'), String(first)).toBe(true);
+    // The retry finds the entry and its policy in place, and the API server still refuses it.
+    s.emu.clock.advance(6_000);
+    const second = await rejection(s.k8s.credentials(id, request, s.ctx()));
+    expect(isComputeError(second, 'UNAVAILABLE'), String(second)).toBe(true);
+    expect(s.eks.calls('CreateAccessEntry')).toHaveLength(1);
+    s.emu.clock.advance(15_000);
+    await expect(s.k8s.credentials(id, request, s.ctx())).resolves.toMatchObject({ token: expect.any(String) });
+    // Long after the entry was made, a refusal is final.
+    s.emu.clock.advance(120_000);
+    s.kube.failWith = 403;
+    const denied = await rejection(s.k8s.credentials(id, request, s.ctx()));
+    expect(isComputeError(denied, 'ACCESS_DENIED'), String(denied)).toBe(true);
+  });
+
+  it('writes the guard and better-compute:edit again on a cluster recreated under its name', async () => {
+    for (const outOfBand of [true, false]) {
+      const s = await setup();
+      const id = await readyCluster(s);
+      await s.k8s.credentials(id, { subject: 'bc-u-alice', role: 'edit', ttlSeconds: 600 }, s.ctx());
+      expect(s.kube.admissionPolicies.has('better-compute-access-guard')).toBe(true);
+      // Gone: deleted by another process (or this one, after the cluster was already gone).
+      s.eks.clusters.delete('bc-k-one');
+      for (const key of [...s.eks.accessEntries.keys()]) if (key.startsWith('bc-k-one|')) s.eks.accessEntries.delete(key);
+      if (!outOfBand) await expect(s.k8s.deleteCluster(id, s.ctx())).resolves.toMatchObject({ state: 'deleted' });
+      for (const store of [s.kube.clusterRoles, s.kube.admissionPolicies, s.kube.admissionBindings, s.kube.bindings]) store.clear();
+      s.kube.namespaces.clear();
+      s.kube.serviceAccounts.clear();
+      s.emu.clock.advance(60_000);
+      const again = await readyCluster(s);
+      expect(again).toBe(id);
+      await s.k8s.credentials(id, { subject: 'bc-u-alice', role: 'edit', ttlSeconds: 600 }, s.ctx());
+      expect(s.kube.clusterRoles.has('better-compute:edit'), `outOfBand=${outOfBand}`).toBe(true);
+      expect(s.kube.admissionPolicies.has('better-compute-access-guard'), `outOfBand=${outOfBand}`).toBe(true);
+    }
+  });
+
   it('refuses an aws-auth-only cluster, a cluster not ready, and malformed requests', async () => {
     const s = await setup();
     const id = await readyCluster(s);
