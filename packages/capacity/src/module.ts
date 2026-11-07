@@ -31,7 +31,12 @@ import {
 } from '@better-compute/core';
 import { readAllocation, releaseAllocation } from './bookings.js';
 import { capacityMigrations } from './migrations.js';
-import { isAwsRoleGlob, maxAwsRoleGlobStars, maxAwsRoleGlobs } from './workload-roles.js';
+import {
+  isAwsRoleGlob,
+  maxAwsRoleGlobStars,
+  maxAwsRoleGlobs,
+  roleBearingHosts,
+} from './workload-roles.js';
 import { nodeResourcesWork, syncNodeResources } from './host-resources.js';
 import { describeCreateReservation, describeExtendReservation } from './describe.js';
 import { planGangs } from './gang.js';
@@ -1229,6 +1234,17 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
           );
           for (const agent of agents) await context.desired.invalidate(tx, agent.id);
         }
+        // AWS A7: a host's instance specs carry the AWS role the pool allows (InstanceSpec.awsRole).
+        // When the pool's workload settings change, recompute the specs of the hosts running its
+        // role-bearing instances now rather than at the level-triggered resync (credentials bcd
+        // already holds stay valid until they expire; the broker refuses new STS tokens at once).
+        const workload = (policy: PoolPolicy) => {
+          const record = policy as Record<string, unknown>;
+          return JSON.stringify([record.workloadIdentity ?? null, record.workloadRoles ?? null]);
+        };
+        if (pool.class === 'vps-host' && workload(pool.policy) !== workload(next.policy))
+          for (const host of await roleBearingHosts(tx, pool.id))
+            await context.desired.invalidate(tx, host);
         // Every tenant view of the pool carries the new attributes.
         const offers = await tx.query<{ tenant_id: string }>(
           `SELECT tenant_id FROM pool_offers WHERE pool_id = $1`,

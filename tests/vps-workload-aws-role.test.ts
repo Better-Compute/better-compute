@@ -71,6 +71,8 @@ const broker: SecretBroker = {
 };
 
 const queue = new Set<string>();
+/** Nodes whose desired spec was invalidated (context.desired.invalidate). */
+const invalidated: string[] = [];
 function moduleContext(sql: SqlExecutor): ModuleContext {
   return {
     sql,
@@ -85,7 +87,11 @@ function moduleContext(sql: SqlExecutor): ModuleContext {
         if (kind === instanceWork) queue.add(key);
       },
     },
-    desired: { async invalidate() {} },
+    desired: {
+      async invalidate(_tx: SqlTx, nodeId: string) {
+        invalidated.push(nodeId);
+      },
+    },
   } as unknown as ModuleContext;
 }
 
@@ -372,6 +378,41 @@ describe('instance AWS workload roles (A7)', () => {
       [poolId],
     );
     expect((await read()).find((spec) => spec.id === id)?.awsRole).toBe(ALLOWED);
+  });
+
+  it('pools.update re-sends the spec of hosts running role-bearing instances when workload roles change', async () => {
+    const policy = (
+      await db.query<{ policy: Record<string, unknown> }>('SELECT policy FROM pools WHERE id = $1', [
+        poolId,
+      ])
+    ).rows[0]!.policy;
+    const update = (next: Record<string, unknown>) =>
+      run(capacityApi.pools!.update!, { tenantId: 'root', poolId, policy: next }, root);
+    invalidated.length = 0;
+    // The same workload settings: no host spec is recomputed.
+    await update(policy);
+    expect(invalidated).toEqual([]);
+    // The pool drops the role: the host converges on invalidation, not at the next resync.
+    await update({ ...policy, workloadRoles: { aws: ['arn:aws:iam::222222222222:role/other'] } });
+    expect(invalidated).toEqual([NODE]);
+    invalidated.length = 0;
+    await update({ ...policy, workloadIdentity: false, workloadRoles: { aws: [] } });
+    expect(invalidated).toEqual([NODE]);
+    invalidated.length = 0;
+    await update(policy);
+    expect(invalidated).toEqual([NODE]);
+    // The pool without role-bearing instances invalidates nothing.
+    invalidated.length = 0;
+    await run(
+      capacityApi.pools!.update!,
+      { tenantId: 'root', poolId: offPoolId, policy: { workloadIdentity: true } },
+      root,
+    );
+    expect(invalidated).toEqual([]);
+    await db.query(`UPDATE pools SET policy = $2::jsonb WHERE id = $1`, [
+      offPoolId,
+      JSON.stringify({ workloadRoles: { aws: [ALLOWED] } }),
+    ]);
   });
 
   it('an idempotency key reused with another role is CONFLICT', async () => {

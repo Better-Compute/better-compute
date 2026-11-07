@@ -1,3 +1,5 @@
+import type { SqlTx } from '@better-compute/core';
+
 // AWS A7 workload roles: a pool's `policy.workloadRoles.aws` allow-list and the matcher that every
 // reader shares. capacity checks the list at pools.create/update, vps at instances.create admission
 // and on every instance spec build, and the workload broker before it mints a token for STS. All of
@@ -63,6 +65,29 @@ export function awsRoleAllowed(list: unknown, arn: string): boolean {
   return list
     .slice(0, maxAwsRoleGlobs)
     .some((entry) => isAwsRoleGlob(entry) && awsRoleGlobMatches(entry, arn));
+}
+
+/**
+ * The hosts running a pool's role-bearing instances (vps `instances.aws_role_arn`), whose desired
+ * spec carries an AWS role. Empty without the vps module (no `instances` table, or no role column).
+ */
+export async function roleBearingHosts(tx: SqlTx, poolId: string): Promise<string[]> {
+  const present = (
+    await tx.query<{ present: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_schema = current_schema() AND table_name = 'instances'
+                         AND column_name = 'aws_role_arn') AS present`,
+    )
+  ).rows[0]?.present;
+  if (!present) return [];
+  const { rows } = await tx.query<{ node_id: string }>(
+    `SELECT DISTINCT node_id FROM instances
+      WHERE pool_id = $1 AND node_id IS NOT NULL AND aws_role_arn IS NOT NULL
+        AND state <> 'deleted' AND NOT draft
+      ORDER BY node_id`,
+    [poolId],
+  );
+  return rows.map((row) => row.node_id);
 }
 
 /** A pool policy's workload identity switch and AWS allow-list, as stored. */
