@@ -49,6 +49,8 @@ export interface ManagedKubernetesProfile {
    * are seen after the cluster is gone): GKE instance groups, EKS node groups, DOKS worker Droplets.
    */
   machines(cluster: string): string[];
+  /** Whether a cluster's node pool is Spot (preemptible) capacity at the provider. */
+  spotPool(cluster: string, pool: string): boolean;
   /** A running cluster the tenant made itself (one node pool of its own); returns its provider id. */
   seedCluster(): string;
   /** Secrets the provider side holds (account tokens): never in a row, an event or a log line. */
@@ -99,6 +101,8 @@ export function gkeProfile(): ManagedKubernetesProfile {
     nodePools: (cluster) => ((gke.clusters.get(cluster)?.nodePools ?? []) as Json[]).map((pool) => pool.name as string),
     machines: (cluster) =>
       [...gke.instanceGroupSizes.keys()].filter((key) => key.split('/')[1]!.startsWith(`gke-${cluster.split('/').pop()}-`)),
+    spotPool: (cluster, pool) =>
+      ((gke.clusters.get(cluster)?.nodePools ?? []) as Json[]).find((entry) => entry.name === pool)?.config?.spot === true,
     seedCluster() {
       gke.clusters.set('us-central1/tenant-own', {
         name: 'tenant-own',
@@ -173,6 +177,9 @@ export function eksProfile(): ManagedKubernetesProfile {
       [...eks.nodegroups.values()]
         .filter((group) => providerId(group.cluster) === cluster)
         .map((group) => `${group.nodegroupName}/${group.status}`),
+    spotPool: (cluster, pool) =>
+      [...eks.nodegroups.values()].find((group) => providerId(group.cluster) === cluster && group.nodegroupName === pool)
+        ?.capacityType === 'SPOT',
     seedCluster() {
       eks.clusters.set('tenant-own', {
         name: 'tenant-own',
@@ -224,7 +231,13 @@ export function doksProfile(): ManagedKubernetesProfile {
     region: 'tor1',
     zones: 1,
     flavor: { machineType: 'gpu-h100x8-640gb', gpus: { type: 'nvidia-h100', count: 8 } },
-    accountConfig: async (putSecret) => ({ token: await putSecret('doks-account', 'do-token'), regions: ['tor1'] }),
+    // Spot node pools are a DigitalOcean preview: the account opts in to both.
+    accountConfig: async (putSecret) => ({
+      token: await putSecret('doks-account', 'do-token'),
+      regions: ['tor1'],
+      allowSpot: true,
+      previews: true,
+    }),
     nodes(server) {
       const nodes: FakeKubeNode[] = [];
       for (const cluster of doks.clusters.values() as Iterable<Json>) {
@@ -246,6 +259,8 @@ export function doksProfile(): ManagedKubernetesProfile {
       [...doks.do.state.droplets.values()]
         .filter((droplet: Json) => (droplet.tags as string[]).includes(`k8s:${cluster}`))
         .map((droplet: Json) => String(droplet.name)),
+    spotPool: (cluster, pool) =>
+      ((doks.clusters.get(cluster)?.node_pools ?? []) as Json[]).find((entry) => entry.name === pool)?.spot === true,
     // The tenant turned DigitalOcean's own GPU device plugins off (DO-D18), as adopting for a GPU pool needs.
     seedCluster: () =>
       doks.seedCluster({

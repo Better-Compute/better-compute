@@ -1,7 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Logger } from '@better-compute/core';
 import { fleetModule, type FleetConfig } from '@better-compute/fleet';
-import { kubernetes, substrateNodePoolName, substratePoolLabel, substrateSubject } from '@better-compute/kubernetes';
+import {
+  kubernetes,
+  substrateCapacityLabel,
+  substrateNodePoolName,
+  substratePoolLabel,
+  substrateSubject,
+} from '@better-compute/kubernetes';
 import { kubernetesSubstrateAgent } from '@better-compute/provider-kubernetes';
 import { cdiSpecPath, createDevStack, type DevStack } from '@better-compute/testing';
 import { vps } from '@better-compute/vps';
@@ -39,11 +45,19 @@ async function until<T>(
 const accountName = 'managed-k8s';
 const siteName = 'k8s';
 
+/** A pool of the document: its on-demand `h100` flavor's nodes, and with `spot` an `h100-spot` Spot flavor's. */
+export interface FleetPoolSpec {
+  name: string;
+  nodes: number;
+  spot?: number;
+  adopt?: string;
+}
+
 /** The fleet pool document: identical for every provider but for the account and what the account calls things. */
 export function fleetPoolDocument(
   profile: Pick<ManagedKubernetesProfile, 'provider' | 'region' | 'flavor'>,
   accountConfig: Record<string, unknown>,
-  pools: { name: string; nodes: number; adopt?: string }[],
+  pools: FleetPoolSpec[],
 ): FleetConfig {
   return {
     version: 1,
@@ -61,7 +75,11 @@ export function fleetPoolDocument(
           kind: 'kubernetes',
           account: accountName,
           cluster: pool.adopt !== undefined ? { adopt: pool.adopt } : { create: { location: profile.region } },
-          flavors: [{ name: 'h100', ...profile.flavor, nodes: pool.nodes }],
+          flavors: [
+            { name: 'h100', ...profile.flavor, nodes: pool.nodes },
+            ...(pool.spot !== undefined ? [{ name: 'h100-spot', ...profile.flavor, nodes: pool.spot, spot: true }] : []),
+          ],
+          ...(pool.spot !== undefined ? { allowSpot: true } : {}),
         },
       },
     })),
@@ -116,7 +134,7 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
       if (row?.cluster_id) await dev.compute.context.work.enqueue(tx, 'kubernetes.clusters', row.cluster_id);
     });
   };
-  const apply = async (pools: { name: string; nodes: number; adopt?: string }[], prune = false) => {
+  const apply = async (pools: FleetPoolSpec[], prune = false) => {
     const result = await api.fleet.apply(dev.root, {
       tenantId: dev.rootTenantId,
       config: fleetPoolDocument(profile, accountConfig, pools),
@@ -205,25 +223,31 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
     const reservations: string[] = [];
     // A flavor's `nodes` are per zone of its node pool (the ProviderKubernetes contract): `zones` Nodes per node.
     const z = profile.zones;
+    // Two on-demand nodes and one Spot node (per zone).
+    const fleet: FleetPoolSpec = { name: 'gpu-fleet', nodes: 2, spot: 1 };
 
-    it('fleet.apply creates the cluster and its labelled GPU node pool at the provider, and applies bcd', async () => {
-      await apply([{ name: 'gpu-fleet', nodes: 2 }]);
+    it('fleet.apply creates the cluster and its labelled GPU node pools (one Spot) at the provider, and applies bcd', async () => {
+      await apply([fleet]);
       poolId = await poolIdOf('gpu-fleet');
       const ready = await until('the substrate to apply bcd', async () => {
         await kick(poolId);
         const row = await substrate(poolId);
-        return row?.state === 'ready' && row.token_applied && row.nodes_listed === 2 * z ? row : undefined;
+        return row?.state === 'ready' && row.token_applied && row.nodes_listed === 3 * z ? row : undefined;
       }, 60_000, () => substrateState(poolId));
       const created = await cluster(poolId);
       server = new URL(created.endpoint!).origin;
       providerId = created.provider_id!;
       expect(ready).toMatchObject({ mode: 'create' });
       expect(profile.clusters()).toContain(providerId);
-      expect(profile.nodePools(providerId)).toContain('h100');
+      expect(profile.nodePools(providerId)).toEqual(expect.arrayContaining(['h100', 'h100-spot']));
+      // The Spot flavor is a Spot node pool at the provider (GKE spot, EKS SPOT capacity, DOKS spot).
+      expect(profile.spotPool(providerId, 'h100-spot')).toBe(true);
+      expect(profile.spotPool(providerId, 'h100')).toBe(false);
       expect(profile.machines(providerId).length).toBeGreaterThan(0);
       // The flavor's Nodes carry the pool label; bcd's DaemonSet selects exactly them.
       const selected = kube.nodeList(server).filter((node) => node.labels[substratePoolLabel] === poolId);
-      expect(selected).toHaveLength(2 * z);
+      expect(selected).toHaveLength(3 * z);
+      expect(selected.filter((node) => node.labels[substrateCapacityLabel] === 'spot')).toHaveLength(z);
       expect(kube.kinds(server)).toEqual(
         expect.arrayContaining(['ConfigMap/bcd-config', 'DaemonSet/bcd', 'Namespace/bcd-system', 'Secret/bcd-join-token']),
       );
@@ -233,7 +257,7 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
       // Every cluster API call carried a credential the driver minted.
       expect(kube.tokens.every((token) => profile.accepts(token))).toBe(true);
       // The applied document is the fleet: planning it again changes nothing, and neither does its export.
-      const document = fleetPoolDocument(profile, accountConfig, [{ name: 'gpu-fleet', nodes: 2 }]);
+      const document = fleetPoolDocument(profile, accountConfig, [fleet]);
       const again = await api.fleet.plan(dev.root, { tenantId: dev.rootTenantId, config: document });
       expect(again.calls).toEqual([]);
       const { config: exported } = await api.fleet.export(dev.root, { tenantId: dev.rootTenantId });
@@ -242,7 +266,7 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
 
     it('the Nodes bcd runs on join the fleet pool, and the hosted token goes once they all did', async () => {
       const ids = await runKubelets(poolId, server);
-      expect(ids).toHaveLength(2 * z);
+      expect(ids).toHaveLength(3 * z);
       await dev.waitFor(ids, { timeoutMs: 60_000 });
       const { rows } = await dev.database.query<{ pool_id: string; trust: string }>(
         `SELECT pool_id, trust FROM nodes WHERE id = ANY($1)`,
@@ -252,9 +276,9 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
       const done = await until('the token to be revoked', async () => {
         await kick(poolId);
         const row = await substrate(poolId);
-        return row?.join_token_id === null && row.nodes_joined === 2 * z ? row : undefined;
+        return row?.join_token_id === null && row.nodes_joined === 3 * z ? row : undefined;
       });
-      expect(done).toMatchObject({ state: 'ready', nodes_listed: 2 * z });
+      expect(done).toMatchObject({ state: 'ready', nodes_listed: 3 * z });
       // The substrate knows which Node each pool node is (by the Node name bcd reports).
       await until('every pool node to be matched to its Node', async () => {
         await kick(poolId);
@@ -269,9 +293,9 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
 
     it("books every node's GPUs for kubernetes-bound reservations, through bcd's device plugin", async () => {
       // One 8-GPU booking per node: every node's GPUs are booked.
-      for (let i = 0; i < 2 * z; i++) reservations.push((await book(poolId, `${profile.label}-booking-${i}`)).id);
+      for (let i = 0; i < 3 * z; i++) reservations.push((await book(poolId, `${profile.label}-booking-${i}`)).id);
       const live = await liveAllocations(poolId);
-      expect(live).toHaveLength(2 * z);
+      expect(live).toHaveLength(3 * z);
       expect(new Set(live.map((allocation) => allocation.node_id))).toEqual(new Set(kubelets.values()));
       for (const allocation of live) {
         const spec = JSON.parse(dev.daemons.get(allocation.node_id)!.files.get(cdiSpecPath(allocation.id))!);
@@ -281,14 +305,18 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
     }, 60_000);
 
     it('a scale-down in the document removes Nodes: their nodes are retired and their bookings released once', async () => {
-      await apply([{ name: 'gpu-fleet', nodes: 1 }]);
+      await apply([{ ...fleet, nodes: 1 }]);
       const remaining = await until('the provider to remove Nodes', async () => {
         await kick(poolId);
         const nodes = kube.nodeList(server).filter((node) => node.labels[substratePoolLabel] === poolId);
-        return nodes.length === z ? nodes.map((node) => node.name) : undefined;
+        return nodes.length === 2 * z ? nodes.map((node) => node.name) : undefined;
       });
       const gone = [...kubelets].filter(([name]) => !remaining.includes(name));
       expect(gone).toHaveLength(z);
+      // Only on-demand Nodes went: the Spot flavor kept its own.
+      const spotNodes = kube.nodeList(server).filter((node) => node.labels[substrateCapacityLabel] === 'spot');
+      expect(spotNodes.map((node) => node.name).every((name) => remaining.includes(name))).toBe(true);
+      expect(spotNodes).toHaveLength(z);
       // Their bcd pods died with the Nodes.
       for (const [, id] of gone) dev.daemons.get(id)!.crash('node-deleted');
       const retired = await until('the removed nodes to be retired', async () => {
@@ -321,13 +349,13 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
         ),
       );
       expect(states.filter((state) => state === 'released')).toHaveLength(z);
-      expect(states.filter((state) => state === 'active')).toHaveLength(z);
+      expect(states.filter((state) => state === 'active')).toHaveLength(2 * z);
       const row = await until('the substrate to settle on the Nodes left', async () => {
         await kick(poolId);
         const current = await substrate(poolId);
-        return current?.nodes_listed === z ? current : undefined;
+        return current?.nodes_listed === 2 * z ? current : undefined;
       });
-      expect(row).toMatchObject({ state: 'ready', nodes_joined: z, join_token_id: null });
+      expect(row).toMatchObject({ state: 'ready', nodes_joined: 2 * z, join_token_id: null });
       for (const [name] of gone) kubelets.delete(name);
     }, 90_000);
 
