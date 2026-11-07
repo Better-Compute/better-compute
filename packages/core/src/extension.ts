@@ -803,7 +803,8 @@ export interface ProviderVolumeSpec {
   labels?: Readonly<Record<string, string>>;
   /**
    * The zone of `region` the volume lives in, for providers whose volumes are zonal (EBS, GCE persistent disks).
-   * Absent: the provider picks one of the account's zones. A provider without zones ignores it.
+   * Absent: the zone `region` names (when it is one), else the account's only zone; with several, the provider
+   * refuses the volume (`INVALID_INPUT`) rather than pick one. A provider without zones ignores it.
    */
   zone?: string;
   /** The provider's volume type (one of `ProviderVolumes.types`, e.g. EBS `gp3`); absent: the provider default. */
