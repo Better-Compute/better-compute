@@ -10,7 +10,9 @@ import {
   type IamStatement,
   awsConfig,
   instanceTypeCache,
+  priceReader,
   purchasePropagationMs,
+  validateAwsConfig,
   zoneCache,
   type AwsConfig,
 } from '@better-compute/provider-aws';
@@ -550,6 +552,40 @@ describe('pricing', () => {
     w.emu.clock.advance(11 * 60_000);
     const later = await w.compute.listOffers({});
     expect(later.find((offer) => offer.id === 'us-east-1a/m7i.large')?.pricePerHour).toBe(0.1008);
+  });
+
+  it('GovCloud has no Price List: on-demand pricing is refused, all prices Spot only', async () => {
+    const gov = (pricing: string) =>
+      ({
+        ...(awsConfig.parse({
+          region: 'us-gov-west-1',
+          zones: ['us-gov-west-1a'],
+          pricing,
+        }) as AwsConfig),
+      }) as AwsConfig;
+    expect(() => validateAwsConfig(gov('on-demand'))).toThrow(
+      expect.objectContaining({ code: 'INVALID_CONFIG', details: expect.objectContaining({ reason: 'pricing' }) }),
+    );
+    expect(() => validateAwsConfig(gov('all'))).not.toThrow();
+    expect(() => validateAwsConfig(gov('off'))).not.toThrow();
+    // The reader never calls the Price List there (it does not exist), and logs no failure.
+    const logs: unknown[][] = [];
+    const reader = priceReader({
+      mode: 'all',
+      region: 'us-gov-west-1',
+      zones: ['us-gov-west-1a'],
+      clock: { now: () => 0 },
+      pricing: {
+        call: async () => {
+          throw new Error('no Price List API in aws-us-gov');
+        },
+      } as any,
+      ec2: { call: async () => ({ items: () => [], textOf: () => undefined }) } as any,
+      ready: async () => {},
+      onError: (...args) => void logs.push(args),
+    });
+    expect((await reader.onDemand(new AbortController().signal)).size).toBe(0);
+    expect(logs).toEqual([]);
   });
 });
 

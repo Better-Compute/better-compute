@@ -190,6 +190,13 @@ export function validateAwsConfig(config: AwsConfig): void {
         'zones',
       );
   roleArnOf(config);
+  // The Price List API does not exist in GovCloud: on-demand pricing could never price anything
+  // there ('all' still reads Spot prices from EC2).
+  if (config.pricing === 'on-demand' && partitionOf(config.region).partition === 'aws-us-gov')
+    throw invalid(
+      `pricing 'on-demand' needs the AWS Price List API, which ${config.region} (aws-us-gov) does not have: use 'off', or 'all' for Spot prices only`,
+      'pricing',
+    );
   if (config.discoverTag !== undefined) parseDiscoverTag(config.discoverTag);
   if (config.instanceProfile !== undefined) {
     let arn;
