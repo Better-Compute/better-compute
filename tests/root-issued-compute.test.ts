@@ -1350,6 +1350,14 @@ describe('isolation between tenants, and between tenants and the root tenant', (
           tenant: R,
           call: () => api.providerAccounts.purchases(root, { tenantId: R, accountId: w.accountId }),
         },
+        // AWS A9 cluster discovery, on the root account: allowed (a provider read), then refused by
+        // the account's provider (this one lists no clusters).
+        {
+          path: 'providerAccounts.clusters',
+          tenant: R,
+          call: () => api.providerAccounts.clusters(root, { tenantId: R, accountId: w.accountId }),
+          expect: 'UNSUPPORTED',
+        },
         // Allowed (main's keyless setup read, decided on the tenant), then refused when the host runs no
         // workload issuer.
         {
