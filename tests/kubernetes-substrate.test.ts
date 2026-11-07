@@ -139,6 +139,26 @@ describe('substrate: create', () => {
     expect(world.kube.calls.filter((call) => call.method === 'PATCH').length).toBe(patches);
   });
 
+  it('restores a token Secret deleted on the cluster with a new token (drift), and revokes the old one', async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(createSpec());
+    await world.converge(pool.id, 6);
+    const before = await world.substrate(pool.id);
+    const server = await world.server(pool.id);
+    const path = '/api/v1/namespaces/bcd-system/secrets/bcd-join-token';
+    expect(world.kube.get(server, path)).toBeDefined();
+    world.kube.store(server).delete(path);
+    await world.converge(pool.id, 2);
+    const after = await world.substrate(pool.id);
+    expect(after).toMatchObject({ state: 'ready', token_applied: true });
+    expect(after.join_token_id).not.toBe(before.join_token_id);
+    expect(world.kube.get(server, path)).toBeDefined();
+    const { rows } = await world.fixture.database.query<any>(`SELECT revoked_at FROM join_tokens WHERE id = $1`, [
+      before.join_token_id,
+    ]);
+    expect(rows[0].revoked_at).not.toBeNull();
+  });
+
   it('revokes the token and deletes its Secret once every node joined, and mints one again for new nodes', async () => {
     world = await substrateWorld();
     const pool = await world.createPool(createSpec());

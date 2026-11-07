@@ -1483,7 +1483,18 @@ async function applyBcd(
   let tokenId = row.join_token_id;
   let revoke = false;
   if (gap > 0) {
-    const usable = tokenId !== null && row.token_applied && (await tokenLive(sql, tokenId, 1));
+    let usable = tokenId !== null && row.token_applied && (await tokenLive(sql, tokenId, 1));
+    if (usable) {
+      // The Secret the DB says is applied must still be on the cluster (and ours): one deleted or replaced there
+      // (drift) is restored with a new token now, not when the old one nears its expiry.
+      const secret = await attempt(deps, row.pool_id, signal, () => api.get(refOf(agent.tokenSecret)));
+      if (!secret) return retry();
+      if ('error' in secret) {
+        await setState(deps, sql, row, { state: 'error', message: `token Secret: ${secret.error}` });
+        return undefined;
+      }
+      usable = secret.value !== undefined && secret.value.metadata.labels[substratePoolLabel] === row.pool_id;
+    }
     if (!usable) {
       const ttlSeconds = deps.substrate!.tokenTtlSeconds ?? 3600;
       const issued = await sql.transaction(async (tx) => {
