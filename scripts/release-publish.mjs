@@ -29,7 +29,9 @@ import { runPnpm } from './tooling.mjs';
 
 /**
  * The packages a release publishes: every package of 0.2.1 plus `@better-compute/gcp-common` (new in
- * 0.3, a dependency of provider-gcp) and `@better-compute/kubernetes` (managed Kubernetes clusters). Publish order is computed from the dependencies, not this order.
+ * 0.3, a dependency of provider-gcp), `@better-compute/kubernetes` (managed Kubernetes clusters) and
+ * `@better-compute/cloud-resources` (managed services, the umbrella's `better-compute/cloud-resources`). Publish order
+ * is computed from the dependencies, not this order.
  */
 export const releaseAllowlist = Object.freeze([
   '@better-compute/audit',
@@ -37,6 +39,7 @@ export const releaseAllowlist = Object.freeze([
   '@better-compute/capacity',
   '@better-compute/cli',
   '@better-compute/client',
+  '@better-compute/cloud-resources',
   '@better-compute/console-kit',
   '@better-compute/core',
   '@better-compute/driver-sdk',
@@ -67,8 +70,6 @@ export const releaseAllowlist = Object.freeze([
 /** Workspace packages a release deliberately leaves out, with the reason. */
 export const notReleased = Object.freeze({
   '@better-compute/aws-core': 'not ready: only the unreleased AWS provider uses it',
-  '@better-compute/cloud-resources':
-    'not ready: managed services land with the DigitalOcean program (P7), then AWS and GCP',
   '@better-compute/provider-digitalocean':
     'not ready: the DigitalOcean program is still in progress',
 });

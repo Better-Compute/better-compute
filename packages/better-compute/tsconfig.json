@@ -21,6 +21,9 @@
       "path": "../client"
     },
     {
+      "path": "../cloud-resources"
+    },
+    {
       "path": "../core"
     },
     {

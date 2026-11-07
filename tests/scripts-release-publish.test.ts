@@ -42,18 +42,22 @@ const released021 = [
 ];
 
 describe('the release allowlist', () => {
-  it('is exactly the 0.2.1 packages plus gcp-common and kubernetes', () => {
+  it('is exactly the 0.2.1 packages plus gcp-common, kubernetes and cloud-resources', () => {
     expect([...releaseAllowlist].sort()).toEqual(
-      [...released021, '@better-compute/gcp-common', '@better-compute/kubernetes'].sort(),
+      [
+        ...released021,
+        '@better-compute/gcp-common',
+        '@better-compute/kubernetes',
+        '@better-compute/cloud-resources',
+      ].sort(),
     );
   });
 
-  it('leaves out aws-core, cloud-resources and provider-digitalocean', () => {
+  it('leaves out aws-core and provider-digitalocean', () => {
     expect(releaseAllowlist).not.toContain('@better-compute/aws-core');
     expect(releaseAllowlist).not.toContain('@better-compute/provider-digitalocean');
     expect(Object.keys(notReleased).sort()).toEqual([
       '@better-compute/aws-core',
-      '@better-compute/cloud-resources',
       '@better-compute/provider-digitalocean',
     ]);
   });
