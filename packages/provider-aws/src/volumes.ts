@@ -166,10 +166,14 @@ function parseVolume(item: XmlElement): EbsVolume | undefined {
   };
 }
 
-/** What an AWS volume and its snapshots look like to vps. */
+/**
+ * What an AWS volume looks like to vps. Its `region` is its zone: an EBS volume is zonal and vps keeps
+ * an AWS volume's region as its AZ (the place it attaches in); the account region falls back only
+ * when EBS names no zone.
+ */
 function volumeOutputs(volume: EbsVolume, region: string): Record<string, string> {
   const outputs: Record<string, string> = {
-    region,
+    region: volume.zone || region,
     zone: volume.zone,
     sizeGiB: String(volume.sizeGiB),
     type: volume.type,

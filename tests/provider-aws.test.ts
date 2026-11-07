@@ -1013,9 +1013,10 @@ describe('conformance', () => {
       };
       return {
         provider: awsProvider({ fetch: emu.fetch, credentials: emu.ambient }),
-        // One zone: the contract's volume cases name a bare region, which on an account with
-        // several zones names no zone (INVALID_INPUT, reason zone-required, in provider-aws-volumes).
-        config: { region: 'us-east-1', zones: ['us-east-1a'] },
+        config: { region: 'us-east-1', zones: ['us-east-1a', 'us-east-1b'] },
+        // (A5) The volume cases name a zone as their region, as vps does (it keeps an AWS volume per
+        // zone): a bare region on an account with several zones names no zone (zone-required).
+        region: 'us-east-1a',
         offerId: 'us-east-1a/t3.micro',
         image: 'ubuntu-24.04',
         context: {

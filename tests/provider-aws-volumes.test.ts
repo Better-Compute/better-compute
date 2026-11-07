@@ -131,7 +131,8 @@ describe('provider-aws volumes: ensure, get, delete', () => {
       id: first.id,
       state: 'ready',
       outputs: {
-        region: 'us-east-1',
+        // A volume's region is its zone (vps keeps an AWS volume per zone).
+        region: 'us-east-1a',
         zone: 'us-east-1a',
         sizeGiB: '10',
         type: 'gp3',
