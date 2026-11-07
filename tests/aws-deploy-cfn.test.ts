@@ -110,6 +110,52 @@ describe('lintTemplate', () => {
     );
   });
 
+  it('reports a reference to a conditional resource outside a branch where it exists', () => {
+    // A restore adopts retained resources instead of creating them: every reference to a conditional
+    // resource must sit where its condition holds, or the template fails only on the path nobody tested.
+    const conditions = {
+      HasExisting: { 'Fn::Not': [{ 'Fn::Equals': [cfnRef('Existing'), ''] }] },
+      CreateIt: { 'Fn::Equals': [cfnRef('Existing'), ''] },
+    };
+    const parameters = { Existing: { Type: 'String' as const, Description: 'e', Default: '' } };
+    const conditional = { Type: 'AWS::S3::Bucket', Condition: 'CreateIt' };
+    const ok = template({
+      Parameters: parameters,
+      Conditions: conditions,
+      Resources: {
+        Bucket: conditional,
+        // The same condition on the referring resource, the resource's own branch, or the false branch of its complement.
+        Same: { Type: 'AWS::S3::BucketPolicy', Condition: 'CreateIt', DependsOn: 'Bucket', Properties: { Bucket: cfnRef('Bucket') } },
+        Own: { Type: 'AWS::SNS::Topic', Properties: { A: { 'Fn::If': ['CreateIt', cfnSub('${Bucket.Arn}'), cfnRef('Existing')] } } },
+        Complement: { Type: 'AWS::SNS::Topic', Properties: { A: { 'Fn::If': ['HasExisting', cfnRef('Existing'), cfnGetAtt('Bucket', 'Arn')] } } },
+      },
+      Outputs: { Name: { Description: 'n', Value: { 'Fn::If': ['HasExisting', cfnRef('Existing'), cfnRef('Bucket')] } } },
+    });
+    expect(lintTemplate(ok)).toEqual([]);
+    const problems = lintTemplate(
+      template({
+        Parameters: parameters,
+        Conditions: conditions,
+        Resources: {
+          Bucket: conditional,
+          BareRef: { Type: 'AWS::SNS::Topic', Properties: { A: cfnRef('Bucket') } },
+          BareSub: { Type: 'AWS::SNS::Topic', Properties: { A: cfnSub('${Bucket.Arn}') } },
+          WrongBranch: { Type: 'AWS::SNS::Topic', Properties: { A: { 'Fn::If': ['HasExisting', cfnGetAtt('Bucket', 'Arn'), cfnRef('Existing')] } } },
+          Depends: { Type: 'AWS::SNS::Topic', DependsOn: 'Bucket' },
+        },
+        Outputs: { Name: { Description: 'n', Value: cfnRef('Bucket') } },
+      }),
+    );
+    expect(problems).toEqual([
+      expect.stringContaining('Resources.BareRef'),
+      expect.stringContaining('Resources.BareSub'),
+      expect.stringContaining('Resources.WrongBranch'),
+      expect.stringContaining('DependsOn Bucket'),
+      expect.stringContaining('Outputs.Name'),
+    ]);
+    for (const problem of problems) expect(problem).toContain('CreateIt');
+  });
+
   it('refuses NoEcho parameters: secrets are generated in AWS, never passed in', () => {
     expect(
       lintTemplate(template({ Parameters: { DbPassword: { Type: 'String', Description: 'p', NoEcho: true } } })),

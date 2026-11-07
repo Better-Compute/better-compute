@@ -121,8 +121,9 @@ export const cfnLimits = {
 
 /**
  * Static problems in a template: references (Ref, GetAtt, Sub, DependsOn, conditions) that name
- * nothing, bad logical ids, duplicate export names, NoEcho parameters and CloudFormation limits.
- * An empty list means it passes.
+ * nothing, references to a conditional resource from where its condition may not hold, bad logical
+ * ids, duplicate export names, NoEcho parameters and CloudFormation limits. An empty list means it
+ * passes.
  */
 export function lintTemplate(template: CfnTemplate): string[] {
   const problems: string[] = [];
@@ -130,6 +131,23 @@ export function lintTemplate(template: CfnTemplate): string[] {
   const resources = Object.keys(template.Resources);
   const conditions = new Set(Object.keys(template.Conditions ?? {}));
   const names = new Set([...parameters, ...resources]);
+  const where = (path: string) => (path ? ` (at ${path})` : '');
+  // A conditional resource may be named only where its condition is known to hold: under the same
+  // condition, in the true branch of an Fn::If on it, or in the false branch of one on its complement.
+  const resourceCondition = new Map(
+    Object.entries(template.Resources).flatMap(([id, resource]) => (resource.Condition === undefined ? [] : [[id, resource.Condition] as const])),
+  );
+  const complements = new Map<string, string[]>();
+  const conditionBodies = Object.entries(template.Conditions ?? {}).map(([id, body]) => [id, JSON.stringify(body)] as const);
+  for (const [a, body] of conditionBodies)
+    for (const [b, other] of conditionBodies)
+      if (body === `{"Fn::Not":[${other}]}` || other === `{"Fn::Not":[${body}]}` || body === JSON.stringify({ 'Fn::Not': [{ Condition: b }] }))
+        complements.set(a, [...(complements.get(a) ?? []), b]);
+  const checkHeld = (target: string, held: ReadonlySet<string>, path: string) => {
+    const condition = resourceCondition.get(target);
+    if (condition !== undefined && !held.has(condition))
+      problems.push(`${target} exists only when ${condition}, which may not hold here${where(path)}`);
+  };
 
   if (Buffer.byteLength(template.Description, 'utf8') > cfnLimits.descriptionBytes)
     problems.push(`Description is over ${cfnLimits.descriptionBytes} bytes`);
@@ -145,10 +163,10 @@ export function lintTemplate(template: CfnTemplate): string[] {
   for (const [id, parameter] of Object.entries(template.Parameters ?? {}))
     if (parameter.NoEcho) problems.push(`parameter ${id} is NoEcho: secrets are generated in AWS, never parameters`);
 
-  const where = (path: string) => (path ? ` (at ${path})` : '');
-  const visit = (value: unknown, path: string, subVariables: ReadonlySet<string>): void => {
+  /** The conditions known to hold at a point: the enclosing resource's or output's, and the Fn::If branches above it. */
+  const visit = (value: unknown, path: string, held: ReadonlySet<string>): void => {
     if (Array.isArray(value)) {
-      value.forEach((item, index) => visit(item, `${path}[${index}]`, subVariables));
+      value.forEach((item, index) => visit(item, `${path}[${index}]`, held));
       return;
     }
     if (!value || typeof value !== 'object') return;
@@ -160,25 +178,29 @@ export function lintTemplate(template: CfnTemplate): string[] {
       if (key === 'Ref') {
         if (typeof argument !== 'string' || !(names.has(argument) || pseudoParameters.has(argument)))
           problems.push(`Ref ${String(argument)} names no parameter or resource${where(path)}`);
+        else checkHeld(argument, held, path);
         return;
       }
       if (key === 'Fn::GetAtt') {
         const target = Array.isArray(argument) ? argument[0] : typeof argument === 'string' ? argument.split('.')[0] : undefined;
         if (typeof target !== 'string' || !resources.includes(target))
           problems.push(`GetAtt ${String(target)} names no resource${where(path)}`);
+        else checkHeld(target, held, path);
         return;
       }
       if (key === 'Fn::Sub') {
         const [text, map] = Array.isArray(argument) ? (argument as [unknown, unknown]) : [argument, undefined];
         const local = new Set(map && typeof map === 'object' ? Object.keys(map as object) : []);
-        if (typeof text === 'string') checkSub(text, path, local);
-        if (map) visit(map, `${path}.Fn::Sub`, subVariables);
+        if (typeof text === 'string') checkSub(text, path, local, held);
+        if (map) visit(map, `${path}.Fn::Sub`, held);
         return;
       }
       if (key === 'Fn::If' && Array.isArray(argument)) {
         if (typeof argument[0] !== 'string' || !conditions.has(argument[0]))
           problems.push(`Fn::If condition ${String(argument[0])} is not defined${where(path)}`);
-        argument.slice(1).forEach((item, index) => visit(item, `${path}.Fn::If[${index + 1}]`, subVariables));
+        const condition = String(argument[0]);
+        visit(argument[1], `${path}.Fn::If[1]`, new Set([...held, condition]));
+        visit(argument[2], `${path}.Fn::If[2]`, new Set([...held, ...(complements.get(condition) ?? [])]));
         return;
       }
       if (key === 'Condition' && typeof argument === 'string' && path.startsWith('Conditions')) {
@@ -186,33 +208,41 @@ export function lintTemplate(template: CfnTemplate): string[] {
         return;
       }
     }
-    for (const [key, item] of Object.entries(record)) visit(item, path ? `${path}.${key}` : key, subVariables);
+    for (const [key, item] of Object.entries(record)) visit(item, path ? `${path}.${key}` : key, held);
   };
-  const checkSub = (text: string, path: string, local: ReadonlySet<string>) => {
+  const checkSub = (text: string, path: string, local: ReadonlySet<string>, held: ReadonlySet<string>) => {
     for (const match of text.matchAll(/\$\{([^}]*)\}/g)) {
       const variable = match[1]!;
       if (variable.startsWith('!')) continue;
       const head = variable.includes('::') ? variable : variable.split('.')[0]!;
-      if (local.has(variable) || local.has(head) || names.has(head) || pseudoParameters.has(head)) continue;
+      if (local.has(variable) || local.has(head) || pseudoParameters.has(head)) continue;
+      if (names.has(head)) {
+        checkHeld(head, held, path);
+        continue;
+      }
       problems.push(`Sub variable ${variable} names no parameter or resource${where(path)}`);
     }
   };
 
   for (const [id, resource] of Object.entries(template.Resources)) {
     const dependsOn = resource.DependsOn === undefined ? [] : typeof resource.DependsOn === 'string' ? [resource.DependsOn] : resource.DependsOn;
+    const own = new Set(resource.Condition === undefined ? [] : [resource.Condition]);
     for (const target of dependsOn)
       if (!resources.includes(target)) problems.push(`DependsOn ${target} names no resource (at Resources.${id})`);
+      else if (resourceCondition.has(target) && !own.has(resourceCondition.get(target)!))
+        problems.push(`DependsOn ${target}: it exists only when ${resourceCondition.get(target)} (at Resources.${id})`);
     if (resource.Condition !== undefined && !conditions.has(resource.Condition))
       problems.push(`condition ${resource.Condition} is not defined (at Resources.${id})`);
     if (typeof resource.Type !== 'string' || !/^(AWS|Custom)::/.test(resource.Type))
       problems.push(`resource ${id} has no AWS type`);
-    visit(resource.Properties, `Resources.${id}.Properties`, new Set());
+    visit(resource.Properties, `Resources.${id}.Properties`, own);
   }
   for (const [id, output] of Object.entries(template.Outputs ?? {})) {
     if (output.Condition !== undefined && !conditions.has(output.Condition))
       problems.push(`condition ${output.Condition} is not defined (at Outputs.${id})`);
-    visit(output.Value, `Outputs.${id}.Value`, new Set());
-    if (output.Export) visit(output.Export.Name, `Outputs.${id}.Export`, new Set());
+    const own = new Set(output.Condition === undefined ? [] : [output.Condition]);
+    visit(output.Value, `Outputs.${id}.Value`, own);
+    if (output.Export) visit(output.Export.Name, `Outputs.${id}.Export`, own);
   }
   visit(template.Conditions, 'Conditions', new Set());
 
