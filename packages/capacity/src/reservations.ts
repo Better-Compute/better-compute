@@ -1636,7 +1636,7 @@ async function preemptFor(
       const victim = await readReservationById(tx, id, false);
       if (!victim?.during || !preemptable.includes(victim.state) || victim.request.spot !== true)
         return await undo();
-      await noticeSpot(deps, tx, victim, row, at);
+      await noticeSpot(deps, tx, victim, at, preemptionNotice(victim, row));
     }
     const planned = new Set(plan.nodeIds);
     const others = (await readPoolNodes(tx, pool.id))
@@ -1656,6 +1656,26 @@ async function preemptFor(
   }
 }
 
+/** Why a reservation is noticed: the condition reason and message, and what its events carry. */
+interface PreemptionNotice {
+  reason: string;
+  message: string;
+  data: Record<string, Json>;
+}
+
+function preemptionNotice(
+  victim: Pick<ReservationRow, 'tenantId'>,
+  preemptor: Pick<ReservationRow, 'id' | 'tenantId'>,
+): PreemptionNotice {
+  // The victim's tenant learns who preempted it only when it is itself the preemptor's tenant.
+  const sameTenant = preemptor.tenantId === victim.tenantId;
+  return {
+    reason: 'SpotPreempted',
+    message: sameTenant ? `preempted by ${preemptor.id}` : 'preempted by a non-spot reservation',
+    data: sameTenant ? { by: preemptor.id } : {},
+  };
+}
+
 /**
  * The notice of a preempted spot reservation. One that starts at or after the deadline has not run:
  * its bookings are released and it goes back to `pending` to be placed again (quota kept). One that
@@ -1664,24 +1684,20 @@ async function preemptFor(
  * `preempted`. Either way it is billed only for the time it held the atoms.
  */
 async function noticeSpot(
-  deps: ReservationDeps,
+  deps: Pick<ReservationDeps, 'clock' | 'events' | 'work' | 'desired'>,
   tx: SqlTx,
   victim: ReservationRow,
-  preemptor: Pick<ReservationRow, 'id' | 'tenantId'>,
   at: number,
+  notice: PreemptionNotice,
 ): Promise<void> {
   const now = deps.clock.now();
   const allocations = await readOwnerAllocations(tx, { kind: 'reservation', id: victim.id });
-  // The victim's tenant learns who preempted it only when it is itself the preemptor's tenant.
-  const sameTenant = preemptor.tenantId === victim.tenantId;
-  const by: Record<string, Json> = sameTenant ? { by: preemptor.id } : {};
-  const message = sameTenant
-    ? `preempted by ${preemptor.id}`
-    : 'preempted by a non-spot reservation';
+  const by = notice.data;
+  const message = notice.message;
   const condition: Omit<Condition, 'since'> = {
     type: 'Preempted',
     status: 'true',
-    reason: 'SpotPreempted',
+    reason: notice.reason,
     message,
   };
   if (victim.during!.start >= at) {
@@ -1696,7 +1712,7 @@ async function noticeSpot(
         {
           type: 'Unschedulable',
           status: 'true',
-          reason: 'SpotPreempted',
+          reason: notice.reason,
           message,
         },
         now,
@@ -1722,6 +1738,62 @@ async function noticeSpot(
   const noticed = { ...victim, conditions, during: { start: victim.during!.start, end: at } };
   await deps.work.enqueue(tx, reservationWork, victim.id, { notBefore: at });
   await publish(deps, tx, noticed, 'reservation.preempting', { ...by, at });
+}
+
+/**
+ * (AWS A4) The machine behind `nodeId` goes away at `deadline` (a provider interruption, e.g. an EC2
+ * Spot interruption warning). Every live reservation holding the node past the deadline gets the
+ * spot notice (`noticeSpot`), spot or not: one not started by then is released and re-queued
+ * (quota kept, placed elsewhere since the caller taints the node), a started one is cut back to end
+ * at the deadline with a `Preempted` condition and released then. A reservation already ending by
+ * the deadline is left alone, so a repeated notice changes nothing. Locks the reservations in id
+ * order, then the nodes they hold in id order (reservation → node → node_resources, the placer's
+ * and host sync's order), so the caller may lock the node again after. Returns the reservations
+ * noticed.
+ */
+export async function noticeNodeInterruption(
+  deps: Pick<ReservationDeps, 'clock' | 'events' | 'work' | 'desired'>,
+  tx: SqlTx,
+  nodeId: string,
+  deadline: number,
+  notice: { reason: string; message: string; data?: Record<string, Json> },
+): Promise<string[]> {
+  const at = Math.max(deadline, deps.clock.now());
+  const { rows } = await tx.query<{ id: string }>(
+    `SELECT DISTINCT r.id FROM allocations a
+       JOIN reservations r ON r.id = a.owner_id AND a.owner_kind = 'reservation'
+      WHERE a.node_id = $1 AND a.released_at IS NULL
+        AND (upper_inf(a.during) OR upper(a.during) > $2::timestamptz)
+        AND r.state = ANY($3::text[])
+      ORDER BY r.id`,
+    [nodeId, new Date(at).toISOString(), [...preemptable]],
+  );
+  if (rows.length === 0) return [];
+  const ids = rows.map((row) => row.id);
+  await tx.query(`SELECT id FROM reservations WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE`, [ids]);
+  // Then the nodes they hold (this one and any other a gang holds), in id order, before a release
+  // writes device bookings, node_resources and the pool rollup: host sync takes nodes before
+  // node_resources, so the notice keeps that order (reservation → node → node_resources).
+  await tx.query(
+    `SELECT id FROM nodes
+      WHERE id = $1 OR id IN (SELECT node_id FROM allocations
+                               WHERE owner_kind = 'reservation' AND owner_id = ANY($2::text[])
+                                 AND released_at IS NULL)
+      ORDER BY id FOR UPDATE`,
+    [nodeId, ids],
+  );
+  const noticed: string[] = [];
+  for (const { id } of rows) {
+    const victim = await readReservationById(tx, id, false);
+    if (!victim?.during || !preemptable.includes(victim.state) || victim.during.end <= at) continue;
+    await noticeSpot(deps, tx, victim, at, {
+      reason: notice.reason,
+      message: notice.message,
+      data: { ...(notice.data ?? {}), nodeId },
+    });
+    noticed.push(id);
+  }
+  return noticed;
 }
 
 /** Whether a reservation leases whole nodes (`binding: 'node'`, deployed by metal). */

@@ -42,6 +42,8 @@ One provider account is one AWS account in one region. A fleet in several region
 | `quotas`                     | `true`     | Cap offers at the EC2 vCPU quota headroom (Service Quotas).                                                                                     |
 | `pricing`                    | `off`      | `off`, `on-demand` (the AWS Price List) or `all` (adds Spot prices).                                                                            |
 | `allowPurchases`             | `false`    | Allow buying capacity (Capacity Blocks, new ODCRs) in this platform account. Spends money.                                                      |
+| `eventQueueUrl`              | –          | The SQS intake queue the account's EventBridge rules feed (`aws event-rules`), in this account and region. See [Events](#events). |
+| `eventSources`               | `aws.ec2`, `aws.health` | The EventBridge sources taken from the queue; `aws.guardduty` is opt-in. Anything else is dropped. |
 
 `awsConfig.parse` checks field shapes (`INVALID_INPUT`); the provider checks the region, that every zone is in it, and the role ARN's shape and partition (`INVALID_CONFIG`), so `providerAccounts.create` refuses a bad account before it is stored.
 
@@ -178,13 +180,36 @@ The provider implements `ProviderImpl.kubernetes` on Amazon EKS, so [`@better-co
 
 [`@better-compute/provider-kubernetes`](../provider-kubernetes) runs bcd as a DaemonSet in an existing EKS cluster: select a node group with `nodeSelector: { 'eks.amazonaws.com/nodegroup': '<name>' }` and tolerate `nvidia.com/gpu` `NoSchedule` on GPU node groups. Machines of a provider pool join an EKS cluster instead through `policy.kubernetes.eks` (`k8s-join` mode `eks`): provision's `eksUserData` puts nodeadm's `NodeConfig` (`node.eks.aws/v1alpha1`) into the user data of an AL2023 EKS AMI (alias `eks-al2023-<k8s>`), and the node authenticates as the role of the account's `eksNodeInstanceProfile`, which needs an `EC2_LINUX` access entry on the cluster.
 
+## Events
+
+`pollEvents` is the account's event intake (A4, AD12), read by vps's `vps.provider-events` worker. With `eventQueueUrl`, it long-polls the queue (`ReceiveMessage`, at most 10 messages, `WaitTimeSeconds` at most 10) and maps EventBridge envelopes:
+
+| `detail-type`                                                     | Event                                                     |
+| ----------------------------------------------------------------- | --------------------------------------------------------- |
+| `EC2 Instance State-change Notification`                          | `machine-changed`                                         |
+| `EC2 Spot Instance Interruption Warning`                          | `interruption-warning`, deadline = event time + 2 minutes |
+| `EC2 Instance Rebalance Recommendation`                           | `rebalance-recommended`                                   |
+| `EC2 Capacity Reservation Instance Interruption Warning`          | `interruption-warning`, deadline = `instance-termination-time` |
+| `AWS Health Event` (service `EC2`, `scheduledChange`, naming instances) | `maintenance-scheduled` per instance, deadline = `startTime`, `healthEvent` = the ARN's unique tail |
+| `AWS Health Event` (service `EC2`, another category, naming instances) | `health` per instance                                   |
+| `AWS Health Event` naming Capacity Reservations (ODCR underutilization) | `reservation-changed` per reservation                  |
+| `Capacity Block Delivered`, `Capacity Block Expiration Warning` and other Capacity Reservation, Capacity Block and ODCR types | `reservation-changed`                     |
+| `AWS API Call via CloudTrail` (succeeded EC2 instance calls)      | `api-call` per instance                                   |
+| `GuardDuty Finding` (when `aws.guardduty` is allowed)             | `health`                                                  |
+
+An envelope counts only when its `account` is the account's verified AWS id, its `region` the account's region and its `source` allowed. Everything else (and anything malformed) is dropped, with counts logged and no message content, and deleted with the batch, so a forged message is read once and never loops. Messages are deleted (`DeleteMessageBatch`) only when vps calls the batch's `ack()`, after its transaction commits; a queue in another AWS account than the identity is `INVALID_CONFIG`. Events only wake reconcilers early: polling stays the source of truth, so a forged event can at worst cause a harmless re-read. The Capacity Block detail types are the ones the EC2 user guide documents (pinned in the tests); the Ec2Events rule also passes the `Capacity Block`, `Capacity Reservation`, `EC2 Capacity Reservation`, `EC2 ODCR` and `EC2 Capacity Block` prefixes, as broad as the mapper, for types not documented yet.
+
+Without a queue, `pollEvents` reads scheduled events with `DescribeInstanceStatus` at most every 5 minutes and reports each as `maintenance-scheduled`; the event id carries its status, so a completed or canceled event is new. The scan includes stopped instances (`IncludeAllInstances`: instance-stop and instance-retirement stop the instance before EC2 marks the event completed), and a complete scan is authoritative: an event the previous scan listed as scheduled and this one does not list at all (rescheduled under a new id, or aged out) is reported as completed. The previous set lives in the process, so an event that vanishes while the control plane restarts is not completed this way.
+
+`better-compute aws event-rules --queue-name <name> --account <id>` prints the CloudFormation stack to deploy in the account: the queue and its dead-letter queue (SSE-SQS, 14-day retention), the EventBridge rules (`--api-calls` adds CloudTrail EC2 calls, `--guardduty` GuardDuty findings), and a queue policy that lets only `events.amazonaws.com` send, only from those rule ARNs in the account, only over TLS, and denies `sqs:SendMessage` to every other sender (a same-account role with `sqs:SendMessage` on `*` included: its forged body could otherwise carry the right account, region and source). Its `QueueUrl` output is `eventQueueUrl`. `aws iam-policy` includes `ec2:DescribeInstanceStatus`, and `--event-queue <name>` adds `sqs:ReceiveMessage` and `sqs:DeleteMessage` on the queue. Add `awsEventRulesCommand()` to the CLI configuration next to the policy commands.
+
 ## What comes next
 
-Event intake and Spot interruptions (A4), EC2 hosts joining as bcd nodes (A6), workload roles (A7), placement groups and EFA (A10), and costs (A11), per `docs/superpowers/plans/2026-10-18-aws-integration-program.md`.
+EC2 hosts joining as bcd nodes (A6), workload roles (A7), placement groups and EFA (A10), and costs (A11), per `docs/superpowers/plans/2026-10-18-aws-integration-program.md`.
 
 ## Testing
 
-`tests/support/aws-emulator` emulates STS, IMDS, EC2, VPC (`vpc.ts`, which wraps the EC2 emulator) and EBS in process through `fetch`, and `tests/support/eks-emulator.ts` EKS and the clusters' Kubernetes API (it verifies each eksToken's signature and the principal's access entry); `tests/provider-aws-eks.test.ts` and `tests/kubernetes-eks.test.ts` cover managed Kubernetes. `tests/provider-aws*.test.ts` cover the config, credentials, offers, compute, attach, networks, EBS volumes and snapshots, the CLI policies and the `providerConformanceCases()` suite; `tests/aws-end-to-end.test.ts`, `tests/aws-networks-end-to-end.test.ts` and `tests/aws-volumes-end-to-end.test.ts` drive the provider through vps on PGlite. No test calls AWS.
+`tests/support/aws-emulator` emulates STS, IMDS, EC2, VPC (`vpc.ts`, which wraps the EC2 emulator), EBS and the SQS intake queue in process through `fetch`, and `tests/support/eks-emulator.ts` EKS and the clusters' Kubernetes API (it verifies each eksToken's signature and the principal's access entry); `tests/provider-aws-eks.test.ts` and `tests/kubernetes-eks.test.ts` cover managed Kubernetes. `tests/provider-aws*.test.ts` cover the config, credentials, offers, compute, attach, networks, EBS volumes and snapshots, the CLI policies and the `providerConformanceCases()` suite; `tests/aws-end-to-end.test.ts`, `tests/aws-networks-end-to-end.test.ts`, `tests/aws-volumes-end-to-end.test.ts` and `tests/aws-events-end-to-end.test.ts` (interruptions, forged events) drive the provider through vps on PGlite. No test calls AWS.
 
 ## License
 

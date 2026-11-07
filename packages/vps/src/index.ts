@@ -27,6 +27,7 @@ export * from './provider-reservations.js';
 export * from './provider-purchases.js';
 export * from './reservation-grants.js';
 export * from './discovery.js';
+export * from './provider-events.js';
 export * from './attach.js';
 export * from './sandboxes.js';
 export * from './snapshots.js';

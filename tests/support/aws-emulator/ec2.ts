@@ -172,6 +172,11 @@ export class Ec2Emulator {
     check?(params: URLSearchParams): Response | undefined;
     launched?(instance: EmuInstance, params: URLSearchParams): void;
   }[] = [];
+  /** (A4) Scheduled events per instance, as DescribeInstanceStatus reports them. */
+  readonly scheduledEvents = new Map<
+    string,
+    { id: string; code: string; description: string; notBefore: number; notAfter?: number }[]
+  >();
   #next = 0;
 
   constructor(private readonly emu: AwsEmulator) {
@@ -414,6 +419,40 @@ export class Ec2Emulator {
       }
       case 'RunInstances':
         return this.#run(request);
+      case 'DescribeInstanceStatus': {
+        const codes = filtersOf(p).get('event.code');
+        // As EC2: only running instances unless IncludeAllInstances is true.
+        const all = p.get('IncludeAllInstances') === 'true';
+        const found = [...this.instances.values()].filter(
+          (instance) =>
+            (all || instance.state === 'running') &&
+            (this.scheduledEvents.get(instance.id) ?? []).some(
+              (event) => !codes || codes.includes(event.code),
+            ),
+        );
+        const { page, next } = this.#page(found, p);
+        const iso = (ms: number) => new Date(ms).toISOString();
+        return ec2Response(
+          action,
+          items(
+            'instanceStatusSet',
+            page.map(
+              (instance) =>
+                `${el('instanceId', instance.id)}${el('availabilityZone', instance.zone)}` +
+                items(
+                  'eventsSet',
+                  (this.scheduledEvents.get(instance.id) ?? [])
+                    .filter((event) => !codes || codes.includes(event.code))
+                    .map(
+                      (event) =>
+                        `${el('instanceEventId', event.id)}${el('code', event.code)}${el('description', event.description)}${el('notBefore', iso(event.notBefore))}${el('notAfter', event.notAfter === undefined ? undefined : iso(event.notAfter))}`,
+                    ),
+                ) +
+                `<instanceState>${el('code', stateCodes[instance.state])}${el('name', instance.state)}</instanceState>`,
+            ),
+          ) + el('nextToken', next),
+        );
+      }
       case 'DescribeInstances': {
         if (this.settleOnRead) this.tick();
         const ids = listOf(p, 'InstanceId');

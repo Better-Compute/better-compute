@@ -60,6 +60,8 @@ export function iamPolicy(
     pricing?: boolean;
     /** (A3) Accounts with `allowPurchases`: buying Capacity Blocks and creating ODCRs (spends money). */
     purchases?: boolean;
+    /** (A4) The name of the accounts' intake queue (`eventQueueUrl`): adds receive and delete on it. */
+    eventQueue?: string;
     /** The host's `ssmImagePrefixes` (`/my/team/`): adds ssm:GetParameters on them. */
     ssmPrefixes?: readonly string[];
     /**
@@ -261,6 +263,23 @@ export function iamPolicy(
     statements.push(
       ...networksIamStatements((resource) => ec2(resource), discover ? { discover } : {}),
     );
+  // A4: scheduled events without a queue (DescribeInstanceStatus), and the intake queue's reads.
+  statements.push({
+    Sid: 'ScheduledEvents',
+    Effect: 'Allow',
+    Action: 'ec2:DescribeInstanceStatus',
+    Resource: '*',
+  });
+  if (options.eventQueue !== undefined) {
+    if (!/^[A-Za-z0-9_-]{1,75}(\.fifo)?$/.test(options.eventQueue))
+      throw usage('--event-queue is the intake queue name (1 to 80 characters of [A-Za-z0-9_-])');
+    statements.push({
+      Sid: 'EventIntake',
+      Effect: 'Allow',
+      Action: ['sqs:ReceiveMessage', 'sqs:DeleteMessage'],
+      Resource: `arn:${partition}:sqs:${region}:${account}:${options.eventQueue}`,
+    });
+  }
   if (options.eksClusterRoleArn !== undefined || options.eksNodeRoleArn !== undefined)
     statements.push(...eksStatements(partition, region, account, options));
   for (const [sid, flag, value] of [
@@ -624,7 +643,7 @@ export function awsIamPolicyCommand() {
     group: 'Providers' as const,
     summary: 'Print the IAM permissions policy an AWS provider account needs',
     description:
-      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; EBS volumes and snapshots created only tagged better-compute:managed=true and changed, attached, snapshotted or deleted only when they carry it and their better-compute:volume or better-compute:snapshot name, which RunInstances may never put on a volume, so never a root volume (attach and detach only on instances carrying better-compute:instance); public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; --ssm-prefix /a/,/b/ adds ssm:GetParameters on the host ssmImagePrefixes; --eks-cluster-role and --eks-node-role add managed Kubernetes on EKS (tagged clusters and node groups, the cluster-admin access entry of the account principal itself, iam:PassRole of the two roles to EKS); --phases A1,A2 adds tenant networks (VPC, subnet, gateway, security group and endpoint creates tagged better-compute:managed=true, changes and deletes only on resources so tagged, route and network ACL entry edits, and security group swaps on claimed instances). Capacity markets: capacity reservation, Capacity Block offering and Spot price reads, EC2 vCPU quota reads and launches into capacity reservations always; --spot adds Spot launches, --pricing the Price List, --allow-purchases buying Capacity Blocks and creating ODCRs (only tagged better-compute:managed=true).',
+      'aws iam-policy prints the attribute-based (ABAC) IAM policy for the role or user an aws provider account signs in as: EC2 reads; RunInstances only when it tags what it creates better-compute:managed=true; TerminateInstances only on instances tagged that way; start, stop, reboot, diagnostic interrupts and root-volume replacement only on instances carrying better-compute:instance; tag edits limited to the two ownership keys; EBS volumes and snapshots created only tagged better-compute:managed=true and changed, attached, snapshotted or deleted only when they carry it and their better-compute:volume or better-compute:snapshot name, which RunInstances may never put on a volume, so never a root volume (attach and detach only on instances carrying better-compute:instance); public SSM image parameters; and sts:GetCallerIdentity. --region and --account narrow the resource ARNs; --instance-profile adds iam:PassRole for the role of that profile; --discover-tag key=value lets attach tag only instances carrying that tag; --kms-key adds the EBS grants for a customer-managed kmsKeyId; --ssm-prefix /a/,/b/ adds ssm:GetParameters on the host ssmImagePrefixes; ec2:DescribeInstanceStatus reads scheduled events, and --event-queue adds sqs:ReceiveMessage and sqs:DeleteMessage on the event intake queue (aws event-rules); --eks-cluster-role and --eks-node-role add managed Kubernetes on EKS (tagged clusters and node groups, the cluster-admin access entry of the account principal itself, iam:PassRole of the two roles to EKS); --phases A1,A2 adds tenant networks (VPC, subnet, gateway, security group and endpoint creates tagged better-compute:managed=true, changes and deletes only on resources so tagged, route and network ACL entry edits, and security group swaps on claimed instances). Capacity markets: capacity reservation, Capacity Block offering and Spot price reads, EC2 vCPU quota reads and launches into capacity reservations always; --spot adds Spot launches, --pricing the Price List, --allow-purchases buying Capacity Blocks and creating ODCRs (only tagged better-compute:managed=true).',
     target: 'none' as const,
     output: 'text' as const,
     flags: {
@@ -678,6 +697,12 @@ export function awsIamPolicyCommand() {
         type: 'boolean' as const,
         description:
           'Accounts buy capacity (config allowPurchases): adds Capacity Block purchases and ODCR creation, tagged managed',
+      },
+      'event-queue': {
+        type: 'string' as const,
+        value: 'NAME',
+        description:
+          'The intake queue of the accounts (aws event-rules): adds sqs:ReceiveMessage and sqs:DeleteMessage on it',
       },
       'ssm-prefix': {
         type: 'string' as const,
@@ -735,6 +760,9 @@ export function awsIamPolicyCommand() {
           ...(context.flags.spot === true ? { spot: true } : {}),
           ...(context.flags.pricing === true ? { pricing: true } : {}),
           ...(context.flags['allow-purchases'] === true ? { purchases: true } : {}),
+          ...(text(context.flags['event-queue'])
+            ? { eventQueue: text(context.flags['event-queue'])! }
+            : {}),
           ...(text(context.flags['ssm-prefix'])
             ? {
                 ssmPrefixes: text(context.flags['ssm-prefix'])!

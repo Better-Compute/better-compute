@@ -14,6 +14,7 @@ import {
   providerPurchasesUnknownMigration,
   providerPurchasesAttemptsMigration,
 } from './provider-purchases.js';
+import { providerEventsMigration, providerInterruptionsMigration } from './provider-events.js';
 import {
   vpsNetworkAdoptMigration,
   vpsNetworksMigration,
@@ -221,4 +222,6 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   providerPurchasesMigration,
   providerPurchasesUnknownMigration,
   providerPurchasesAttemptsMigration,
+  providerEventsMigration,
+  providerInterruptionsMigration,
 ]);

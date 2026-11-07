@@ -12,6 +12,7 @@ import {
   type OfferQuery,
   type PowerAction,
   type ProviderContext,
+  type ProviderEventBatch,
   type ProviderImpl,
   type PurchaseAttempt,
   type ProviderKubernetes,
@@ -20,6 +21,13 @@ import type { JsonClient, QueryClient, QueryParams, XmlElement } from '@better-c
 import type { AccountCredentials } from './account.js';
 import { parseDiscoverTag, type AwsConfig, type AwsProviderOptions } from './config.js';
 import { clientToken, offerId, parseInstanceId, parseOfferId, tags, tagValue } from './ids.js';
+import {
+  defaultEventSources,
+  pollQueue,
+  scanScheduledEvents,
+  scheduledEventScanMs,
+  type ScheduledEvent,
+} from './events.js';
 import {
   aliasRootDeviceOf,
   imageAllowed,
@@ -60,12 +68,17 @@ import {
   type ParsedOffering,
 } from './markets/purchases.js';
 
+/** (A4) How long a scheduled-event scan the IAM policy refuses waits before it is tried again. */
+const scanDeniedBackoffMs = 3_600_000;
+
 export interface AwsComputeDeps {
   ec2: QueryClient;
   /** (A3) Service Quotas (JSON 1.1); absent: offers carry no quota headroom. */
   quotas?: JsonClient;
   /** (A3) The Price List Query API (JSON 1.1); absent: offers carry no on-demand price. */
   pricing?: JsonClient;
+  /** (A4) The event-intake queue's client, when the account names `eventQueueUrl`. */
+  sqs?: JsonClient;
   /** SSM Parameter Store; reinstall of a `resolve:ssm:` image needs it (UNSUPPORTED without). */
   ssm?: JsonClient;
   account: AccountCredentials;
@@ -223,6 +236,12 @@ export class AwsCompute implements ProviderImpl {
   readonly volumes: AwsVolumes;
   readonly #quotas: QuotaReader | undefined;
   readonly #prices: PriceReader;
+  /** (A4, no queue) When the last DescribeInstanceStatus scan succeeded. */
+  #scannedAt: number | undefined;
+  /** (A4) A failed scan's backoff: no scan before this time. */
+  #scanRetryAt: number | undefined;
+  /** (A4) The scheduled events the last complete scan listed (a vanished one is completed). */
+  #scheduled: ReadonlyMap<string, ScheduledEvent> = new Map();
   readonly #imageOwners: readonly string[];
 
   constructor(
@@ -1750,6 +1769,67 @@ export class AwsCompute implements ProviderImpl {
       'DeleteTags',
       { ResourceId: [id], Tag: [{ Key: tags.instance, Value: instanceId }, { Key: tags.managed }] },
       context.signal,
+    );
+  }
+
+  // --- Events (A4) --------------------------------------------------------------------------------
+
+  /**
+   * The account's EventBridge events from its intake queue (`eventQueueUrl`), authenticated by
+   * account, region and source. Messages are deleted only by the batch's `ack`. Without a queue,
+   * the account's scheduled events (DescribeInstanceStatus) at most every 5 minutes. A failed scan
+   * waits the same 5 minutes, and one the IAM policy refuses (a policy from before A4) an hour,
+   * logged once per hour with the fix: vps polls every 15 s and must not spend the EC2 budget.
+   */
+  async pollEvents(
+    context: CallContext,
+    options: { waitMs: number; max: number },
+  ): Promise<ProviderEventBatch> {
+    const { sqs } = this.deps;
+    if (sqs === undefined || this.config.eventQueueUrl === undefined) {
+      const now = this.context.clock.now();
+      if (
+        (this.#scannedAt !== undefined && now - this.#scannedAt < scheduledEventScanMs) ||
+        (this.#scanRetryAt !== undefined && now < this.#scanRetryAt)
+      )
+        return { events: [], received: 0, ack: async () => {} };
+      let scan;
+      try {
+        scan = await scanScheduledEvents(
+          (action, params, signal) => this.call(action, params, signal),
+          context.signal,
+          now,
+          this.#scheduled,
+        );
+      } catch (error) {
+        const denied = isComputeError(error, 'ACCESS_DENIED');
+        this.#scanRetryAt = now + (denied ? scanDeniedBackoffMs : scheduledEventScanMs);
+        if (denied)
+          context.log.warn(
+            'provider-aws: the account may not call ec2:DescribeInstanceStatus; scheduled events are read again in an hour (rerun `aws iam-policy` and update the role or user policy)',
+            { provider: 'aws' },
+          );
+        throw error;
+      }
+      const { events, scheduled } = scan;
+      this.#scanRetryAt = undefined;
+      this.#scannedAt = now;
+      this.#scheduled = scheduled;
+      // Not a queue: nothing more to read until the next scan, however many events it found.
+      return { events, received: 0, ack: async () => {} };
+    }
+    return pollQueue(
+      {
+        sqs,
+        queueUrl: this.config.eventQueueUrl,
+        region: this.config.region,
+        sources: this.config.eventSources ?? defaultEventSources,
+        account: async (signal) =>
+          (await this.deps.account.verify({ signal, clock: this.context.clock })).account,
+        log: context.log,
+      },
+      context,
+      options,
     );
   }
 }

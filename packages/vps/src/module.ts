@@ -194,6 +194,7 @@ import {
   type ProviderMachineView,
   type UnbindMachinesOutput,
 } from './discovery.js';
+import { providerEventsReconciler, type ProviderEventsOptions } from './provider-events.js';
 import {
   costSettings,
   costsReconciler,
@@ -390,6 +391,11 @@ export interface VpsOptions {
    * listed into `provider_machines` (default `5m`), and opt-in label-driven auto-attach.
    */
   discovery?: DiscoveryOptions;
+  /**
+   * (AWS A4) The `vps.provider-events` worker: how often accounts whose client has `pollEvents` are polled
+   * (default `15s`), the long poll and the per-run budget. Events only wake reconcilers early.
+   */
+  events?: ProviderEventsOptions;
   /**
    * The `vps.costs` worker (platform compute billing, D10): how often provider accounts whose client reads costs
    * (`ProviderImpl.costs`, e.g. GCP's billing export) are read into `provider_costs` (default `6h`), how many days
@@ -2032,6 +2038,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       providerPurchasesReconciler(purchaseDeps),
       // R5: provider_machines, listed per provider account (key `all` periodic, then per account).
       discoveryReconciler(options.discovery ?? {}, depsOf),
+      // A4: provider event intake (EventBridge → SQS for EC2): early wakes, interruptions, maintenance.
+      providerEventsReconciler(options.events ?? {}, depsOf),
       // D10: provider_costs per provider account whose client reads costs (key `all` periodic, then per account).
       costsReconciler(
         options.costs ?? {},
