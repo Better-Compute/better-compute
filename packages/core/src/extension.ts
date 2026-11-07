@@ -863,6 +863,14 @@ export interface ProviderResourceKind {
    * machines, so they are not account-wide.
    */
   instances?(spec: unknown): readonly string[];
+  /**
+   * (Pure, no I/O.) The better-compute network ids the spec names (a database joining a tenant network). The caller
+   * refuses an id that is not a live network of the resource's tenant on the same provider account, or one shared
+   * with machines of other tenants on an account that is not the tenant's own (`INVALID_INPUT`, `reason 'network'`),
+   * and passes each one's provider-side name in `ProviderResourceRequest.networks`. A tenant's own network reaches
+   * only its machines, so it is not account-wide.
+   */
+  networks?(spec: unknown): readonly string[];
 }
 
 /** (cloud-resources) What `ProviderResources.ensure` is asked for. */
@@ -884,6 +892,12 @@ export interface ProviderResourceRequest {
    * account-wide objects (a VPC, a registry, linked repositories, another resource by name).
    */
   accountScope?: 'tenant' | 'shared';
+  /**
+   * For a kind with `networks`: each network id the spec names, mapped to its provider-side name (what a provider's
+   * `NetworkRef.network` carries), checked by the caller as `ProviderResourceKind.networks` says. A provider refuses
+   * a spec network missing here: a bare id is never trusted.
+   */
+  networks?: Readonly<Record<string, string>>;
 }
 
 /** (cloud-resources) A resource the account can see, managed by better-compute or not. */
