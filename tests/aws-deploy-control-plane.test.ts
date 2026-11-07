@@ -275,6 +275,22 @@ describe('control-plane template', () => {
     // Listing stays on the bucket ARN itself; nobody lists the audit archive.
     for (const role of ['ApiTaskRole', 'WorkerTaskRole', 'GatewayTaskRole']) expect(listedBuckets(role).has('AuditBucket'), role).toBe(false);
     expect(listedBuckets('GatewayTaskRole').has('BlobsBucket')).toBe(false);
+    // Listing a tenant bucket is confined to the store's prefix (the stores' documented IAM); only the downloads
+    // bucket, which holds public bcd binaries, is listed whole.
+    const prefixes: Record<string, string> = { BlobsBucket: 'blobs', SnapshotsBucket: 'snapshots' };
+    for (const role of ['ApiTaskRole', 'WorkerTaskRole', 'GatewayTaskRole'])
+      for (const statement of statementsOf(role).filter((entry) => [entry.Action].flat().includes('s3:ListBucket'))) {
+        const buckets = [statement.Resource].flat().map((entry) => /^\$\{(\w+)\.Arn\}$/.exec((created(entry) as { 'Fn::Sub'?: string })['Fn::Sub'] ?? '')?.[1]);
+        expect(buckets.length, role).toBe(1);
+        const bucket = buckets[0]!;
+        if (bucket === 'DownloadsBucket') expect(statement.Condition, role).toBeUndefined();
+        else expect(statement.Condition, `${role} ${bucket}`).toEqual({ StringLike: { 's3:prefix': `${prefixes[bucket]}/*` } });
+      }
+    // The tasks get the same prefixes for s3BlobStore and s3SnapshotStore.
+    for (const task of ['ApiTask', 'WorkerTask', 'GatewayTask']) {
+      expect(container(task).Environment, task).toContainEqual({ Name: 'BC_BLOBS_PREFIX', Value: 'blobs' });
+      expect(container(task).Environment, task).toContainEqual({ Name: 'BC_SNAPSHOTS_PREFIX', Value: 'snapshots' });
+    }
   });
 
   it('restores under the same name by adopting the retained PKI bundle, buckets, key and log groups', () => {

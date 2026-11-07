@@ -108,6 +108,9 @@ doing right now, sealed to that node. It never writes secrets, objects or events
 
 Every role that reads a bucket also has `s3:ListBucket` on it. Without it S3 answers a read of a missing key with
 403 AccessDenied instead of 404, so a download that was never published would be an error rather than not found.
+On the blobs and snapshots buckets the listing is confined to the stores' prefixes (`s3:prefix` like `blobs/*` and
+`snapshots/*`, passed to the tasks as `BC_BLOBS_PREFIX` and `BC_SNAPSHOTS_PREFIX`), so no task enumerates keys
+outside them. Only the downloads bucket, which holds public bcd binaries, is listed whole.
 
 No statement uses a wildcard resource or a service-wide action. The migrate task has a role of its own that allows only `rds-db:connect`: an upgrade runs the next image's migrate step before that image serves anything, so it gets no secret, bucket, bus or KMS permission. A configuration whose loading calls AWS under `migrate` needs those permissions added.
 
@@ -152,7 +155,8 @@ a release whose tasks never become healthy.
 The tasks pass everything a configuration needs as environment variables: `AWS_REGION`, `BC_PUBLIC_URL`,
 `BC_GATEWAY_PUBLIC_HOST`, `BC_GATEWAY_INTERNAL_PORT`, `BC_DATABASE_HOST`, `BC_DATABASE_PORT`, `BC_DATABASE_NAME`,
 `BC_DATABASE_USER`, `BC_EVENT_BUS`, the four bucket names (`BC_DOWNLOADS_BUCKET`, `BC_BLOBS_BUCKET`,
-`BC_SNAPSHOTS_BUCKET`, `BC_AUDIT_BUCKET`), `BC_AUDIT_RETENTION_DAYS`, `BC_KMS_KEY_ARN`, `BC_DEPLOYMENT` and
+`BC_SNAPSHOTS_BUCKET`, `BC_AUDIT_BUCKET`), the blob and snapshot store prefixes (`BC_BLOBS_PREFIX`,
+`BC_SNAPSHOTS_PREFIX`), `BC_AUDIT_RETENTION_DAYS`, `BC_KMS_KEY_ARN`, `BC_DEPLOYMENT` and
 `BC_ROLE`, plus the secrets `BETTER_COMPUTE_SECRET` and `BC_PKI_BUNDLE`. A configuration on AWS wires them into
 the platform-service factories:
 
@@ -171,7 +175,8 @@ import {
 export default defineConfig(async ({ command, env = process.env } = {}) => {
   const aws = { region: env.AWS_REGION!, credentials: ambientCredentials({ region: env.AWS_REGION }) };
   const sse = { kind: 'aws:kms', keyId: env.BC_KMS_KEY_ARN } as const;
-  const snapshots = s3SnapshotStore({ ...aws, bucket: env.BC_SNAPSHOTS_BUCKET!, sse });
+  // The task roles may list these buckets only under these prefixes.
+  const snapshots = s3SnapshotStore({ ...aws, bucket: env.BC_SNAPSHOTS_BUCKET!, prefix: env.BC_SNAPSHOTS_PREFIX!, sse });
   // A restore rendered before the download credentials load cannot be fetched: serve only once they have.
   if (command === 'serve' && !(await snapshots.warm())) throw new Error('snapshot download credentials did not load');
   const host = env.BC_DATABASE_HOST!;
@@ -195,7 +200,7 @@ export default defineConfig(async ({ command, env = process.env } = {}) => {
       audit: [s3AuditSink({ ...aws, bucket: env.BC_AUDIT_BUCKET!, prefix: 'audit', sse })],
     },
     downloads: { blob: s3BlobStore({ ...aws, bucket: env.BC_DOWNLOADS_BUCKET! }) },
-    supportBundles: { blob: s3BlobStore({ ...aws, bucket: env.BC_BLOBS_BUCKET!, sse }) },
+    supportBundles: { blob: s3BlobStore({ ...aws, bucket: env.BC_BLOBS_BUCKET!, prefix: env.BC_BLOBS_PREFIX!, sse }) },
     modules: [vps({ snapshots })],
     // …your tenancy, IAM, PKI (from env.BC_PKI_BUNDLE) and modules, as in examples/postgres.
   };

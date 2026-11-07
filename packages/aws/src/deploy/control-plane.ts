@@ -45,6 +45,8 @@ const securityHeaders = '67f7725c-6f97-4210-82d7-5512b31e9d03';
 /** The buckets a stack deletion keeps, which a restore adopts instead of creating. */
 const retainedBuckets = ['BlobsBucket', 'SnapshotsBucket', 'AuditBucket'] as const;
 type RetainedBucket = (typeof retainedBuckets)[number];
+/** The key prefixes of s3BlobStore and s3SnapshotStore in those buckets (BC_*_PREFIX); listing is confined to them. */
+const storePrefixes = { BlobsBucket: 'blobs', SnapshotsBucket: 'snapshots' } as const;
 
 const apiPort = 3000;
 const gatewayPort = 8443;
@@ -404,13 +406,18 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
   const objects = (bucket: string) => bucketArn(bucket, '/*');
   // A reader also needs s3:ListBucket on the bucket itself: without it S3 answers GetObject or
   // HeadObject on a missing key with 403 AccessDenied rather than 404, and s3BlobStore.get treats
-  // only 404 as absent. Listing reveals key names only, never object bodies.
-  const listBuckets = (sid: string, ...buckets: string[]): PolicyStatement => ({
-    Sid: sid,
-    Effect: 'Allow',
-    Action: 's3:ListBucket',
-    Resource: buckets.map((bucket) => bucketArn(bucket)),
-  });
+  // only 404 as absent. Listing reveals key names only, never object bodies, and on a tenant bucket it is
+  // confined to the store's prefix (the stores' documented IAM), so no role enumerates keys outside it.
+  const listBucket = (sid: string, bucket: string): PolicyStatement => {
+    const prefix = storePrefixes[bucket as keyof typeof storePrefixes];
+    return {
+      Sid: sid,
+      Effect: 'Allow',
+      Action: 's3:ListBucket',
+      Resource: [bucketArn(bucket)],
+      ...(prefix ? { Condition: { StringLike: { 's3:prefix': `${prefix}/*` } } } : {}),
+    };
+  };
   const connect: PolicyStatement = {
     Sid: 'ConnectAsTheDatabaseUser',
     Effect: 'Allow',
@@ -428,7 +435,7 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
     { Sid: 'DecryptWithPlatformKey', Effect: 'Allow', Action: 'kms:Decrypt', Resource: platformKeys },
     // NodeSpec signs snapshot download URLs wherever it renders.
     { Sid: 'ReadSnapshots', Effect: 'Allow', Action: 's3:GetObject', Resource: objects('SnapshotsBucket') },
-    listBuckets('ListSnapshots', 'SnapshotsBucket'),
+    listBucket('ListSnapshots', 'SnapshotsBucket'),
   ];
   // Writing secrets and KMS-encrypted objects asks KMS for data keys as the caller; only api and worker write.
   // An adopted bucket's default encryption names the old key, so writers may use it too.
@@ -452,7 +459,8 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
       { Sid: 'ServeDownloads', Effect: 'Allow', Action: 's3:GetObject', Resource: objects('DownloadsBucket') },
       writeObjects('Blobs', 'BlobsBucket'),
       writeObjects('Snapshots', 'SnapshotsBucket'),
-      listBuckets('ListBuckets', 'DownloadsBucket', 'BlobsBucket'),
+      listBucket('ListDownloads', 'DownloadsBucket'),
+      listBucket('ListBlobs', 'BlobsBucket'),
       { Sid: 'PublishEvents', Effect: 'Allow', Action: 'events:PutEvents', Resource: cfnGetAtt('EventBus', 'Arn') },
     ],
     worker: [
@@ -460,7 +468,7 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
       writeSecrets,
       writeObjects('Blobs', 'BlobsBucket'),
       writeObjects('Snapshots', 'SnapshotsBucket'),
-      listBuckets('ListBuckets', 'BlobsBucket'),
+      listBucket('ListBlobs', 'BlobsBucket'),
       { Sid: 'AppendAudit', Effect: 'Allow', Action: ['s3:PutObject', 's3:PutObjectRetention'], Resource: objects('AuditBucket') },
       { Sid: 'PublishEvents', Effect: 'Allow', Action: 'events:PutEvents', Resource: cfnGetAtt('EventBus', 'Arn') },
     ],
@@ -699,6 +707,8 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
     { Name: 'BC_DOWNLOADS_BUCKET', Value: cfnRef('DownloadsBucket') },
     { Name: 'BC_BLOBS_BUCKET', Value: bucketName('BlobsBucket') },
     { Name: 'BC_SNAPSHOTS_BUCKET', Value: bucketName('SnapshotsBucket') },
+    { Name: 'BC_BLOBS_PREFIX', Value: storePrefixes.BlobsBucket },
+    { Name: 'BC_SNAPSHOTS_PREFIX', Value: storePrefixes.SnapshotsBucket },
     { Name: 'BC_AUDIT_BUCKET', Value: bucketName('AuditBucket') },
     { Name: 'BC_AUDIT_RETENTION_DAYS', Value: cfnSub('${AuditRetentionDays}') },
     { Name: 'BC_KMS_KEY_ARN', Value: keyArn },
