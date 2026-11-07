@@ -433,6 +433,93 @@ describe('provider-aws costs (Cost Explorer)', () => {
     expect(page).toBe(3);
   });
 
+  it('a second provider account reading the same Cost Explorer scope is refused (double counting)', async () => {
+    const emu = new AwsEmulator();
+    const ce = new CeEmulator(emu);
+    const awsAccount = '222222222222';
+    ce.lines.push(
+      line({ account: awsAccount, cost: '1' }),
+      line({ account: awsAccount, region: 'eu-west-1', usageType: 'EU-BoxUsage:m7i.large' }),
+    );
+    const reader = (owner: string, overrides: Record<string, unknown>) => {
+      const costs = costExplorerCosts({
+        ce: jsonClient({
+          service: 'ce',
+          region: 'us-east-1',
+          credentials: emu.ambient,
+          fetch: emu.fetch,
+          clock: emu.clock,
+          jsonVersion: '1.1',
+          targetPrefix: 'AWSInsightsIndexService',
+        }),
+        account: { source: emu.ambient, verify: async () => ({ account: awsAccount }) },
+        config: awsConfig.parse({
+          region: 'us-east-1',
+          zones: ['us-east-1a'],
+          ...overrides,
+        }) as AwsConfig,
+        clock: emu.clock,
+        owner,
+      })!;
+      return async () => {
+        const out: ProviderCostRecord[] = [];
+        for await (const record of costs(
+          { from: emu.now() - 3 * DAY, to: emu.now() },
+          callContext(emu),
+        ))
+          out.push(record);
+        return out;
+      };
+    };
+    const reason = (error: unknown) =>
+      isComputeError(error, 'INVALID_CONFIG')
+        ? (error as { details?: { reason?: string } }).details?.reason
+        : error;
+    const east = reader('pa_east', { costs: 'region' });
+    expect(await east()).toHaveLength(1);
+    // another region of the same AWS account: distinct rows, allowed
+    const west = reader('pa_eu', { region: 'eu-west-1', zones: ['eu-west-1a'], costs: 'region' });
+    expect(await west()).toHaveLength(1);
+    // the same region again, or the whole account over a region already read: refused, nothing read
+    const queries = ce.queries.length;
+    expect(reason(await reader('pa_east_2', { costs: 'region' })().catch((e: unknown) => e))).toBe(
+      'costs-overlap',
+    );
+    expect(reason(await reader('pa_all', { costs: 'account' })().catch((e: unknown) => e))).toBe(
+      'costs-overlap',
+    );
+    expect(ce.queries.length).toBe(queries);
+    // the first reader keeps reading, from its cache and after it
+    expect(await east()).toHaveLength(1);
+    emu.clock.advance(DAY);
+    expect(await east()).toHaveLength(1);
+    // a claim not renewed for two days lapses (the provider account was deleted): the region is free again
+    emu.clock.advance(2 * DAY);
+    await expect(reader('pa_all', { costs: 'account' })()).resolves.toEqual(expect.any(Array));
+    // and an account-scope reader now blocks every region of that AWS account
+    expect(reason(await east().catch((e: unknown) => e))).toBe('costs-overlap');
+  });
+
+  it('awsProvider names the provider account as the reader of its scope', async () => {
+    const { emu, ce, read, today } = await world();
+    ce.lines.push(line());
+    expect(await read(today - 3 * DAY, today)).toHaveLength(1);
+    const twin = await awsProvider({ fetch: emu.fetch, credentials: emu.ambient }).create(
+      awsConfig.parse({ region: 'us-east-1', zones: ['us-east-1b'], costs: 'region' }) as AwsConfig,
+      {
+        clock: emu.clock,
+        log: quiet,
+        secrets: { resolve: async () => '' },
+        account: { id: 'pa_twin', tenantId: 'root', platform: true },
+      },
+    );
+    const refused = await (async () => {
+      for await (const _ of twin.costs!({ from: today - 3 * DAY, to: today }, callContext(emu)));
+    })().catch((error: unknown) => error);
+    expect(isComputeError(refused, 'INVALID_CONFIG')).toBe(true);
+    expect((refused as Error).message).toContain('pa_platform');
+  });
+
   it('a caller identity without a 12-digit account is refused before Cost Explorer is asked', async () => {
     const { emu, ce, today } = await world();
     const costs = costExplorerCosts({

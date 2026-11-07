@@ -32,7 +32,13 @@ export function finopsMembers(
       rateLimit: { perSecond: 2, burst: 4 },
     });
     const costs = costExplorerCosts(
-      { ce, account, config, clock: context.clock },
+      {
+        ce,
+        account,
+        config,
+        clock: context.clock,
+        ...(context.account !== undefined ? { owner: context.account.id } : {}),
+      },
       options.costsCacheMs !== undefined ? { cacheMs: options.costsCacheMs } : {},
     );
     if (costs) members.costs = costs;

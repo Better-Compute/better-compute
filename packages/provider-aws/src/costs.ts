@@ -245,10 +245,52 @@ function mapCostError(error: unknown): unknown {
 }
 
 /**
+ * What each provider account in this process reads from Cost Explorer: `<aws account>|*` (account scope) or
+ * `<aws account>|<region>` → the provider account and when it last read. Two provider accounts on one AWS account
+ * that both read its whole bill, or one region twice, would ingest every row twice (and pass it through twice), so
+ * the second is refused. A claim not renewed for `claimTtlMs` (a deleted provider account) lapses. Per process only:
+ * readers in other processes are not seen.
+ */
+const claims = new Map<string, { owner: string; at: number }>();
+const claimTtlMs = 2 * DAY;
+
+function claimScope(
+  owner: string,
+  accountId: string,
+  scope: 'region' | 'account',
+  regions: readonly string[],
+  now: number,
+): void {
+  const mine =
+    scope === 'account' ? [`${accountId}|*`] : regions.map((name) => `${accountId}|${name}`);
+  for (const [key, held] of claims) {
+    if (held.owner === owner || now - held.at >= claimTtlMs) continue;
+    const bar = key.indexOf('|');
+    if (key.slice(0, bar) !== accountId) continue;
+    if (key.slice(bar + 1) === '*' || scope === 'account' || mine.includes(key))
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        `provider account ${held.owner} already reads the costs of AWS account ${accountId}${key.endsWith('|*') ? '' : ` in ${key.slice(bar + 1)}`}: two provider accounts reading the same Cost Explorer scope count each row twice; set costs to off, or region scope on distinct regions`,
+        undefined,
+        { provider: 'aws', reason: 'costs-overlap' },
+      );
+  }
+  for (const [key, held] of claims) if (held.owner === owner) claims.delete(key);
+  for (const key of mine) claims.set(key, { owner, at: now });
+}
+
+/**
  * The account's `costs` reader. Undefined when the account's `costs` is `off`: vps then never reads costs for it.
+ * `owner` (the provider account id) lets it refuse a second provider account reading the same scope in-process.
  */
 export function costExplorerCosts(
-  deps: { ce: JsonClient; account: AccountCredentials; config: AwsConfig; clock: Clock },
+  deps: {
+    ce: JsonClient;
+    account: AccountCredentials;
+    config: AwsConfig;
+    clock: Clock;
+    owner?: string;
+  },
   options: CostExplorerOptions = {},
 ):
   | ((
@@ -264,6 +306,8 @@ export function costExplorerCosts(
   const regions = costRegions(deps.config);
   /** Day start → the day's records and when they were read. */
   const days = new Map<number, { readAt: number; records: ProviderCostRecord[] }>();
+  /** The AWS account the last read verified. */
+  let knownAccount: string | undefined;
 
   async function query(
     accountId: string,
@@ -476,8 +520,12 @@ export function costExplorerCosts(
           provider: 'aws',
           reason: 'caller-account',
         });
+      if (deps.owner !== undefined) claimScope(deps.owner, accountId, scope, regions, now);
+      knownAccount = accountId;
       await read(accountId, { start: first, end }, context.signal);
-    }
+    } else if (deps.owner !== undefined && knownAccount !== undefined)
+      // Every day is cached: renew the claim without asking STS again.
+      claimScope(deps.owner, knownAccount, scope, regions, now);
     for (let day = start; day < end; day += DAY) yield* days.get(day)?.records ?? [];
   };
 }
