@@ -1024,3 +1024,17 @@ user merges. Claimed: new packages `packages/aws-core/**` and `packages/provider
 `tests/check-deps-aws.test.ts`; check-deps rule 5 (`scripts/check-deps.mjs`: only `provider-aws`/`aws` may depend on
 `aws-core`, nothing depends on `aws`/`provider-aws`); one-line inserts in root `tsconfig.json` and `vitest.config.ts`
 `scoped` on that branch. No core/vps/server changes. Program plan: `2026-10-18-aws-integration-program.md`.
+## wf lane do-cloud-resources (DigitalOcean P7, 2026-11-06): cross-lane edits for integration
+
+Branch `wf/do-cloud-resources` (off feat/kubernetes 00bf8404). Own namespace: `packages/cloud-resources/**`,
+`cloud-resources/0001`-`0005`, `packages/provider-digitalocean/src/resources/**`. Edits outside it, each additive and
+tested, for integration to keep exactly one version of:
+- `packages/kubernetes/src/migrations.ts` kubernetes/0001 (ce765706): the usage_windows source-kind CHECK is appended
+  to (current values read back) instead of replaced by a fixed list. Lanes branched from feat/kubernetes carry the old
+  text; keep the appending version (it is what lets cloud-resources/0002 survive either module order). The runner has
+  no checksum, so a database that already ran the old 0001 keeps its CHECK; cloud-resources/0002 appends again and
+  the `cloud-resources.usage-source` selfCheck reports a later migration that dropped the kind.
+- core `ProviderResources.find?` and the ProviderResourceKind/Request additions (all optional).
+- vps: `liveCloudResources` (accounts.ts) refusing `deleteAccount` and `deleteNetwork` for live cloud resources
+  (to_regclass-guarded, like `liveKubernetesClusters`); the `ProviderResources` conformance cases
+  (`resources-conformance.ts`, now with a `find` case).

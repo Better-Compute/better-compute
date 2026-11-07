@@ -110,6 +110,20 @@ export class DoResources implements ProviderResources {
     return this.#kind(kind, 'keep').get(this.#env, id, context);
   }
 
+  /**
+   * What an earlier ensure of the request made, when the answer was lost; every kind can tell. Read-only and part of a
+   * teardown (the row is being forgotten), so a preview kind is still looked up on an account without previews.
+   */
+  async find(request: ProviderResourceRequest, context: CallContext): Promise<string | undefined> {
+    const found = this.#kind(request.kind, 'keep');
+    if (!found.find)
+      throw new ComputeError('UNSUPPORTED', `${request.kind} cannot be looked up`, undefined, {
+        provider: 'digitalocean',
+        reason: 'find',
+      });
+    return found.find(this.#env, request, context);
+  }
+
   async delete(kind: string, id: string, context: CallContext): Promise<ProviderResourceState> {
     return this.#kind(kind, 'keep').delete(this.#env, id, context);
   }

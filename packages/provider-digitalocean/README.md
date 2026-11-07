@@ -135,6 +135,18 @@ DigitalOcean has no network object, so a tenant network is built from a VPC per 
   `better-compute-instance:<id>` tag, which only that Droplet carries. A `.user` is never bound to the cluster's admin user (role
   `primary`, `doadmin`): that is `INVALID_INPUT` (`primaryUser`), and a delete of it answers `deleted` without a call,
   since it goes with the cluster.
+- **Private networking.** A cluster's `vpc` (a VPC uuid) is account-wide: the tenant's own account only. On any
+  account a cluster may instead name `network`, a better-compute network of the tenant (`net_…`): the module checks it
+  is the tenant's and passes its provider-side name, and the cluster joins that network's subnet VPC in the cluster's
+  region (`noSubnetInRegion` when it has none). `vpc` and `network` together are `INVALID_INPUT` (`vpcAndNetwork`);
+  either changes only by a new cluster (`replaceRequired`).
+- **User options by engine.** Kafka `acl` (`<admin|consume|produce|produceconsume>:<topic pattern>`) and OpenSearch
+  `acl` (`<deny|admin|read|readwrite|write>:<index pattern>`) and PostgreSQL `replication` change in place
+  (`PUT …/users/{name}`, settings only). A MySQL `authPlugin` (`caching_sha2_password`, `mysql_native_password`)
+  change goes through `reset_auth`: DigitalOcean issues a new password, sealed in the same run. A MongoDB user's
+  `readonly` is fixed at create. A Kafka user's client certificate and key are secret outputs (`accessCert`,
+  `accessKey`) next to its password. These bodies follow the API reference, not a recording; MongoDB's newer
+  `settings.mongo_user_settings` (role, databases) is not mapped yet.
 - **Ownership.** A cluster carries `better-compute-managed:true`, this deployment's tag, the idempotency key's tag and
   the module's `better-compute-resource:<id>` and `better-compute-tenant:<t>` tags. A create first looks the key's tag
   up (only among clusters this deployment manages: another deployment's cluster with the same key tag is never
@@ -178,9 +190,13 @@ which only DigitalOcean's billing knows (P9 reconciles it).
 Token scopes: `database:read`, `database:create`, `database:update` and `database:delete`, plus `tag:create` for
 adopt and release; the App Platform, Functions and Add-Ons scopes for those kinds. The App, Functions and Add-Ons
 bodies follow the API reference and are not yet checked against recorded responses. A cluster's `vpc` (a VPC uuid)
-is accepted only on the tenant's own account and cannot change in place. Not modelled yet: Standard and Advanced
-editions, a tenant network (`net_…`) as a cluster's VPC and Vector Databases. The 1-Click body follows the API
-reference too.
+is accepted only on the tenant's own account and cannot change in place. A cluster's `network` (a tenant network,
+`net_…`) is accepted on any account: only the tenant's own networks, checked at the API and again before every
+ensure; `vpc` and `network` together are refused (`vpcAndNetwork`), and a change is `replaceRequired`. Every kind
+serves `find` (read-only), as its `ensure` finds its resource: the key tag (clusters), the key env (apps), the label
+(namespaces), the name suffix (add-ons, attachments) or the child of an owned cluster or namespace, so a create
+whose answer was lost is deleted rather than forgotten. Not modelled yet: Standard and Advanced editions and Vector
+Databases. The 1-Click body follows the API reference too.
 
 ## AI platform
 

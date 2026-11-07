@@ -627,6 +627,11 @@ export function appKind(): DoKind {
       return state.state === 'ready' ? { ...state, state: 'updating' } : state;
     },
 
+    // A create whose answer was lost: the app of this deployment carrying the key's env, as ensure finds it.
+    async find(env, _request, context) {
+      return (await byKey(env, context))?.id;
+    },
+
     async get(env, id, context) {
       const app = await readApp(env, id, context.signal);
       return app ? appState(env, app, context.signal) : undefined;

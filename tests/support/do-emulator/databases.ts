@@ -187,9 +187,46 @@ export function registerDatabases(emulator: DoEmulator): void {
     const name = context.body?.name;
     if (typeof name !== 'string') return emulator.error('422-unknown');
     if (cluster._users.some((u: Json) => u.name === name)) return emulator.error('422-name-in-use');
-    const user = { name, role: 'normal', password: newPassword() };
+    const input = context.body as Json;
+    const user: Json = { name, role: 'normal', password: newPassword() };
+    if (cluster.engine === 'mysql')
+      user.mysql_settings = {
+        auth_plugin: input.mysql_settings?.auth_plugin ?? 'caching_sha2_password',
+      };
+    if (cluster.engine === 'kafka') {
+      user.access_cert = `-----BEGIN CERTIFICATE-----\nC${randomUUID()}\n-----END CERTIFICATE-----`;
+      user.access_key = `-----BEGIN PRIVATE KEY-----\nK${randomUUID()}\n-----END PRIVATE KEY-----`;
+    }
+    if (input.settings !== undefined) user.settings = structuredClone(input.settings);
+    if (input.readonly !== undefined) user.readonly = input.readonly;
     cluster._users.push(user);
-    return { status: 201, body: { user: { ...user } } };
+    return { status: 201, body: { user: structuredClone(user) } };
+  });
+  // Only settings change in place (ACLs, pg_allow_replication).
+  emulator.route('PUT', /^\/databases\/([^/]+)\/users\/([^/]+)$/, (context) => {
+    const cluster = clusterOf(context, emulator);
+    const user = cluster?._users.find(
+      (u: Json) => u.name === decodeURIComponent(context.match[2]!),
+    );
+    if (!user) return emulator.error('not-found');
+    const settings = (context.body as Json)?.settings;
+    if (settings === undefined) return emulator.error('422-unknown');
+    user.settings = { ...(user.settings ?? {}), ...structuredClone(settings) };
+    return { status: 201, body: { user: structuredClone(user) } };
+  });
+  // MySQL: a new password and auth plugin.
+  emulator.route('POST', /^\/databases\/([^/]+)\/users\/([^/]+)\/reset_auth$/, (context) => {
+    const cluster = clusterOf(context, emulator);
+    const user = cluster?._users.find(
+      (u: Json) => u.name === decodeURIComponent(context.match[2]!),
+    );
+    if (!user) return emulator.error('not-found');
+    const plugin = (context.body as Json)?.mysql_settings?.auth_plugin;
+    if (cluster!.engine !== 'mysql' || typeof plugin !== 'string')
+      return emulator.error('422-unknown');
+    user.mysql_settings = { auth_plugin: plugin };
+    user.password = newPassword();
+    return { status: 200, body: { user: structuredClone(user) } };
   });
   emulator.route('DELETE', /^\/databases\/([^/]+)\/users\/([^/]+)$/, (context) => {
     const cluster = clusterOf(context, emulator);

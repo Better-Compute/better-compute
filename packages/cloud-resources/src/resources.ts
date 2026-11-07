@@ -9,6 +9,7 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { setQuotaBooking } from '@better-compute/vps';
+import { providerResourceName as providerNetworkName } from '@better-compute/vps';
 import { canonical, sha256Hex } from './input.js';
 import {
   kindOf,
@@ -102,6 +103,14 @@ interface Admitted {
   parent?: ResourceRow;
   /** The kind's identity of the spec within the parent (`ProviderResourceKind.identity`). */
   identity?: string;
+  /** The networks the spec names (`ProviderResourceKind.networks`), as the row keeps them. */
+  networkIds: string[];
+}
+
+/** The networks a spec names, sorted and once each: what `network_ids` keeps (vps reads it on a network delete). */
+export function networkIdsOf(kind: ProviderResourceKind, spec: unknown): string[] {
+  if (typeof kind.networks !== 'function') return [];
+  return [...new Set(kind.networks(spec))].filter((id) => typeof id === 'string').sort();
 }
 
 /** A child's identity within its parent, when its kind declares one: a non-empty string, else none. */
@@ -263,6 +272,69 @@ export async function assertInstances(
     );
 }
 
+/**
+ * The provider-side names of the networks a spec names (`ProviderResourceKind.networks`), for the networks of the
+ * tenant on the provider account; one shared with machines of other tenants (an adopted, tag-scoped VPC such as a
+ * project's default) only when the account is the tenant's own. `live`: only networks still wanted and not
+ * deleted (a create or a change naming one); otherwise any such network still recorded (a resource converging on
+ * the network it was created in). An id that is not found is left out of the map.
+ */
+export async function networkNames(
+  tx: SqlTx,
+  scope: { tenantId: string; accountId: string; tenantAccount: boolean; live: boolean },
+  ids: readonly string[],
+): Promise<Record<string, string>> {
+  if (ids.length === 0) return {};
+  const { rows } = await tx.query<{ id: string; external_name: string | null }>(
+    `SELECT id, external_name FROM networks
+      WHERE id = ANY($1::text[]) AND tenant_id = $2 AND provider_account_id = $3
+        AND (NOT shared_tag_scoped OR $4::bool)
+        AND (NOT $5::bool OR (desired_state = 'present' AND state <> 'deleted'))`,
+    [[...new Set(ids)], scope.tenantId, scope.accountId, scope.tenantAccount, scope.live],
+  );
+  return Object.fromEntries(
+    rows.map((row) => [row.id, providerNetworkName(row.id, row.external_name)]),
+  );
+}
+
+/**
+ * The networks a spec names must be live networks of the tenant on the same provider account, and not shared with
+ * other tenants' machines unless the account is the tenant's own: INVALID_INPUT otherwise (one that does not exist
+ * and one of another tenant alike).
+ */
+export async function assertNetworks(
+  tx: SqlTx,
+  tenantId: string,
+  provider: ResourcesProvider,
+  kind: ProviderResourceKind,
+  spec: unknown,
+  /** On an update, the stored spec: the networks it already named are not checked again (one may be going). */
+  before?: unknown,
+): Promise<void> {
+  if (typeof kind.networks !== 'function') return;
+  const kept = new Set(before === undefined ? [] : kind.networks(before));
+  const named = [...new Set(kind.networks(spec))].filter((id) => !kept.has(id));
+  if (named.length === 0) return;
+  const found = await networkNames(
+    tx,
+    {
+      tenantId,
+      accountId: provider.account.id,
+      tenantAccount: provider.account.tenantId === tenantId,
+      live: true,
+    },
+    named,
+  );
+  const missing = named.filter((id) => found[id] === undefined);
+  if (missing.length > 0)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${kind.kind}: network ${missing[0]} is not a network of this tenant on the pool's provider account`,
+      undefined,
+      { reason: 'network', field: 'spec', networks: missing, kind: kind.kind },
+    );
+}
+
 async function parentOf(
   tx: SqlTx,
   input: { tenantId: string; parentId?: string },
@@ -327,6 +399,7 @@ async function admit(
   const spec = await validSpec(kind, input.spec);
   assertAccountScope(provider, input.tenantId, kind, spec);
   await assertInstances(tx, input.tenantId, provider.account.id, kind, spec);
+  await assertNetworks(tx, input.tenantId, provider, kind, spec);
   const region = regionOf(provider, kind, spec);
   const parent = await parentOf(tx, input, kind, provider.account.id);
   const identity = parent ? identityOf(kind, spec) : undefined;
@@ -338,6 +411,7 @@ async function admit(
     ...(region !== undefined ? { region } : {}),
     ...(parent ? { parent } : {}),
     ...(identity !== undefined ? { identity } : {}),
+    networkIds: networkIdsOf(kind, spec),
   };
 }
 
@@ -481,9 +555,9 @@ export async function createResource(
     await tx.query(
       `INSERT INTO cloud_resources (id, tenant_id, project_id, pool_id, provider_account_id, provider, kind, family,
                                     name, description, region, parent_id, spec, provider_name, state, desired_state,
-                                    created_by, idempotency_key, request_hash, version, identity)
+                                    created_by, idempotency_key, request_hash, version, identity, network_ids)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, 'pending', 'present', $15, $16,
-               decode($17, 'hex'), 1, $18)`,
+               decode($17, 'hex'), 1, $18, $19::text[])`,
       [
         resourceId,
         input.tenantId,
@@ -503,6 +577,7 @@ export async function createResource(
         input.idempotencyKey,
         hash,
         admitted.identity ?? null,
+        admitted.networkIds,
       ],
     );
   } catch (error) {
@@ -606,6 +681,7 @@ export async function updateResource(
   let spec = stored;
   let identity = row.identity;
   let quota: Readonly<Record<string, number>> | undefined;
+  let networkIds: string[] | null = null;
   if (input.spec !== undefined && row.adopted && row.ready_at === null)
     // Its spec is the provider's until the takeover reads it back: a change before that has nothing to apply to.
     throw new ComputeError(
@@ -629,6 +705,8 @@ export async function updateResource(
     spec = await validSpec(kind, { ...stored, ...input.spec });
     assertAccountScope(provider, row.tenant_id, kind, spec);
     await assertInstances(tx, row.tenant_id, row.provider_account_id, kind, spec, stored);
+    await assertNetworks(tx, row.tenant_id, provider, kind, spec, stored);
+    networkIds = networkIdsOf(kind, spec);
     const changed = [...new Set([...Object.keys(stored), ...Object.keys(spec)])].filter(
       (field) => !same(stored[field], spec[field]),
     );
@@ -664,7 +742,8 @@ export async function updateResource(
         SET spec = $2::jsonb, description = $3, version = version + 1, updated_at = compute_now(),
             state = CASE WHEN $4 AND state IN ('ready', 'error') THEN 'updating' ELSE state END,
             message = CASE WHEN $4 AND state IN ('ready', 'error') THEN NULL ELSE message END,
-            spec_changed = spec_changed OR $4, identity = $5
+            spec_changed = spec_changed OR $4, identity = $5,
+            network_ids = coalesce($6::text[], network_ids)
       WHERE id = $1`,
     [
       row.id,
@@ -672,6 +751,7 @@ export async function updateResource(
       input.description !== undefined ? input.description : row.description,
       providerChange,
       identity,
+      networkIds,
     ],
   );
   if (providerChange) {

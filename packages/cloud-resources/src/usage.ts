@@ -14,7 +14,9 @@ import { json } from './store.js';
 //   (`deleted_at`). It is better-compute's managed-resource fee, so it is recorded for `metered` (platform-hosted)
 //   and `platform-fee` (BYO) pools alike; a pool whose billing mode is `none` records nothing, though its watermark
 //   still advances. What the provider itself charges reaches a hosted tenant through the account's cost
-//   pass-through rules, as for a managed Kubernetes cluster's nodes.
+//   pass-through rules, as for a managed Kubernetes cluster's nodes. A resource living in another (a database
+//   user, a pool, a firewall, a replica: `parent_id` set) bills no fee of its own: it is part of the managed resource,
+//   and the provider charges nothing for most; a replica's nodes bill through its kind meter.
 // - The kind's own meters (`ProviderResourceKind.meters`): the rate the provider last reported for each
 //   (`ProviderResourceState.usage`, kept in `meter_rates`) bills the hours being written. They are written only for
 //   the meters the operator names in `cloudResources({ kindMeters })`: better-iam prices only meters it defines
@@ -36,6 +38,7 @@ interface DueResource {
   provider: string;
   kind: string;
   region: string | null;
+  parent_id: string | null;
   meter_rates: Record<string, unknown> | string;
   pool_class: string | null;
   pool_owner: string | null;
@@ -79,7 +82,7 @@ export async function meterResources(
   const floorNow = Math.floor((now - grace) / hourMs) * hourMs;
   const start = 'coalesce(r.metered_until, r.provisioned_at, r.ready_at)';
   const { rows } = await tx.query<DueResource>(
-    `SELECT r.id, r.tenant_id, r.project_id, r.pool_id, r.provider, r.kind, r.region, r.meter_rates,
+    `SELECT r.id, r.tenant_id, r.project_id, r.pool_id, r.provider, r.kind, r.region, r.parent_id, r.meter_rates,
             p.class AS pool_class, p.owner_tenant_id AS pool_owner, p.policy,
             ${poolAccountTenantSql} AS account_tenant,
             (extract(epoch FROM ${start}) * 1000)::float8 AS metered,
@@ -114,7 +117,9 @@ export async function meterResources(
       ) === 'none'
     )
       continue;
-    const lines: MeterLine[] = [{ meter: resourceHoursMeter, perHour: 1 }];
+    // The fee is the managed resource's: what lives in it bills only its kind meters.
+    const lines: MeterLine[] =
+      row.parent_id === null ? [{ meter: resourceHoursMeter, perHour: 1 }] : [];
     for (const [meter, rate] of Object.entries(json(row.meter_rates) ?? {}))
       if (
         deps.kindMeters?.has(meter) &&
@@ -124,6 +129,7 @@ export async function meterResources(
         rate > 0
       )
         lines.push({ meter, perHour: rate });
+    if (lines.length === 0) continue;
     const tags: UsageTags = { pool: row.pool_id, provider: row.provider, source: row.kind };
     if (row.region) tags.region = row.region;
     if (row.project_id) tags.project = row.project_id;

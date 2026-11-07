@@ -238,6 +238,11 @@ export function addonKind(): DoKind {
         : state;
     },
 
+    // A create whose answer was lost: the add-on with this deployment's name suffix, as ensure finds it.
+    async find(env, request, context) {
+      return (await byName(env, `${request.name}${suffix(env)}`, context))?.uuid;
+    },
+
     async get(env, id, context) {
       const addon = await readAddon(env, id, context.signal);
       return addon && status(addon.state) !== 'deleted' ? addonState(addon) : undefined;

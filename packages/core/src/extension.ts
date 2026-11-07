@@ -778,6 +778,10 @@ export interface ProviderNetworks {
  * `ProviderNetworkState`, plus `updating` and the resource's plain `outputs` (never secrets).
  */
 export interface ProviderResourceState {
+  /**
+   * The provider's id. (cloud-resources) An `ensure` answering `error` after the provider made the resource (a first
+   * deployment that failed) still carries it, so the caller can delete it; empty when nothing was made.
+   */
   id: string;
   state: 'pending' | 'ready' | 'updating' | 'deleting' | 'deleted' | 'error';
   outputs?: Readonly<Record<string, string>>;
@@ -871,6 +875,14 @@ export interface ProviderResourceKind {
    * adopted (its spec is unknown until the takeover). Absent or empty: the kind books nothing.
    */
   quota?(spec: unknown): Readonly<Record<string, number>>;
+  /**
+   * (Pure, no I/O.) The better-compute network ids the spec names (a database joining a tenant network). The caller
+   * refuses an id that is not a live network of the resource's tenant on the same provider account, or one shared
+   * with machines of other tenants on an account that is not the tenant's own (`INVALID_INPUT`, `reason 'network'`),
+   * and passes each one's provider-side name in `ProviderResourceRequest.networks`. A tenant's own network reaches
+   * only its machines, so it is not account-wide.
+   */
+  networks?(spec: unknown): readonly string[];
 }
 
 /** (cloud-resources) What `ProviderResources.ensure` is asked for. */
@@ -892,6 +904,12 @@ export interface ProviderResourceRequest {
    * account-wide objects (a VPC, a registry, linked repositories, another resource by name).
    */
   accountScope?: 'tenant' | 'shared';
+  /**
+   * For a kind with `networks`: each network id the spec names, mapped to its provider-side name (what a provider's
+   * `NetworkRef.network` carries), checked by the caller as `ProviderResourceKind.networks` says. A provider refuses
+   * a spec network missing here: a bare id is never trusted.
+   */
+  networks?: Readonly<Record<string, string>>;
 }
 
 /** (cloud-resources) A resource the account can see, managed by better-compute or not. */
@@ -920,6 +938,14 @@ export interface ProviderResources {
   ensure(request: ProviderResourceRequest, context: CallContext): Promise<ProviderResourceState>;
   /** The resource as it is; undefined when it does not exist. */
   get(kind: string, id: string, context: CallContext): Promise<ProviderResourceState | undefined>;
+  /**
+   * The provider id of the resource an earlier `ensure` of this request made, found the way `ensure` finds it (by
+   * `CallContext.idempotencyKey`, the provider-side name, or a child's identity in `request.parent`); undefined when
+   * there is none. Read-only: it never creates or changes anything. The caller asks before it forgets a resource
+   * whose create was sent but never answered (a timeout after the provider accepted it), so it can delete it.
+   * Absent: the caller cannot tell, and keeps such a resource in error rather than forget it.
+   */
+  find?(request: ProviderResourceRequest, context: CallContext): Promise<string | undefined>;
   delete(kind: string, id: string, context: CallContext): Promise<ProviderResourceState>;
   /** Every resource of the kind the account can see. */
   discover?(kind: string, context: CallContext): AsyncIterable<ProviderDiscoveredResource>;

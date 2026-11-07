@@ -68,6 +68,14 @@ betterCompute({
   database user's name; `firewall` for a cluster's single firewall): a second live resource of the kind with the
   same identity in one parent is `CONFLICT` (`reason 'identity'`). A row the provider answers an id for that another
   live row already records goes to `error` instead.
+- **Nothing the provider made is forgotten.** The provider id an `ensure` answers is recorded whatever state it
+  reports (an app whose first deployment failed still has to be deleted). A resource deleted before the provider
+  was ever asked is finished with no provider call; one whose `ensure` was sent (`ensure_sent_at`) but never
+  answered (a timeout after the provider accepted the create) is looked up first through the optional
+  `ProviderResources.find`, and deleted when found; a provider without `find` keeps it in `error` rather than guess.
+  A create answered after another run finished the row brings the row back to be deleted (`deleting`, reason
+  `late-create`). vps refuses to delete a provider account or a network a live resource uses
+  (`liveCloudResources`; the networks a spec names are kept in `network_ids`).
 - **Adoption** takes the resource over in its first run, whatever its version (a description change before it
   does not count); its spec stays the provider's (observed) until the tenant changes it. A spec change before the
   takeover is `INVALID_STATE` (`adopting`). One deleted or released before the takeover completed (or after it
@@ -80,6 +88,11 @@ betterCompute({
   instances), through the kind's pure `instances(spec)`: each must be a live instance of the tenant on the same
   provider account (`INVALID_INPUT`, `reason 'instance'`), and the provider maps it to its own handle (DigitalOcean:
   the Droplet's instance tag), so it is safe on a hosted pool.
+  Likewise a spec may name tenant networks (a database joining a private network) through the kind's pure
+  `networks(spec)`: each must be a live network of the tenant on the same provider account, and not an adopted VPC
+  shared with other tenants' machines unless the account is the tenant's own (`INVALID_INPUT`, `reason 'network'`).
+  The reconciler checks them again before every `ensure` and hands the provider each one's provider-side name
+  (`networks` on the request); a provider never trusts a bare network id.
 - **Secrets in a spec** are SecretRefs, resolved only within the resource's tenant, just before the provider call.
 - **Quota** per tenant and kind: `maxPerKind` (default 20) and `quotas: { 'do.database.pg': 5 }`.
 - **Capacity quota bookings.** A kind may declare a pure `quota(spec)`: what the spec books against the tenant's
@@ -95,14 +108,16 @@ betterCompute({
   the provider's first acceptance until it is deleted or released, billed to the resource's tenant as
   `cloud-resource` usage windows (tags `pool`, `provider`, `region`, `project` and `source` = the kind). It is
   the managed-resource fee, recorded on hosted and BYO pools alike; a pool whose billing mode is `none` records
-  none. A kind's own meters (`do.database.pg.node.hours`, …) bill at the rate the provider last reported
+  none. A resource living in another (a database user, pool, firewall or replica) bills no fee of its own. A
+  kind's own meters (`do.database.pg.node.hours`, …) bill at the rate the provider last reported
   (`ProviderResourceState.usage`, kept in `meter_rates`), but only those named in `kindMeters`: better-iam prices
   only meters it defines (100 per tenant), so define them there first. What the provider charges reaches a hosted
   tenant through the account's cost pass-through rules.
 - **Migrations** `cloud-resources/0001_resources` (one `cloud_resources` table), `0002_metering` (the
   watermark, the rates, and `cloud-resource` appended to the usage source CHECK; selfCheck
   `cloud-resources.usage-source` reports a later migration that dropped it) and `0003_identity` (`identity`, its
-  unique index under a parent, and `spec_changed`).
+  unique index under a parent, and `spec_changed`), `0004_ensure_sent` (`ensure_sent_at`) and `0005_network_ids`
+  (`network_ids`, GIN-indexed).
 
 ## Conformance
 

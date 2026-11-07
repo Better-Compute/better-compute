@@ -100,6 +100,7 @@ passes them in. `inventory` and `capacity` are built in and always registered.
 | `better-compute/provision`                          | The workflow engine, `defineStep`, `defineProfile`, `provisionModule()`                                                               |
 | `better-compute/metal`                              | Bare-metal verbs and drivers (power, management, boot, deploy, inspect), `metal()`                                                    |
 | `better-compute/vps`                                | Instances and sandboxes, runtimes, flavors, `defineProvider`, `vps()`                                                                 |
+| `better-compute/cloud-resources`                    | Managed databases, apps and other provider services as one desired-state resource, `cloudResources()`                                 |
 | `better-compute/iam`, `/iam/plugin`, `/iam/testing` | The Better IAM bridge, the plugin for IAM hosts, and an embedded Better IAM for tests and `dev --sim`                                 |
 | `better-compute/events`                             | Signed webhooks and the server-sent `/watch` stream                                                                                   |
 | `better-compute/fleet`                              | FleetConfig export, plan and apply                                                                                                    |

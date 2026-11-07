@@ -4,6 +4,7 @@ import {
   type CallContext,
   type ModuleContext,
   type ProviderResourceKind,
+  type ProviderResourceRequest,
   type ProviderResourceState,
   type Reconciler,
   type SecretRef,
@@ -29,7 +30,7 @@ import {
   type ResourceRow,
   type ResourcesProvider,
 } from './store.js';
-import { kindQuota, markDeleted, quotaOwner } from './resources.js';
+import { kindQuota, markDeleted, networkIdsOf, networkNames, quotaOwner } from './resources.js';
 import type { CloudResourceState } from './types.js';
 import { meterRates } from './usage.js';
 
@@ -85,8 +86,14 @@ export async function reconcileResource(
     return undefined;
   const worker = new ResourceWorker(deps, sql, snapshot, signal);
   const { row } = snapshot;
-  if (row.desired_state !== 'present' && row.provider_id === null && snapshot.liveChildren === 0)
-    // The provider never answered for it: nothing to delete or release there.
+  if (
+    row.desired_state !== 'present' &&
+    row.provider_id === null &&
+    row.ensure_sent_at === null &&
+    snapshot.liveChildren === 0
+  )
+    // The provider was never asked for it: nothing to delete or release there. (One whose ensure was sent but never
+    // answered is looked up first: see recoverLost.)
     return worker.finish(row.desired_state === 'released' ? 'released' : 'deleted');
   if (row.desired_state !== 'present' && row.adopted && row.ready_at === null && snapshot.liveChildren === 0)
     // An adoption whose takeover never completed: the resource never became ours (a delete would be refused as not
@@ -98,6 +105,9 @@ export async function reconcileResource(
   if (row.desired_state === 'released') return worker.release(provider);
   return worker.converge(provider);
 }
+
+/** What recording a provider id came to. */
+type Recorded = 'recorded' | 'conflict' | 'reopened';
 
 /** What one provider call came to; `undefined` when the provider was busy (try later). */
 type Sealed = { refs: Record<string, SecretRef>; created: SecretRef[]; superseded: SecretRef[] };
@@ -186,23 +196,128 @@ class ResourceWorker {
    * The provider's id, recorded as soon as the provider answers one, whatever the row's version: it is a fact
    * about the provider, and a resource whose id was lost could not be deleted.
    */
-  async #recordProviderId(id: string): Promise<boolean> {
-    if (this.#row.provider_id !== null) return true;
+  async #recordProviderId(id: string): Promise<Recorded> {
+    const row = this.#row;
+    if (row.provider_id !== null) return row.provider_id === id ? 'recorded' : 'conflict';
+    let outcome: Recorded;
     try {
-      await this.sql.transaction((tx) =>
-        tx.query(
+      outcome = await this.sql.transaction(async (tx): Promise<Recorded> => {
+        const recorded = await tx.query(
           `UPDATE cloud_resources
               SET provider_id = $2, provisioned_at = coalesce(provisioned_at, compute_now())
-            WHERE id = $1 AND provider_id IS NULL`,
-          [this.#row.id, id],
-        ),
-      );
+            WHERE id = $1 AND provider_id IS NULL AND state NOT IN ('deleted', 'released')
+            RETURNING id`,
+          [row.id, id],
+        );
+        if (recorded.rows.length > 0) return 'recorded';
+        const { rows } = await tx.query<{ provider_id: string | null }>(
+          `SELECT provider_id FROM cloud_resources WHERE id = $1 FOR UPDATE`,
+          [row.id],
+        );
+        const current = rows[0];
+        if (!current) return 'conflict';
+        if (current.provider_id !== null)
+          return current.provider_id === id ? 'recorded' : 'conflict';
+        // Another run finished the row (deleted or released, with no provider id) while this one's create was in
+        // flight: the provider made it after all. The row is brought back to be deleted, never left unmanaged.
+        await tx.query(
+          `UPDATE cloud_resources
+              SET provider_id = $2, provisioned_at = coalesce(provisioned_at, compute_now()),
+                  desired_state = 'deleted', state = 'deleting', deleted_at = NULL, message = NULL,
+                  version = version + 1, updated_at = compute_now()
+            WHERE id = $1`,
+          [row.id, id],
+        );
+        await this.deps.work.enqueue(tx, resourcesWork, row.id);
+        await publish(this.deps, tx, row, 'deleting', { reason: 'late-create' });
+        return 'reopened';
+      });
     } catch (error) {
       // Another live row records that provider resource (cloud_resources_provider_id): this one never takes it.
       if ((error as { code?: string } | undefined)?.code !== '23505') throw error;
+      return 'conflict';
+    }
+    if (outcome === 'conflict') return outcome;
+    row.provider_id = id;
+    if (outcome === 'reopened') {
+      this.deps.log.warn('cloud-resources: a create answered after its row was finished; deleting it', {
+        resourceId: row.id,
+        providerId: id,
+      });
+      this.#again = true;
+    }
+    return outcome;
+  }
+
+  /**
+   * A row being deleted or released whose `ensure` was sent but whose provider id was never recorded (the answer was
+   * lost, or the claim expired mid-call): the provider is asked whether it made the resource (`find`). `gone`: it did
+   * not, and the row can finish; `found`: the id is recorded and the teardown goes on; `wait`: the provider is busy or
+   * cannot tell (the row is in error, retried on refresh: never forgotten on a guess).
+   */
+  async #recoverLost(provider: ResourcesProvider): Promise<'gone' | 'found' | 'wait'> {
+    const row = this.#row;
+    if (row.ensure_sent_at === null) return 'gone';
+    const resources = provider.resources;
+    if (typeof resources.find !== 'function') {
+      await this.#set({
+        state: 'error',
+        message: `Provider ${row.provider} cannot look up a resource whose create was sent but never answered; it may exist there`,
+      });
+      return 'wait';
+    }
+    const looked = await this.#attempt(async (): Promise<ProviderResourceState> => {
+      const id = await resources.find!(this.#request(), this.#call());
+      return typeof id === 'string' && id.length > 0
+        ? { id, state: 'ready' }
+        : { id: '', state: 'deleted' };
+    });
+    if (!looked) return 'wait';
+    if (looked.state === 'error') {
+      await this.#set({ state: 'error', message: looked.message ?? 'The provider lookup failed' });
+      return 'wait';
+    }
+    if (looked.state === 'deleted') return 'gone';
+    // Another live row manages what it found: it is not this row's to delete.
+    return (await this.#recordProviderId(looked.result!.id)) === 'conflict' ? 'gone' : 'found';
+  }
+
+  /** The request `ensure` (and `find`) is sent for the row. */
+  #request(networks?: Record<string, string>): ProviderResourceRequest {
+    const row = this.#row;
+    const { parent, account } = this.snapshot;
+    return {
+      kind: row.kind,
+      name: row.provider_name,
+      spec: json(row.spec),
+      ...(row.provider_id !== null ? { id: row.provider_id } : {}),
+      ...(parent?.provider_id ? { parent: parent.provider_id } : {}),
+      labels: this.#labels(),
+      accountScope: account?.tenantId === row.tenant_id ? 'tenant' : 'shared',
+      ...(networks ? { networks } : {}),
+    };
+  }
+
+  /**
+   * Records, and commits, that an ensure is about to be sent for a row with no provider id, unless the row stopped
+   * being wanted since this run read it (then nothing is sent). False: do not send.
+   */
+  async #markEnsureSent(): Promise<boolean> {
+    const row = this.#row;
+    if (row.provider_id !== null) return true;
+    const { rows } = await this.sql.transaction((tx) =>
+      tx.query<{ ensure_sent_at: Date | string }>(
+        `UPDATE cloud_resources SET ensure_sent_at = coalesce(ensure_sent_at, compute_now())
+          WHERE id = $1 AND desired_state = 'present' AND state NOT IN ('deleted', 'released')
+          RETURNING ensure_sent_at`,
+        [row.id],
+      ),
+    );
+    if (rows.length === 0) {
+      await this.#changedMeanwhile();
       return false;
     }
-    this.#row.provider_id = id;
+    row.ensure_sent_at = rows[0]!.ensure_sent_at;
     return true;
   }
 
@@ -275,6 +390,8 @@ class ResourceWorker {
     secretRefs?: Record<string, SecretRef>;
     /** An adopted resource's spec, as the provider reports it. */
     spec?: Readonly<Record<string, unknown>>;
+    /** The networks that spec names (written with it). */
+    networkIds?: readonly string[];
     /** The rate of each of the kind's meters, when the provider reported its usage. */
     rates?: Readonly<Record<string, number>>;
     /** What the spec books, once the provider reports it applied: a shrink kept since the change is returned. */
@@ -289,6 +406,7 @@ class ResourceWorker {
                 secret_outputs = coalesce($6::jsonb, secret_outputs),
                 spec = coalesce($7::jsonb, spec),
                 meter_rates = coalesce($8::jsonb, meter_rates),
+                network_ids = coalesce($9::text[], network_ids),
                 updated_at = compute_now(),
                 ready_at = CASE WHEN $3 = 'ready' THEN coalesce(ready_at, compute_now()) ELSE ready_at END
           WHERE id = $1 AND version = $2
@@ -302,6 +420,7 @@ class ResourceWorker {
           update.secretRefs ? JSON.stringify(update.secretRefs) : null,
           update.spec ? JSON.stringify(update.spec) : null,
           update.rates ? JSON.stringify(update.rates) : null,
+          update.networkIds ? [...update.networkIds] : null,
         ],
       );
       if (rows.length === 0) return false;
@@ -377,23 +496,57 @@ class ResourceWorker {
     // An adopted resource is taken over first, whatever its version (a description change does not count), and then
     // observed, not ensured, until the tenant changes its spec: until then its spec is the provider's.
     const observe = row.adopted && (row.ready_at === null || !row.spec_changed);
+    // The tenant networks the spec names, by their provider-side names: only the tenant's own on this account (the
+    // API checked them; this keeps a provider from ever being handed a network that is not).
+    let networks: Record<string, string> | undefined;
+    if (!observe && typeof kind.networks === 'function') {
+      const named = [...kind.networks(json(row.spec))];
+      if (named.length > 0) {
+        networks = await this.sql.transaction((tx) =>
+          networkNames(
+            tx,
+            {
+              tenantId: row.tenant_id,
+              accountId: provider.account.id,
+              tenantAccount: provider.account.tenantId === row.tenant_id,
+              live: false,
+            },
+            named,
+          ),
+        );
+        const missing = named.find((id) => networks![id] === undefined);
+        if (missing !== undefined) {
+          await this.#set({
+            state: 'error',
+            message: `Network ${missing} is not a network of this tenant on the provider account`,
+          });
+          return this.#next();
+        }
+      }
+    }
+    if (!observe && !(await this.#markEnsureSent())) return this.#next();
     const ensured = await this.#attempt(() =>
       observe
         ? this.#observe(provider)
-        : provider.resources.ensure(
-            {
-              kind: row.kind,
-              name: row.provider_name,
-              spec: json(row.spec),
-              ...(row.provider_id !== null ? { id: row.provider_id } : {}),
-              ...(parent?.provider_id ? { parent: parent.provider_id } : {}),
-              labels: this.#labels(),
-              accountScope: provider.account.tenantId === row.tenant_id ? 'tenant' : 'shared',
-            },
-            this.#call(),
-          ),
+        : provider.resources.ensure(this.#request(networks), this.#call()),
     );
     if (!ensured) return this.#next();
+    // The provider's id is recorded whatever state it answered: a resource it made and reports failed (a first
+    // deployment that ended in error) still has to be deleted with the row. An answer with no id made nothing.
+    const answeredId = ensured.result?.id;
+    if (typeof answeredId === 'string' && answeredId.length > 0) {
+      const recorded = await this.#recordProviderId(answeredId);
+      if (recorded === 'conflict') {
+        // Nothing of what it answered is kept (its secrets are the other resource's).
+        await this.#set({
+          state: 'error',
+          message: `Another cloud resource already manages ${answeredId}`.slice(0, 500),
+        });
+        return this.#next();
+      }
+      // The row was finished meanwhile and is now being deleted: the next run tears it down.
+      if (recorded === 'reopened') return this.#next();
+    }
     if (ensured.state === 'error') {
       await this.#set({
         state: 'error',
@@ -402,14 +555,6 @@ class ResourceWorker {
       return this.#next();
     }
     const result = ensured.result!;
-    if (!(await this.#recordProviderId(result.id))) {
-      // Nothing of what it answered is kept (its secrets are the other resource's).
-      await this.#set({
-        state: 'error',
-        message: `Another cloud resource already manages ${result.id}`.slice(0, 500),
-      });
-      return this.#next();
-    }
     const adoptedSpec =
       observe && result.spec !== undefined && Object.keys(json(row.spec)).length === 0
         ? result.spec
@@ -432,7 +577,7 @@ class ResourceWorker {
       state: ready ? 'ready' : this.#converging(),
       ...(Object.keys(outputs).length > 0 ? { outputs } : {}),
       ...(sealed.created.length > 0 ? { secretRefs: sealed.refs } : {}),
-      ...(adoptedSpec ? { spec: adoptedSpec } : {}),
+      ...(adoptedSpec ? { spec: adoptedSpec, networkIds: networkIdsOf(kind, adoptedSpec) } : {}),
       // What it bills per hour from here (usage.ts); undeclared meters and bad rates are dropped.
       ...(result.usage !== undefined ? { rates: meterRates(kind.meters, result.usage) } : {}),
       // Ready on the spec this run ensured (the write is guarded by its version): a kept shrink is returned.
@@ -480,7 +625,11 @@ class ResourceWorker {
       if (row.state !== 'deleting') await this.#set({ state: 'deleting' });
       return this.#next();
     }
-    if (row.provider_id === null) return this.finish('deleted');
+    if (row.provider_id === null) {
+      const lost = await this.#recoverLost(provider);
+      if (lost === 'wait') return this.#next();
+      if (lost === 'gone') return this.finish('deleted');
+    }
     const gone = await this.#attempt(async () => {
       try {
         return await provider.resources.delete(row.kind, row.provider_id!, this.#call());
@@ -520,6 +669,11 @@ class ResourceWorker {
         message: 'Resources still live in it; delete them before it can be released',
       });
       return this.#next();
+    }
+    if (row.provider_id === null) {
+      const lost = await this.#recoverLost(provider);
+      if (lost === 'wait') return this.#next();
+      if (lost === 'gone') return this.finish('released');
     }
     if (typeof provider.resources.release !== 'function') {
       await this.#set({
