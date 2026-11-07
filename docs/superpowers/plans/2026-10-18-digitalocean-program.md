@@ -638,6 +638,23 @@ Spending stays under the test account's cap; the sweeper leaves no `better-compu
     the guest mounts it. Follow-up: a bcd mount on `providerVolume.attached` for instances with an agent, then a
     create-time attach (DO `volumes` on the Droplet create) with a rendered mount unit
     (`/dev/disk/by-id/scsi-0DO_Volume_<name>`, a tenant-chosen or default mount point, `nofail`).
+- *Review notes (2026-11-06, lane do-volumes):*
+  - A resource gone at the provider is never re-created or re-adopted. Once a volume has an `external_id`, the
+    reconciler only reads it (`getVolume`); one the provider no longer has goes to `error`. A reserved address released
+    outside better-compute, or whose IP a later reserve is handed, is `lost` (vps/0068 column; `error`, external id
+    cleared, never another provider call). One live row per `(provider_account_id, external_id)` (partial unique
+    index `provider_addresses_external`).
+  - A reserved IPv4 has no fingerprint (its `project_id` is shared by every reservation in the project); only IPv6's
+    `reserved_at` is one. vps's own record is the IPv4 guard. An IPv4 released and re-reserved by someone else
+    *between two reads* of ours is still indistinguishable at DO; the window is one drift interval.
+  - A restore never sends a filesystem (it inherits the snapshot's) and only restores this deployment's snapshots.
+  - The account probe stays read-only (decision: a trial write could bill); its report names `unverified` write
+    scopes.
+  - **For integration:** `usage_windows_source_kind_ck` is rewritten as a full hard-coded list by both core/0044 and
+    the kubernetes module's migration (this lane added `volume`/`address` to the latter). Any other lane adding a
+    `source_kind` (do-edge's core/0060, for example) must carry every kind in its list too, and the kubernetes list
+    must be the union at merge time, or whichever migration runs last drops the others' kinds.
+  - Lost resources keep billing until the tenant deletes the `error` row, like any `error` row (not changed here).
 
 **Task titles**
 
