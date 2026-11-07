@@ -218,6 +218,8 @@ export class AwsCompute implements ProviderImpl {
   readonly networks: AwsNetworks;
   /** (A10) Shared filesystems (EFS, FSx for Lustre) on those networks. */
   readonly filesystems?: AwsFilesystems;
+  /** (A10) EC2 placement group strategies `create({ placement })` launches into. */
+  readonly placementStrategies = ['cluster', 'spread', 'partition'] as const;
   readonly #quotas: QuotaReader | undefined;
   readonly #prices: PriceReader;
   /** (A10) Placement groups made on first use. */

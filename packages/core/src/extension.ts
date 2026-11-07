@@ -1184,7 +1184,10 @@ export interface ProviderImpl {
       userData: string;
       name: string;
       network?: NetworkRef;
-      /** (AWS A10) The placement group to launch into; a provider without placement groups ignores it. */
+      /**
+       * (AWS A10) The placement group to launch into. Only sent with a strategy the provider lists in
+       * `placementStrategies` (vps refuses the rest); a provider without placement groups ignores it.
+       */
       placement?: ProviderPlacement;
       /** (AWS A10) Filesystems the machine mounts at boot; a provider without filesystems ignores it. */
       mounts?: readonly ProviderMount[];
@@ -1266,6 +1269,11 @@ export interface ProviderImpl {
     context: CallContext,
   ): Promise<ProviderListPrice[]>;
   networks?: ProviderNetworks;
+  /**
+   * (AWS A10) The placement group strategies `create({ placement })` honors. Absent or empty: the
+   * provider has no placement groups, and a placement asked of it is refused rather than ignored.
+   */
+  readonly placementStrategies?: readonly ProviderPlacement['strategy'][];
   /** (AWS A10) Shared filesystems (EFS, FSx for Lustre) on this account's networks. */
   filesystems?: ProviderFilesystems;
   /** The region a zone is in, when the zone's name does not end in `-<letter>` (AWS `us-east-1a`, `us-west-2-lax-1a`). */

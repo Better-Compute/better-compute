@@ -26,7 +26,7 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { chargeQuota, refundQuota, resizeAllocation } from '@better-compute/capacity';
-import type { ClientDeps, ProviderClients } from './accounts.js';
+import { readAccount, type ClientDeps, type ProviderClients } from './accounts.js';
 import { readFlavorByName, type FlavorRecord } from './flavors.js';
 import { claimReservationSlot } from './provider-reservations.js';
 import {
@@ -1327,7 +1327,18 @@ async function assertTenantPutSecret(tx: SqlTx, tenantId: string, ref: string): 
 }
 
 export async function prepareCreateInstance(
-  deps: Pick<InstanceDeps, 'images' | 'runtime' | 'runtimes' | 'rootTenantId'>,
+  deps: Pick<
+    InstanceDeps,
+    | 'images'
+    | 'runtime'
+    | 'runtimes'
+    | 'rootTenantId'
+    | 'clients'
+    | 'clock'
+    | 'secrets'
+    | 'log'
+    | 'workload'
+  >,
   context: MethodContext,
   input: CreateInstanceInput,
   tx: SqlTx,
@@ -1364,8 +1375,27 @@ export async function prepareCreateInstance(
         'INVALID_INPUT',
         `Pool ${pool.id} is not a provider pool; placement groups are the provider's`,
       );
+    // Only a strategy the provider declares: one without placement groups would ignore it, and
+    // the instance would claim a placement it never got.
+    if (pool.providerAccountId) {
+      const account = await readAccount(tx, pool.providerAccountId);
+      const strategies = account
+        ? (await deps.clients.client(account, deps)).placementStrategies
+        : undefined;
+      if (!strategies?.includes(input.placement.strategy))
+        throw new ComputeError(
+          'INVALID_INPUT',
+          `Provider ${account?.provider ?? 'of this pool'} has no ${input.placement.strategy} placement groups`,
+          undefined,
+          { reason: 'placement-unsupported' },
+        );
+    }
     // One strategy per group: a provider placement group has one, so another is refused here
-    // rather than failing the machine later.
+    // rather than failing the machine later. Creates naming the group take turns until commit, so
+    // two concurrent creates with different strategies cannot both pass the check.
+    await tx.query(`SELECT pg_advisory_xact_lock(hashtext('better-compute:placement:' || $1))`, [
+      `${input.tenantId}/${input.poolId}/${input.placement.group}`,
+    ]);
     const { rows: clash } = await tx.query<{ strategy: string }>(
       `SELECT placement->>'strategy' AS strategy FROM instances
         WHERE tenant_id = $1 AND pool_id = $2 AND placement IS NOT NULL

@@ -1372,6 +1372,19 @@ describe('provider instances', () => {
     ...extra,
   });
 
+  it('refuses a placement group on a provider that declares no placement strategies', async () => {
+    await expect(
+      call(
+        'instances',
+        'create',
+        createProvider({ placement: { group: 'train', strategy: 'cluster' } }),
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT', message: expect.stringMatching(/placement/) });
+    expect(cloud.calls.filter((entry) => entry.startsWith('create'))).toEqual([]);
+    const { rows } = await db.query(`SELECT id FROM instances WHERE placement IS NOT NULL`);
+    expect(rows).toEqual([]);
+  });
+
   it('creates idempotently through the provider, then follows it to running', async () => {
     const created = (await call('instances', 'create', createProvider())) as View;
     expect(created.state).toBe('scheduling');

@@ -180,6 +180,30 @@ describe('placement groups through vps', () => {
     ).rejects.toMatchObject({ code: 'CONFLICT' });
   });
 
+  it('concurrent creates naming one group with different strategies: one is refused', async () => {
+    const w = await world();
+    const results = await Promise.allSettled([
+      w.api.instances.create(
+        w.acme,
+        createInput(w, 'a', { placement: { group: 'train', strategy: 'cluster' } }),
+      ),
+      w.api.instances.create(
+        w.acme,
+        createInput(w, 'b', { placement: { group: 'train', strategy: 'spread' } }),
+      ),
+    ]);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.find((result) => result.status === 'rejected')).toMatchObject({
+      reason: { code: 'CONFLICT' },
+    });
+    // Only one instance names the group (PGlite runs one transaction at a time; on Postgres the
+    // group's advisory lock serializes the check).
+    const { rows } = await w.fixture.database.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM instances WHERE placement->>'group' = 'train'`,
+    );
+    expect(rows[0]!.n).toBe(1);
+  });
+
   it.each([
     [{ group: 'Train', strategy: 'cluster' }],
     [{ group: 'train', strategy: 'mesh' }],
