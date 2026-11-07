@@ -795,9 +795,16 @@ export interface ProviderVolumeSpec {
   /** Whole GiB, at least 1. */
   sizeGiB: number;
   kind: 'block' | 'shared';
-  /** The filesystem the provider formats the volume with; absent or `none`: left raw. */
+  /**
+   * The filesystem the provider formats the volume with; absent or `none`: left raw. Ignored with `snapshotId`: a
+   * restored volume keeps the snapshot's filesystem (a format would wipe it), and a provider neither asks for one nor
+   * compares it.
+   */
   filesystem?: 'ext4' | 'xfs' | 'none';
-  /** Creates the volume from this snapshot (an id `snapshotVolume` returned); `sizeGiB` is at least the snapshot's. */
+  /**
+   * Creates the volume from this snapshot (an id `snapshotVolume` returned); `sizeGiB` is at least the snapshot's. A
+   * provider restores only a snapshot it made for this deployment (`INVALID_STATE` otherwise, before any write).
+   */
   snapshotId?: string;
   /** Plain labels, written as the provider's labels or tags. `better-compute-*` keys are the provider's own. */
   labels?: Readonly<Record<string, string>>;
@@ -838,6 +845,17 @@ export interface ProviderVolumes {
   ensureVolume(spec: ProviderVolumeSpec, context: CallContext): Promise<ProviderResourceState>;
   /** The volume as it is; undefined when it does not exist. */
   getVolume(volumeId: string, context: CallContext): Promise<ProviderResourceState | undefined>;
+  /**
+   * The volume named `name` in `region` that this deployment made, without creating one: undefined when there is
+   * none (a same-named volume that is not ours is none). A delete whose create answer was lost finds it by this
+   * instead of an `ensureVolume`, which could create a volume only to delete it. Optional: without it, vps falls
+   * back to `ensureVolume` for that one case.
+   */
+  findVolume?(
+    name: string,
+    region: string,
+    context: CallContext,
+  ): Promise<ProviderResourceState | undefined>;
   /** With `instanceId`, only a machine whose ownership label names that instance is attached to. */
   attachVolume(
     volumeId: string,
