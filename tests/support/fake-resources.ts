@@ -45,6 +45,12 @@ export interface FakeResourcesCloud {
   refuse: Set<string>;
   /** The next call throws this. */
   failNext?: ComputeError;
+  /** Names whose ensure creates the resource and then answers `error` with its id (a first deployment that failed). */
+  failAfterCreate: Set<string>;
+  /** By name: the ensure creates the resource, then throws this instead of answering (a lost answer). Once. */
+  loseAnswer: Map<string, ComputeError>;
+  /** By name: runs inside the ensure, after the resource was created, before the answer (a racing run). Once. */
+  during: Map<string, () => Promise<void>>;
   /** Every password handed out, so tests can check none leaks. */
   passwords: string[];
   /** The value a spec's `secret` resolved to, by provider-side name. */
@@ -73,6 +79,9 @@ export function fakeResourcesCloud(): FakeResourcesCloud {
     calls: [],
     delayTicks: 1,
     refuse: new Set(),
+    failAfterCreate: new Set(),
+    loseAnswer: new Map(),
+    during: new Map(),
     passwords: [],
     scopes: new Map(),
     networks: new Map(),
@@ -82,7 +91,10 @@ export function fakeResourcesCloud(): FakeResourcesCloud {
       this.calls.length = 0;
       this.delayTicks = 1;
       this.refuse.clear();
+      this.failAfterCreate.clear();
       delete this.failNext;
+      this.loseAnswer.clear();
+      this.during.clear();
       this.passwords.length = 0;
       this.scopes.clear();
       this.networks.clear();
@@ -282,7 +294,8 @@ export function fakeProviderResources(
           reason: 'preview',
         });
       if (cloud.refuse.has(request.name) || cloud.refuse.has(request.kind))
-        return { id: request.id ?? 'refused', state: 'error', message: 'refused by the fake' };
+        // Nothing was created: no id (an empty one).
+        return { id: request.id ?? '', state: 'error', message: 'refused by the fake' };
       const spec = request.spec as Record<string, unknown>;
       let resource =
         (request.id !== undefined ? live(request.kind, request.id) : undefined) ??
@@ -323,6 +336,14 @@ export function fakeProviderResources(
         }
         cloud.resources.set(resource.id, resource);
         inFlight(cloud, `create ${resource.id}`);
+        const racing = cloud.during.get(request.name);
+        cloud.during.delete(request.name);
+        if (racing) await racing();
+        const lost = cloud.loseAnswer.get(request.name);
+        cloud.loseAnswer.delete(request.name);
+        if (lost) throw lost;
+        if (cloud.failAfterCreate.has(request.name))
+          return { id: resource.id, state: 'error', message: 'the first deployment failed' };
         return { id: resource.id, state: 'pending' };
       }
       for (const [name, value] of Object.entries(spec))
@@ -347,6 +368,19 @@ export function fakeProviderResources(
         resource.ready = true;
       }
       return outputs(resource, cloud);
+    },
+    async find(request, context) {
+      call(`find ${request.kind} ${request.name}`);
+      const spec = request.spec as Record<string, unknown>;
+      return [...cloud.resources.values()].find(
+        (entry) =>
+          !entry.deleted &&
+          entry.kind === request.kind &&
+          (entry.idempotencyKey === context.idempotencyKey ||
+            (request.kind === 'fake.database-user' &&
+              entry.parent === request.parent &&
+              entry.spec.user === spec.user)),
+      )?.id;
     },
     async get(kind, id) {
       call(`get ${kind} ${id}`);

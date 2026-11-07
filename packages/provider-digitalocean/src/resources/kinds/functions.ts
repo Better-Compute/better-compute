@@ -176,6 +176,11 @@ function namespaceKind(): DoKind {
       return namespaceState(namespace);
     },
 
+    // A create whose answer was lost: the namespace with this deployment's label for the name.
+    async find(env, request, context) {
+      return (await byLabel(env, labelFor(env, request.name), context))?.namespace;
+    },
+
     async get(env, id, context) {
       const namespace = await readNamespace(env, id, context.signal);
       return namespace ? namespaceState(namespace) : undefined;
@@ -395,6 +400,16 @@ function triggerKind(): DoKind {
         },
       );
       return state(namespace.namespace, updated.trigger);
+    },
+
+    // A create whose answer was lost: the trigger of the name in the namespace, if it exists.
+    async find(env, request, context) {
+      const namespace = await ownedNamespace(env, request.parent, context.signal);
+      if (!namespace) return undefined;
+      const { name } = request.spec as TriggerSpec;
+      return (await read(env, namespace.namespace, name, context.signal))
+        ? childId(namespace.namespace, name)
+        : undefined;
     },
 
     async get(env, id, context) {

@@ -452,6 +452,11 @@ function clusterKind(info: EngineInfo): DoKind {
       return (await change(env, database, wanted, context, request)) ?? clusterState(database);
     },
 
+    // A create whose answer was lost: the cluster carrying the key's tag, as ensure finds it.
+    async find(env, _request, context) {
+      return (await byKey(env, info.engine, context))?.id;
+    },
+
     async get(env, id, context) {
       const database = await readCluster(env, id, context.signal);
       if (!database || database.engine !== info.engine) return undefined;
@@ -817,6 +822,14 @@ function userKind(info: EngineInfo): DoKind {
         return converge(env, database.id, raced.user, wanted, context.signal);
       }
     },
+    // A create whose answer was lost: the user of the cluster, if it exists.
+    async find(env, request, context) {
+      const database = await ownedParent(env, kind, request.parent, context.signal);
+      if (!database) return undefined;
+      const { name } = request.spec as { name: string };
+      return (await read(env, database.id, name, context.signal)) ? childId(database.id, name) : undefined;
+    },
+
     async get(env, id, context) {
       const { parent, name } = parseChildId(kind, id);
       const reply = await read(env, parent, name, context.signal);
@@ -966,6 +979,14 @@ function poolKind(): DoKind {
       }
       return state(database.id, pool);
     },
+    // A create whose answer was lost: the pool of the cluster, if it exists.
+    async find(env, request, context) {
+      const database = await ownedParent(env, kind, request.parent, context.signal);
+      if (!database) return undefined;
+      const { name } = request.spec as { name: string };
+      return (await read(env, database.id, name, context.signal)) ? childId(database.id, name) : undefined;
+    },
+
     async get(env, id, context) {
       const { parent, name } = parseChildId(kind, id);
       const reply = await read(env, parent, name, context.signal);
@@ -1072,6 +1093,14 @@ function replicaKind(info: EngineInfo): DoKind {
       );
       return state(database.id, created.replica);
     },
+    // A create whose answer was lost: the replica of the cluster, if it exists.
+    async find(env, request, context) {
+      const database = await ownedParent(env, kind, request.parent, context.signal);
+      if (!database) return undefined;
+      const { name } = request.spec as { name: string };
+      return (await read(env, database.id, name, context.signal)) ? childId(database.id, name) : undefined;
+    },
+
     async get(env, id, context) {
       const { parent, name } = parseChildId(kind, id);
       const reply = await read(env, parent, name, context.signal);
@@ -1215,6 +1244,12 @@ function firewallKind(info: EngineInfo): DoKind {
         });
       return { id, state: 'ready', spec: specOf(wanted) };
     },
+    // A cluster has one firewall: it is the cluster's, once the cluster is ours.
+    async find(env, request, context) {
+      const database = await ownedParent(env, kind, request.parent, context.signal);
+      return database ? childId(database.id, 'firewall') : undefined;
+    },
+
     async get(env, id, context) {
       const { parent } = parseChildId(kind, id);
       if (!(await readCluster(env, parent, context.signal))) return undefined;

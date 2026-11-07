@@ -839,6 +839,44 @@ describe('what lives in a cluster', () => {
     );
     expect(error.details?.reason).toBe('replaceRequired');
   });
+
+  it('find answers a child a lost create made, nothing for one never made, and sends nothing', async () => {
+    const { emu, resources, mine } = await cluster();
+    const user = { kind: 'do.database.pg.user', name: 'u', spec: { name: 'app' }, parent: mine.id };
+    const pool = {
+      kind: 'do.database.pg.pool',
+      name: 'p',
+      spec: { name: 'web', mode: 'transaction', size: 10, database: 'defaultdb' },
+      parent: mine.id,
+    };
+    const replica = {
+      kind: 'do.database.pg.replica',
+      name: 'r',
+      spec: { name: 'read-1', region: 'ams3', size: 'db-s-1vcpu-1gb' },
+      parent: mine.id,
+    };
+    for (const request of [user, pool, replica]) {
+      expect(await resources.find(request, ctx())).toBeUndefined();
+      await resources.ensure(request, ctx());
+    }
+    const sent = emu.requests.filter((r) => r.method !== 'GET').length;
+    expect(await resources.find(user, ctx())).toBe(`${mine.id}/app`);
+    expect(await resources.find(pool, ctx())).toBe(`${mine.id}/web`);
+    expect(await resources.find(replica, ctx())).toBe(`${mine.id}/read-1`);
+    // A cluster has one firewall: it is found once the cluster is ours.
+    expect(
+      await resources.find(
+        { kind: 'do.database.pg.firewall', name: 'f', spec: { ipAddresses: [] }, parent: mine.id },
+        ctx(),
+      ),
+    ).toBe(`${mine.id}/firewall`);
+    expect(emu.requests.filter((r) => r.method !== 'GET').length).toBe(sent);
+    // The children of a cluster that is not ours are never looked into.
+    const theirs = seedDatabase(emu.state, { name: 'by-hand' });
+    expect((await failure(resources.find({ ...user, parent: theirs.id }, ctx()))).details?.reason).toBe(
+      'notManaged',
+    );
+  });
 });
 
 describe('discover, adopt and release', () => {

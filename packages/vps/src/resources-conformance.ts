@@ -368,6 +368,26 @@ export function providerResourcesConformanceCases(): ConformanceCase<ProviderRes
       },
     },
     {
+      name: 'find (when served) answers what ensure made for the request, and nothing for one never sent',
+      async run(subject) {
+        const probe = await client(subject);
+        if (typeof probe.resources.find !== 'function') return;
+        const { resources, call, request, state } = await ready(subject, 'find');
+        try {
+          // As the caller asks after a lost answer: the same request and key, with no id.
+          const found = await resources.find!(request, call(key(subject, 'find')));
+          checkEqual(found, state.id, 'find answers the id ensure made');
+          const none = await resources.find!(
+            { ...request, name: key(subject, 'find-none') },
+            call(key(subject, 'find-none')),
+          );
+          check(none === undefined, `find answers nothing for a request never sent, not ${none}`);
+        } finally {
+          await cleanUp(subject, resources, call, state.id);
+        }
+      },
+    },
+    {
       name: 'delete refuses a resource this deployment does not manage (notManaged)',
       async run(subject) {
         if (subject.unmanaged === undefined) return;

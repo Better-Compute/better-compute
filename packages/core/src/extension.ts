@@ -778,6 +778,10 @@ export interface ProviderNetworks {
  * `ProviderNetworkState`, plus `updating` and the resource's plain `outputs` (never secrets).
  */
 export interface ProviderResourceState {
+  /**
+   * The provider's id. (cloud-resources) An `ensure` answering `error` after the provider made the resource (a first
+   * deployment that failed) still carries it, so the caller can delete it; empty when nothing was made.
+   */
   id: string;
   state: 'pending' | 'ready' | 'updating' | 'deleting' | 'deleted' | 'error';
   outputs?: Readonly<Record<string, string>>;
@@ -926,6 +930,14 @@ export interface ProviderResources {
   ensure(request: ProviderResourceRequest, context: CallContext): Promise<ProviderResourceState>;
   /** The resource as it is; undefined when it does not exist. */
   get(kind: string, id: string, context: CallContext): Promise<ProviderResourceState | undefined>;
+  /**
+   * The provider id of the resource an earlier `ensure` of this request made, found the way `ensure` finds it (by
+   * `CallContext.idempotencyKey`, the provider-side name, or a child's identity in `request.parent`); undefined when
+   * there is none. Read-only: it never creates or changes anything. The caller asks before it forgets a resource
+   * whose create was sent but never answered (a timeout after the provider accepted it), so it can delete it.
+   * Absent: the caller cannot tell, and keeps such a resource in error rather than forget it.
+   */
+  find?(request: ProviderResourceRequest, context: CallContext): Promise<string | undefined>;
   delete(kind: string, id: string, context: CallContext): Promise<ProviderResourceState>;
   /** Every resource of the kind the account can see. */
   discover?(kind: string, context: CallContext): AsyncIterable<ProviderDiscoveredResource>;

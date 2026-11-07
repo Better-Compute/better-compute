@@ -294,6 +294,11 @@ export function partnerKind(): DoKind {
       return state(env, updated.partner_attachment, context.signal);
     },
 
+    // A create whose answer was lost: the attachment with this deployment's name suffix, as ensure finds it.
+    async find(env, request, context) {
+      return (await byName(env, `${request.name}-bc${deploymentHash(env)}`, context))?.id;
+    },
+
     async get(env, id, context) {
       const attachment = await read(env, id, context.signal);
       return attachment ? state(env, attachment, context.signal) : undefined;

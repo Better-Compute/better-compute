@@ -134,8 +134,24 @@ CREATE UNIQUE INDEX cloud_resources_identity ON cloud_resources (parent_id, kind
 `,
 };
 
+/**
+ * `ensure_sent_at`: when the reconciler first sent an `ensure` for the resource (written, and committed, before the
+ * call). A row that never sent one is finished without a provider call when it is deleted; one that did, but never
+ * recorded a provider id (the answer was lost: a timeout after the provider accepted the create), is looked up through
+ * `ProviderResources.find` first, so a resource the provider made is deleted, never forgotten. Rows that exist when
+ * this runs are taken to have sent one (fail closed: the worst case is one lookup).
+ */
+export const cloudResourcesEnsureSentMigration: Migration = {
+  name: 'cloud-resources/0004_ensure_sent',
+  sql: `
+ALTER TABLE cloud_resources ADD COLUMN ensure_sent_at timestamptz;
+UPDATE cloud_resources SET ensure_sent_at = created_at WHERE state NOT IN ('deleted', 'released');
+`,
+};
+
 export const cloudResourcesMigrations: readonly Migration[] = Object.freeze([
   cloudResourcesMigration,
   cloudResourcesMeteringMigration,
   cloudResourcesIdentityMigration,
+  cloudResourcesEnsureSentMigration,
 ]);

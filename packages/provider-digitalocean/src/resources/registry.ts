@@ -78,6 +78,17 @@ export class DoResources implements ProviderResources {
     return this.#kind(kind).get(this.#env, id, context);
   }
 
+  /** What an earlier ensure of the request made, when the answer was lost; every kind can tell. */
+  async find(request: ProviderResourceRequest, context: CallContext): Promise<string | undefined> {
+    const found = this.#kind(request.kind);
+    if (!found.find)
+      throw new ComputeError('UNSUPPORTED', `${request.kind} cannot be looked up`, undefined, {
+        provider: 'digitalocean',
+        reason: 'find',
+      });
+    return found.find(this.#env, request, context);
+  }
+
   delete(kind: string, id: string, context: CallContext): Promise<ProviderResourceState> {
     return this.#kind(kind).delete(this.#env, id, context);
   }

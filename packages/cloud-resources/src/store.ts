@@ -88,12 +88,14 @@ export interface ResourceRow {
   provisioned_at: Date | string | null;
   ready_at: Date | string | null;
   deleted_at: Date | string | null;
+  /** When the reconciler first sent an `ensure` (cloud-resources/0004); null: the provider was never asked. */
+  ensure_sent_at: Date | string | null;
 }
 
 export const resourceColumns = `id, tenant_id, project_id, pool_id, provider_account_id, provider, kind, family, name,
   description, region, parent_id, spec, provider_name, provider_id, state, desired_state, message, outputs,
   secret_outputs, adopted, spec_changed, identity, created_by, encode(request_hash, 'hex') AS request_hash, version, created_at, updated_at,
-  provisioned_at, ready_at, deleted_at`;
+  provisioned_at, ready_at, deleted_at, ensure_sent_at`;
 
 export const json = <T>(value: T | string): T =>
   typeof value === 'string' ? (JSON.parse(value) as T) : value;

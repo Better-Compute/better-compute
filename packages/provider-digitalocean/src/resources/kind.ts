@@ -33,6 +33,12 @@ export interface DoKind {
     context: CallContext,
   ): Promise<ProviderResourceState>;
   get(env: DoKindEnv, id: string, context: CallContext): Promise<ProviderResourceState | undefined>;
+  /** The id of what an earlier ensure of the request made (found as ensure finds it); read-only. */
+  find?(
+    env: DoKindEnv,
+    request: ProviderResourceRequest,
+    context: CallContext,
+  ): Promise<string | undefined>;
   delete(env: DoKindEnv, id: string, context: CallContext): Promise<ProviderResourceState>;
   discover?(env: DoKindEnv, context: CallContext): AsyncIterable<ProviderDiscoveredResource>;
   adopt?(

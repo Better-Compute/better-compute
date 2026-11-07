@@ -53,7 +53,10 @@ afterAll(closeFixtures);
 beforeEach(() => {
   world.cloud.delayTicks = 1;
   world.cloud.refuse.clear();
+  world.cloud.failAfterCreate.clear();
   delete world.cloud.failNext;
+  world.cloud.loseAnswer.clear();
+  world.cloud.during.clear();
 });
 
 describe('cloud.resources: convergence', () => {
@@ -308,7 +311,10 @@ describe('cloud.resources: children and deletion', () => {
     });
     const before = world.cloud.calls.length;
     await settled(created.id, 'deleted');
-    expect(world.cloud.calls.slice(before).filter((call) => call.startsWith('delete'))).toEqual([]);
+    // No ensure was ever sent for it: not even a lookup.
+    expect(
+      world.cloud.calls.slice(before).filter((call) => /^(delete|find)/.test(call)),
+    ).toEqual([]);
   });
 
   it('a delete the provider refuses (not managed here) leaves the resource in error, never forgotten', async () => {
@@ -350,6 +356,102 @@ describe('cloud.resources: children and deletion', () => {
         (event) => event.data.resourceId === created.id && event.data.reason === 'tenant-deleted',
       ),
     ).toBe(true);
+  });
+});
+
+describe('cloud.resources: a resource the provider made is never forgotten', () => {
+  const row = async (resourceId: string) =>
+    (
+      await world.fixture.database.query<{
+        state: string;
+        desired_state: string;
+        provider_id: string | null;
+        deleted_at: Date | null;
+      }>(`SELECT state, desired_state, provider_id, deleted_at FROM cloud_resources WHERE id = $1`, [
+        resourceId,
+      ])
+    ).rows[0]!;
+  const atProvider = (resourceId: string) =>
+    [...world.cloud.resources.values()].find((entry) => entry.idempotencyKey === resourceId);
+  const remove = (resourceId: string) =>
+    world.api.cloudResources.delete(world.acme, { tenantId: world.acmeTenant, resourceId });
+
+  it('an error that carries the provider id records it, and a delete then deletes it at the provider', async () => {
+    const app = await create({ kind: 'fake.app', name: 'failed-deploy', spec: { image: 'nginx' } });
+    world.cloud.failAfterCreate.add(app.providerName);
+    await settled(app.id, 'error');
+    const made = atProvider(app.id)!;
+    expect(made).toBeDefined();
+    expect((await row(app.id)).provider_id).toBe(made.id);
+    await remove(app.id);
+    await settled(app.id, 'deleted');
+    expect(world.cloud.calls).toContain(`delete fake.app ${made.id}`);
+    expect(made.deleted).toBe(true);
+  });
+
+  it('a create the provider accepted whose answer was lost is found by its key and deleted', async () => {
+    const database = await create({ name: 'lost-answer' });
+    world.cloud.loseAnswer.set(database.providerName, new ComputeError('UNAVAILABLE', 'timed out'));
+    await world.tick();
+    const made = atProvider(database.id)!;
+    expect(made).toBeDefined();
+    expect(await row(database.id)).toMatchObject({ state: 'pending', provider_id: null });
+    await remove(database.id);
+    await settled(database.id, 'deleted');
+    expect(world.cloud.calls).toContain(`find fake.database ${database.providerName}`);
+    expect(world.cloud.calls).toContain(`delete fake.database ${made.id}`);
+    expect(made.deleted).toBe(true);
+    expect((await row(database.id)).provider_id).toBe(made.id);
+  });
+
+  it('a sent create the provider never made is looked up, then finished with no delete', async () => {
+    const database = await create({ name: 'never-made' });
+    // As a run that recorded the ensure as sent and then lost the connection before the provider got it.
+    await world.fixture.database.query(
+      `UPDATE cloud_resources SET ensure_sent_at = now() WHERE id = $1`,
+      [database.id],
+    );
+    expect(atProvider(database.id)).toBeUndefined();
+    await remove(database.id);
+    const before = world.cloud.calls.length;
+    await settled(database.id, 'deleted');
+    const calls = world.cloud.calls.slice(before);
+    expect(calls).toContain(`find fake.database ${database.providerName}`);
+    // Nothing was ever made for it: no ensure, no provider id, so no delete of its own.
+    expect(calls).not.toContain(`ensure fake.database ${database.providerName}`);
+    expect((await row(database.id)).provider_id).toBeNull();
+    expect(atProvider(database.id)).toBeUndefined();
+  });
+
+  it('a provider id answered after another run finished the row brings it back to be deleted', async () => {
+    const app = await create({ kind: 'fake.app', name: 'late-answer', spec: { image: 'nginx' } });
+    // Another run (after this one's claim expired) finishes the row while this one's create is in flight.
+    world.cloud.during.set(app.providerName, async () => {
+      await world.fixture.database.query(
+        `UPDATE cloud_resources SET desired_state = 'deleted', state = 'deleted', deleted_at = now(),
+                version = version + 1 WHERE id = $1`,
+        [app.id],
+      );
+    });
+    await world.tick();
+    const made = atProvider(app.id)!;
+    expect(made).toBeDefined();
+    expect(await row(app.id)).toMatchObject({
+      provider_id: made.id,
+      desired_state: 'deleted',
+      state: 'deleting',
+      deleted_at: null,
+    });
+    await world.until(async () => (await stateOf(app.id)) === 'deleted');
+    expect(world.cloud.calls).toContain(`delete fake.app ${made.id}`);
+    expect(made.deleted).toBe(true);
+  });
+
+  it('no ensure is sent for a row deleted after the run read it', async () => {
+    const app = await create({ kind: 'fake.app', name: 'deleted-first', spec: { image: 'nginx' } });
+    await remove(app.id);
+    await settled(app.id, 'deleted');
+    expect(world.cloud.calls).not.toContain(`ensure fake.app ${app.providerName}`);
   });
 });
 
