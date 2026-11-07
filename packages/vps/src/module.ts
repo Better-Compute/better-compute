@@ -67,7 +67,7 @@ import {
 import { id, int, name, object, optional, tenant } from './input.js';
 import { isRootCaller } from './billing.js';
 import {
-  describePurchase,
+  describePurchaseFor,
   listPurchases,
   listReservationOfferings,
   parseListPurchases,
@@ -1588,7 +1588,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
               ? { status: 'replay' as const, result: existing }
               : { status: 'decide' as const, resource: accountResource(input) };
           },
-          describe: (input) => describePurchase(input, providers.values()),
+          describe: (input) => describePurchaseFor(input, providers),
         },
         handler: (context, input) =>
           requestPurchase(purchaseDeps(context), context.sql, input, context.caller),

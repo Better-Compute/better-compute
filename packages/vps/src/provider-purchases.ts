@@ -77,6 +77,27 @@ ALTER TABLE provider_purchases ADD COLUMN uncertain_since timestamptz;
 };
 
 /**
+ * `attempt_started_at`: when the attempt in flight started, cleared when it settles. A claim that
+ * finds it set knows the earlier attempt never settled (the run crashed, lost its lease, or failed
+ * to record the provider's answer) and so may have bought: it becomes `uncertain_since`.
+ * One reservation is recorded by one purchase only (`provider_purchases_reservation`). Purchases
+ * are a record of money spent: they outlive their provider account (no foreign key; deleting an
+ * account with a purchase in flight is refused).
+ */
+export const providerPurchasesAttemptsMigration: Migration = {
+  name: 'vps/0089_provider_purchases_attempts',
+  sql: `
+ALTER TABLE provider_purchases ADD COLUMN attempt_started_at timestamptz;
+CREATE UNIQUE INDEX provider_purchases_reservation ON provider_purchases (account_id, reservation_id)
+  WHERE reservation_id IS NOT NULL;
+ALTER TABLE provider_purchases DROP CONSTRAINT IF EXISTS provider_purchases_account_id_fkey;
+`,
+};
+
+/** The unique index that keeps one reservation to one purchase. */
+const reservationIndex = 'provider_purchases_reservation';
+
+/**
  * `unknown`: the attempts ran out while one may have bought; a person checks the provider account
  * (`providerAccounts.reservations` lists what was bought).
  */
@@ -272,12 +293,13 @@ interface PurchaseRow {
   reservation: ExternalReservation | string | null;
   error: { code: string; message: string } | string | null;
   uncertain_since: Date | null;
+  attempt_started_at: Date | null;
   created_at: Date;
   updated_at: Date;
 }
 
 const columns = `id, account_id, tenant_id, created_by, idempotency_key, offering_id, state, attempts,
-  reservation_id, reservation, error, uncertain_since, created_at, updated_at`;
+  reservation_id, reservation, error, uncertain_since, attempt_started_at, created_at, updated_at`;
 
 const json = <T>(value: T | string | null): T | undefined =>
   value === null ? undefined : typeof value === 'string' ? (JSON.parse(value) as T) : value;
@@ -389,6 +411,14 @@ export async function listReservationOfferings(
   };
 }
 
+/**
+ * The provider of the account each admitted request names, as `preparePurchase` read it: the
+ * approver's text comes from that provider only (`describePurchaseFor`), never from another plugin
+ * that claims the offering id. Keyed by the request's input object, which the admission passes to
+ * `prepare` and then `describe`.
+ */
+const accountProviders = new WeakMap<PurchaseReservationInput, string>();
+
 /** The admission's first transaction: a finished request with the same key replays. */
 export async function preparePurchase(
   tx: SqlTx,
@@ -397,15 +427,32 @@ export async function preparePurchase(
 ): Promise<ProviderPurchaseView | undefined> {
   if (!caller) return undefined;
   const existing = await byKey(tx, input.tenantId, caller.identityId, input.idempotencyKey);
-  if (!existing) return undefined;
+  if (!existing) {
+    const account = await readAccount(tx, input.accountId, input.tenantId);
+    if (account) accountProviders.set(input, account.provider);
+    return undefined;
+  }
   if (!sameRequest(existing, input))
     throw new ComputeError('CONFLICT', 'This idempotency key was used for a different purchase');
   return viewOf(existing);
 }
 
 /**
+ * The approver's text for an admitted request: described by the provider of the account
+ * `preparePurchase` read, and by no other; the raw id when there is none.
+ */
+export function describePurchaseFor(
+  input: PurchaseReservationInput,
+  providers: ReadonlyMap<string, Pick<ProviderDefinition, 'describeOffering'>>,
+): string {
+  const name = accountProviders.get(input);
+  const provider = name === undefined ? undefined : providers.get(name);
+  return describePurchase(input, provider ? [provider] : []);
+}
+
+/**
  * What a person asked to approve the purchase reads: the provider's own account of the offering
- * (what, where, when, what it costs) when a registered provider describes it, else the raw id.
+ * (what, where, when, what it costs) when one of `providers` describes it, else the raw id.
  */
 export function describePurchase(
   input: PurchaseReservationInput,
@@ -557,11 +604,17 @@ function safeError(error: unknown): { code: string; message: string } {
   return { code: 'PROVIDER_ERROR', message: 'The provider failed the purchase' };
 }
 
+/** How far back recorded reservations are left out of a purchase's search (clock skew included). */
+const excludeWindowMs = 10 * 60_000;
+
 /**
- * One purchase: claim it (requested → purchasing, attempts + 1) in a transaction, buy outside any
- * transaction with the purchase's own key, then record the outcome in one. A purchase found in
- * `purchasing` (a crash or a retryable failure) is bought again with the same key: the provider
- * answers with what it already bought. Returns when to run again, if at all.
+ * One purchase: claim it (requested → purchasing, attempts + 1, `attempt_started_at` now) in a
+ * transaction, buy outside any transaction with the purchase's own key, then record the outcome in
+ * one. A purchase found in `purchasing` (a crash, a lost lease, a failed settle or a retryable
+ * failure) is bought again with the same key: the provider answers with what it already bought.
+ * An earlier attempt that never settled (`attempt_started_at` still set) may have bought, so the
+ * claim makes it `uncertain_since` and the provider waits for what it bought before buying again.
+ * Returns when to run again, if at all.
  */
 export async function reconcilePurchase(
   deps: PurchaseDeps,
@@ -569,20 +622,35 @@ export async function reconcilePurchase(
   purchaseId: string,
   signal: AbortSignal,
 ): Promise<number | undefined> {
-  const claimed = await sql.transaction(async (tx) => {
+  const startedAt = deps.clock.now();
+  const claim = await sql.transaction(async (tx) => {
     const { rows } = await tx.query<PurchaseRow>(
-      `UPDATE provider_purchases SET state = 'purchasing', attempts = attempts + 1, updated_at = compute_now()
+      `UPDATE provider_purchases
+          SET uncertain_since = CASE WHEN state = 'purchasing' AND attempt_started_at IS NOT NULL
+                THEN GREATEST(COALESCE(uncertain_since, attempt_started_at), attempt_started_at)
+                ELSE uncertain_since END,
+              attempt_started_at = $2::timestamptz,
+              state = 'purchasing', attempts = attempts + 1, updated_at = compute_now()
         WHERE id = $1 AND state IN ('requested', 'purchasing')
         RETURNING ${columns}`,
-      [purchaseId],
+      [purchaseId, new Date(startedAt)],
     );
-    return rows[0];
+    const row = rows[0];
+    if (!row) return undefined;
+    // What other purchases of the account recorded since this one was requested: never ours.
+    const recorded = await tx.query<{ reservation_id: string }>(
+      `SELECT reservation_id FROM provider_purchases
+        WHERE account_id = $1 AND id <> $2 AND reservation_id IS NOT NULL AND updated_at >= $3
+        ORDER BY updated_at, id LIMIT 200`,
+      [row.account_id, row.id, new Date(row.created_at.getTime() - excludeWindowMs)],
+    );
+    return { row, exclude: recorded.rows.map((r) => r.reservation_id) };
   });
-  if (!claimed) return undefined;
+  if (!claim) return undefined;
+  const claimed = claim.row;
   const account = await sql.transaction((tx) => readAccount(tx, claimed.account_id));
   if (!account) return undefined;
   let bought: ExternalReservation;
-  const startedAt = deps.clock.now();
   try {
     // Purchases stay the platform's even if the account changed hands since the request.
     if (
@@ -601,6 +669,7 @@ export async function reconcilePurchase(
       attempt: Number(claimed.attempts),
       requestedAt: claimed.created_at.getTime(),
       ...(claimed.uncertain_since ? { uncertainSince: claimed.uncertain_since.getTime() } : {}),
+      ...(claim.exclude.length ? { excludeReservationIds: claim.exclude } : {}),
     };
     bought = await client.purchaseReservation(
       claimed.offering_id,
@@ -615,21 +684,30 @@ export async function reconcilePurchase(
     const retry = !isComputeError(error) || retryable.has(error.code);
     const uncertain = retry && !propagating(error);
     const again = retry && Number(claimed.attempts) < maxAttempts;
-    // Out of attempts while one may have bought: money may have been spent, so not 'failed'.
+    // Settled while this or an earlier attempt may have bought (out of attempts, or refused after
+    // one whose answer was lost): money may have been spent, so 'unknown', never 'failed'.
     const state = again
       ? undefined
-      : retry && (uncertain || claimed.uncertain_since)
+      : (retry && uncertain) || claimed.uncertain_since
         ? 'unknown'
         : 'failed';
     const settled = await sql.transaction(async (tx) => {
+      // Only this attempt settles (a later claim owns the purchase now).
       const { rows } = await tx.query<{ id: string }>(
         `UPDATE provider_purchases
             SET state = COALESCE($3, state), error = $2::jsonb,
                 uncertain_since = CASE WHEN $4::boolean THEN $5::timestamptz ELSE uncertain_since END,
-                updated_at = compute_now()
-          WHERE id = $1 AND state = 'purchasing'
+                attempt_started_at = NULL, updated_at = compute_now()
+          WHERE id = $1 AND state = 'purchasing' AND attempts = $6
           RETURNING id`,
-        [claimed.id, JSON.stringify(failure), state ?? null, uncertain, new Date(startedAt)],
+        [
+          claimed.id,
+          JSON.stringify(failure),
+          state ?? null,
+          uncertain,
+          new Date(startedAt),
+          Number(claimed.attempts),
+        ],
       );
       // Only the run that settled the purchase says so (a concurrent run may have recorded it).
       if (!state || !rows[0]) return false;
@@ -653,31 +731,66 @@ export async function reconcilePurchase(
       });
     return again ? deps.clock.now() + retryMs(Number(claimed.attempts)) : undefined;
   }
-  await sql.transaction(async (tx) => {
-    const { rows } = await tx.query<{ id: string }>(
-      `UPDATE provider_purchases
-          SET state = 'purchased', reservation_id = $2, reservation = $3::jsonb, error = NULL,
-              updated_at = compute_now()
-        WHERE id = $1 AND state = 'purchasing'
-        RETURNING id`,
-      [claimed.id, bought.id, JSON.stringify(bought)],
-    );
-    if (!rows[0]) return;
-    // The reservations worker reads the account at once, so the bought reservation can be bound.
-    await deps.work.enqueue(tx, reservationsWork, claimed.account_id);
-    await deps.events.publish(tx, {
-      type: 'provider.purchase.completed',
-      subject: `provider-account/${claimed.account_id}`,
-      tenantId: claimed.tenant_id,
-      data: {
-        accountId: claimed.account_id,
-        purchaseId: claimed.id,
-        offeringId: claimed.offering_id,
-        reservationId: bought.id,
-        state: bought.state,
-      },
+  // The provider's answer is authoritative: it is recorded even when another run settled the
+  // purchase failed or unknown meanwhile (this run's lease expired while the provider sold).
+  const unrecorded = { purchaseId: claimed.id, reservationId: bought.id };
+  let recorded: boolean;
+  try {
+    recorded = await sql.transaction(async (tx) => {
+      const { rows } = await tx.query<{ id: string }>(
+        `UPDATE provider_purchases
+            SET state = 'purchased', reservation_id = $2, reservation = $3::jsonb, error = NULL,
+                attempt_started_at = NULL, updated_at = compute_now()
+          WHERE id = $1 AND state IN ('purchasing', 'failed', 'unknown')
+          RETURNING id`,
+        [claimed.id, bought.id, JSON.stringify(bought)],
+      );
+      if (!rows[0]) return false;
+      // The reservations worker reads the account at once, so the bought reservation can be bound.
+      await deps.work.enqueue(tx, reservationsWork, claimed.account_id);
+      await deps.events.publish(tx, {
+        type: 'provider.purchase.completed',
+        subject: `provider-account/${claimed.account_id}`,
+        tenantId: claimed.tenant_id,
+        data: {
+          accountId: claimed.account_id,
+          purchaseId: claimed.id,
+          offeringId: claimed.offering_id,
+          reservationId: bought.id,
+          state: bought.state,
+        },
+      });
+      return true;
     });
-  });
+  } catch (error) {
+    // Another purchase recorded this reservation: the provider took it for this purchase's (its
+    // search by what a block is cannot tell them apart). Not this purchase's: retry, leaving the
+    // attempt unsettled (uncertain) and the recorded reservation out of the next search.
+    if (
+      (error as { code?: unknown } | null)?.code === '23505' &&
+      (error as { constraint?: unknown }).constraint === reservationIndex
+    ) {
+      deps.log.warn('vps.purchase_duplicate', unrecorded);
+      return Number(claimed.attempts) < maxAttempts
+        ? deps.clock.now() + retryMs(Number(claimed.attempts))
+        : undefined;
+    }
+    // Not recorded (the transaction failed or was refused): the attempt stays unsettled, so the
+    // next one is uncertain and finds what was bought; a person can reconcile from this line.
+    deps.log.warn('vps.purchase_unrecorded', unrecorded);
+    throw error;
+  }
+  if (!recorded) {
+    const { rows } = await sql.transaction((tx) =>
+      tx.query<{ state: string; reservation_id: string | null }>(
+        `SELECT state, reservation_id FROM provider_purchases WHERE id = $1`,
+        [claimed.id],
+      ),
+    );
+    // Already recorded with this reservation by another run: nothing lost.
+    if (rows[0]?.state !== 'purchased' || rows[0].reservation_id !== bought.id)
+      deps.log.warn('vps.purchase_unrecorded', unrecorded);
+  }
   return undefined;
 }
 

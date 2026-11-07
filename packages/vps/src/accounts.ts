@@ -720,6 +720,19 @@ export async function deleteAccount(
       undefined,
       { grantIds: unmetered.rows.map((row) => row.id) },
     );
+  // AWS A3: a purchase in flight needs the account (purchases themselves outlive it, as a record).
+  const buying = await tx.query<{ id: string }>(
+    `SELECT id FROM provider_purchases WHERE account_id = $1 AND state IN ('requested', 'purchasing')
+      ORDER BY id LIMIT 50`,
+    [account.id],
+  );
+  if (buying.rows.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Provider account ${account.name} has purchases in flight: retry once they settle`,
+      undefined,
+      { purchaseIds: buying.rows.map((row) => row.id) },
+    );
   const networks = await tx.query<{ id: string; name: string }>(
     `SELECT id, name FROM networks WHERE provider_account_id = $1 AND state <> 'deleted'
       ORDER BY name LIMIT 50`,

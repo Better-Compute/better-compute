@@ -4,7 +4,10 @@ import { awsProvider } from '@better-compute/provider-aws';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
 import {
   describePurchase,
+  describePurchaseFor,
+  preparePurchase,
   ProviderClients,
+  reconcilePurchase,
   requestPurchase,
   vps,
   type PurchaseDeps,
@@ -34,6 +37,42 @@ async function inTransaction(database: SqlExecutor): Promise<boolean> {
   );
   return rows[0]?.value === 'set';
 }
+
+/**
+ * `database` whose transactions refuse the statements `refuses` picks (a lost lease: the fenced
+ * executor refuses a stale run's writes; or the settle transaction failing), and run `before`
+ * first in the same transaction (another run's write landing just before).
+ */
+function fenced(
+  database: SqlExecutor,
+  refuses: (text: string) => boolean,
+  before?: (text: string, tx: SqlTx) => Promise<void>,
+): SqlExecutor {
+  const wrap = (tx: SqlTx) =>
+    new Proxy(tx, {
+      get(target, key) {
+        if (key === 'query')
+          return async (text: string, params?: unknown[]) => {
+            if (refuses(text)) throw new Error('the write was refused: the lease was lost');
+            await before?.(text, target);
+            return target.query(text, params);
+          };
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as SqlTx;
+  return new Proxy(database, {
+    get(target, key) {
+      if (key === 'transaction')
+        return (fn: (tx: SqlTx) => Promise<unknown>) => target.transaction((tx) => fn(wrap(tx)));
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as SqlExecutor;
+}
+
+const settlesPurchased = (text: string) => /SET state = 'purchased'/.test(text);
+const claims = (text: string) => /attempts = attempts \+ 1/.test(text);
 
 async function world(config: Record<string, unknown> = { allowPurchases: true }) {
   const emu = new AwsEmulator();
@@ -98,6 +137,30 @@ async function world(config: Record<string, unknown> = { allowPurchases: true })
     },
     async list() {
       return (await api.providerAccounts.purchases(root, ref)).items as any[];
+    },
+    /** Deps for calling the reconciler directly; what it publishes, enqueues and logs is kept. */
+    direct(overrides: Partial<PurchaseDeps> = {}) {
+      const published: { type: string; data: any }[] = [];
+      const enqueued: string[] = [];
+      const warnings: [string, unknown][] = [];
+      const deps: PurchaseDeps = {
+        clock: fixture.clock,
+        events: {
+          publish: async (_tx: unknown, event: any) => void published.push(event),
+        } as any,
+        work: { enqueue: async (_tx: unknown, kind: string) => void enqueued.push(kind) } as any,
+        log: {
+          debug() {},
+          info() {},
+          warn: (message: string, fields: unknown) => void warnings.push([message, fields]),
+          error() {},
+        },
+        secrets: { resolve: async () => '' },
+        clients: new ProviderClients(new Map([['aws', aws]])),
+        rootTenantId: tenants.root.id,
+        ...overrides,
+      };
+      return { deps, published, enqueued, warnings };
     },
     offerings: async () =>
       (
@@ -362,6 +425,225 @@ describe('provider capacity purchases', () => {
       'provider.purchase.requested',
       'provider.purchase.unknown',
     ]);
+  });
+
+  const signal = () => new AbortController().signal;
+  const settle = async (w: Awaited<ReturnType<typeof world>>, rounds = 30) => {
+    for (let round = 0; round < rounds; round++) {
+      await w.work('vps.purchases');
+      await w.fixture.advance(60_000);
+    }
+  };
+
+  it('a settle that fails after EC2 sold the block never buys twice, nor reports failed', async () => {
+    const w = await world();
+    const offering = block(await w.offerings());
+    // EC2 could sell more blocks like it, and shows the one it sold (and later its tag) only after
+    // a while.
+    w.capacity.blockOfferings[0]!.stock = 5;
+    w.capacity.purchaseLag = { hiddenReads: 6, tagsHiddenReads: 12 };
+    const requested = await w.purchase(offering.id);
+    // EC2 sells the block, then recording it fails (the settle transaction throws).
+    const { deps } = w.direct();
+    await expect(
+      reconcilePurchase(deps, fenced(w.fixture.database, settlesPurchased), requested.id, signal()),
+    ).rejects.toThrow(/refused/);
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(1);
+    await settle(w);
+    expect(await w.list()).toMatchObject([
+      { state: 'purchased', reservationId: expect.stringMatching(/^cb:cr-/) },
+    ]);
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(1);
+    expect(w.capacity.purchases).toHaveLength(1);
+    expect(await w.events('provider.purchase.failed')).toEqual([]);
+  });
+
+  it('a run that lost its lease after a lost answer never lets the next run buy twice', async () => {
+    const w = await world();
+    const offering = block(await w.offerings());
+    w.capacity.blockOfferings[0]!.stock = 5;
+    w.capacity.purchaseLag = { hiddenReads: 6, tagsHiddenReads: 12 };
+    loseFirstPurchase(w);
+    const requested = await w.purchase(offering.id);
+    // The claim commits; every later write of the run is refused (its lease expired), so nothing
+    // records that the attempt may have bought.
+    const { deps } = w.direct();
+    const lost = fenced(
+      w.fixture.database,
+      (text) => /UPDATE provider_purchases/.test(text) && !claims(text),
+    );
+    await expect(reconcilePurchase(deps, lost, requested.id, signal())).rejects.toThrow(/refused/);
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(1);
+    await settle(w);
+    expect(await w.list()).toMatchObject([{ state: 'purchased' }]);
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(1);
+    expect(await w.events('provider.purchase.failed')).toEqual([]);
+  });
+
+  it('a refusal after an attempt that may have bought leaves the purchase unknown', async () => {
+    const w = await world();
+    const offering = block(await w.offerings());
+    // The first attempt buys but its answer is lost; EC2 shows nothing for a long time.
+    w.capacity.purchaseLag = { hiddenReads: 1_000, tagsHiddenReads: 1_000 };
+    loseFirstPurchase(w);
+    await w.purchase(offering.id);
+    await w.work('vps.purchases');
+    expect(await w.list()).toMatchObject([{ state: 'purchasing', attempts: 1 }]);
+    // The second attempt is refused: the account's credentials stopped working.
+    w.emu.failNext('DescribeCapacityReservations', 'AuthFailure', 401, 10);
+    await w.fixture.advance(60_000);
+    await w.work('vps.purchases');
+    expect(await w.list()).toMatchObject([
+      { state: 'unknown', attempts: 2, error: { code: 'UNAUTHENTICATED' } },
+    ]);
+    expect((await w.events('provider.purchase.')).map((e) => e.type)).toEqual([
+      'provider.purchase.requested',
+      'provider.purchase.unknown',
+    ]);
+    expect(w.capacity.purchases).toHaveLength(1);
+  });
+
+  it('an answer that is not readable after EC2 sold the block is retried, not failed', async () => {
+    const w = await world();
+    const offering = block(await w.offerings());
+    // EC2 answers PurchaseCapacityBlock with a state this code does not know.
+    w.capacity.purchaseAnswerState = 'payment-processing';
+    await w.purchase(offering.id);
+    await settle(w, 4);
+    expect(await w.list()).toMatchObject([{ state: 'purchased' }]);
+    expect(w.capacity.purchases).toHaveLength(1);
+    expect(await w.events('provider.purchase.failed')).toEqual([]);
+  });
+
+  it("the provider's answer is recorded even after another run settled the purchase", async () => {
+    const w = await world();
+    const offering = block(await w.offerings());
+    const requested = await w.purchase(offering.id);
+    // Another run (this one's lease had expired) settled it failed while EC2 was selling.
+    const { deps, published, enqueued } = w.direct();
+    const raced = fenced(
+      w.fixture.database,
+      () => false,
+      async (text, tx) => {
+        if (settlesPurchased(text))
+          await tx.query(
+            `UPDATE provider_purchases SET state = 'failed', error = '{"code":"CAPACITY_UNAVAILABLE","message":"gone"}'::jsonb WHERE id = $1`,
+            [requested.id],
+          );
+      },
+    );
+    await reconcilePurchase(deps, raced, requested.id, signal());
+    const [purchase] = await w.list();
+    expect(purchase).toMatchObject({
+      state: 'purchased',
+      reservationId: expect.stringMatching(/^cb:cr-/),
+    });
+    expect(purchase.error).toBeUndefined();
+    expect(published.map((e) => e.type)).toEqual(['provider.purchase.completed']);
+    expect(enqueued).toEqual(['vps.reservations']);
+  });
+
+  it('an answer that cannot be recorded is logged for a person to reconcile', async () => {
+    const w = await world();
+    const offering = block(await w.offerings());
+    const requested = await w.purchase(offering.id);
+    const { deps, warnings, published } = w.direct();
+    // Another run recorded another reservation for this purchase.
+    const raced = fenced(
+      w.fixture.database,
+      () => false,
+      async (text, tx) => {
+        if (settlesPurchased(text))
+          await tx.query(
+            `UPDATE provider_purchases SET state = 'purchased', reservation_id = 'cb:cr-0ther' WHERE id = $1`,
+            [requested.id],
+          );
+      },
+    );
+    await reconcilePurchase(deps, raced, requested.id, signal());
+    expect(published).toEqual([]);
+    expect(warnings).toEqual([
+      [
+        'vps.purchase_unrecorded',
+        { purchaseId: requested.id, reservationId: expect.stringMatching(/^cb:cr-/) },
+      ],
+    ]);
+  });
+
+  it('a reservation another purchase recorded is never recorded twice', async () => {
+    const w = await world();
+    const offering = block(await w.offerings());
+    w.capacity.blockOfferings[0]!.stock = 2;
+    await w.purchase(offering.id);
+    await w.work('vps.purchases');
+    const [first] = await w.list();
+    expect(first).toMatchObject({ state: 'purchased' });
+    const second = await w.purchase(offering.id, { idempotencyKey: 'buy-2' });
+    // The provider answers the second purchase with the first one's block (taken for its own).
+    const attempts: any[] = [];
+    const clients = {
+      client: async () => ({
+        purchaseReservation: async (_id: string, _context: unknown, attempt: unknown) => {
+          attempts.push(attempt);
+          return first.reservation;
+        },
+      }),
+    } as any;
+    const { deps, published, warnings } = w.direct({ clients });
+    const next = await reconcilePurchase(deps, w.fixture.database, second.id, signal());
+    expect(next).toBeGreaterThan(w.fixture.clock.now());
+    expect(published).toEqual([]);
+    expect(warnings.map(([message]) => message)).toEqual(['vps.purchase_duplicate']);
+    let rows = (await w.list()).filter((p) => p.id === second.id);
+    expect(rows).toMatchObject([{ state: 'purchasing' }]);
+    expect(rows[0].reservationId).toBeUndefined();
+    // The next attempt is uncertain (it may have bought) and leaves out what is recorded.
+    await w.fixture.advance(60_000);
+    await reconcilePurchase(deps, w.fixture.database, second.id, signal());
+    expect(attempts[1]).toMatchObject({
+      attempt: 2,
+      uncertainSince: expect.any(Number),
+      excludeReservationIds: [first.reservationId],
+    });
+    rows = (await w.list()).filter((p) => p.id === second.id);
+    expect(rows[0].reservationId).toBeUndefined();
+  });
+
+  it('a provider account with a purchase in flight is not deleted; its purchases outlive it', async () => {
+    const w = await world();
+    const offering = block(await w.offerings());
+    const requested = await w.purchase(offering.id);
+    await expect(w.api.providerAccounts.delete(w.root, w.ref)).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      details: { purchaseIds: [requested.id] },
+    });
+    await w.work('vps.purchases');
+    expect(await w.list()).toMatchObject([{ state: 'purchased' }]);
+    await w.api.providerAccounts.delete(w.root, w.ref);
+    const { rows } = await w.fixture.database.query<{ state: string }>(
+      'SELECT state FROM provider_purchases WHERE id = $1',
+      [requested.id],
+    );
+    expect(rows).toEqual([{ state: 'purchased' }]);
+  });
+
+  it("the approver reads the account's own provider's description only", async () => {
+    const w = await world();
+    const offering = block(await w.offerings());
+    const input = { ...w.ref, offeringId: offering.id, idempotencyKey: 'k', confirm: true };
+    const other = { describeOffering: () => 'a free block, nothing to pay' };
+    const providers = new Map<string, any>([
+      ['other', other],
+      ['aws', w.aws],
+    ]);
+    // Before the admission read the account, nothing describes the id.
+    expect(describePurchaseFor(input, providers)).not.toContain('free block');
+    await w.fixture.database.transaction((tx) =>
+      preparePurchase(tx, input, { tenantId: w.ref.tenantId, identityId: 'idn_x' } as any),
+    );
+    const text = describePurchaseFor(input, providers);
+    expect(text).toContain('1179.84 USD paid up front');
+    expect(text).not.toContain('free block');
   });
 
   it('two requests racing on one key record one purchase', async () => {
