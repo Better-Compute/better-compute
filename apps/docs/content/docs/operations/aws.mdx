@@ -1,0 +1,60 @@
+---
+title: Operating on AWS
+description: CloudWatch metrics through EMF, bcd telemetry through an ADOT collector, Amazon Managed Service for Prometheus, and control-plane spans to X-Ray.
+icon: Cloud
+packages: ['@better-compute/aws', '@better-compute/observability']
+sources:
+  - packages/aws/src/emf.ts
+  - packages/aws/README.md
+  - packages/observability/src/registry.ts
+  - packages/observability/src/spans.ts
+  - packages/core/src/domain.ts
+---
+
+A deployment that runs on or next to AWS can send its telemetry to AWS's own services without an agent of its own.
+Each path below is independent: pick the ones you need. The platform services themselves (Secrets Manager, KMS,
+S3, EventBridge and the rest) are in the `@better-compute/aws` README.
+
+## Control-plane metrics in CloudWatch (EMF)
+
+`emfMetricsExporter` reads the metrics registry and writes one CloudWatch Embedded Metric Format document per line
+to standard output. On ECS, the `awslogs` log driver ships those lines to CloudWatch Logs, which extracts the
+metrics. No `PutMetricData` call and no IAM permission for metrics is needed.
+
+```ts
+import { createMetrics } from '@better-compute/observability';
+import { emfMetricsExporter } from '@better-compute/aws';
+
+const registry = createMetrics();
+const emf = emfMetricsExporter({ registry, namespace: 'BetterCompute' });
+emf.start(); // every 60 s; emf.stop() on shutdown
+```
+
+- Counters, and the `_sum` and `_count` of histograms, are sent as the change since the last flush. The first flush
+  only records a baseline. Gauges are sent as their value. Histogram buckets are not sent.
+- Only the labels named in `dimensions` (default `module`, `method`, `code`, `pool`, `kind`) become CloudWatch
+  dimensions. Series that differ only in other labels are summed, which keeps the metric count bounded.
+- Metric names drop the registry's `better_compute_` prefix. A document holds at most 100 metrics; more go into
+  further documents.
+- Tenant labels never reach CloudWatch: the registry refuses them when a metric is defined.
+
+## bcd telemetry through an ADOT collector
+
+bcd exports host and instance telemetry over OTLP when the node's `TelemetrySpec` has an `otlpEndpoint`. Point it at
+an AWS Distro for OpenTelemetry collector (a sidecar, a DaemonSet or a gateway). Put the collector's auth headers in
+a secret and set `headersRef` to its `secret://` ref: bcd fetches it through the secret broker, so the headers are
+never stored in the node spec. The collector then forwards to CloudWatch, X-Ray or Amazon Managed Service for
+Prometheus with its own IAM role.
+
+## Amazon Managed Service for Prometheus
+
+Run an ADOT collector with a Prometheus receiver that scrapes the control plane's `GET /metrics` with the bearer token
+`metricsHandler` was given, and a `prometheusremotewrite` exporter with SigV4 auth to the workspace's remote-write
+URL. Amazon Managed Grafana reads the workspace. The token is a secret: give it to the collector from Secrets
+Manager, not from its configuration file.
+
+## Control-plane spans to X-Ray
+
+Pass an `onSpan` observer that turns each `ComputeSpan` into an OpenTelemetry span and exports it to the ADOT
+collector over OTLP. The collector's `awsxray` exporter sends them to X-Ray. Spans carry `tenantId` and
+`requestId`; drop or hash `tenantId` in the collector if tenant ids must not leave the deployment.

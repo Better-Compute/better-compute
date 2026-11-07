@@ -8,6 +8,7 @@ import {
   type InstanceNicSpec,
   type InstanceSpec,
   type InstanceState,
+  type Logger,
   type ModuleContext,
   type ProviderImpl,
   type SqlExecutor,
@@ -51,6 +52,7 @@ import { releaseAddress } from './ipam.js';
 import { networkTag, providerResourceName } from './networks.js';
 import { specPlacement, type HostPlacement } from './placement.js';
 import { markSandboxReady, sandboxWork } from './sandboxes.js';
+import type { SnapshotStore } from './snapshots.js';
 import { instanceVolumeSpecs, volumePlacement } from './volumes.js';
 
 // The Instance controller (PLAN.md §11.1, §3.6): converges `state` toward `desiredState`.
@@ -998,10 +1000,11 @@ export const defaultHostNetwork = 'br0';
 export async function instanceSpecs(
   tx: SqlTx,
   nodeId: string,
-  options: { network?: string } = {},
+  options: { network?: string; snapshots?: SnapshotStore; log?: Logger } = {},
 ): Promise<InstanceSpec[]> {
   const { rows } = await tx.query<{
     id: string;
+    tenant_id: string;
     state: InstanceState;
     desired_state: 'running' | 'stopped' | 'paused' | 'deleted';
     runtime: string;
@@ -1021,7 +1024,7 @@ export async function instanceSpecs(
     host_placement: HostPlacement | string | null;
     sandboxed: boolean;
   }>(
-    `SELECT i.id, i.state, i.desired_state, i.runtime, i.flavor, i.image, i.user_data, i.ssh_keys,
+    `SELECT i.id, i.tenant_id, i.state, i.desired_state, i.runtime, i.flavor, i.image, i.user_data, i.ssh_keys,
             i.allocation_id, a.atoms, i.restore_from, i.network_policy, i.identity_rebind_ref,
             i.host_placement,
             (i.sandbox_id IS NOT NULL OR i.warm_template_id IS NOT NULL) AS sandboxed,
@@ -1041,7 +1044,7 @@ export async function instanceSpecs(
   const network = options.network ?? defaultHostNetwork;
   // Agent memory: the host volumes each instance attaches, in order.
   const volumes = await instanceVolumeSpecs(tx, rows.map((row) => row.id));
-  return rows.flatMap((row) => {
+  const specs = rows.flatMap((row) => {
     const image = typeof row.image === 'string' ? JSON.parse(row.image) : row.image;
     if (!image) return [];
     const flavor = typeof row.flavor === 'string' ? JSON.parse(row.flavor) : row.flavor;
@@ -1089,4 +1092,57 @@ export async function instanceSpecs(
     spec.nics = [nic];
     return [spec];
   });
+  return freshRestoreUrls(
+    specs,
+    new Map(rows.map((row) => [row.id, { tenantId: row.tenant_id, state: row.state }])),
+    options.snapshots,
+    options.log,
+  );
+}
+
+/**
+ * The states in which the host has not restored the instance yet (it fetches `restoreFrom.url`
+ * only while it has no domain for it). Placed anew (recreate), an instance passes through
+ * `provisioning` again.
+ */
+const restorePendingStates: ReadonlySet<InstanceState> = new Set<InstanceState>(['provisioning', 'starting']);
+
+/**
+ * A restore's stored URL may be a presigned link that has expired by now: when the snapshot store
+ * mints download URLs (`SnapshotStore.downloadUrl`), a restore the host has not done yet gets a
+ * fresh one. Once it has (any later state), the spec keeps the stored URL (for S3, the stable
+ * `s3://` identifier): the spec stops changing with each signing window, and no live presigned
+ * link stays in `nodes.spec` for the instance's life (the host keeps the snapshot file by digest).
+ *
+ * Never throws: a store that cannot mint one (credentials loading, ACCESS_DENIED, a URL from
+ * another store) leaves that restore on its stored URL and is logged by code only, so the rest of
+ * the node's spec still converges. This runs inside NodeSpec's transaction: stores must not make
+ * network calls here (`s3SnapshotStore` signs with cached credentials only).
+ */
+export async function freshRestoreUrls(
+  specs: InstanceSpec[],
+  instances: ReadonlyMap<string, { tenantId: string; state: InstanceState }>,
+  store?: Pick<SnapshotStore, 'downloadUrl'>,
+  log?: Logger,
+): Promise<InstanceSpec[]> {
+  if (!store?.downloadUrl) return specs;
+  for (const spec of specs) {
+    const instance = instances.get(spec.id);
+    if (!spec.restoreFrom || instance === undefined || !restorePendingStates.has(instance.state)) continue;
+    try {
+      const url = await store.downloadUrl({
+        tenantId: instance.tenantId,
+        snapshotId: spec.restoreFrom.imageId,
+        url: spec.restoreFrom.url,
+      });
+      if (typeof url === 'string' && url !== '') spec.restoreFrom = { ...spec.restoreFrom, url };
+    } catch (error) {
+      log?.warn('snapshot download url unavailable; the restore keeps its stored url', {
+        instanceId: spec.id,
+        snapshotId: spec.restoreFrom.imageId,
+        code: isComputeError(error) ? error.code : 'INTERNAL',
+      });
+    }
+  }
+  return specs;
 }

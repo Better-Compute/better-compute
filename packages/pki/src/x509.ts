@@ -146,6 +146,38 @@ function extension(oid: string, critical: boolean, value: Uint8Array): Uint8Arra
 
 /** Builds and signs an X.509 v3 certificate with ECDSA P-256 / SHA-256. */
 export function buildCertificate(template: CertificateTemplate, signer: KeyObject): Uint8Array {
+  const tbs = tbsCertificate(template);
+  const signature = sign('sha256', tbs, { key: signer, dsaEncoding: 'der' });
+  return der.sequence(tbs, ecdsaWithSha256(), der.bitString(new Uint8Array(signature)));
+}
+
+/** A signer whose key lives elsewhere (a KMS or HSM key): it signs the TBSCertificate bytes. */
+export interface CertificateSigner {
+  readonly algorithm: 'ecdsa-sha256';
+  /** ECDSA P-256 over SHA-256 of `tbs`, as a DER ECDSA-Sig-Value. */
+  sign(tbs: Uint8Array): Promise<Uint8Array>;
+}
+
+/**
+ * `buildCertificate` with a remote signer: the same TBSCertificate, signed by `signer`. The
+ * signature is checked as DER (a SEQUENCE of two INTEGERs) before it is embedded.
+ */
+export async function buildCertificateWithSigner(
+  template: CertificateTemplate,
+  signer: CertificateSigner,
+): Promise<Uint8Array> {
+  if (signer.algorithm !== 'ecdsa-sha256')
+    throw new ComputeError('INVALID_INPUT', 'Only ecdsa-sha256 signers are supported');
+  const tbs = tbsCertificate(template);
+  const signature = await signer.sign(tbs);
+  const parts = children(expectTag(parseDer(signature), Tag.sequence, 'signature'));
+  if (parts.length !== 2 || parts.some((part) => part.tag !== Tag.integer))
+    throw new ComputeError('INVALID_INPUT', 'The signer returned no DER ECDSA signature');
+  return der.sequence(tbs, ecdsaWithSha256(), der.bitString(new Uint8Array(signature)));
+}
+
+/** The DER TBSCertificate `buildCertificate` signs. */
+function tbsCertificate(template: CertificateTemplate): Uint8Array {
   if (template.serial.length === 0 || template.serial.length > 20 || template.serial[0]! & 0x80)
     throw new ComputeError('INVALID_INPUT', 'Serial must be 1 to 20 bytes and positive');
   if (!(template.notAfter > template.notBefore))
@@ -205,7 +237,7 @@ export function buildCertificate(template: CertificateTemplate, signer: KeyObjec
         der.sequence(der.implicit(0, template.authorityKeyId)),
       ),
     );
-  const tbs = der.sequence(
+  return der.sequence(
     der.explicit(0, der.integer(2)),
     der.integer(template.serial),
     ecdsaWithSha256(),
@@ -215,8 +247,6 @@ export function buildCertificate(template: CertificateTemplate, signer: KeyObjec
     publicKeyInfo,
     der.explicit(3, der.sequence(...extensions)),
   );
-  const signature = sign('sha256', tbs, { key: signer, dsaEncoding: 'der' });
-  return der.sequence(tbs, ecdsaWithSha256(), der.bitString(new Uint8Array(signature)));
 }
 
 export interface CertificateExtension {

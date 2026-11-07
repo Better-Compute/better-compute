@@ -69,6 +69,7 @@ export const notReleased = Object.freeze({
   '@better-compute/aws-core': 'not ready: only the unreleased AWS provider uses it',
   '@better-compute/provider-aws':
     'not ready: the AWS program is still in progress (A1, emulator-tested only)',
+  '@better-compute/aws': 'not ready: the AWS platform services are still in progress',
   '@better-compute/provider-digitalocean':
     'not ready: the DigitalOcean program is still in progress',
 });

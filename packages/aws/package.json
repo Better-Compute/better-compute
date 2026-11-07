@@ -1,0 +1,55 @@
+{
+  "name": "@better-compute/aws",
+  "version": "0.1.0",
+  "description": "AWS platform services behind better-compute seams: Secrets Manager, Parameter Store, KMS, S3, EventBridge, SNS, SQS, Kinesis, Firehose, ACM Private CA, RDS IAM auth and CloudWatch EMF. No AWS SDK.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "better-compute contributors",
+  "homepage": "https://github.com/better-compute/better-compute/tree/main/packages/aws#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/better-compute/better-compute.git",
+    "directory": "packages/aws"
+  },
+  "bugs": {
+    "url": "https://github.com/better-compute/better-compute/issues"
+  },
+  "keywords": [
+    "better-compute",
+    "aws",
+    "kms",
+    "s3",
+    "secrets-manager",
+    "eventbridge"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-compute/aws-core": "workspace:*",
+    "@better-compute/core": "workspace:*",
+    "@better-compute/pki": "workspace:*",
+    "@better-compute/vps": "workspace:*"
+  }
+}

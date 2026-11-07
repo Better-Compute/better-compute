@@ -36,6 +36,8 @@ export interface SnapshotStore {
   }>;
   /** Deletes a stored snapshot (best effort: failures are logged). */
   delete?(input: { tenantId: string; snapshotId: string; url: string }): Promise<void>;
+  /** A fresh URL to fetch a stored snapshot; restores call it when present (stored URLs may expire). */
+  downloadUrl?(input: { tenantId: string; snapshotId: string; url: string }): Promise<string>;
 }
 
 /** The command kind (agent/v1 `InstanceSnapshotRequest` → `InstanceSnapshotResult`). */
