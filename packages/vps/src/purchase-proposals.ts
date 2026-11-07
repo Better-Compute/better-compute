@@ -43,8 +43,13 @@ export const maxProposalAttempts = 5;
 /** Reservations proposed per pass (each is one provider read). */
 const perPass = 50;
 const hour = 3_600_000;
-/** A provider read gets this long. */
+/** A provider read gets this long at most (and never past the run's budget). */
 const callBudgetMs = 45_000;
+/**
+ * How long one run takes reservations (default): under the work queue's claim (15 s), so no other
+ * worker claims `all` and repeats the reads while this one still runs (as provider-events).
+ */
+const defaultBudgetMs = 12_000;
 
 export const purchaseProposalsMigration: Migration = {
   name: 'vps/0113_purchase_proposals',
@@ -286,6 +291,12 @@ function viewOf(
 export interface PurchaseProposalsOptions {
   /** How often pending reservations are looked at (default `15m`). */
   every?: Duration;
+  /**
+   * How long one run takes reservations, in ms (default 12 000, at least 1 000): kept under the work
+   * claim. No reservation is started past it, and a provider read gets at most what is left; a read
+   * the budget cuts short records nothing (the next run asks again), never an error attempt.
+   */
+  budgetMs?: number;
 }
 
 interface CandidateRow {
@@ -327,6 +338,9 @@ function safeError(error: unknown): { code: string; message: string } {
   return { code: 'PROVIDER_ERROR', message: 'The provider failed the offering read' };
 }
 
+/** The run's own budget or signal ended the read: nothing is recorded, no attempt is spent. */
+const cutShort = Symbol('cut-short');
+
 interface Outcome {
   state: ProposalState;
   reason?: string;
@@ -342,7 +356,8 @@ async function propose(
   candidate: CandidateRow,
   reservation: ProposalReservation,
   signal: AbortSignal,
-): Promise<Outcome> {
+  leftMs: number,
+): Promise<Outcome | typeof cutShort> {
   const now = deps.clock.now();
   const flavors = await sql.transaction(async (tx) =>
     (
@@ -356,6 +371,10 @@ async function propose(
   );
   const query = proposalQuery(reservation, flavors, now);
   if (!query) return { state: 'none', reason: 'no-flavor' };
+  // The read gets the call budget, or what is left of the run's when that is less: then its timing
+  // out is the run ending, not the provider failing.
+  const byRun = leftMs < callBudgetMs;
+  const timeout = AbortSignal.timeout(Math.max(1, Math.min(callBudgetMs, leftMs)));
   try {
     const account = await sql.transaction((tx) => readAccount(tx, candidate.account_id));
     if (!account || account.tenantId !== deps.rootTenantId)
@@ -365,7 +384,7 @@ async function propose(
       return { state: 'none', reason: 'unsupported', query };
     const offerings = await client.listReservationOfferings(query, {
       idempotencyKey: `proposal:${candidate.id}`,
-      signal: AbortSignal.any([signal, AbortSignal.timeout(callBudgetMs)]),
+      signal: AbortSignal.any([signal, timeout]),
       clock: deps.clock,
       secrets: deps.secrets,
       log: deps.log,
@@ -375,6 +394,7 @@ async function propose(
       ? { state: 'proposed', query, offering }
       : { state: 'none', reason: 'no-offering', query };
   } catch (error) {
+    if (signal.aborted || (byRun && timeout.aborted)) return cutShort;
     return { state: 'error', query, error: safeError(error) };
   }
 }
@@ -384,13 +404,18 @@ export async function reconcilePurchaseProposals(
   deps: PurchaseDeps,
   sql: SqlExecutor,
   signal: AbortSignal,
+  budgetMs = defaultBudgetMs,
 ): Promise<void> {
   const rootTenantId = deps.rootTenantId;
   if (rootTenantId === undefined) return;
+  // Wall time, like the claim it stays under (the compute clock may be simulated).
+  const deadline = Date.now() + Math.max(1_000, budgetMs);
   const now = deps.clock.now();
   const rows = await sql.transaction((tx) => candidates(tx, rootTenantId, now));
   for (const candidate of rows) {
     if (signal.aborted) return;
+    const leftMs = deadline - Date.now();
+    if (leftMs <= 0) return;
     const request = json<Exclude<CandidateRow['request'], string>>(candidate.request)!;
     let duration: number;
     try {
@@ -407,7 +432,8 @@ export async function reconcilePurchaseProposals(
         .reduce((sum, device) => sum + Number(device.count), 0),
       machinesPer: Math.max(1, Number(request.gang?.size ?? 1)),
     };
-    const outcome = await propose(deps, sql, candidate, reservation, signal);
+    const outcome = await propose(deps, sql, candidate, reservation, signal, leftMs);
+    if (outcome === cutShort) return;
     await sql.transaction(async (tx) => {
       const { rows: saved } = await tx.query<{ id: string; state: ProposalState }>(
         `INSERT INTO provider_purchase_proposals
@@ -473,7 +499,12 @@ export function purchaseProposalsReconciler(
     shardBy: 'none',
     periodic: [{ key: 'all', every: options.every ?? '15m' }],
     async run(context) {
-      await reconcilePurchaseProposals(depsOf(context), context.sql, context.signal);
+      await reconcilePurchaseProposals(
+        depsOf(context),
+        context.sql,
+        context.signal,
+        options.budgetMs ?? defaultBudgetMs,
+      );
       return 'DONE';
     },
   };

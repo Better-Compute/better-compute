@@ -18,12 +18,33 @@ type Api = any;
 const HOUR = 3_600_000;
 const ZONE = 'us-east-1a';
 
-async function world() {
+async function world(options: { budgetMs?: number } = {}) {
   const emu = new AwsEmulator();
   const ec2 = new Ec2Emulator(emu);
   const capacity = new CapacityEmulator(emu, ec2);
-  const aws = awsProvider({ fetch: emu.fetch, credentials: emu.ambient });
-  const fixture = await computeFixture({ clock: 'sim', modules: [vps({ providers: [aws] })] });
+  /** While set, offering reads hang until their caller gives up (a provider slower than any budget). */
+  const slow = { offerings: false, hung: 0 };
+  const fetch: typeof emu.fetch = async (input, init) => {
+    const body = typeof init?.body === 'string' ? init.body : '';
+    if (slow.offerings && body.includes('Action=DescribeCapacityBlockOfferings'))
+      return new Promise<Response>((_, reject) => {
+        slow.hung++;
+        const signal = init?.signal;
+        if (signal?.aborted) return reject(signal.reason);
+        signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    return emu.fetch(input, init);
+  };
+  const aws = awsProvider({ fetch, credentials: emu.ambient });
+  const fixture = await computeFixture({
+    clock: 'sim',
+    modules: [
+      vps({
+        providers: [aws],
+        ...(options.budgetMs ? { purchaseProposals: { budgetMs: options.budgetMs } } : {}),
+      }),
+    ],
+  });
   emu.follow(fixture.clock);
   const { compute, tenants, iam } = fixture;
   (iam as { rootTenantId?: string }).rootTenantId = tenants.root.id;
@@ -76,6 +97,7 @@ async function world() {
   const t0 = fixture.clock.now();
   return {
     emu,
+    slow,
     capacity,
     fixture,
     api,
@@ -345,6 +367,52 @@ describe('calendar → Capacity Blocks (AWS A10)', () => {
     await expect(w.proposals(w.acme, w.acmeTenant)).rejects.toMatchObject({
       code: expect.stringMatching(/ACCESS_DENIED|NOT_FOUND/),
     });
+  });
+
+  it('a read cut short by the run budget records nothing and spends no attempt', async () => {
+    const w = await world({ budgetMs: 1_000 });
+    const start = w.t0 + 40 * HOUR;
+    const reservation = await w.reserve('r-1', start);
+    w.slow.offerings = true;
+    await w.tick();
+    expect(w.slow.hung).toBeGreaterThan(0);
+    expect(await w.proposals()).toEqual([]);
+
+    // After one real failure, a cut-short read leaves the attempts where they were.
+    w.slow.offerings = false;
+    w.emu.failNext('DescribeCapacityBlockOfferings', 'InvalidParameterValue', 400, 1);
+    await w.tick(20 * 60_000);
+    expect(await w.proposals()).toMatchObject([
+      { reservationId: reservation.id, state: 'error', attempts: 1 },
+    ]);
+    w.slow.offerings = true;
+    await w.tick(20 * 60_000);
+    expect(await w.proposals()).toMatchObject([{ state: 'error', attempts: 1 }]);
+
+    // The provider answers again: proposed on the next pass.
+    w.slow.offerings = false;
+    w.capacity.blockOfferings.push({
+      id: 'cb-0aaaaaaaaaaaaaaa1',
+      type: 'p5.48xlarge',
+      zone: ZONE,
+      count: 2,
+      start: start - 3 * HOUR,
+      hours: 48,
+      upfrontFee: 2_000,
+    });
+    await w.tick(20 * 60_000);
+    expect(await w.proposals()).toMatchObject([{ state: 'proposed', attempts: 2 }]);
+  });
+
+  it('a pass stops taking reservations once its budget is spent', async () => {
+    const w = await world({ budgetMs: 1_000 });
+    for (let n = 0; n < 3; n++) await w.reserve(`r-${n}`, w.t0 + (30 + n) * HOUR);
+    w.slow.offerings = true;
+    await w.fixture.advance(1_000);
+    await w.fixture.compute.jobs[purchaseProposalsWork]!.tick();
+    // The first read used the whole budget: the others wait for the next pass.
+    expect(w.slow.hung).toBe(1);
+    expect(await w.proposals()).toEqual([]);
   });
 
   it('a provider failure is retried on later passes, and gives up after five attempts', async () => {
