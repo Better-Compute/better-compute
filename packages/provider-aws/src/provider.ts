@@ -62,9 +62,23 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
                 : {}),
               ...(options.rateLimit ? { rateLimit: options.rateLimit } : {}),
             });
+      // SSM Parameter Store: reinstall resolves resolve:ssm: images to an AMI id with it.
+      const ssm = jsonClient({
+        service: 'ssm',
+        jsonVersion: '1.1',
+        targetPrefix: 'AmazonSSM',
+        region: config.region,
+        credentials: account.source,
+        fetch: options.fetch,
+        clock: context.clock,
+        log: context.log,
+        ...(options.endpoints?.ssm !== undefined ? { endpoint: options.endpoints.ssm } : {}),
+        ...(options.rateLimit ? { rateLimit: options.rateLimit } : {}),
+      });
       const compute = new AwsCompute(config, context, options, {
         ec2,
         quotas,
+        ssm,
         ...(pricing ? { pricing } : {}),
         account,
         types: instanceTypeCache(ec2, { clock: context.clock }),

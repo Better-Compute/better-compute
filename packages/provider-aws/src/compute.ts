@@ -19,7 +19,14 @@ import type { JsonClient, QueryClient, QueryParams, XmlElement } from '@better-c
 import type { AccountCredentials } from './account.js';
 import { parseDiscoverTag, type AwsConfig, type AwsProviderOptions } from './config.js';
 import { clientToken, offerId, parseInstanceId, parseOfferId, tags, tagValue } from './ids.js';
-import { aliasRootDeviceOf, resolveImage, ssmImagePrefixes } from './images.js';
+import {
+  aliasRootDeviceOf,
+  imageAllowed,
+  imageOwnersOf,
+  isAmiId,
+  resolveImage,
+  ssmImagePrefixes,
+} from './images.js';
 import { AwsNetworks } from './networks.js';
 import {
   toMachine,
@@ -57,6 +64,8 @@ export interface AwsComputeDeps {
   quotas?: JsonClient;
   /** (A3) The Price List Query API (JSON 1.1); absent: offers carry no on-demand price. */
   pricing?: JsonClient;
+  /** SSM Parameter Store; reinstall of a `resolve:ssm:` image needs it (UNSUPPORTED without). */
+  ssm?: JsonClient;
   account: AccountCredentials;
   types: InstanceTypeCache;
   zones: ZoneCache;
@@ -150,6 +159,17 @@ function tagPropagation(id: string): ComputeError {
   );
 }
 
+/** The EBS volume id attached at the instance's root device (DescribeInstances), if any. */
+function rootVolumeOf(instance: XmlElement): string | undefined {
+  const root = instance.textOf('rootDeviceName');
+  if (!root) return undefined;
+  const mapping = instance
+    .items('blockDeviceMapping')
+    .find((item) => item.textOf('deviceName') === root);
+  const volume = mapping?.child('ebs')?.textOf('volumeId');
+  return volume && /^vol-[0-9a-f]{8,17}$/.test(volume) ? volume : undefined;
+}
+
 /** The ownership keys (`better-compute:<key>`) a tenant label may never set. */
 const reservedLabels: ReadonlySet<string> = new Set(
   Object.values(tags)
@@ -180,7 +200,13 @@ export class AwsCompute implements ProviderImpl {
   readonly #created = new Map<string, number>();
   /** Instance id → when this client last claimed it with `managed` (tags lag behind writes). */
   readonly #managedClaims = new Map<string, number>();
-  readonly #rootDevices = new Map<string, { device: string | undefined; at: number }>();
+  /** Instance id → when this client last wrote or saw its own ownership tag on it in `claim`. */
+  readonly #claims = new Map<string, number>();
+  /** AMI id → its root device and whether a tenant may launch it (DescribeImages, cached a day). */
+  readonly #images = new Map<
+    string,
+    { device: string | undefined; allowed: boolean; at: number }
+  >();
   readonly #loggedSsm = new Set<string>();
   /** Error codes already logged once (an unreadable market read is warned once per code). */
   readonly #warned = new Set<string>();
@@ -191,6 +217,7 @@ export class AwsCompute implements ProviderImpl {
   readonly volumes: AwsVolumes;
   readonly #quotas: QuotaReader | undefined;
   readonly #prices: PriceReader;
+  readonly #imageOwners: readonly string[];
 
   constructor(
     readonly config: AwsConfig,
@@ -199,6 +226,7 @@ export class AwsCompute implements ProviderImpl {
     readonly deps: AwsComputeDeps,
   ) {
     this.#ssmPrefixes = ssmImagePrefixes(options.ssmImagePrefixes);
+    this.#imageOwners = imageOwnersOf(options.imageOwners);
     this.networks = new AwsNetworks({
       config,
       context,
@@ -1002,9 +1030,36 @@ export class AwsCompute implements ProviderImpl {
       }
       return undefined;
     }
+    return this.#checkedAmi(imageId, signal);
+  }
+
+  /**
+   * A raw AMI's root device, after the ownership check: the image id comes from the tenant and EC2
+   * launches anything the account can see, so a private AMI passes only when its owner is
+   * `amazon`, `aws-marketplace` or one of the host's `imageOwners` (INVALID_INPUT, reason `image`).
+   */
+  async #checkedAmi(imageId: string, signal: AbortSignal): Promise<string | undefined> {
     const now = this.context.clock.now();
-    const hit = this.#rootDevices.get(imageId);
-    if (hit && now - hit.at < imageTtlMs) return hit.device;
+    let hit = this.#images.get(imageId);
+    if (!hit || now - hit.at >= imageTtlMs) {
+      hit = await this.#describeImage(imageId, signal);
+      this.#images.set(imageId, hit);
+    }
+    if (!hit.allowed)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `image ${imageId} is a private AMI whose owner the host does not allow (imageOwners)`,
+        undefined,
+        { provider: 'aws', reason: 'image' },
+      );
+    return hit.device;
+  }
+
+  async #describeImage(
+    imageId: string,
+    signal: AbortSignal,
+  ): Promise<{ device: string | undefined; allowed: boolean; at: number }> {
+    const now = this.context.clock.now();
     let doc: XmlElement;
     try {
       doc = await this.call('DescribeImages', { ImageId: [imageId] }, signal);
@@ -1021,9 +1076,56 @@ export class AwsCompute implements ProviderImpl {
         );
       throw error;
     }
-    const device = doc.items('imagesSet')[0]?.textOf('rootDeviceName');
-    this.#rootDevices.set(imageId, { device, at: now });
-    return device;
+    const item = doc.items('imagesSet').find((image) => image.textOf('imageId') === imageId);
+    if (!item)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `image ${imageId} does not exist in ${this.config.region}`,
+        undefined,
+        { provider: 'aws', reason: 'image' },
+      );
+    const allowed = imageAllowed(
+      {
+        isPublic: item.textOf('isPublic'),
+        ownerId: item.textOf('imageOwnerId'),
+        ownerAlias: item.textOf('imageOwnerAlias'),
+      },
+      this.#imageOwners,
+    );
+    return { device: item.textOf('rootDeviceName'), allowed, at: now };
+  }
+
+  /**
+   * The AMI id a `resolve:ssm:` image names now (SSM GetParameters, as the account). For calls
+   * that, unlike RunInstances, take only an AMI id. The parameter is one `resolveImage` let through
+   * (public, or under the host's `ssmImagePrefixes`); its value is never echoed.
+   */
+  async #ssmAmi(image: string, signal: AbortSignal): Promise<string> {
+    const name = image.slice('resolve:ssm:'.length);
+    if (!this.deps.ssm)
+      throw new ComputeError(
+        'UNSUPPORTED',
+        'this AWS client has no SSM client to resolve a resolve:ssm: image',
+        undefined,
+        { provider: 'aws', reason: 'ssm-client' },
+      );
+    await this.ready(signal);
+    const result = await this.deps.ssm.call<{
+      Parameters?: { Name?: string; Value?: string }[];
+      InvalidParameters?: string[];
+    }>('GetParameters', { Names: [name] }, { signal });
+    const bare = name.replace(/:\d+$/, '');
+    const value = (result.Parameters ?? []).find((parameter) => parameter.Name === bare)?.Value;
+    if (value === undefined || !isAmiId(value))
+      throw new ComputeError(
+        'INVALID_INPUT',
+        value === undefined
+          ? `SSM parameter ${bare.slice(0, 256)} does not exist in ${this.config.region}`
+          : `SSM parameter ${bare.slice(0, 256)} does not hold an AMI id`,
+        undefined,
+        { provider: 'aws', reason: 'image' },
+      );
+    return value;
   }
 
   #tagSpecifications(request: AwsCreateRequest, context: CallContext) {
@@ -1282,6 +1384,13 @@ export class AwsCompute implements ProviderImpl {
       if (this.recent(this.#created, id)) return { id, state: 'pending', addresses: [] };
       return undefined;
     }
+    // Just claimed by this client: a lagging read may not show the ownership tag yet. vps would take
+    // the missing label as lost ownership, so that is a retryable UNAVAILABLE inside the window.
+    if (
+      !instance.items('tagSet').some((item) => item.textOf('key') === tags.instance) &&
+      this.recent(this.#claims, id)
+    )
+      throw tagPropagation(id);
     const machine = await this.machine(instance, context.signal);
     if (instance.child('instanceState')?.textOf('name') === 'terminated') {
       const failure = terminatedFailure(instance.child('stateReason')?.textOf('code'));
@@ -1437,14 +1546,27 @@ export class AwsCompute implements ProviderImpl {
       (instance.textOf('architecture') as 'x86_64' | 'arm64' | undefined) ??
       (type ? (await this.#types([type], context.signal)).get(type)?.arch[0] : undefined) ??
       'x86_64';
-    const imageId = resolveImage(image, arch === 'arm64' ? 'arm64' : 'x86_64', this.#ssmPrefixes);
+    const resolved = resolveImage(image, arch === 'arm64' ? 'arm64' : 'x86_64', this.#ssmPrefixes);
+    // CreateReplaceRootVolumeTask takes only an AMI id (resolve:ssm: is a launch-time syntax), so an
+    // SSM image is read here; a raw AMI takes the same ownership check as create.
+    let imageId: string;
+    if (resolved.startsWith('resolve:ssm:')) imageId = await this.#ssmAmi(resolved, context.signal);
+    else {
+      await this.#checkedAmi(resolved, context.signal);
+      imageId = resolved;
+    }
+    // The token covers retries of one reinstall: they see the same root volume. Once the task has
+    // replaced it, the same reinstall again is a new task (a new wipe), not the finished one.
+    const rootVolume = rootVolumeOf(instance);
     await this.call(
       'CreateReplaceRootVolumeTask',
       {
         InstanceId: id,
         ImageId: imageId,
         DeleteReplacedRootVolume: true,
-        ClientToken: clientToken(`${context.idempotencyKey}:reinstall:${image}`),
+        ClientToken: rootVolume
+          ? clientToken(`${context.idempotencyKey}:reinstall:${image}:${rootVolume}`)
+          : undefined,
       },
       context.signal,
     );
@@ -1551,6 +1673,7 @@ export class AwsCompute implements ProviderImpl {
     const after = await this.#tagged(id, context.signal);
     const now = after.tags.get(tags.instance);
     if (!now || (options.managed && after.tags.get(tags.managed) !== 'true')) {
+      this.#remember(this.#claims, id);
       if (options.managed) this.#remember(this.#managedClaims, id);
       throw tagPropagation(id);
     }
@@ -1564,12 +1687,16 @@ export class AwsCompute implements ProviderImpl {
           reason: 'lost-race',
         },
       );
+    this.#remember(this.#claims, id);
     if (options.managed) this.#remember(this.#managedClaims, id);
     return this.machine(after.instance, context.signal);
   }
 
   /** Removes the ownership (and managed) tags if they name `instanceId`; a missing instance is fine. */
   async release(id: string, instanceId: string, context: CallContext): Promise<void> {
+    // A released instance legitimately reads without the tag from here on.
+    this.#claims.delete(id);
+    this.#managedClaims.delete(id);
     let current;
     try {
       current = await this.#tagged(id, context.signal);

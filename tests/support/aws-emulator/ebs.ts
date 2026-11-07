@@ -243,9 +243,8 @@ export class EbsEmulator {
   }
 
   #blockDevices(instance: EmuInstance): string[] {
-    const out = [
-      `${el('deviceName', instance.rootDevice)}<ebs>${el('volumeId', `vol-root${instance.id.slice(2, 10)}`)}${el('status', 'attached')}</ebs>`,
-    ];
+    // The root volume is the EC2 emulator's own mapping.
+    const out: string[] = [];
     for (const volume of this.volumes.values())
       if (volume.attachment?.instanceId === instance.id && !this.laggingAttachments.has(volume.id))
         out.push(

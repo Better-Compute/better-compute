@@ -135,7 +135,7 @@ export interface AwsConfig {
 export interface AwsProviderOptions {
   fetch?: typeof fetch;
   /** Tests and VPC endpoints; host options, never account config. */
-  endpoints?: Partial<Record<'ec2' | 'sts' | 'servicequotas' | 'pricing', string>>;
+  endpoints?: Partial<Record<'ec2' | 'sts' | 'servicequotas' | 'pricing' | 'ssm', string>>;
   /** Ambient identity for platform accounts (default `ambientCredentials()`). */
   credentials?: CredentialSource;
   /** ExternalId prefix: `${externalIdPrefix}:${providerAccountId}` (default 'better-compute'). */
@@ -154,6 +154,13 @@ export interface AwsProviderOptions {
    * private parameters are refused unless listed here.
    */
   ssmImagePrefixes?: readonly string[];
+  /**
+   * AWS account ids (12 digits) whose private AMIs a raw `ami-…` image may name. Public AMIs and
+   * those owned by `amazon` or `aws-marketplace` always pass; any other private AMI the account can
+   * see (its own golden images, images shared with it) is refused, because the image comes from the
+   * tenant and EC2 launches it as the account.
+   */
+  imageOwners?: readonly string[];
 }
 
 function invalid(message: string, reason: string): ComputeError {
