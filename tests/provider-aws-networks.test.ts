@@ -38,6 +38,9 @@ async function world(
   const provider = awsProvider({
     fetch: options.wrapFetch ? options.wrapFetch(emu.fetch) : emu.fetch,
     credentials: emu.ambient,
+    // The client's token bucket runs on the emulator's clock, which these tests do not move: with
+    // the default 20/s every call past the burst would wait in real time.
+    rateLimit: { perSecond: 1_000_000, burst: 1_000_000 },
   });
   const config = {
     ...(awsConfig.parse({ region: 'us-east-1', zones: ['us-east-1a', 'us-east-1b'] }) as AwsConfig),
@@ -265,6 +268,49 @@ describe('networks: VPC', () => {
     );
     expect(emu.calls('CreateVpc')).toHaveLength(2);
     expect(vpc.vpcs.size).toBe(2);
+  });
+
+  it('an IPAM pool network: allocated by size, found again after a lost answer, and usable', async () => {
+    let lose = 1;
+    const { networks, vpc, emu, call, settle } = await world(
+      { ipamPoolId: 'ipam-pool-0123456789abcdef0' },
+      {
+        wrapFetch: (inner) => async (input, init) => {
+          const response = await inner(input, init);
+          if (String(init?.body ?? '').includes('Action=CreateVpc') && lose-- > 0)
+            throw new TypeError('fetch failed: socket hang up');
+          return response;
+        },
+      },
+    );
+    vpc.tagLagReads = 5;
+    await expect(networks.ensureNetwork({ name: 'bc-net-1' }, call())).rejects.toMatchObject({
+      code: 'UNAVAILABLE',
+    });
+    expect((await settle(() => networks.ensureNetwork({ name: 'bc-net-1' }, call()))).state).toBe(
+      'ready',
+    );
+    expect(emu.calls('CreateVpc')).toHaveLength(1);
+    expect(vpc.vpcs.size).toBe(1);
+    const create = emu.calls('CreateVpc')[0]!.params;
+    expect(create.get('Ipv4IpamPoolId')).toBe('ipam-pool-0123456789abcdef0');
+    expect(create.get('Ipv4NetmaskLength')).toBe('16');
+    expect(create.has('CidrBlock')).toBe(false);
+    // The emulator's pool hands out 10.200.0.0/16: a subnet inside it is made directly.
+    const made = await settle(() =>
+      networks.ensureSubnet(
+        {
+          network: 'bc-net-1',
+          name: 'bc-sub-1',
+          region: 'us-east-1',
+          cidr: '10.200.1.0/24',
+          zone: 'us-east-1a',
+        },
+        call(),
+      ),
+    );
+    expect(made.state).toBe('ready');
+    expect(emu.calls('AssociateVpcCidrBlock')).toHaveLength(0);
   });
 
   it('of two VPCs with the same network tag, the one with the gateway is used', async () => {
@@ -498,12 +544,62 @@ describe('networks: subnets', () => {
     expect(endpoints.every((e) => e.tags.get('better-compute:network') === 'bc-net-1')).toBe(true);
     expect(emu.calls('CreateVpcEndpoint')).toHaveLength(2);
     // The network's delete removes them before the VPC.
-    await networks.deleteSubnet('us-east-1', 'bc-sub-1', call());
-    await networks.deleteSubnet('us-east-1', 'bc-sub-2', call());
     expect((await networks.deleteNetwork('bc-net-1', call())).state).toBe('deleted');
     expect(vpc.endpoints.size).toBe(0);
     const order = emu.requests.map((r) => r.operation);
     expect(order.indexOf('DeleteVpcEndpoints')).toBeLessThan(order.indexOf('DeleteVpc'));
+  });
+
+  it('the last private-access subnet out removes the endpoints; one deleted by hand comes back', async () => {
+    const { networks, vpc, emu, call } = await withNetwork();
+    await networks.ensureSubnet(subnet({ privateGoogleAccess: true }), call());
+    await networks.ensureSubnet(
+      subnet({ name: 'bc-sub-2', cidr: '10.64.2.0/24', privateGoogleAccess: true }),
+      call(),
+    );
+    await networks.ensureSubnet(subnet({ name: 'bc-sub-3', cidr: '10.64.3.0/24' }), call());
+    expect(vpc.endpoints.size).toBe(2);
+    expect((await networks.deleteSubnet('us-east-1', 'bc-sub-1', call())).state).toBe('deleted');
+    expect(vpc.endpoints.size).toBe(2);
+    expect((await networks.deleteSubnet('us-east-1', 'bc-sub-2', call())).state).toBe('deleted');
+    // bc-sub-3 never asked for private access: nothing keeps the endpoints.
+    expect(vpc.endpoints.size).toBe(0);
+    // A new private-access subnet brings them back, and one deleted by hand is made again (no
+    // idempotency token hands back the deleted endpoint).
+    await networks.ensureSubnet(
+      subnet({ name: 'bc-sub-4', cidr: '10.64.4.0/24', privateGoogleAccess: true }),
+      call(),
+    );
+    expect(vpc.endpoints.size).toBe(2);
+    const s3 = [...vpc.endpoints.values()].find((e) => e.service.endsWith('.s3'))!;
+    vpc.endpoints.delete(s3.id);
+    expect(
+      (
+        await networks.ensureSubnet(
+          subnet({ name: 'bc-sub-4', cidr: '10.64.4.0/24', privateGoogleAccess: true }),
+          call(),
+        )
+      ).state,
+    ).toBe('ready');
+    expect([...vpc.endpoints.values()].map((e) => e.service).sort()).toEqual([
+      'com.amazonaws.us-east-1.dynamodb',
+      'com.amazonaws.us-east-1.s3',
+    ]);
+    expect(emu.calls('CreateVpcEndpoint').every((r) => !r.params.has('ClientToken'))).toBe(true);
+  });
+
+  it('a gateway endpoint DeleteVpcEndpoints reports unsuccessful keeps the network delete pending', async () => {
+    const { networks, vpc, call } = await withNetwork();
+    await networks.ensureSubnet(subnet({ privateGoogleAccess: true }), call());
+    const stuck = [...vpc.endpoints.values()][0]!;
+    vpc.endpointDeleteFailures.add(stuck.id);
+    expect(await networks.deleteNetwork('bc-net-1', call())).toMatchObject({
+      state: 'pending',
+      message: expect.stringMatching(new RegExp(`${stuck.id} was not deleted`)),
+    });
+    vpc.endpointDeleteFailures.clear();
+    expect((await networks.deleteNetwork('bc-net-1', call())).state).toBe('deleted');
+    expect(vpc.endpoints.size).toBe(0);
   });
 
   it('an adopted VPC gets no gateway endpoint and no new range, only subnets inside its ranges', async () => {
@@ -770,6 +866,35 @@ describe('networks: firewall', () => {
       .calls('RevokeSecurityGroupIngress')
       .map((r) => r.params.get('SecurityGroupRuleId.1'));
     expect(revoked).not.toContain('sgr-0000000000000beef');
+  });
+
+  it('an equal rule on a later page of a busy group is found and tagged, not refused', async () => {
+    const { networks, call, vpc } = await withNetwork();
+    await networks.ensureFirewall(rule({ targetTags: [tagA], disabled: true }), call());
+    const sg = [...vpc.groups.values()].find((g) => g.name === tagA)!;
+    vpc.rules.set('sgr-0000000000000beef', {
+      id: 'sgr-0000000000000beef',
+      groupId: sg.id,
+      egress: false,
+      protocol: 'tcp',
+      from: 22,
+      to: 22,
+      cidrIpv4: '203.0.113.0/24',
+      tags: new Map(),
+    });
+    // One rule per page: the group's default egress rule comes first.
+    vpc.pageSize = 1;
+    expect(
+      (
+        await networks.ensureFirewall(
+          rule({ targetTags: [tagA], rules: [{ protocol: 'tcp', ports: ['22'] }] }),
+          call(),
+        )
+      ).state,
+    ).toBe('ready');
+    expect(
+      vpc.rules.get('sgr-0000000000000beef')!.tags.get('better-compute:firewall:bc-fw-1'),
+    ).toBe('true');
   });
 
   it('refuses a targeted deny and a rule that filters the other side', async () => {

@@ -33,6 +33,8 @@ import { clientToken, parseInstanceId, tags, tagValue } from './ids.js';
 export const networkTags = {
   network: 'better-compute:network',
   subnet: 'better-compute:subnet',
+  /** On a subnet that asked for private service access (`true`): it keeps the gateway endpoints. */
+  privateAccess: 'better-compute:private-access',
   /** On a per-tag security group: the network tag it stands for. */
   tag: 'better-compute:tag',
   /** `better-compute:firewall:<name>` on a security group rule: that firewall wants it. */
@@ -1008,6 +1010,8 @@ export class AwsNetworks implements ProviderNetworks {
           TagSpecification: this.#ownTags('subnet', spec.network, {
             [networkTags.subnet]: spec.name,
             [tags.name]: spec.name,
+            // What keeps the gateway endpoints: the last such subnet's delete removes them.
+            ...(spec.privateGoogleAccess === true ? { [networkTags.privateAccess]: 'true' } : {}),
           }),
         },
         signal,
@@ -1191,7 +1195,58 @@ export class AwsNetworks implements ProviderNetworks {
         throw error;
       }
     }
+    const deleted = new Set(found.map((subnet) => subnet.id));
+    for (const subnet of found)
+      if (subnet.tags.get(networkTags.privateAccess) === 'true') {
+        const waiting = await this.#pruneServiceAccess(
+          subnet.tags.get(networkTags.network)!,
+          subnet.vpcId,
+          deleted,
+          context.signal,
+        );
+        if (waiting) return state(subnet.id, 'pending', waiting);
+      }
     return state(found[0]?.id ?? id, 'deleted');
+  }
+
+  /**
+   * Removes the network's gateway endpoints once no subnet of the VPC asks for private service
+   * access any more (`deleted` are gone already); the reason to wait, or undefined.
+   */
+  async #pruneServiceAccess(
+    network: string,
+    vpcId: string,
+    deleted: ReadonlySet<string>,
+    signal: AbortSignal,
+  ): Promise<string | undefined> {
+    const subnets = await this.#subnetsBy([{ Name: 'vpc-id', Value: [vpcId] }], signal);
+    if (
+      subnets.some(
+        (subnet) =>
+          !deleted.has(subnet.id) && subnet.tags.get(networkTags.privateAccess) === 'true',
+      )
+    )
+      return undefined;
+    const services = new Set(this.#endpointServices());
+    const doc = await this.#call(
+      'DescribeVpcEndpoints',
+      { Filter: [{ Name: 'vpc-id', Value: [vpcId] }] },
+      signal,
+    );
+    const ids = doc
+      .items('vpcEndpointSet')
+      .filter((item) => madeFor(item, network) && services.has(item.textOf('serviceName') ?? ''))
+      .map((item) => item.textOf('vpcEndpointId') ?? '')
+      .filter(Boolean);
+    if (ids.length === 0) return undefined;
+    const result = await this.#call('DeleteVpcEndpoints', { VpcEndpointId: ids }, signal);
+    const failed = result
+      .items('unsuccessful')
+      .filter((item) => !(item.child('error')?.textOf('code') ?? '').endsWith('.NotFound'))
+      .map((item) => item.textOf('resourceId') ?? '');
+    return failed.length
+      ? `Gateway endpoints ${failed.join(', ')} were not deleted`.slice(0, 500)
+      : undefined;
   }
 
   // --- Security groups ---------------------------------------------------------------------------------
@@ -1290,17 +1345,21 @@ export class AwsNetworks implements ProviderNetworks {
   // --- Firewalls -------------------------------------------------------------------------------------
 
   async #rulesOf(firewall: string, signal: AbortSignal): Promise<Rule[]> {
+    return this.#rules(
+      [{ Name: `tag:${networkTags.firewallPrefix}${firewall}`, Value: ['true'] }],
+      signal,
+    );
+  }
+
+  /** Every security group rule matching `filters`, a page at a time. */
+  async #rules(filters: { Name: string; Value: string[] }[], signal: AbortSignal): Promise<Rule[]> {
     const out: Rule[] = [];
     const seen = new Set<string>();
     let token: string | undefined;
     do {
       const doc = await this.#call(
         'DescribeSecurityGroupRules',
-        {
-          Filter: [{ Name: `tag:${networkTags.firewallPrefix}${firewall}`, Value: ['true'] }],
-          MaxResults: 1000,
-          NextToken: token,
-        },
+        { Filter: filters, MaxResults: 1000, NextToken: token },
         signal,
       );
       out.push(...doc.items('securityGroupRuleSet').map(parseRule));
@@ -1432,15 +1491,10 @@ export class AwsNetworks implements ProviderNetworks {
             await this.#authorize(groupId, egress, [p], firewall, network, signal);
           } catch (inner) {
             if (!isComputeError(inner, 'CONFLICT')) throw inner;
-            const doc = await this.#call(
-              'DescribeSecurityGroupRules',
-              { Filter: [{ Name: 'group-id', Value: [groupId] }], MaxResults: 1000 },
-              signal,
+            // Every page: a busy group has more rules than one answer holds.
+            const same = (await this.#rules([{ Name: 'group-id', Value: [groupId] }], signal)).find(
+              (rule) => permissionKey(rule) === permissionKey(p),
             );
-            const same = doc
-              .items('securityGroupRuleSet')
-              .map(parseRule)
-              .find((rule) => permissionKey(rule) === permissionKey(p));
             if (!same) throw inner;
             await this.#call(
               'CreateTags',
