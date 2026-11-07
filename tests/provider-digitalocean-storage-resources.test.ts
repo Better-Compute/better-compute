@@ -322,7 +322,7 @@ describe('refusals and discovery', () => {
     ]);
   });
 
-  it('a known key id wins over the name', async () => {
+  it('a known key id wins over a create, for the key of its own name only', async () => {
     const w = await world();
     await w.ensure('do.spaces-bucket', 'b-one', { region: 'nyc3' }, w.ctx(), { labels });
     const created = await w.ensure('do.spaces-key', 'bc-key1', { grants: ['nyc3/b-one:read'] }, w.ctx(), {
@@ -330,7 +330,7 @@ describe('refusals and discovery', () => {
     });
     const again = await w.ensure(
       'do.spaces-key',
-      'bc-key-renamed-row',
+      'bc-key1',
       { grants: ['nyc3/b-one:readwrite'] },
       w.ctx(),
       { id: created.id, labels },
@@ -338,6 +338,14 @@ describe('refusals and discovery', () => {
     expect(again.id).toBe(created.id);
     expect(again.outputs?.grants).toBe('b-one:readwrite');
     expect(again.secretOutputs).toBeUndefined();
+    // The id of a key made for another name (another resource's) is refused, not regranted.
+    const crossed = await failure(
+      w.ensure('do.spaces-key', 'bc-key-renamed-row', { grants: ['nyc3/b-one:read'] }, w.ctx(), {
+        id: created.id,
+        labels,
+      }),
+    );
+    expect([crossed.code, crossed.details?.reason]).toEqual(['INVALID_STATE', 'idMismatch']);
   });
 
   it('marks what this deployment manages, with region, outputs and spec', async () => {

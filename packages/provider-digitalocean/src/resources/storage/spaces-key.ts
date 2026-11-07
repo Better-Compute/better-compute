@@ -26,8 +26,12 @@ import { otherTenant, readMarker, sameTenant } from './spaces-bucket.js';
 // (`spacesKeyFullAccess`).
 //
 // A key is created only when the caller holds no id for it: one found by name alone is a create
-// whose answer (and secret) was lost, so a fresh key is created, and every other key with the name
-// is deleted, so the secret always comes back and no orphaned credential stays live.
+// whose answer (and secret) was lost, so a fresh key is created, and every older key with the name
+// is deleted, so the secret always comes back and no orphaned credential stays live. Only older
+// keys go (by created_at, then access key), so two racing creates of one name never delete each
+// other's key: the newest survives, and the run whose key was reaped makes a fresh one on its next
+// pass (its recorded id reads as gone). An id is honoured only for the key of the request's own
+// name: another key of this deployment (another resource's, maybe another tenant's) is refused.
 
 /**
  * `<region>/<bucket>:read`, `<region>/<bucket>:readwrite`, or `*:fullaccess` (every bucket of the
@@ -105,6 +109,18 @@ function state(key: DoSpacesKey, secret?: string): DoResourceState {
 
 const accessKeyPattern = /^[A-Za-z0-9]{8,128}$/;
 
+/**
+ * Whether `key` was made before `than`: by created_at, then (a tie) by access key. A key whose
+ * time does not read is never older, so it is left alone.
+ */
+function olderThan(key: DoSpacesKey, than: DoSpacesKey): boolean {
+  if (key.access_key === than.access_key) return false;
+  const a = Date.parse(key.created_at ?? '');
+  const b = Date.parse(than.created_at ?? '');
+  if (Number.isNaN(a) || Number.isNaN(b)) return false;
+  return a < b || (a === b && key.access_key < than.access_key);
+}
+
 function checkAccessKey(id: string): void {
   if (!accessKeyPattern.test(id))
     throw storageError('INVALID_INPUT', 'Not a Spaces access key id', 'accessKey');
@@ -180,11 +196,16 @@ export function spacesKeyKind(deps: {
     }
   }
 
-  /** Deletes every key with the name except the survivor (a create retried after a lost answer). */
-  async function reap(name: string, survivor: string, ctx: CallContext): Promise<void> {
+  /**
+   * Deletes the keys with the name that are older than the survivor (a create retried after a lost
+   * answer). Never a newer one: a racing create of the same name keeps its key, so one survives.
+   */
+  async function reap(name: string, survivor: DoSpacesKey, ctx: CallContext): Promise<void> {
     try {
-      for (const key of await namedKeys(name, ctx.signal)) {
-        if (key.access_key === survivor) continue;
+      const keys = await namedKeys(name, ctx.signal);
+      const self = keys.find((key) => key.access_key === survivor.access_key) ?? survivor;
+      for (const key of keys) {
+        if (!olderThan(key, self)) continue;
         try {
           await client.request('DELETE', `/spaces/keys/${key.access_key}`, {
             signal: ctx.signal,
@@ -223,7 +244,16 @@ export function spacesKeyKind(deps: {
       // The key an earlier ensure answered (whose secret the caller sealed) is the one to keep.
       const existing = id !== undefined ? await read(id, ctx.signal) : undefined;
       // Keys are owned by their names: an id naming another key changes nothing.
-      if (existing) names.requireOwn(existing.name, 'Spaces key');
+      if (existing) {
+        names.requireOwn(existing.name, 'Spaces key');
+        // Nor one of this deployment made for another name (another resource's grants).
+        if (existing.name !== name)
+          throw storageError(
+            'INVALID_STATE',
+            `Spaces key ${existing.access_key} was made for another resource`,
+            'idMismatch',
+          );
+      }
       const wanted = toDoGrants(grants);
       if (!existing) {
         const created = await client.request<{ key: DoSpacesKey }>('POST', '/spaces/keys', {
@@ -238,7 +268,7 @@ export function spacesKeyKind(deps: {
             'badBody',
           );
         ctx.log.info('digitalocean.spaces-key.created', { name });
-        await reap(name, created.key.access_key, ctx);
+        await reap(name, created.key, ctx);
         return state(created.key, created.key.secret_key);
       }
       if (grantKey(existing.grants) === grantKey(wanted)) return state(existing);

@@ -238,12 +238,80 @@ describe('do.spaces-key', () => {
     expect(orphan).toBeDefined();
 
     // The caller never recorded an id: the key found by name has a secret nobody holds.
+    w.clock.advance(1000);
     const next = await lossy.ensure('do.spaces-key', 'bc-key1', spec, w.ctx(), { labels: tenantA });
     expect(next.secretOutputs?.secretKey).toBe(w.spaces.keys.get(next.id));
     expect(next.id).not.toBe(orphan);
     expect([...spacesKeys(w.emu).keys()]).toEqual([next.id]);
     // The orphan's credential no longer works.
     expect(w.spaces.keys.has(orphan!)).toBe(false);
+  });
+
+  it('two racing creates of one key leave exactly one live key', async () => {
+    const w = await world();
+    await bucket(w, 'tenant-a-assets', 'ten_a');
+    const spec = { grants: ['nyc3/tenant-a-assets:read'] };
+    // Two runs with no recorded id (a claim expired): each creates a key, then reaps.
+    const [one, two] = await Promise.all([
+      w.ensure('do.spaces-key', 'bc-k1', spec, w.ctx('r1'), { labels: tenantA }),
+      w.ensure('do.spaces-key', 'bc-k1', spec, w.ctx('r2'), { labels: tenantA }),
+    ]);
+    const live = [...spacesKeys(w.emu).values()].filter((k) => k.name === `${own}k1`);
+    expect(live).toHaveLength(1);
+    const survivor = live[0]!.access_key as string;
+    expect([one.id, two.id]).toContain(survivor);
+    expect(await w.resources.get('do.spaces-key', survivor, w.ctx())).toBeDefined();
+    expect(w.spaces.keys.has(survivor)).toBe(true);
+
+    // The run that recorded the reaped key converges: its next pass makes a fresh key and the
+    // older one goes.
+    const loser = one.id === survivor ? two : one;
+    expect(await w.resources.get('do.spaces-key', loser.id, w.ctx())).toBeUndefined();
+    w.clock.advance(1000);
+    const healed = await w.ensure('do.spaces-key', 'bc-k1', spec, w.ctx('r3'), {
+      id: loser.id,
+      labels: tenantA,
+    });
+    expect(healed.secretOutputs?.secretKey).toBe(w.spaces.keys.get(healed.id));
+    expect([...spacesKeys(w.emu).values()].filter((k) => k.name === `${own}k1`).map((k) => k.access_key)).toEqual([
+      healed.id,
+    ]);
+  });
+
+  it('never reaps a key newer than its own', async () => {
+    const w = await world();
+    await bucket(w, 'tenant-a-assets', 'ten_a');
+    w.clock.advance(60_000);
+    // Another run's key, made after this run's create.
+    const newer = { name: `${own}k2`, access_key: 'DONEWER00001', created_at: new Date(w.clock.now() + 5000).toISOString() };
+    seedSpacesKey(w.emu, newer);
+    const state = await w.ensure('do.spaces-key', 'bc-k2', { grants: ['nyc3/tenant-a-assets:read'] }, w.ctx(), {
+      labels: tenantA,
+    });
+    expect(spacesKeys(w.emu).has('DONEWER00001')).toBe(true);
+    expect(spacesKeys(w.emu).has(state.id)).toBe(true);
+  });
+
+  it('refuses an id that names another key of this deployment, sending nothing', async () => {
+    const w = await world();
+    await bucket(w, 'tenant-a-assets', 'ten_a');
+    await bucket(w, 'tenant-b-assets', 'ten_b');
+    const bKey = await w.ensure('do.spaces-key', 'bc-key-b', { grants: ['nyc3/tenant-b-assets:read'] }, w.ctx(), {
+      labels: tenantB,
+    });
+    const before = mutations(w).length;
+    // Tenant A's request carries tenant B's key id: its grants must not land on B's key.
+    const refused = await failure(
+      w.ensure('do.spaces-key', 'bc-key-a', { grants: ['nyc3/tenant-a-assets:readwrite'] }, w.ctx(), {
+        id: bKey.id,
+        labels: tenantA,
+      }),
+    );
+    expect([refused.code, refused.details?.reason]).toEqual(['INVALID_STATE', 'idMismatch']);
+    expect(mutations(w).slice(before)).toHaveLength(0);
+    expect(spacesKeys(w.emu).get(bKey.id)!.grants).toEqual([
+      { bucket: 'tenant-b-assets', permission: 'read' },
+    ]);
   });
 
   it('reaps duplicate keys with its name after a create', async () => {
@@ -256,6 +324,8 @@ describe('do.spaces-key', () => {
         grants: [{ bucket: 'tenant-a-assets', permission: 'read' }],
       });
     seedSpacesKey(w.emu, { name: `${own}other`, access_key: 'DOOTHER000001' });
+    // The duplicates are older than the key the create makes.
+    w.clock.advance(1000);
     const state = await w.ensure(
       'do.spaces-key',
       'bc-dup',
