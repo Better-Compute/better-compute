@@ -881,6 +881,156 @@ describe('networks: firewall', () => {
     expect(denied).toMatchObject({ state: 'error', message: expect.stringMatching(/adopted/) });
     expect(emu.calls('CreateNetworkAclEntry').length).toBe(2);
   });
+
+  it('an ACL number taken meanwhile keeps no owner tag, so the other entry survives', async () => {
+    const { networks, call, vpc, emu, vpcId } = await withNetwork();
+    const acl = vpc.networkNacl(vpcId)!;
+    const foreign = {
+      number: 150,
+      egress: false,
+      protocol: '6',
+      action: 'deny' as const,
+      cidr: '198.51.100.0/24',
+      from: 25,
+      to: 25,
+    };
+    // Someone writes rule 150 between this firewall's read and its create.
+    let raced = false;
+    emu.beforeAction('CreateNetworkAclEntry', (request) => {
+      if (raced || request.params.get('RuleNumber') !== '150') return;
+      raced = true;
+      acl.entries.push({ ...foreign });
+    });
+    const deny = rule({
+      action: 'deny',
+      priority: 500,
+      rules: [{ protocol: 'tcp', ports: ['22'] }],
+      sources: ['0.0.0.0/0'],
+    });
+    expect(await networks.ensureFirewall(deny, call())).toMatchObject({
+      state: 'pending',
+      message: expect.stringMatching(/taken meanwhile/),
+    });
+    expect(acl.tags.has('better-compute:deny:ingress:150')).toBe(false);
+    expect((await networks.ensureFirewall(deny, call())).state).toBe('ready');
+    expect(acl.entries).toContainEqual(foreign);
+    expect(acl.entries.find((e) => e.number === 151)).toMatchObject({ from: 22, to: 22 });
+    expect(acl.tags.get('better-compute:deny:ingress:151')).toBe('bc-fw-1');
+  });
+
+  it('an ACL out of tag room is an error naming the tag limit, and keeps nothing half-made', async () => {
+    const { networks, call, vpc, emu, vpcId } = await withNetwork();
+    const acl = vpc.networkNacl(vpcId)!;
+    vpc.tagLimit = acl.tags.size;
+    const full = await networks.ensureFirewall(
+      rule({ action: 'deny', rules: [{ protocol: 'all' }], sources: ['0.0.0.0/0'] }),
+      call(),
+    );
+    expect(full).toMatchObject({
+      state: 'error',
+      message: expect.stringMatching(/TagLimitExceeded.*50 tags/),
+    });
+    expect(acl.entries.some((e) => e.action === 'deny')).toBe(false);
+    expect(emu.calls('CreateNetworkAclEntry').length).toBe(2);
+  });
+
+  it('a firewall right after a VPC found by range waits for the tag read, never calls it adopted', async () => {
+    let lose = 1;
+    const w = await world(
+      {},
+      {
+        wrapFetch: (inner) => async (input, init) => {
+          const response = await inner(input, init);
+          if (String(init?.body ?? '').includes('Action=CreateVpc') && lose-- > 0)
+            throw new TypeError('fetch failed: socket hang up');
+          return response;
+        },
+      },
+    );
+    w.vpc.tagLagReads = 50;
+    await expect(w.networks.ensureNetwork({ name: 'bc-net-1' }, w.call())).rejects.toMatchObject({
+      code: 'UNAVAILABLE',
+    });
+    expect((await w.networks.ensureNetwork({ name: 'bc-net-1' }, w.call())).state).toBe('ready');
+    const allow = await w.networks.ensureFirewall(
+      rule({ rules: [{ protocol: 'all' }], sources: undefined }),
+      w.call(),
+    );
+    expect(allow).toMatchObject({
+      state: 'pending',
+      message: expect.stringMatching(/Waiting for VPC/),
+    });
+    const deny = await w.networks.ensureFirewall(
+      rule({ name: 'bc-fw-2', action: 'deny', rules: [{ protocol: 'all' }] }),
+      w.call(),
+    );
+    expect(deny).toMatchObject({
+      state: 'pending',
+      message: expect.stringMatching(/Waiting for VPC/),
+    });
+  });
+});
+
+describe('networks: the default VPC', () => {
+  it('network default is the account default VPC, adopted: used, never changed or deleted', async () => {
+    const { networks, vpc, emu, call } = await world();
+    const { vpc: fallback } = vpc.addDefaultVpc();
+    const made = await networks.ensureSubnet(
+      {
+        network: 'default',
+        name: 'bc-sub-1',
+        region: 'us-east-1',
+        cidr: '172.31.32.0/24',
+        zone: 'us-east-1a',
+      },
+      call(),
+    );
+    expect(made.state).toBe('ready');
+    expect(vpc.subnets.get(made.id)!.vpcId).toBe(fallback.id);
+    // Adopted: an untargeted rule is refused, a targeted one lands on the tag's group.
+    const base = {
+      network: 'default',
+      direction: 'ingress',
+      action: 'allow',
+      priority: 1000,
+      rules: [{ protocol: 'tcp', ports: ['22'] }],
+    } as const;
+    expect(await networks.ensureFirewall({ ...base, name: 'bc-fw-1' }, call())).toMatchObject({
+      state: 'error',
+      message: expect.stringMatching(/adopted/),
+    });
+    expect(
+      (
+        await networks.ensureFirewall(
+          { ...base, name: 'bc-fw-2', targetTags: ['bc-0123456789abcdef'] },
+          call(),
+        )
+      ).state,
+    ).toBe('ready');
+    expect((await networks.deleteNetwork('default', call())).state).toBe('deleted');
+    expect(vpc.vpcs.has(fallback.id)).toBe(true);
+    expect(emu.calls('DeleteVpc')).toHaveLength(0);
+    expect(emu.calls('CreateRouteTable')).toHaveLength(0);
+    await expect(networks.ensureNetwork({ name: 'default' }, call())).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+  });
+
+  it('an account without a default VPC says so instead of waiting', async () => {
+    const { networks, call } = await world();
+    expect(
+      await networks.ensureSubnet(
+        {
+          network: 'default',
+          name: 'bc-sub-1',
+          region: 'us-east-1',
+          cidr: '172.31.32.0/24',
+          zone: 'us-east-1a',
+        },
+        call(),
+      ),
+    ).toMatchObject({ state: 'error', message: expect.stringMatching(/no default VPC/) });
+  });
 });
 
 describe('networks: machines', () => {
@@ -920,6 +1070,29 @@ describe('networks: machines', () => {
       );
     return { ...w, subnetId: subnet.id, vpcId, groupId, create };
   }
+
+  it('only a launch on a tenant network tags its interface (an A1 policy keeps working)', async () => {
+    const { create, emu, impl, call } = await onNetwork();
+    const specTypes = (params: URLSearchParams) => {
+      const types: string[] = [];
+      for (let n = 1; params.has(`TagSpecification.${n}.ResourceType`); n++)
+        types.push(params.get(`TagSpecification.${n}.ResourceType`)!);
+      return types;
+    };
+    await impl.create(
+      {
+        offerId: 'us-east-1a/t3.micro',
+        image: 'ubuntu-24.04',
+        userData: '#cloud-config\n',
+        name: 'vm-plain',
+      },
+      call('ins_plain'),
+    );
+    await create('ins_1');
+    const [plain, onNet] = emu.calls('RunInstances').map((r) => specTypes(r.params));
+    expect(plain).toEqual(['instance', 'volume']);
+    expect(onNet).toEqual(['instance', 'volume', 'network-interface']);
+  });
 
   it('create launches into the network subnet with the network and tag groups', async () => {
     const { create, emu, ec2, subnetId, vpcId, groupId } = await onNetwork();

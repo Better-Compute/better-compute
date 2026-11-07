@@ -281,8 +281,11 @@ nothing depends on remembered ids. The tenant-facing behaviour above holds; thes
   numbered `100 + priority/10` (taken numbers shift up); the ACL's allow-all is rule 32766, after every deny.
   A deny that targets instances is refused at `firewallRules.create` and `update` with `UNSUPPORTED`. A network-wide
   deny applies whatever the priority of a targeted allow, and ACLs are stateless: a deny on ingress ports can block the
-  replies to outbound connections that use them. An ACL holds 20 entries per direction by default; a deny that does not
-  fit is `error`. Deny rules on an adopted VPC are `error`: its ACL is never edited.
+  replies to outbound connections that use them. An ACL holds 20 entries per direction by default, and each deny
+  entry's owner is a tag on the ACL (EC2 allows 50 per resource); a deny that does not fit either is `error`. Deny
+  rules on an adopted VPC are `error`: its ACL is never edited.
+- **Adopting.** `networks.adopt` takes a VPC id (`vpc-…`), or `default` (with `sharedTagScoped`): the account's
+  default VPC in the region. An account without a default VPC answers `error` on its subnets and rules.
 - **Private service access.** `networks.addSubnet` with `privateAccess: true` (Private Google Access on GCE) adds S3
   and DynamoDB gateway endpoints on the network's route table; they are removed with the network. An adopted network
   refuses `privateAccess` at the API (`INVALID_INPUT`): the endpoints would reroute those services for the whole VPC.

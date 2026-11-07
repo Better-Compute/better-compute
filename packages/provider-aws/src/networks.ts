@@ -51,6 +51,8 @@ export const defaultGroupsPerInterface = 5;
 export const tagGroupSweepMs = 10 * 60_000;
 
 const namePattern = /^[a-z0-9][a-z0-9-]{0,62}$/;
+/** The network name vps gives the project's shared default network: here, the account's default VPC. */
+const defaultNetwork = 'default';
 const vpcIdPattern = /^vpc-[0-9a-f]{8,17}$/;
 const subnetIdPattern = /^subnet-[0-9a-f]{8,17}$/;
 // A tag's group is named after the tag, so a tag never takes the name of a network's group.
@@ -318,8 +320,21 @@ export class AwsNetworks implements ProviderNetworks {
 
   // --- VPC ---------------------------------------------------------------------------------------
 
-  /** The VPC a network name stands for: ours by tag, or (an adopted network) a VPC id. */
+  /**
+   * The VPC a network name stands for: ours by tag, or an adopted one: a VPC id, or `default`
+   * (the account's default VPC in the region, which vps adopts as the shared default network).
+   */
   async #vpc(name: string, signal: AbortSignal): Promise<Vpc | undefined> {
+    if (name === defaultNetwork) {
+      const doc = await this.#call(
+        'DescribeVpcs',
+        { Filter: [{ Name: 'isDefault', Value: ['true'] }] },
+        signal,
+      );
+      const item = doc.items('vpcSet')[0];
+      // Adopted, whatever its tags say: never changed, never deleted.
+      return item ? { ...parseVpc(item), ours: false } : undefined;
+    }
     if (vpcIdPattern.test(name)) {
       try {
         const doc = await this.#call('DescribeVpcs', { VpcId: [name] }, signal);
@@ -368,34 +383,55 @@ export class AwsNetworks implements ProviderNetworks {
     if (found[0]) return found[0];
     const created = this.#created.get(name);
     if (created && this.host.context.clock.now() - created.at < this.host.consistencyWindowMs())
-      return { id: created.id, state: 'pending', blocks: [], tags: new Map(), ours: true };
+      return {
+        id: created.id,
+        state: 'pending',
+        blocks: [],
+        tags: new Map([[networkTags.network, name]]),
+        ours: true,
+      };
     return undefined;
   }
 
   /**
    * CreateVpc takes no idempotency token: before making one, a VPC of the range read without a tag
-   * filter (which lags) whose tags name the network, as a lost CreateVpc answer leaves. Not with an
-   * IPAM pool, whose range is not known up front.
+   * filter (which lags) whose tags name the network, as a lost CreateVpc answer leaves. With an
+   * IPAM pool the range is not known up front, so every VPC of the region is read (a page at a time).
    */
   async #byRange(name: string, cidr: string, signal: AbortSignal): Promise<Vpc | undefined> {
-    if (this.#config.ipamPoolId) return undefined;
-    const doc = await this.#call(
-      'DescribeVpcs',
-      { Filter: [{ Name: 'cidr-block-association.cidr-block', Value: [cidr] }] },
-      signal,
-    );
-    const mine = doc
-      .items('vpcSet')
-      .map(parseVpc)
+    const vpcs: Vpc[] = [];
+    const seen = new Set<string>();
+    let token: string | undefined;
+    do {
+      const doc = await this.#call(
+        'DescribeVpcs',
+        this.#config.ipamPoolId
+          ? { MaxResults: 1000, NextToken: token }
+          : { Filter: [{ Name: 'cidr-block-association.cidr-block', Value: [cidr] }] },
+        signal,
+      );
+      vpcs.push(...doc.items('vpcSet').map(parseVpc));
+      token = this.#config.ipamPoolId ? doc.textOf('nextToken') || undefined : undefined;
+      if (token && seen.has(token)) break;
+      if (token) seen.add(token);
+    } while (token);
+    const mine = vpcs
       .filter((vpc) => vpc.tags.get(networkTags.network) === name)
       .sort((a, b) => (a.id < b.id ? -1 : 1))[0];
     if (mine) this.#created.set(name, { id: mine.id, at: this.host.context.clock.now() });
     return mine;
   }
 
+  /** No VPC for the network: wait for it, or (`default`) say the account has none. */
+  #missing(id: string, network: string): ProviderNetworkState {
+    return network === defaultNetwork
+      ? state(id, 'error', `This account has no default VPC in ${this.#config.region}`)
+      : state(id, 'pending', `Waiting for network ${network}`);
+  }
+
   /** Every VPC that carries the network's tag (duplicates included). */
   async #vpcsOf(name: string, signal: AbortSignal): Promise<Vpc[]> {
-    if (!namePattern.test(name)) return [];
+    if (name === defaultNetwork || !namePattern.test(name)) return [];
     const doc = await this.#call(
       'DescribeVpcs',
       { Filter: [{ Name: `tag:${networkTags.network}`, Value: [name] }] },
@@ -409,7 +445,11 @@ export class AwsNetworks implements ProviderNetworks {
     context: CallContext,
   ): Promise<ProviderNetworkState> {
     const { signal } = context;
-    if (vpcIdPattern.test(spec.name) || !namePattern.test(spec.name))
+    if (
+      vpcIdPattern.test(spec.name) ||
+      spec.name === defaultNetwork ||
+      !namePattern.test(spec.name)
+    )
       throw invalidInput(
         `network ${JSON.stringify(spec.name.slice(0, 64))} is not a better-compute network name`,
         'network-name',
@@ -890,7 +930,7 @@ export class AwsNetworks implements ProviderNetworks {
     const range = vpcRange(spec.cidr, 'subnet cidr');
 
     const vpc = await this.#vpc(spec.network, signal);
-    if (!vpc) return state(id, 'pending', `Waiting for network ${spec.network}`);
+    if (!vpc) return this.#missing(id, spec.network);
     if (vpc.state !== 'available') return state(id, 'pending', `Waiting for VPC ${vpc.id}`);
     // An adopted VPC stays as it is: gateway endpoints would reroute S3 and DynamoDB for every
     // subnet of it (they go on a route table every subnet shares), so they need a network
@@ -1311,7 +1351,9 @@ export class AwsNetworks implements ProviderNetworks {
         `AWS rules match only the ${spec.direction === 'ingress' ? 'source' : 'destination'} range; ${spec.direction} ${spec.direction === 'ingress' ? 'destinations' : 'sources'} are not supported`,
       );
     const vpc = await this.#vpc(spec.network, signal);
-    if (!vpc) return state(spec.name, 'pending', `Waiting for network ${spec.network}`);
+    if (!vpc) return this.#missing(spec.name, spec.network);
+    // A VPC this client just made that tag reads do not show yet: neither ready nor adopted.
+    if (vpc.state !== 'available') return state(spec.name, 'pending', `Waiting for VPC ${vpc.id}`);
     const network = vpc.ours ? vpc.tags.get(networkTags.network) : undefined;
     if (spec.action === 'deny') {
       if (!network)
@@ -1550,11 +1592,28 @@ export class AwsNetworks implements ProviderNetworks {
       taken.add(slot(entry.egress, number));
       // The owner tag first: a crash between the two leaves a tag without an entry, which the next
       // ensure repairs, never an entry nobody owns.
-      await this.#call(
-        'CreateTags',
-        { ResourceId: [aclId], Tag: [{ Key: denyTag(entry.egress, number), Value: spec.name }] },
-        signal,
-      );
+      try {
+        await this.#call(
+          'CreateTags',
+          { ResourceId: [aclId], Tag: [{ Key: denyTag(entry.egress, number), Value: spec.name }] },
+          signal,
+        );
+      } catch (error) {
+        if (awsCode(error) !== 'TagLimitExceeded') throw error;
+        return state(
+          spec.name,
+          'error',
+          `Network ACL ${aclId} has no room for the owner tag of deny rule ${spec.name} (TagLimitExceeded: EC2 allows 50 tags per resource, one per deny entry)`,
+        );
+      }
+      const untag = () =>
+        this.#tolerate(['*NotFound'], () =>
+          this.#call(
+            'DeleteTags',
+            { ResourceId: [aclId], Tag: [{ Key: denyTag(entry.egress, number) }] },
+            signal,
+          ),
+        );
       try {
         await this.#call(
           'CreateNetworkAclEntry',
@@ -1574,16 +1633,13 @@ export class AwsNetworks implements ProviderNetworks {
         );
       } catch (error) {
         const code = awsCode(error);
-        if (code === 'NetworkAclEntryAlreadyExists')
+        if (code === 'NetworkAclEntryAlreadyExists') {
+          // Not this firewall's entry: an owner tag left on it would have the next ensure delete it.
+          await untag();
           return state(spec.name, 'pending', `ACL rule ${number} was taken meanwhile`);
+        }
         if (code === 'NetworkAclEntryLimitExceeded') {
-          await this.#tolerate(['*NotFound'], () =>
-            this.#call(
-              'DeleteTags',
-              { ResourceId: [aclId], Tag: [{ Key: denyTag(entry.egress, number) }] },
-              signal,
-            ),
-          );
+          await untag();
           return state(
             spec.name,
             'error',
