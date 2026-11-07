@@ -186,6 +186,12 @@
     "description": "Provider capacity reservations seen by the vps.reservations worker: detected { accountId, reservationId, machineType, gpus?, total, state, startsAt? }, changed (+ free, inUse, changes), ready (a scheduled or creating reservation became ready), gone (+ poolId, flavorId when it was bound)"
   },
   {
+    "type": "provider.purchase.*",
+    "subject": "provider-account/{id}",
+    "module": "vps",
+    "description": "Provider capacity purchases (AWS A3): requested { accountId, purchaseId, offeringId }, completed (+ reservationId, state), failed (+ code), unknown (+ code: the attempts ran out while one may have bought; check the account); proposed { accountId, proposalId, reservationId, poolId, offeringId, startsAt, upfrontPrice, currency } (AWS A10: capacity proposed 48 h before a pending reservation of a provider pool starts; nothing is bought)"
+  },
+  {
     "type": "billing.*",
     "subject": "provider-account/{id}",
     "module": "vps",
@@ -207,7 +213,49 @@
     "type": "network.*",
     "subject": "network/{id}",
     "module": "vps",
-    "description": "Tenant networks (VPCs): created, adopted (an existing provider VPC, networks.adopt: { externalNetwork, sharedTagScoped }), ready, error, deleting, deleted; network.subnet.ready and network.rule.ready/error when a subnet or firewall rule converges; data { networkId, ... }"
+    "description": "Tenant networks (VPCs): created, adopted (an existing provider VPC, networks.adopt: { externalNetwork, sharedTagScoped }), ready, error, deleting, deleted; network.subnet.ready and network.rule.ready/error when a subnet or firewall rule converges; network.filesystem.created/ready/error/deleting/deleted for its shared filesystems { filesystemId, ... }; (edge) network.natGateway.ready/error, network.peering.ready/error and network.route.ready/error { edgeId, subnetId }; data { networkId, ... }"
+  },
+  {
+    "type": "providerVolume.*",
+    "subject": "provider-volume/{id}",
+    "module": "vps",
+    "description": "Provider volumes (DO P2): created { poolId, providerAccountId, name, region, sizeGiB, sourceSnapshotId?, instanceId? }, updated (an attach, detach or resize asked: { attach | detach | sizeGiB, previousSizeGiB }), ready, attached and detached { instanceId }, resized { sizeGiB }, error { message }, deleting, deleted; data { volumeId, ... }"
+  },
+  {
+    "type": "providerVolume.snapshot.*",
+    "subject": "provider-snapshot/{id}",
+    "module": "vps",
+    "description": "Provider volume snapshots: created { volumeId, name }, ready, error { message }, deleting, deleted; data { snapshotId, volumeId }"
+  },
+  {
+    "type": "providerAddress.*",
+    "subject": "provider-address/{id}",
+    "module": "vps",
+    "description": "Reserved provider addresses (DO P2): created { poolId, providerAccountId, name, region, family }, updated ({ assign | unassign }), ready { address }, assigned { instanceId }, unassigned, error { message }, deleting, deleted; data { addressId, ... }"
+  },
+  {
+    "type": "providerCertificate.*",
+    "subject": "provider-certificate/{id}",
+    "module": "vps",
+    "description": "TLS certificates on a provider account (DO P4): created { poolId, providerAccountId, name, kind }, ready, error { message }, deleting, deleted; data { certificateId, ... }"
+  },
+  {
+    "type": "providerLoadBalancer.*",
+    "subject": "provider-load-balancer/{id}",
+    "module": "vps",
+    "description": "Load balancers on a provider account (DO P4): created { poolId, providerAccountId, name, scope, region? }, updated { changed }, ready { address? }, error { message }, deleting, deleted; data { loadBalancerId, ... }"
+  },
+  {
+    "type": "providerDnsZone.*",
+    "subject": "provider-dns-zone/{id}",
+    "module": "vps",
+    "description": "DNS zones on a provider account (DO P4): created { poolId, providerAccountId, zone, adopt }, ready, error { message }, deleting, deleted; data { zoneId, ... }"
+  },
+  {
+    "type": "providerDnsRecord.*",
+    "subject": "provider-dns-record/{id}",
+    "module": "vps",
+    "description": "DNS records (DO P4): created { zoneId, name, type, instanceId? }, updated { changed }, ready, error { message }, deleting { instanceId? }, deleted; data { recordId, ... }"
   },
   {
     "type": "kubernetes.cluster.*",
@@ -220,6 +268,18 @@
     "subject": "kubernetes-cluster/{id}",
     "module": "kubernetes",
     "description": "Node pools of managed Kubernetes clusters, published on their cluster: created, ready, error { message }, deleted; data { clusterId, nodePoolId, name, ... }"
+  },
+  {
+    "type": "cloud.resource.*",
+    "subject": "cloud-resource/{id}",
+    "module": "cloud-resources",
+    "description": "Managed data and platform services (databases, apps, functions, …): created { poolId, providerAccountId, family, name, region? }, ready the first time { outputs, secretOutputs } (output names only, never a value), updating { fields }, updated when ready again after a change, failed { message }, deleting { reason: requested | parent-deleted | tenant-deleted }, deleted; adopted { poolId, providerAccountId, family, name, providerId } (cloudResources.adopt), releasing and released (cloudResources.release: left running, unmanaged); data { resourceId, kind, ... }"
+  },
+  {
+    "type": "kubernetes.substrate.*",
+    "subject": "pool/{id}",
+    "module": "kubernetes",
+    "description": "Pool substrates (policy.substrate: the managed Kubernetes cluster behind a pool): created { providerAccountId, mode }, ready { clusterId, nodes }, error { message }, token-issued { tokenId, maxUses, ttlSeconds } and token-revoked { tokenId, reason } for the hosted join token bcd joins with (never the token itself), node-removed { nodeId, kubernetesNode, released, requeued, retired } when a pool node's Kubernetes Node is gone, its reservations ended and the node was retired, draining { version, bookings } and upgrading { version, drained } for upgrades: drain, deleting, deleted { retiredNodes }; data { poolId, ... }"
   },
   {
     "type": "fleet.*",

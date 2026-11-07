@@ -11,7 +11,7 @@ These methods call the IAM root tenant's billing API as a root service account. 
 
 The catalog these methods work from is the same one `better-compute iam setup --meters` and the IAM bridge sync: hosted and node GPU, CPU, memory and volume hours, provider VM meters, reservation-grant and managed-VM meters, the ancillary network, address, disk and snapshot meters, and the `flavor.*` meters root sets on flavors. `vps({ billing: { gpuModels, gpuFamilies } })` names the GPU models whose VM meters exist; name the same models as the bridge so the two agree.
 
-All 6 methods are served by @better-compute/server 0.3.0.
+All 7 methods are served by @better-compute/server 0.3.0.
 
 | Method                            | Kind     | Authorization                              | Phase | Status     |
 | --------------------------------- | -------- | ------------------------------------------ | ----- | ---------- |
@@ -21,6 +21,7 @@ All 6 methods are served by @better-compute/server 0.3.0.
 | [`setPrices`](#setprices)         | mutation | `compute:billing:manage` @ `compute-fleet` | v1.0  | registered |
 | [`proposePrices`](#proposeprices) | read     | `compute:billing:read` @ `compute-fleet`   | v1.0  | registered |
 | [`margins`](#margins)             | read     | `compute:billing:read` @ `compute-fleet`   | v1.0  | registered |
+| [`leaks`](#leaks)                 | read     | `compute:billing:read` @ `compute-fleet`   | v1.0  | registered |
 
 ## meters
 
@@ -157,7 +158,9 @@ Returns the platform's margin over a range: revenue (what better-iam billed) min
 
 Decided as `compute:billing:read` on `compute-fleet`, so a tenant cannot read it. The IAM call happens outside any compute transaction.
 
-**Leak detection** (no method; reported as events) — at the end of every `vps.costs` pass over a platform provider account, each instance's provider-billed compute is compared with what compute metered for it, per UTC day. The provider hours of an instance-day are the **distinct hour slots** the provider billed compute for it (regular rows of the provider's compute SKUs attributed to the instance, quantity above 0), not the sum of the rows' quantities: a provider bills a VM's cores and memory as separate rows in vCPU-hours and GiB-hours, so summed quantities are no count of hours. The metered hours are how many of those slots a `running` usage interval of the instance overlaps. When the provider hours exceed the metered ones by more than `vps({ costs: { leakToleranceHours } })` (default 1), `billing.leak` is published, at most once per instance and day. Instances with `billing: none` and tenants' own accounts are not checked.
+**Leak detection** (reported as events, listed by `leaks`) — at the end of every `vps.costs` pass over a platform provider account, each instance's provider-billed compute is compared with what compute metered for it, per UTC day. The provider hours of an instance-day are the **distinct hour slots** the provider billed compute for it (regular rows of the provider's compute SKUs attributed to the instance, quantity above 0), not the sum of the rows' quantities: a provider bills a VM's cores and memory as separate rows in vCPU-hours and GiB-hours, so summed quantities are no count of hours. The metered hours are how many of those slots a `running` usage interval of the instance overlaps. When the provider hours exceed the metered ones by more than `vps({ costs: { leakToleranceHours } })` (default 1), `billing.leak` is published, at most once per instance and day. Instances with `billing: none` and tenants' own accounts are not checked.
+
+A provider whose cost rows are period aggregates (`billing.periodRows`: a DigitalOcean invoice item is a Droplet's month so far) is compared differently: the row's billed hours against the instance's metered hours over the row's span, with a gap over `max(leakToleranceHours, 5%)` of the billed hours, raised once per instance and period; a provider that bills stopped machines (`billing.billsStopped`) has the instance's stopped hours counted as metered.
 
 - **Kind:** read
 - **Authorization:** `compute:billing:read` @ `compute-fleet`
@@ -171,3 +174,25 @@ Decided as `compute:billing:read` on `compute-fleet`, so a tenant cannot read it
 | `from`    | integer                                     | yes      | at least 0  |
 | `to`      | integer                                     | yes      | at least 1  |
 | `groupBy` | one of `tenant`, `pool`, `account`, `meter` | yes      |             |
+
+## leaks
+
+`POST /api/compute/billing/leaks`
+
+Lists the leaks raised on the platform's (root's) provider accounts whose day is in `[from, to)`, newest day first, at most 500: `{ items }`.
+
+- **Input.** `from` and `to` are epoch milliseconds; a leak's day is its UTC day (for a period row, the period's first day).
+- **Items.** `{ accountId, accountName, provider, instanceId, tenantId, day, providerHours, meteredHours, raisedAt }`: `tenantId` is the instance's tenant, `null` once the instance is gone; `providerHours` is what the provider billed and `meteredHours` what compute metered. A tenant's own accounts are never checked, so they have no leaks; without a root tenant the list is empty.
+- **IAM.** Decided as `compute:billing:read` on `compute-fleet`, so a tenant cannot read it. A read of the database: no provider is called.
+
+- **Kind:** read
+- **Authorization:** `compute:billing:read` @ `compute-fleet`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field  | Type    | Required | Constraints |
+| ------ | ------- | -------- | ----------- |
+| `from` | integer | yes      | at least 0  |
+| `to`   | integer | yes      | at least 1  |

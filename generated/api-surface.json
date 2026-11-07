@@ -1,6 +1,36 @@
 {
   "$comment": "The frozen compute API surface (PLAN.md §16 v1.0). Written by `node scripts/api-surface.mjs --update`; do not edit.",
   "methods": {
+    "billing.leaks": {
+      "route": "POST /api/compute/billing/leaks",
+      "kind": "read",
+      "action": "compute:billing:read",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Start of the range of leak days, epoch ms"
+          },
+          "to": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "End of the range (exclusive), epoch ms"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "additionalProperties": false
+      }
+    },
     "billing.margins": {
       "route": "POST /api/compute/billing/margins",
       "kind": "read",
@@ -588,6 +618,322 @@
         "additionalProperties": false
       }
     },
+    "certificates.create": {
+      "route": "POST /api/compute/certificates/create",
+      "kind": "mutation",
+      "action": "compute:certificates:manage",
+      "resource": "compute-provider-certificate",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The project the certificate belongs to"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool offered to the tenant, whose account provides certificates"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z]([-a-z0-9]{0,40}[a-z0-9])?$",
+            "maxLength": 42,
+            "description": "The certificate name, unique in the tenant, e.g. www"
+          },
+          "kind": {
+            "enum": [
+              "managed",
+              "custom"
+            ],
+            "description": "managed: the provider issues and renews it for domains; custom: PEMs from the tenant’s secrets"
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^(\\*\\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$"
+            },
+            "minItems": 1,
+            "maxItems": 100,
+            "description": "managed: the names it covers, e.g. example.com and *.example.com"
+          },
+          "certificate": {
+            "type": "string",
+            "pattern": "^secret:\\/\\/([A-Za-z0-9._:-]{1,128})\\/[A-Za-z0-9._-]{1,128}$",
+            "maxLength": 270,
+            "description": "custom: the leaf certificate (PEM), as secret://<tenantId>/<id>"
+          },
+          "privateKey": {
+            "type": "string",
+            "pattern": "^secret:\\/\\/([A-Za-z0-9._:-]{1,128})\\/[A-Za-z0-9._-]{1,128}$",
+            "maxLength": 270,
+            "description": "custom: its private key (PEM), as secret://<tenantId>/<id>"
+          },
+          "chain": {
+            "type": "string",
+            "pattern": "^secret:\\/\\/([A-Za-z0-9._:-]{1,128})\\/[A-Za-z0-9._-]{1,128}$",
+            "maxLength": 270,
+            "description": "custom: the intermediate chain (PEM), as secret://<tenantId>/<id>"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "name",
+          "kind",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "certificates.delete": {
+      "route": "POST /api/compute/certificates/delete",
+      "kind": "mutation",
+      "action": "compute:certificates:manage",
+      "resource": "compute-provider-certificate",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "certificateId": {
+            "type": "string",
+            "pattern": "^pcert_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The certificate"
+          }
+        },
+        "required": [
+          "tenantId",
+          "certificateId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "certificates.get": {
+      "route": "POST /api/compute/certificates/get",
+      "kind": "read",
+      "action": "compute:certificates:read",
+      "resource": "compute-provider-certificate",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "certificateId": {
+            "type": "string",
+            "pattern": "^pcert_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The certificate"
+          }
+        },
+        "required": [
+          "tenantId",
+          "certificateId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "certificates.list": {
+      "route": "POST /api/compute/certificates/list",
+      "kind": "read",
+      "action": "compute:certificates:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "Only those of this pool"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "Only those of this project"
+          },
+          "includeDeleted": {
+            "type": "boolean",
+            "default": false,
+            "description": "Include deleted ones"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "cloudResources.adopt": {
+      "route": "POST /api/compute/cloudResources/adopt",
+      "kind": "mutation",
+      "action": "compute:cloud-resources:create",
+      "resource": "compute-cloud-resource",
+      "alternatives": [],
+      "list": false,
+      "status": "planned",
+      "phase": "v1.0",
+      "input": null
+    },
+    "cloudResources.catalog": {
+      "route": "POST /api/compute/cloudResources/catalog",
+      "kind": "read",
+      "action": "compute:cloud-resources:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "planned",
+      "phase": "v1.0",
+      "input": null
+    },
+    "cloudResources.create": {
+      "route": "POST /api/compute/cloudResources/create",
+      "kind": "mutation",
+      "action": "compute:cloud-resources:create",
+      "resource": "compute-cloud-resource",
+      "alternatives": [],
+      "list": false,
+      "status": "planned",
+      "phase": "v1.0",
+      "input": null
+    },
+    "cloudResources.delete": {
+      "route": "POST /api/compute/cloudResources/delete",
+      "kind": "mutation",
+      "action": "compute:cloud-resources:delete",
+      "resource": "compute-cloud-resource",
+      "alternatives": [],
+      "list": false,
+      "status": "planned",
+      "phase": "v1.0",
+      "input": null
+    },
+    "cloudResources.discover": {
+      "route": "POST /api/compute/cloudResources/discover",
+      "kind": "read",
+      "action": "compute:cloud-resources:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "planned",
+      "phase": "v1.0",
+      "input": null
+    },
+    "cloudResources.get": {
+      "route": "POST /api/compute/cloudResources/get",
+      "kind": "read",
+      "action": "compute:cloud-resources:read",
+      "resource": "compute-cloud-resource",
+      "alternatives": [],
+      "list": false,
+      "status": "planned",
+      "phase": "v1.0",
+      "input": null
+    },
+    "cloudResources.kinds": {
+      "route": "POST /api/compute/cloudResources/kinds",
+      "kind": "read",
+      "action": "compute:cloud-resources:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "planned",
+      "phase": "v1.0",
+      "input": null
+    },
+    "cloudResources.list": {
+      "route": "POST /api/compute/cloudResources/list",
+      "kind": "read",
+      "action": "compute:cloud-resources:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "planned",
+      "phase": "v1.0",
+      "input": null
+    },
+    "cloudResources.release": {
+      "route": "POST /api/compute/cloudResources/release",
+      "kind": "mutation",
+      "action": "compute:cloud-resources:delete",
+      "resource": "compute-cloud-resource",
+      "alternatives": [],
+      "list": false,
+      "status": "planned",
+      "phase": "v1.0",
+      "input": null
+    },
+    "cloudResources.signals": {
+      "route": "POST /api/compute/cloudResources/signals",
+      "kind": "read",
+      "action": "compute:cloud-resources:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "planned",
+      "phase": "v1.0",
+      "input": null
+    },
+    "cloudResources.update": {
+      "route": "POST /api/compute/cloudResources/update",
+      "kind": "mutation",
+      "action": "compute:cloud-resources:update",
+      "resource": "compute-cloud-resource",
+      "alternatives": [],
+      "list": false,
+      "status": "planned",
+      "phase": "v1.0",
+      "input": null
+    },
     "commandBatches.approve": {
       "route": "POST /api/compute/commandBatches/approve",
       "kind": "mutation",
@@ -1051,6 +1397,473 @@
         "additionalProperties": false
       }
     },
+    "dnsRecords.create": {
+      "route": "POST /api/compute/dnsRecords/create",
+      "kind": "mutation",
+      "action": "compute:dns:manage",
+      "resource": "compute-provider-dns-zone",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "zoneId": {
+            "type": "string",
+            "pattern": "^pdz_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The DNS zone"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "@ (the apex) or a name relative to the zone, e.g. www"
+          },
+          "type": {
+            "enum": [
+              "A",
+              "AAAA",
+              "CNAME",
+              "TXT",
+              "MX",
+              "SRV",
+              "CAA",
+              "NS"
+            ],
+            "default": "A",
+            "description": "The record type"
+          },
+          "instanceId": {
+            "type": "string",
+            "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A/AAAA: follow this instance’s public address instead of data"
+          },
+          "data": {
+            "type": "string",
+            "maxLength": 512,
+            "description": "An address (A/AAAA), an absolute host name with a final dot (CNAME/MX/SRV/NS), or text (TXT/CAA)"
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 30,
+            "maximum": 86400,
+            "description": "How long resolvers cache it"
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535,
+            "description": "MX and SRV"
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "SRV"
+          },
+          "weight": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535,
+            "description": "SRV"
+          },
+          "flags": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255,
+            "description": "CAA"
+          },
+          "tag": {
+            "enum": [
+              "issue",
+              "issuewild",
+              "iodef"
+            ],
+            "description": "CAA"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          }
+        },
+        "required": [
+          "tenantId",
+          "zoneId",
+          "name",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "dnsRecords.delete": {
+      "route": "POST /api/compute/dnsRecords/delete",
+      "kind": "mutation",
+      "action": "compute:dns:manage",
+      "resource": "compute-provider-dns-zone",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "zoneId": {
+            "type": "string",
+            "pattern": "^pdz_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The DNS zone"
+          },
+          "recordId": {
+            "type": "string",
+            "pattern": "^pdr_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The DNS record"
+          }
+        },
+        "required": [
+          "tenantId",
+          "zoneId",
+          "recordId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "dnsRecords.get": {
+      "route": "POST /api/compute/dnsRecords/get",
+      "kind": "read",
+      "action": "compute:dns:read",
+      "resource": "compute-provider-dns-zone",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "zoneId": {
+            "type": "string",
+            "pattern": "^pdz_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The DNS zone"
+          },
+          "recordId": {
+            "type": "string",
+            "pattern": "^pdr_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The DNS record"
+          }
+        },
+        "required": [
+          "tenantId",
+          "zoneId",
+          "recordId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "dnsRecords.list": {
+      "route": "POST /api/compute/dnsRecords/list",
+      "kind": "read",
+      "action": "compute:dns:read",
+      "resource": "compute-provider-dns-zone",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "zoneId": {
+            "type": "string",
+            "pattern": "^pdz_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The DNS zone"
+          },
+          "includeDeleted": {
+            "type": "boolean",
+            "default": false,
+            "description": "Include deleted ones"
+          }
+        },
+        "required": [
+          "tenantId",
+          "zoneId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "dnsRecords.update": {
+      "route": "POST /api/compute/dnsRecords/update",
+      "kind": "mutation",
+      "action": "compute:dns:manage",
+      "resource": "compute-provider-dns-zone",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "zoneId": {
+            "type": "string",
+            "pattern": "^pdz_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The DNS zone"
+          },
+          "recordId": {
+            "type": "string",
+            "pattern": "^pdr_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The DNS record"
+          },
+          "data": {
+            "type": "string",
+            "maxLength": 512,
+            "description": "An address (A/AAAA), an absolute host name with a final dot (CNAME/MX/SRV/NS), or text (TXT/CAA)"
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 30,
+            "maximum": 86400,
+            "description": "How long resolvers cache it"
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535,
+            "description": "MX and SRV"
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "SRV"
+          },
+          "weight": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535,
+            "description": "SRV"
+          },
+          "flags": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255,
+            "description": "CAA"
+          },
+          "tag": {
+            "enum": [
+              "issue",
+              "issuewild",
+              "iodef"
+            ],
+            "description": "CAA"
+          }
+        },
+        "required": [
+          "tenantId",
+          "zoneId",
+          "recordId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "dnsZones.create": {
+      "route": "POST /api/compute/dnsZones/create",
+      "kind": "mutation",
+      "action": "compute:dns:manage",
+      "resource": "compute-provider-dns-zone",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The project the zone belongs to"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool offered to the tenant, whose account provides DNS"
+          },
+          "zone": {
+            "type": "string",
+            "maxLength": 253,
+            "description": "The domain, e.g. example.com"
+          },
+          "adopt": {
+            "type": "boolean",
+            "default": false,
+            "description": "The account's owner tenant only: take over a zone the account already holds (never deleted)"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "zone",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "dnsZones.delete": {
+      "route": "POST /api/compute/dnsZones/delete",
+      "kind": "mutation",
+      "action": "compute:dns:manage",
+      "resource": "compute-provider-dns-zone",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "zoneId": {
+            "type": "string",
+            "pattern": "^pdz_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The DNS zone"
+          }
+        },
+        "required": [
+          "tenantId",
+          "zoneId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "dnsZones.get": {
+      "route": "POST /api/compute/dnsZones/get",
+      "kind": "read",
+      "action": "compute:dns:read",
+      "resource": "compute-provider-dns-zone",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "zoneId": {
+            "type": "string",
+            "pattern": "^pdz_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The DNS zone"
+          }
+        },
+        "required": [
+          "tenantId",
+          "zoneId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "dnsZones.list": {
+      "route": "POST /api/compute/dnsZones/list",
+      "kind": "read",
+      "action": "compute:dns:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "Only those of this pool"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "Only those of this project"
+          },
+          "includeDeleted": {
+            "type": "boolean",
+            "default": false,
+            "description": "Include deleted ones"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
     "drivers.list": {
       "route": "POST /api/compute/drivers/list",
       "kind": "read",
@@ -1116,6 +1929,188 @@
         },
         "required": [
           "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "filesystems.create": {
+      "route": "POST /api/compute/filesystems/create",
+      "kind": "mutation",
+      "action": "compute:networks:update",
+      "resource": "compute-network",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "networkId": {
+            "type": "string",
+            "pattern": "^net_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The network the filesystem belongs to"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z]([-a-z0-9]{0,40}[a-z0-9])?$",
+            "maxLength": 42,
+            "description": "The filesystem name, unique in the network, e.g. datasets"
+          },
+          "kind": {
+            "enum": [
+              "nfs",
+              "lustre"
+            ],
+            "description": "nfs: an elastic NFS filesystem across every zone of the network (Amazon EFS); lustre: a Lustre filesystem in one zone (Amazon FSx for Lustre)"
+          },
+          "sizeGiB": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000,
+            "description": "lustre: the capacity (AWS: 1200 or a multiple of 2400, default 1200); nfs is elastic and takes none"
+          },
+          "deployment": {
+            "enum": [
+              "scratch",
+              "persistent"
+            ],
+            "description": "lustre: scratch (default) or persistent storage"
+          },
+          "zone": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "lustre: the zone it lives in (default: the account's first)"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          }
+        },
+        "required": [
+          "tenantId",
+          "networkId",
+          "name",
+          "kind",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "filesystems.delete": {
+      "route": "POST /api/compute/filesystems/delete",
+      "kind": "mutation",
+      "action": "compute:networks:update",
+      "resource": "compute-network",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "networkId": {
+            "type": "string",
+            "pattern": "^net_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The network the filesystem belongs to"
+          },
+          "filesystemId": {
+            "type": "string",
+            "pattern": "^fs_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 55,
+            "description": "The filesystem"
+          }
+        },
+        "required": [
+          "tenantId",
+          "networkId",
+          "filesystemId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "filesystems.get": {
+      "route": "POST /api/compute/filesystems/get",
+      "kind": "read",
+      "action": "compute:networks:read",
+      "resource": "compute-network",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "networkId": {
+            "type": "string",
+            "pattern": "^net_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The network the filesystem belongs to"
+          },
+          "filesystemId": {
+            "type": "string",
+            "pattern": "^fs_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 55,
+            "description": "The filesystem"
+          }
+        },
+        "required": [
+          "tenantId",
+          "networkId",
+          "filesystemId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "filesystems.list": {
+      "route": "POST /api/compute/filesystems/list",
+      "kind": "read",
+      "action": "compute:networks:read",
+      "resource": "compute-network",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "networkId": {
+            "type": "string",
+            "pattern": "^net_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The network the filesystem belongs to"
+          }
+        },
+        "required": [
+          "tenantId",
+          "networkId"
         ],
         "additionalProperties": false
       }
@@ -1766,7 +2761,7 @@
           },
           "config": {
             "type": "object",
-            "description": "The FleetConfig document: { version: 1, sites, providerAccounts, pools, flavors, sandboxTemplates }, as fleet.export writes it"
+            "description": "The FleetConfig document: { version: 1, sites, providerAccounts, pools, flavors, sandboxTemplates, kubernetesClusters }, as fleet.export writes it"
           },
           "prune": {
             "type": "boolean",
@@ -1832,7 +2827,7 @@
           },
           "config": {
             "type": "object",
-            "description": "The FleetConfig document: { version: 1, sites, providerAccounts, pools, flavors, sandboxTemplates }, as fleet.export writes it"
+            "description": "The FleetConfig document: { version: 1, sites, providerAccounts, pools, flavors, sandboxTemplates, kubernetesClusters }, as fleet.export writes it"
           },
           "prune": {
             "type": "boolean",
@@ -2244,11 +3239,108 @@
             },
             "description": "Provider labels for the machine (provider pools): GCE label rules, at most 62; keys starting with better-compute- are reserved"
           },
+          "placement": {
+            "type": "object",
+            "properties": {
+              "group": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,62}$",
+                "maxLength": 63,
+                "description": "The placement group: instances of one group in a pool share one provider placement group"
+              },
+              "strategy": {
+                "enum": [
+                  "cluster",
+                  "spread",
+                  "partition"
+                ],
+                "description": "cluster: one low-latency network segment; spread: distinct hardware; partition: disjoint racks"
+              },
+              "partition": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 7,
+                "description": "partition only: the partition to launch into"
+              }
+            },
+            "required": [
+              "group",
+              "strategy"
+            ],
+            "additionalProperties": false
+          },
+          "filesystems": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "properties": {
+                "filesystem": {
+                  "type": "string",
+                  "pattern": "^fs_[0-9a-hjkmnp-tv-z]{26,52}$",
+                  "maxLength": 55,
+                  "description": "A ready filesystem of the instance network (filesystems.create)"
+                },
+                "path": {
+                  "type": "string",
+                  "pattern": "^(/[A-Za-z0-9._-]+)+$",
+                  "maxLength": 200,
+                  "description": "Where the machine mounts it: an absolute path of plain segments outside the system directories"
+                }
+              },
+              "required": [
+                "filesystem",
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            "description": "(provider pools on a network) Shared filesystems of the network the machine mounts at boot; needs networkId"
+          },
           "ownerIdentityId": {
             "type": "string",
             "pattern": "^[A-Za-z0-9._:@-]{1,128}$",
             "maxLength": 128,
             "description": "Who owns it in the tenant (default: the caller); only a root caller creating in another tenant names someone else"
+          },
+          "workloadIdentity": {
+            "type": "object",
+            "properties": {
+              "awsRoleArn": {
+                "type": "string",
+                "pattern": "^arn:(aws|aws-cn|aws-us-gov):iam::[0-9]{12}:role/[A-Za-z0-9_+=,.@/-]{1,512}$",
+                "maxLength": 2048,
+                "description": "The IAM role its workloads assume through the host's metadata endpoint (hosted pools whose policy.workloadRoles.aws allows it)"
+              }
+            },
+            "required": [
+              "awsRoleArn"
+            ],
+            "additionalProperties": false
+          },
+          "dns": {
+            "type": "object",
+            "properties": {
+              "zoneId": {
+                "type": "string",
+                "pattern": "^pdz_[0-9a-hjkmnp-tv-z]{26,52}$",
+                "maxLength": 56,
+                "description": "A DNS zone of the tenant (dnsZones)"
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 200,
+                "description": "The name in the zone (default: the instance id, with - for _)"
+              },
+              "ipv6": {
+                "type": "boolean",
+                "default": false,
+                "description": "Also an AAAA record for its public IPv6 address"
+              }
+            },
+            "required": [
+              "zoneId"
+            ],
+            "additionalProperties": false
           },
           "idempotencyKey": {
             "type": "string",
@@ -3168,7 +4260,7 @@
                 },
                 "machineType": {
                   "type": "string",
-                  "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+                  "pattern": "^[a-z0-9][a-z0-9.-]{0,62}$",
                   "maxLength": 63,
                   "description": "The provider machine type, e.g. e2-standard-4 or g2-standard-8"
                 },
@@ -3600,7 +4692,7 @@
           },
           "machineType": {
             "type": "string",
-            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "pattern": "^[a-z0-9][a-z0-9.-]{0,62}$",
             "maxLength": 63,
             "description": "The provider machine type, e.g. e2-standard-4 or g2-standard-8"
           },
@@ -3874,6 +4966,703 @@
           "tenantId",
           "clusterId",
           "nodePoolId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "kubernetesSubstrates.get": {
+      "route": "POST /api/compute/kubernetesSubstrates/get",
+      "kind": "read",
+      "action": "compute:kubernetes:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A pool of the tenant with policy.substrate"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "loadBalancers.create": {
+      "route": "POST /api/compute/loadBalancers/create",
+      "kind": "mutation",
+      "action": "compute:load-balancers:manage",
+      "resource": "compute-provider-load-balancer",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The project the load balancer belongs to"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool offered to the tenant, whose account provides load balancers"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z]([-a-z0-9]{0,40}[a-z0-9])?$",
+            "maxLength": 42,
+            "description": "The load balancer name, unique in the tenant, e.g. web"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "What it is for"
+          },
+          "scope": {
+            "enum": [
+              "regional",
+              "global"
+            ],
+            "default": "regional",
+            "description": "regional or global (anycast)"
+          },
+          "region": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,38}[a-z0-9]$",
+            "maxLength": 40,
+            "description": "A region of the pool's provider account, e.g. nyc3"
+          },
+          "subnetId": {
+            "type": "string",
+            "pattern": "^snet_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "regional: a subnet of a tenant network; the load balancer reaches only instances on it (default: the subnet its named instances share, else the default network)"
+          },
+          "targets": {
+            "type": "object",
+            "properties": {
+              "pool": {
+                "const": true,
+                "description": "The tenant's instances in the load balancer's pool and region"
+              },
+              "instanceIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+                  "maxLength": 57,
+                  "description": "An instance of the tenant"
+                },
+                "minItems": 1,
+                "maxItems": 100,
+                "description": "Instances of the tenant on the same provider account and in the same region"
+              },
+              "loadBalancerIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^plb_[0-9a-hjkmnp-tv-z]{26,52}$",
+                  "maxLength": 56,
+                  "description": "A regional load balancer of the tenant"
+                },
+                "minItems": 1,
+                "maxItems": 100,
+                "description": "global only: regional load balancers of the tenant"
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "forwarding": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "entryProtocol": {
+                  "enum": [
+                    "http",
+                    "https",
+                    "http2",
+                    "tcp",
+                    "udp"
+                  ],
+                  "description": "The protocol clients connect with"
+                },
+                "entryPort": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535,
+                  "description": "The port clients connect to"
+                },
+                "targetProtocol": {
+                  "enum": [
+                    "http",
+                    "https",
+                    "http2",
+                    "tcp",
+                    "udp"
+                  ],
+                  "description": "The protocol the targets are reached with"
+                },
+                "targetPort": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535,
+                  "description": "The port on the targets"
+                },
+                "certificateId": {
+                  "type": "string",
+                  "pattern": "^pcert_[0-9a-hjkmnp-tv-z]{26,52}$",
+                  "maxLength": 58,
+                  "description": "https/http2 entries: the certificate TLS terminates with"
+                },
+                "tlsPassthrough": {
+                  "type": "boolean",
+                  "description": "https entries: pass TLS through to the targets"
+                }
+              },
+              "required": [
+                "entryProtocol",
+                "entryPort",
+                "targetProtocol",
+                "targetPort"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 1,
+            "maxItems": 15,
+            "description": "Forwarding rules"
+          },
+          "healthCheck": {
+            "type": "object",
+            "properties": {
+              "protocol": {
+                "enum": [
+                  "http",
+                  "https",
+                  "tcp"
+                ],
+                "description": "How targets are checked"
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535,
+                "description": "The port checked on each target"
+              },
+              "path": {
+                "type": "string",
+                "maxLength": 255,
+                "description": "http/https: the path asked for (default /)"
+              },
+              "intervalSeconds": {
+                "type": "integer",
+                "minimum": 3,
+                "maximum": 300,
+                "description": "Seconds between checks"
+              },
+              "timeoutSeconds": {
+                "type": "integer",
+                "minimum": 3,
+                "maximum": 300,
+                "description": "Seconds a check may take"
+              },
+              "healthyThreshold": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 10,
+                "description": "Passes before healthy"
+              },
+              "unhealthyThreshold": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 10,
+                "description": "Failures before unhealthy"
+              }
+            },
+            "required": [
+              "protocol",
+              "port"
+            ],
+            "additionalProperties": false
+          },
+          "stickySessions": {
+            "type": "object",
+            "properties": {
+              "cookieName": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,40}$",
+                "maxLength": 40,
+                "description": "The cookie"
+              },
+              "ttlSeconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 604800,
+                "description": "How long a client stays pinned"
+              }
+            },
+            "required": [
+              "cookieName",
+              "ttlSeconds"
+            ],
+            "additionalProperties": false
+          },
+          "sourceRanges": {
+            "type": "object",
+            "properties": {
+              "allow": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 43
+                },
+                "maxItems": 50,
+                "description": "Only these CIDR ranges connect"
+              },
+              "deny": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 43
+                },
+                "maxItems": 50,
+                "description": "These CIDR ranges never connect (deny wins)"
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "redirectHttpToHttps": {
+            "type": "boolean",
+            "description": "Answer plain http with a redirect to https"
+          },
+          "domains": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "maxLength": 253,
+                  "description": "A host name the load balancer serves"
+                },
+                "certificateId": {
+                  "type": "string",
+                  "pattern": "^pcert_[0-9a-hjkmnp-tv-z]{26,52}$",
+                  "maxLength": 58,
+                  "description": "The certificate TLS terminates with for this name"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "additionalProperties": false
+            },
+            "description": "global only: the host names it serves"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "name",
+          "targets",
+          "forwarding",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "loadBalancers.delete": {
+      "route": "POST /api/compute/loadBalancers/delete",
+      "kind": "mutation",
+      "action": "compute:load-balancers:manage",
+      "resource": "compute-provider-load-balancer",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "loadBalancerId": {
+            "type": "string",
+            "pattern": "^plb_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The load balancer"
+          }
+        },
+        "required": [
+          "tenantId",
+          "loadBalancerId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "loadBalancers.get": {
+      "route": "POST /api/compute/loadBalancers/get",
+      "kind": "read",
+      "action": "compute:load-balancers:read",
+      "resource": "compute-provider-load-balancer",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "loadBalancerId": {
+            "type": "string",
+            "pattern": "^plb_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The load balancer"
+          }
+        },
+        "required": [
+          "tenantId",
+          "loadBalancerId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "loadBalancers.list": {
+      "route": "POST /api/compute/loadBalancers/list",
+      "kind": "read",
+      "action": "compute:load-balancers:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "Only those of this pool"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "Only those of this project"
+          },
+          "includeDeleted": {
+            "type": "boolean",
+            "default": false,
+            "description": "Include deleted ones"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "loadBalancers.update": {
+      "route": "POST /api/compute/loadBalancers/update",
+      "kind": "mutation",
+      "action": "compute:load-balancers:manage",
+      "resource": "compute-provider-load-balancer",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "loadBalancerId": {
+            "type": "string",
+            "pattern": "^plb_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The load balancer"
+          },
+          "targets": {
+            "type": "object",
+            "properties": {
+              "pool": {
+                "const": true,
+                "description": "The tenant's instances in the load balancer's pool and region"
+              },
+              "instanceIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+                  "maxLength": 57,
+                  "description": "An instance of the tenant"
+                },
+                "minItems": 1,
+                "maxItems": 100,
+                "description": "Instances of the tenant on the same provider account and in the same region"
+              },
+              "loadBalancerIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^plb_[0-9a-hjkmnp-tv-z]{26,52}$",
+                  "maxLength": 56,
+                  "description": "A regional load balancer of the tenant"
+                },
+                "minItems": 1,
+                "maxItems": 100,
+                "description": "global only: regional load balancers of the tenant"
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "forwarding": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "entryProtocol": {
+                  "enum": [
+                    "http",
+                    "https",
+                    "http2",
+                    "tcp",
+                    "udp"
+                  ],
+                  "description": "The protocol clients connect with"
+                },
+                "entryPort": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535,
+                  "description": "The port clients connect to"
+                },
+                "targetProtocol": {
+                  "enum": [
+                    "http",
+                    "https",
+                    "http2",
+                    "tcp",
+                    "udp"
+                  ],
+                  "description": "The protocol the targets are reached with"
+                },
+                "targetPort": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535,
+                  "description": "The port on the targets"
+                },
+                "certificateId": {
+                  "type": "string",
+                  "pattern": "^pcert_[0-9a-hjkmnp-tv-z]{26,52}$",
+                  "maxLength": 58,
+                  "description": "https/http2 entries: the certificate TLS terminates with"
+                },
+                "tlsPassthrough": {
+                  "type": "boolean",
+                  "description": "https entries: pass TLS through to the targets"
+                }
+              },
+              "required": [
+                "entryProtocol",
+                "entryPort",
+                "targetProtocol",
+                "targetPort"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 1,
+            "maxItems": 15,
+            "description": "Forwarding rules"
+          },
+          "healthCheck": {
+            "type": "object",
+            "properties": {
+              "protocol": {
+                "enum": [
+                  "http",
+                  "https",
+                  "tcp"
+                ],
+                "description": "How targets are checked"
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535,
+                "description": "The port checked on each target"
+              },
+              "path": {
+                "type": "string",
+                "maxLength": 255,
+                "description": "http/https: the path asked for (default /)"
+              },
+              "intervalSeconds": {
+                "type": "integer",
+                "minimum": 3,
+                "maximum": 300,
+                "description": "Seconds between checks"
+              },
+              "timeoutSeconds": {
+                "type": "integer",
+                "minimum": 3,
+                "maximum": 300,
+                "description": "Seconds a check may take"
+              },
+              "healthyThreshold": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 10,
+                "description": "Passes before healthy"
+              },
+              "unhealthyThreshold": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 10,
+                "description": "Failures before unhealthy"
+              }
+            },
+            "required": [
+              "protocol",
+              "port"
+            ],
+            "additionalProperties": false
+          },
+          "stickySessions": {
+            "type": "object",
+            "properties": {
+              "cookieName": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,40}$",
+                "maxLength": 40,
+                "description": "The cookie"
+              },
+              "ttlSeconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 604800,
+                "description": "How long a client stays pinned"
+              }
+            },
+            "required": [
+              "cookieName",
+              "ttlSeconds"
+            ],
+            "additionalProperties": false
+          },
+          "sourceRanges": {
+            "type": "object",
+            "properties": {
+              "allow": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 43
+                },
+                "maxItems": 50,
+                "description": "Only these CIDR ranges connect"
+              },
+              "deny": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 43
+                },
+                "maxItems": 50,
+                "description": "These CIDR ranges never connect (deny wins)"
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "redirectHttpToHttps": {
+            "type": "boolean",
+            "description": "Answer plain http with a redirect to https"
+          },
+          "domains": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "maxLength": 253,
+                  "description": "A host name the load balancer serves"
+                },
+                "certificateId": {
+                  "type": "string",
+                  "pattern": "^pcert_[0-9a-hjkmnp-tv-z]{26,52}$",
+                  "maxLength": 58,
+                  "description": "The certificate TLS terminates with for this name"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "additionalProperties": false
+            },
+            "description": "global only: the host names it serves"
+          }
+        },
+        "required": [
+          "tenantId",
+          "loadBalancerId"
         ],
         "additionalProperties": false
       }
@@ -4591,9 +6380,18 @@
             "pattern": "^[a-z][a-z0-9-]{1,38}[a-z0-9]$",
             "description": "A region of the account’s configured zones"
           },
+          "zone": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{1,62}[a-z0-9]$",
+            "description": "On a zone-scoped provider (AWS: subnets live in one Availability Zone), required: one of the account’s zones, in region"
+          },
           "cidr": {
             "type": "string",
-            "description": "A private (RFC 1918) IPv4 range from /8 to /29 that overlaps no other subnet of the network"
+            "description": "A private (RFC 1918) IPv4 range from /8 to /29 (narrower where the provider takes less, AWS /16 to /28) that overlaps no other subnet of the network"
+          },
+          "privateAccess": {
+            "type": "boolean",
+            "description": "Reach the cloud’s own services privately: Private Google Access on GCE, S3 and DynamoDB gateway endpoints on AWS. Not on an adopted network. Default false"
           }
         },
         "required": [
@@ -4702,6 +6500,10 @@
             "type": "string",
             "maxLength": 256,
             "description": "What the network is for"
+          },
+          "cidr": {
+            "type": "string",
+            "description": "The network’s own private (RFC 1918) IPv4 range, on providers whose networks have one (an AWS VPC: /16 to /28, default 10.64.0.0/16); others ignore it"
           },
           "idempotencyKey": {
             "type": "string",
@@ -4825,6 +6627,108 @@
         "additionalProperties": false
       }
     },
+    "networks.natGateway": {
+      "route": "POST /api/compute/networks/natGateway",
+      "kind": "mutation",
+      "action": "compute:networks:update",
+      "resource": "compute-network",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "networkId": {
+            "type": "string",
+            "pattern": "^net_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The network"
+          },
+          "subnetId": {
+            "type": "string",
+            "pattern": "^snet_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The subnet whose egress the gateway carries"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "true: the subnet has a NAT gateway; false: it has none"
+          }
+        },
+        "required": [
+          "tenantId",
+          "networkId",
+          "subnetId",
+          "enabled"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "networks.peer": {
+      "route": "POST /api/compute/networks/peer",
+      "kind": "mutation",
+      "action": "compute:networks:update",
+      "resource": "compute-network",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "networkId": {
+            "type": "string",
+            "pattern": "^net_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The network"
+          },
+          "subnetId": {
+            "type": "string",
+            "pattern": "^snet_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "This network’s subnet"
+          },
+          "peerNetworkId": {
+            "type": "string",
+            "pattern": "^net_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The other network (the same one for two of its subnets)"
+          },
+          "peerSubnetId": {
+            "type": "string",
+            "pattern": "^snet_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The other network’s subnet"
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "true: the two subnets are peered; false: they are not"
+          }
+        },
+        "required": [
+          "tenantId",
+          "networkId",
+          "subnetId",
+          "peerNetworkId",
+          "peerSubnetId"
+        ],
+        "additionalProperties": false
+      }
+    },
     "networks.removeSubnet": {
       "route": "POST /api/compute/networks/removeSubnet",
       "kind": "mutation",
@@ -4860,6 +6764,93 @@
           "tenantId",
           "networkId",
           "subnetId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "networks.routes": {
+      "route": "POST /api/compute/networks/routes",
+      "kind": "mutation",
+      "action": "compute:networks:update",
+      "resource": "compute-network",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "networkId": {
+            "type": "string",
+            "pattern": "^net_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The network"
+          },
+          "subnetId": {
+            "type": "string",
+            "pattern": "^snet_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The subnet whose routes these are"
+          },
+          "routes": {
+            "type": "array",
+            "maxItems": 32,
+            "description": "Every static route of the subnet: the list replaces the current one",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^[a-z]([-a-z0-9]{0,40}[a-z0-9])?$",
+                  "maxLength": 42,
+                  "description": "Unique in the subnet"
+                },
+                "destination": {
+                  "type": "string",
+                  "description": "An IPv4 CIDR, e.g. 0.0.0.0/0"
+                },
+                "nextHop": {
+                  "type": "object",
+                  "properties": {
+                    "natGateway": {
+                      "const": true,
+                      "description": "The subnet’s NAT gateway"
+                    },
+                    "instanceId": {
+                      "type": "string",
+                      "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+                      "maxLength": 57,
+                      "description": "An instance of the tenant on the subnet"
+                    },
+                    "address": {
+                      "type": "string",
+                      "description": "A host address inside the subnet"
+                    }
+                  },
+                  "required": [],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "name",
+                "destination",
+                "nextHop"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "tenantId",
+          "networkId",
+          "subnetId",
+          "routes"
         ],
         "additionalProperties": false
       }
@@ -6518,6 +8509,38 @@
         "additionalProperties": false
       }
     },
+    "providerAccounts.billing": {
+      "route": "POST /api/compute/providerAccounts/billing",
+      "kind": "read",
+      "action": "compute:providers:manage",
+      "resource": "compute-provider-account",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider account"
+          }
+        },
+        "required": [
+          "tenantId",
+          "accountId"
+        ],
+        "additionalProperties": false
+      }
+    },
     "providerAccounts.bindReservation": {
       "route": "POST /api/compute/providerAccounts/bindReservation",
       "kind": "mutation",
@@ -6546,7 +8569,7 @@
           },
           "reservationId": {
             "type": "string",
-            "pattern": "^[A-Za-z0-9._/-]{1,300}$",
+            "pattern": "^[A-Za-z0-9._/:-]{1,300}$",
             "maxLength": 300,
             "description": "The reservation, as `reservations` lists it"
           },
@@ -6633,6 +8656,177 @@
           "accountId",
           "poolId",
           "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAccounts.check": {
+      "route": "POST /api/compute/providerAccounts/check",
+      "kind": "read",
+      "action": "compute:providers:read",
+      "resource": "compute-provider-account",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider account"
+          }
+        },
+        "required": [
+          "tenantId",
+          "accountId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAccounts.clusters": {
+      "route": "POST /api/compute/providerAccounts/clusters",
+      "kind": "read",
+      "action": "compute:providers:read",
+      "resource": "compute-provider-account",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider account"
+          }
+        },
+        "required": [
+          "tenantId",
+          "accountId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAccounts.connect": {
+      "route": "POST /api/compute/providerAccounts/connect",
+      "kind": "mutation",
+      "action": "compute:providers:manage",
+      "resource": "compute-fleet",
+      "alternatives": [
+        "compute:providers:manage @ compute-tenant"
+      ],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "provider": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,63}$",
+            "maxLength": 64,
+            "description": "The provider id, e.g. provider-hetzner"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+            "maxLength": 63,
+            "description": "The account name, e.g. do-main"
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._~+/=-]{1,512}$",
+            "description": "The authorization code the redirect carried (single use)"
+          },
+          "redirectUri": {
+            "type": "string",
+            "maxLength": 2048,
+            "description": "The redirect URI connectSetup was given"
+          },
+          "config": {
+            "description": "The rest of the account's config; the provider fills in the credential",
+            "default": {}
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$",
+            "maxLength": 128,
+            "description": "Makes the account id deterministic; a retry returns the account"
+          }
+        },
+        "required": [
+          "tenantId",
+          "provider",
+          "name",
+          "code",
+          "redirectUri"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAccounts.connectSetup": {
+      "route": "POST /api/compute/providerAccounts/connectSetup",
+      "kind": "read",
+      "action": "compute:providers:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "provider": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,63}$",
+            "maxLength": 64,
+            "description": "The provider id, e.g. provider-hetzner"
+          },
+          "redirectUri": {
+            "type": "string",
+            "maxLength": 2048,
+            "description": "Where the provider sends the browser back, one the platform registered (https)"
+          },
+          "state": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._~-]{16,256}$",
+            "description": "The caller’s anti-forgery value, echoed back on the redirect"
+          }
+        },
+        "required": [
+          "tenantId",
+          "provider",
+          "redirectUri",
+          "state"
         ],
         "additionalProperties": false
       }
@@ -6834,6 +9028,38 @@
         "additionalProperties": false
       }
     },
+    "providerAccounts.findings": {
+      "route": "POST /api/compute/providerAccounts/findings",
+      "kind": "read",
+      "action": "compute:providers:read",
+      "resource": "compute-provider-account",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider account"
+          }
+        },
+        "required": [
+          "tenantId",
+          "accountId"
+        ],
+        "additionalProperties": false
+      }
+    },
     "providerAccounts.get": {
       "route": "POST /api/compute/providerAccounts/get",
       "kind": "read",
@@ -7019,6 +9245,194 @@
         "additionalProperties": false
       }
     },
+    "providerAccounts.purchaseProposals": {
+      "route": "POST /api/compute/providerAccounts/purchaseProposals",
+      "kind": "read",
+      "action": "compute:providers:read",
+      "resource": "compute-provider-account",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant that owns the provider account (the platform)"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider account"
+          }
+        },
+        "required": [
+          "tenantId",
+          "accountId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAccounts.purchaseReservation": {
+      "route": "POST /api/compute/providerAccounts/purchaseReservation",
+      "kind": "mutation",
+      "action": "compute:providers:purchase",
+      "resource": "compute-provider-account",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant that owns the provider account"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider account"
+          },
+          "offeringId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._/:-]{1,300}$",
+            "maxLength": 300,
+            "description": "The offering, as `reservationOfferings` lists it"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays and never buys twice"
+          },
+          "confirm": {
+            "type": "boolean",
+            "description": "Must be true: buying capacity spends money"
+          }
+        },
+        "required": [
+          "tenantId",
+          "accountId",
+          "offeringId",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAccounts.purchases": {
+      "route": "POST /api/compute/providerAccounts/purchases",
+      "kind": "read",
+      "action": "compute:providers:read",
+      "resource": "compute-provider-account",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant that owns the provider account"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider account"
+          }
+        },
+        "required": [
+          "tenantId",
+          "accountId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAccounts.reservationOfferings": {
+      "route": "POST /api/compute/providerAccounts/reservationOfferings",
+      "kind": "read",
+      "action": "compute:providers:read",
+      "resource": "compute-provider-account",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant that owns the provider account"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider account"
+          },
+          "query": {
+            "type": "object",
+            "properties": {
+              "instanceType": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._-]{1,64}$",
+                "maxLength": 64,
+                "description": "The machine type, e.g. p5.48xlarge"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000,
+                "description": "Machines"
+              },
+              "durationHours": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4368,
+                "description": "How long the capacity is held"
+              },
+              "earliestStart": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 140737488355328,
+                "description": "The earliest start, epoch milliseconds"
+              },
+              "latestStart": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 140737488355328,
+                "description": "The latest start, epoch milliseconds"
+              }
+            },
+            "required": [
+              "instanceType",
+              "count",
+              "durationHours"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "tenantId",
+          "accountId",
+          "query"
+        ],
+        "additionalProperties": false
+      }
+    },
     "providerAccounts.reservations": {
       "route": "POST /api/compute/providerAccounts/reservations",
       "kind": "read",
@@ -7082,7 +9496,7 @@
           },
           "reservationId": {
             "type": "string",
-            "pattern": "^[A-Za-z0-9._/-]{1,300}$",
+            "pattern": "^[A-Za-z0-9._/:-]{1,300}$",
             "maxLength": 300,
             "description": "The reservation to unbind"
           }
@@ -7165,6 +9579,794 @@
         "required": [
           "tenantId",
           "accountId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAddresses.assign": {
+      "route": "POST /api/compute/providerAddresses/assign",
+      "kind": "mutation",
+      "action": "compute:addresses:manage",
+      "resource": "compute-provider-address",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "addressId": {
+            "type": "string",
+            "pattern": "^paddr_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The reserved address"
+          },
+          "instanceId": {
+            "type": "string",
+            "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "An instance of the tenant on the same provider account and region"
+          }
+        },
+        "required": [
+          "tenantId",
+          "addressId",
+          "instanceId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAddresses.create": {
+      "route": "POST /api/compute/providerAddresses/create",
+      "kind": "mutation",
+      "action": "compute:addresses:manage",
+      "resource": "compute-provider-address",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The project the address belongs to"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool offered to the tenant, whose account provides addresses"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z]([-a-z0-9]{0,40}[a-z0-9])?$",
+            "maxLength": 42,
+            "description": "The address name, unique in the tenant, e.g. ingress"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "What it is for"
+          },
+          "region": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,38}[a-z0-9]$",
+            "maxLength": 40,
+            "description": "A region of the pool's provider account, e.g. nyc3"
+          },
+          "family": {
+            "enum": [
+              "ipv4",
+              "ipv6"
+            ],
+            "default": "ipv4",
+            "description": "The address family"
+          },
+          "prefix": {
+            "type": "string",
+            "maxLength": 43,
+            "description": "A BYOIP prefix of the account to draw from (its IPv4 CIDR or id); only the account's owner tenant"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "name",
+          "region",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAddresses.delete": {
+      "route": "POST /api/compute/providerAddresses/delete",
+      "kind": "mutation",
+      "action": "compute:addresses:manage",
+      "resource": "compute-provider-address",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "addressId": {
+            "type": "string",
+            "pattern": "^paddr_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The reserved address"
+          }
+        },
+        "required": [
+          "tenantId",
+          "addressId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAddresses.get": {
+      "route": "POST /api/compute/providerAddresses/get",
+      "kind": "read",
+      "action": "compute:addresses:read",
+      "resource": "compute-provider-address",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "addressId": {
+            "type": "string",
+            "pattern": "^paddr_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The reserved address"
+          }
+        },
+        "required": [
+          "tenantId",
+          "addressId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAddresses.list": {
+      "route": "POST /api/compute/providerAddresses/list",
+      "kind": "read",
+      "action": "compute:addresses:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "Only those of this pool"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "Only those of this project"
+          },
+          "includeDeleted": {
+            "type": "boolean",
+            "default": false,
+            "description": "Include deleted ones"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAddresses.unassign": {
+      "route": "POST /api/compute/providerAddresses/unassign",
+      "kind": "mutation",
+      "action": "compute:addresses:manage",
+      "resource": "compute-provider-address",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "addressId": {
+            "type": "string",
+            "pattern": "^paddr_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The reserved address"
+          }
+        },
+        "required": [
+          "tenantId",
+          "addressId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerSnapshots.delete": {
+      "route": "POST /api/compute/providerSnapshots/delete",
+      "kind": "mutation",
+      "action": "compute:volumes:manage",
+      "resource": "compute-provider-snapshot",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "snapshotId": {
+            "type": "string",
+            "pattern": "^psnap_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider volume snapshot"
+          }
+        },
+        "required": [
+          "tenantId",
+          "snapshotId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerSnapshots.get": {
+      "route": "POST /api/compute/providerSnapshots/get",
+      "kind": "read",
+      "action": "compute:volumes:read",
+      "resource": "compute-provider-snapshot",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "snapshotId": {
+            "type": "string",
+            "pattern": "^psnap_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider volume snapshot"
+          }
+        },
+        "required": [
+          "tenantId",
+          "snapshotId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerSnapshots.list": {
+      "route": "POST /api/compute/providerSnapshots/list",
+      "kind": "read",
+      "action": "compute:volumes:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "volumeId": {
+            "type": "string",
+            "pattern": "^pvol_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "Only the snapshots of this volume"
+          },
+          "includeDeleted": {
+            "type": "boolean",
+            "default": false,
+            "description": "Include deleted ones"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerSnapshots.restore": {
+      "route": "POST /api/compute/providerSnapshots/restore",
+      "kind": "mutation",
+      "action": "compute:volumes:manage",
+      "resource": "compute-provider-snapshot",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "snapshotId": {
+            "type": "string",
+            "pattern": "^psnap_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider volume snapshot"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z]([-a-z0-9]{0,40}[a-z0-9])?$",
+            "maxLength": 42,
+            "description": "The new volume name, unique in the tenant"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "What it is for"
+          },
+          "sizeGiB": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16384,
+            "description": "The new volume's size in GiB: at least the snapshot's (the default)"
+          },
+          "deleteWithInstance": {
+            "type": "boolean",
+            "default": false,
+            "description": "Delete the volume with the instance it is attached to; otherwise deleting the instance only detaches it"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          }
+        },
+        "required": [
+          "tenantId",
+          "snapshotId",
+          "name",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerVolumes.attach": {
+      "route": "POST /api/compute/providerVolumes/attach",
+      "kind": "mutation",
+      "action": "compute:volumes:manage",
+      "resource": "compute-provider-volume",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "volumeId": {
+            "type": "string",
+            "pattern": "^pvol_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The provider volume"
+          },
+          "instanceId": {
+            "type": "string",
+            "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "An instance of the tenant on the same provider account and region"
+          }
+        },
+        "required": [
+          "tenantId",
+          "volumeId",
+          "instanceId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerVolumes.create": {
+      "route": "POST /api/compute/providerVolumes/create",
+      "kind": "mutation",
+      "action": "compute:volumes:manage",
+      "resource": "compute-provider-volume",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The project the volume belongs to"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool offered to the tenant, whose account provides volumes"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z]([-a-z0-9]{0,40}[a-z0-9])?$",
+            "maxLength": 42,
+            "description": "The volume name, unique in the tenant, e.g. data"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "What it is for"
+          },
+          "region": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,38}[a-z0-9]$",
+            "maxLength": 40,
+            "description": "A region of the pool's provider account, e.g. nyc3"
+          },
+          "sizeGiB": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16384,
+            "description": "The size in GiB (it can grow later, never shrink)"
+          },
+          "kind": {
+            "enum": [
+              "block",
+              "shared"
+            ],
+            "default": "block",
+            "description": "block: a disk attached to one instance at a time. shared: a network file share (NFS) many instances of its network mount at once"
+          },
+          "networkId": {
+            "type": "string",
+            "pattern": "^net_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The tenant network a shared volume is reachable from (required for, and only for, kind shared)"
+          },
+          "filesystem": {
+            "enum": [
+              "ext4",
+              "xfs",
+              "none"
+            ],
+            "description": "The filesystem the provider formats the volume with; none (or absent) leaves it raw"
+          },
+          "deleteWithInstance": {
+            "type": "boolean",
+            "default": false,
+            "description": "Delete the volume with the instance it is attached to; otherwise deleting the instance only detaches it"
+          },
+          "instanceId": {
+            "type": "string",
+            "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "An instance of the tenant on the same provider account and region"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "name",
+          "region",
+          "sizeGiB",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerVolumes.delete": {
+      "route": "POST /api/compute/providerVolumes/delete",
+      "kind": "mutation",
+      "action": "compute:volumes:manage",
+      "resource": "compute-provider-volume",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "volumeId": {
+            "type": "string",
+            "pattern": "^pvol_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The provider volume"
+          }
+        },
+        "required": [
+          "tenantId",
+          "volumeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerVolumes.detach": {
+      "route": "POST /api/compute/providerVolumes/detach",
+      "kind": "mutation",
+      "action": "compute:volumes:manage",
+      "resource": "compute-provider-volume",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "volumeId": {
+            "type": "string",
+            "pattern": "^pvol_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The provider volume"
+          },
+          "instanceId": {
+            "type": "string",
+            "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The instance to detach from: required for a shared volume; for a block volume, naming another instance changes nothing"
+          }
+        },
+        "required": [
+          "tenantId",
+          "volumeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerVolumes.get": {
+      "route": "POST /api/compute/providerVolumes/get",
+      "kind": "read",
+      "action": "compute:volumes:read",
+      "resource": "compute-provider-volume",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "volumeId": {
+            "type": "string",
+            "pattern": "^pvol_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The provider volume"
+          }
+        },
+        "required": [
+          "tenantId",
+          "volumeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerVolumes.list": {
+      "route": "POST /api/compute/providerVolumes/list",
+      "kind": "read",
+      "action": "compute:volumes:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "Only those of this pool"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "Only those of this project"
+          },
+          "includeDeleted": {
+            "type": "boolean",
+            "default": false,
+            "description": "Include deleted ones"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerVolumes.resize": {
+      "route": "POST /api/compute/providerVolumes/resize",
+      "kind": "mutation",
+      "action": "compute:volumes:manage",
+      "resource": "compute-provider-volume",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "volumeId": {
+            "type": "string",
+            "pattern": "^pvol_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The provider volume"
+          },
+          "sizeGiB": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16384,
+            "description": "The new size in GiB: at least the current one"
+          }
+        },
+        "required": [
+          "tenantId",
+          "volumeId",
+          "sizeGiB"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerVolumes.snapshot": {
+      "route": "POST /api/compute/providerVolumes/snapshot",
+      "kind": "mutation",
+      "action": "compute:volumes:manage",
+      "resource": "compute-provider-volume",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "volumeId": {
+            "type": "string",
+            "pattern": "^pvol_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The provider volume"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z]([-a-z0-9]{0,40}[a-z0-9])?$",
+            "maxLength": 42,
+            "description": "The snapshot name, unique in the tenant"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          }
+        },
+        "required": [
+          "tenantId",
+          "volumeId",
+          "name",
+          "idempotencyKey"
         ],
         "additionalProperties": false
       }
@@ -7324,7 +10526,7 @@
           },
           "reservationId": {
             "type": "string",
-            "pattern": "^[A-Za-z0-9._/-]{1,300}$",
+            "pattern": "^[A-Za-z0-9._/:-]{1,300}$",
             "maxLength": 300,
             "description": "The reservation, as providerAccounts.reservations lists it"
           },

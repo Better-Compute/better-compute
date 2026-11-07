@@ -52,7 +52,7 @@ Root only. Commits `slots` of a reservation to `grantTenantId` (optionally one o
 | ---------------- | ------- | -------- | ------------------------------------------------------------------ |
 | `tenantId`       | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
 | `accountId`      | string  | yes      | at most 58 characters; matches `^pacct_[0-9a-hjkmnp-tv-z]{26,52}$` |
-| `reservationId`  | string  | yes      | at most 300 characters; matches `^[A-Za-z0-9._/-]{1,300}$`         |
+| `reservationId`  | string  | yes      | at most 300 characters; matches `^[A-Za-z0-9._/:-]{1,300}$`        |
 | `grantTenantId`  | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
 | `projectId`      | string  |          | at most 56 characters; matches `^prj_[0-9a-hjkmnp-tv-z]{26,52}$`   |
 | `slots`          | integer | yes      | 1-100000                                                           |

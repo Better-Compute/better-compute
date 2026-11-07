@@ -337,5 +337,75 @@
     "help": "Outbox events by catalog family",
     "labels": ["family", "module"],
     "source": "eventCounter"
+  },
+  {
+    "name": "better_compute_external_host_cpu_utilization_ratio",
+    "kind": "gauge",
+    "help": "A host metric of a machine that runs no bcd, pulled from its provider (cpu_utilization_ratio)",
+    "labels": ["source", "instance"],
+    "source": "externalMetricsCollector"
+  },
+  {
+    "name": "better_compute_external_host_memory_used_bytes",
+    "kind": "gauge",
+    "help": "A host metric of a machine that runs no bcd, pulled from its provider (memory_used_bytes)",
+    "labels": ["source", "instance"],
+    "source": "externalMetricsCollector"
+  },
+  {
+    "name": "better_compute_external_host_memory_total_bytes",
+    "kind": "gauge",
+    "help": "A host metric of a machine that runs no bcd, pulled from its provider (memory_total_bytes)",
+    "labels": ["source", "instance"],
+    "source": "externalMetricsCollector"
+  },
+  {
+    "name": "better_compute_external_host_load1",
+    "kind": "gauge",
+    "help": "A host metric of a machine that runs no bcd, pulled from its provider (load1)",
+    "labels": ["source", "instance"],
+    "source": "externalMetricsCollector"
+  },
+  {
+    "name": "better_compute_external_host_filesystem_used_bytes",
+    "kind": "gauge",
+    "help": "A host metric of a machine that runs no bcd, pulled from its provider (filesystem_used_bytes)",
+    "labels": ["source", "instance"],
+    "source": "externalMetricsCollector"
+  },
+  {
+    "name": "better_compute_external_host_filesystem_size_bytes",
+    "kind": "gauge",
+    "help": "A host metric of a machine that runs no bcd, pulled from its provider (filesystem_size_bytes)",
+    "labels": ["source", "instance"],
+    "source": "externalMetricsCollector"
+  },
+  {
+    "name": "better_compute_external_host_network_receive_bytes_per_second",
+    "kind": "gauge",
+    "help": "A host metric of a machine that runs no bcd, pulled from its provider (network_receive_bytes_per_second)",
+    "labels": ["source", "instance"],
+    "source": "externalMetricsCollector"
+  },
+  {
+    "name": "better_compute_external_host_network_transmit_bytes_per_second",
+    "kind": "gauge",
+    "help": "A host metric of a machine that runs no bcd, pulled from its provider (network_transmit_bytes_per_second)",
+    "labels": ["source", "instance"],
+    "source": "externalMetricsCollector"
+  },
+  {
+    "name": "better_compute_external_metrics_pull_failures_total",
+    "kind": "counter",
+    "help": "Pulls of an external metrics source that failed",
+    "labels": ["source", "code"],
+    "source": "externalMetricsCollector"
+  },
+  {
+    "name": "better_compute_external_metrics_last_pull_timestamp_seconds",
+    "kind": "gauge",
+    "help": "When an external metrics source last answered (epoch seconds)",
+    "labels": ["source"],
+    "source": "externalMetricsCollector"
   }
 ]

@@ -305,6 +305,19 @@ returns. Never hashed as a whole.
 | `os`             | 17     | [`OsSection`](#ossection)         |                                                              |
 | `images`         | 18     | [`ImagesSection`](#imagessection) | (v0.3) Section "images".                                     |
 
+### CloudSection
+
+| Field           | Number | Type     | Description                                                                            |
+| --------------- | ------ | -------- | -------------------------------------------------------------------------------------- |
+| `provider`      | 1      | `string` | "aws".                                                                                 |
+| `instance_id`   | 2      | `string` | e.g. "i-0123456789abcdef0".                                                            |
+| `instance_type` | 3      | `string` | e.g. "p5.48xlarge", "c7i.metal-48xl".                                                  |
+| `region`        | 4      | `string` | e.g. "us-east-1".                                                                      |
+| `zone`          | 5      | `string` | The zone name, e.g. "us-east-1a" (names map to physical zones per account).            |
+| `zone_id`       | 6      | `string` | The zone id, e.g. "use1-az4" (the same physical zone in every account).                |
+| `lifecycle`     | 7      | `string` | "on-demand", "spot" or "capacity-block"; empty when the metadata names something else. |
+| `efa_devices`   | 8      | `uint32` | Elastic Fabric Adapter devices (/sys/class/infiniband/\* bound to the efa driver).     |
+
 ### ImagesSection
 
 | Field            | Number | Type                                   | Description                                                                 |
@@ -326,21 +339,49 @@ returns. Never hashed as a whole.
 
 ### SystemSection
 
-| Field            | Number | Type                    | Description                    |
-| ---------------- | ------ | ----------------------- | ------------------------------ |
-| `vendor`         | 1      | `string`                |                                |
-| `product`        | 2      | `string`                |                                |
-| `serial`         | 3      | `string`                |                                |
-| `product_uuid`   | 4      | `string`                | Lowercase.                     |
-| `board_vendor`   | 5      | `string`                |                                |
-| `board_product`  | 6      | `string`                |                                |
-| `board_serial`   | 7      | `string`                |                                |
-| `chassis_serial` | 8      | `string`                |                                |
-| `bios_vendor`    | 9      | `string`                |                                |
-| `bios_version`   | 10     | `string`                |                                |
-| `boot_mode`      | 11     | [`BootMode`](#bootmode) |                                |
-| `secure_boot`    | 12     | optional `bool`         | Absent when unknown.           |
-| `tpm`            | 13     | [`Tpm`](#tpm)           | Absent when no TPM is present. |
+| Field            | Number | Type                              | Description                                                                                                                                                                                                                                               |
+| ---------------- | ------ | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `vendor`         | 1      | `string`                          |                                                                                                                                                                                                                                                           |
+| `product`        | 2      | `string`                          |                                                                                                                                                                                                                                                           |
+| `serial`         | 3      | `string`                          |                                                                                                                                                                                                                                                           |
+| `product_uuid`   | 4      | `string`                          | Lowercase.                                                                                                                                                                                                                                                |
+| `board_vendor`   | 5      | `string`                          |                                                                                                                                                                                                                                                           |
+| `board_product`  | 6      | `string`                          |                                                                                                                                                                                                                                                           |
+| `board_serial`   | 7      | `string`                          |                                                                                                                                                                                                                                                           |
+| `chassis_serial` | 8      | `string`                          |                                                                                                                                                                                                                                                           |
+| `bios_vendor`    | 9      | `string`                          |                                                                                                                                                                                                                                                           |
+| `bios_version`   | 10     | `string`                          |                                                                                                                                                                                                                                                           |
+| `boot_mode`      | 11     | [`BootMode`](#bootmode)           |                                                                                                                                                                                                                                                           |
+| `secure_boot`    | 12     | optional `bool`                   | Absent when unknown.                                                                                                                                                                                                                                      |
+| `tpm`            | 13     | [`Tpm`](#tpm)                     | Absent when no TPM is present.                                                                                                                                                                                                                            |
+| `cloud`          | 14     | [`CloudInstance`](#cloudinstance) | (v0.3) The cloud instance this system is, from the provider's metadata service: absent off a cloud, and when the service did not answer. Inventory only: it is not signed, so nothing ever uses it as an identity (hardware_key and node join ignore it). |
+
+### CloudInstance
+
+What a cloud's instance metadata service reports about the instance (DigitalOcean:
+169.254.169.254/metadata/v1.json, read only on a Droplet). Never user data, vendor data, keys
+or tokens.
+
+| Field         | Number | Type                                         | Description                                              |
+| ------------- | ------ | -------------------------------------------- | -------------------------------------------------------- |
+| `provider`    | 1      | `string`                                     | "digitalocean".                                          |
+| `instance_id` | 2      | `string`                                     | The provider's instance id (the Droplet id, in decimal). |
+| `region`      | 3      | `string`                                     | Region slug, e.g. "nyc3".                                |
+| `tags`        | 4      | repeated `string`                            | Sorted, without duplicates.                              |
+| `interfaces`  | 5      | repeated [`CloudInterface`](#cloudinterface) | Sorted by network, then MAC.                             |
+
+### CloudInterface
+
+| Field                | Number | Type     | Description                      |
+| -------------------- | ------ | -------- | -------------------------------- |
+| `network`            | 1      | `string` | "public" or "private" (the VPC). |
+| `mac`                | 2      | `string` | Lowercase.                       |
+| `ipv4_address`       | 3      | `string` |                                  |
+| `ipv4_netmask`       | 4      | `string` |                                  |
+| `ipv4_gateway`       | 5      | `string` |                                  |
+| `ipv6_address`       | 6      | `string` |                                  |
+| `ipv6_prefix_length` | 7      | `uint32` | 0 = no IPv6.                     |
+| `ipv6_gateway`       | 8      | `string` |                                  |
 
 ### Tpm
 
@@ -1154,6 +1195,7 @@ root disk. bcd refuses (InstanceStatus error) an instance naming a volume the se
 | `ssh_from_host_only`  | 15     | `bool`                                            | (review 13 L5) Port 22 of the guest is reachable only from the host (bcd's tunnel dial), never from other guests or the network, whatever network_policy allows.                                                                                                                                                                                                                                                                                            |
 | `placement`           | 16     | [`InstancePlacement`](#instanceplacement)         | (v1.1 §3.8) Where the guest's vCPUs and memory live on the host. Absent: the runtime's default (floating vCPUs, host memory).                                                                                                                                                                                                                                                                                                                               |
 | `volumes`             | 17     | repeated [`InstanceVolume`](#instancevolume)      | (v1.1, agent memory) Persistent volumes to attach (InstancesSection.volumes).                                                                                                                                                                                                                                                                                                                                                                               |
+| `aws_role`            | 18     | `string`                                          | (AWS A7) The IAM role ARN the guest's metadata endpoint serves AWS credentials for. bcd exchanges the instance's workload token (audience sts.amazonaws.com) with STS AssumeRoleWithWebIdentity (RoleSessionName bc-\<instance_id>) and serves the result on the AWS-compatible /latest/meta-data/iam/security-credentials/ paths. Empty: no AWS credentials are served.                                                                                    |
 
 ### InstancePlacement
 

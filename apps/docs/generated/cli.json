@@ -9826,6 +9826,230 @@
       ]
     },
     {
+      "name": "provider-accounts check",
+      "aliases": [],
+      "group": "Metal",
+      "summary": "Ask the provider what the account’s credential may do, read-only (providerAccounts.check)",
+      "description": "provider-accounts check reads the account at its provider without changing anything: the account’s state there, the permissions instances need that the credential lacks (missing) and the ones only optional features need (optional). It exits with an error when the provider refuses the credential.",
+      "usage": "better-compute provider-accounts check ACCOUNT --tenant ID [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "account",
+          "description": "The account id (pacct_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute provider-accounts check pacct_01k5w…"]
+    },
+    {
+      "name": "digitalocean check",
+      "aliases": ["do check"],
+      "group": "Metal",
+      "summary": "Check a DigitalOcean account’s token scopes, read-only (providerAccounts.check)",
+      "description": "Check a DigitalOcean account’s token scopes, read-only (providerAccounts.check)",
+      "usage": "better-compute digitalocean check ACCOUNT --tenant ID [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "account",
+          "description": "The account id (pacct_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute digitalocean check pacct_01k5w…"]
+    },
+    {
+      "name": "digitalocean offers",
+      "aliases": ["do offers"],
+      "group": "Metal",
+      "summary": "List the Droplet sizes a DigitalOcean account can get (providerAccounts.offers)",
+      "description": "List the Droplet sizes a DigitalOcean account can get (providerAccounts.offers)",
+      "usage": "better-compute digitalocean offers ACCOUNT --tenant ID [--region REGION] [--gpu-model MODEL] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "account",
+          "description": "The account id (pacct_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--region",
+          "value": "REGION",
+          "optional": true,
+          "description": "Only this region (nyc3)"
+        },
+        {
+          "flag": "--gpu-model",
+          "value": "MODEL",
+          "optional": true,
+          "description": "Only this GPU model"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute digitalocean offers pacct_01k5w…"]
+    },
+    {
+      "name": "digitalocean discover",
+      "aliases": ["do discover"],
+      "group": "Metal",
+      "summary": "List a DigitalOcean account’s Droplets again now (providerAccounts.discover)",
+      "description": "List a DigitalOcean account’s Droplets again now (providerAccounts.discover)",
+      "usage": "better-compute digitalocean discover ACCOUNT --tenant ID [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "account",
+          "description": "The account id (pacct_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute digitalocean discover pacct_01k5w…"]
+    },
+    {
       "name": "provider-accounts bootstrap",
       "aliases": [],
       "group": "Metal",

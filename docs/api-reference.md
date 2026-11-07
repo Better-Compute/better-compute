@@ -278,24 +278,35 @@ Every call is authenticated (except public methods), refused before any database
 | `billing.setPrices`     | mutation | `compute:billing:manage` @ `compute-fleet` | v1.0  | registered |
 | `billing.proposePrices` | read     | `compute:billing:read` @ `compute-fleet`   | v1.0  | registered |
 | `billing.margins`       | read     | `compute:billing:read` @ `compute-fleet`   | v1.0  | registered |
+| `billing.leaks`         | read     | `compute:billing:read` @ `compute-fleet`   | v1.0  | registered |
 
 ### `providerAccounts` (vps)
 
-| Method                               | Kind     | Authorization                                                                                        | Phase | Status     |
-| ------------------------------------ | -------- | ---------------------------------------------------------------------------------------------------- | ----- | ---------- |
-| `providerAccounts.create`            | mutation | `compute:providers:manage` @ `compute-fleet` or `compute:providers:manage` @ `compute-tenant`        | v0.3  | registered |
-| `providerAccounts.list`              | read     | `compute:providers:read` @ `compute-tenant` + items                                                  | v0.3  | registered |
-| `providerAccounts.federationSetup`   | read     | `compute:providers:read` @ `compute-tenant`                                                          | v1.0  | registered |
-| `providerAccounts.get`               | read     | `compute:providers:read` @ `compute-provider-account`                                                | v0.3  | registered |
-| `providerAccounts.offers`            | read     | `compute:providers:read` @ `compute-provider-account`                                                | v0.3  | registered |
-| `providerAccounts.update`            | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v0.3  | registered |
-| `providerAccounts.delete`            | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v0.3  | registered |
-| `providerAccounts.bootstrap`         | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v0.3  | registered |
-| `providerAccounts.machines`          | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
-| `providerAccounts.discover`          | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v1.0  | registered |
-| `providerAccounts.reservations`      | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
-| `providerAccounts.bindReservation`   | mutation | `compute:providers:manage` @ `compute-provider-account` or `compute:flavors:manage` @ `compute-pool` | v1.0  | registered |
-| `providerAccounts.unbindReservation` | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v1.0  | registered |
+| Method                                  | Kind     | Authorization                                                                                        | Phase | Status     |
+| --------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------- | ----- | ---------- |
+| `providerAccounts.create`               | mutation | `compute:providers:manage` @ `compute-fleet` or `compute:providers:manage` @ `compute-tenant`        | v0.3  | registered |
+| `providerAccounts.list`                 | read     | `compute:providers:read` @ `compute-tenant` + items                                                  | v0.3  | registered |
+| `providerAccounts.federationSetup`      | read     | `compute:providers:read` @ `compute-tenant`                                                          | v1.0  | registered |
+| `providerAccounts.connectSetup`         | read     | `compute:providers:read` @ `compute-tenant`                                                          | v1.0  | registered |
+| `providerAccounts.connect`              | mutation | `compute:providers:manage` @ `compute-fleet` or `compute:providers:manage` @ `compute-tenant`        | v1.0  | registered |
+| `providerAccounts.get`                  | read     | `compute:providers:read` @ `compute-provider-account`                                                | v0.3  | registered |
+| `providerAccounts.offers`               | read     | `compute:providers:read` @ `compute-provider-account`                                                | v0.3  | registered |
+| `providerAccounts.check`                | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
+| `providerAccounts.findings`             | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
+| `providerAccounts.billing`              | read     | `compute:providers:manage` @ `compute-provider-account`                                              | v1.0  | registered |
+| `providerAccounts.update`               | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v0.3  | registered |
+| `providerAccounts.delete`               | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v0.3  | registered |
+| `providerAccounts.bootstrap`            | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v0.3  | registered |
+| `providerAccounts.machines`             | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
+| `providerAccounts.discover`             | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v1.0  | registered |
+| `providerAccounts.reservations`         | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
+| `providerAccounts.bindReservation`      | mutation | `compute:providers:manage` @ `compute-provider-account` or `compute:flavors:manage` @ `compute-pool` | v1.0  | registered |
+| `providerAccounts.unbindReservation`    | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v1.0  | registered |
+| `providerAccounts.reservationOfferings` | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
+| `providerAccounts.purchaseReservation`  | mutation | `compute:providers:purchase` @ `compute-provider-account`                                            | v1.0  | registered |
+| `providerAccounts.purchases`            | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
+| `providerAccounts.clusters`             | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
+| `providerAccounts.purchaseProposals`    | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
 
 ### `reservationGrants` (vps)
 
@@ -358,6 +369,9 @@ Every call is authenticated (except public methods), refused before any database
 | `networks.addSubnet`    | mutation | `compute:networks:update` @ `compute-network`      | v1.0  | registered |
 | `networks.removeSubnet` | mutation | `compute:networks:update` @ `compute-network`      | v1.0  | registered |
 | `networks.adopt`        | mutation | `compute:providers:manage` @ `compute-fleet`       | v1.0  | registered |
+| `networks.natGateway`   | mutation | `compute:networks:update` @ `compute-network`      | v1.0  | registered |
+| `networks.peer`         | mutation | `compute:networks:update` @ `compute-network`      | v1.0  | registered |
+| `networks.routes`       | mutation | `compute:networks:update` @ `compute-network`      | v1.0  | registered |
 
 ### `firewallRules` (vps)
 
@@ -367,6 +381,86 @@ Every call is authenticated (except public methods), refused before any database
 | `firewallRules.list`   | read     | `compute:networks:read` @ `compute-network`   | v1.0  | registered |
 | `firewallRules.update` | mutation | `compute:networks:update` @ `compute-network` | v1.0  | registered |
 | `firewallRules.delete` | mutation | `compute:networks:update` @ `compute-network` | v1.0  | registered |
+
+### `filesystems` (vps)
+
+| Method               | Kind     | Authorization                                 | Phase | Status     |
+| -------------------- | -------- | --------------------------------------------- | ----- | ---------- |
+| `filesystems.create` | mutation | `compute:networks:update` @ `compute-network` | v1.0  | registered |
+| `filesystems.list`   | read     | `compute:networks:read` @ `compute-network`   | v1.0  | registered |
+| `filesystems.get`    | read     | `compute:networks:read` @ `compute-network`   | v1.0  | registered |
+| `filesystems.delete` | mutation | `compute:networks:update` @ `compute-network` | v1.0  | registered |
+
+### `providerVolumes` (vps)
+
+| Method                     | Kind     | Authorization                                        | Phase | Status     |
+| -------------------------- | -------- | ---------------------------------------------------- | ----- | ---------- |
+| `providerVolumes.create`   | mutation | `compute:volumes:manage` @ `compute-provider-volume` | v1.0  | registered |
+| `providerVolumes.list`     | read     | `compute:volumes:read` @ `compute-tenant` + items    | v1.0  | registered |
+| `providerVolumes.get`      | read     | `compute:volumes:read` @ `compute-provider-volume`   | v1.0  | registered |
+| `providerVolumes.attach`   | mutation | `compute:volumes:manage` @ `compute-provider-volume` | v1.0  | registered |
+| `providerVolumes.detach`   | mutation | `compute:volumes:manage` @ `compute-provider-volume` | v1.0  | registered |
+| `providerVolumes.resize`   | mutation | `compute:volumes:manage` @ `compute-provider-volume` | v1.0  | registered |
+| `providerVolumes.snapshot` | mutation | `compute:volumes:manage` @ `compute-provider-volume` | v1.0  | registered |
+| `providerVolumes.delete`   | mutation | `compute:volumes:manage` @ `compute-provider-volume` | v1.0  | registered |
+
+### `providerSnapshots` (vps)
+
+| Method                      | Kind     | Authorization                                          | Phase | Status     |
+| --------------------------- | -------- | ------------------------------------------------------ | ----- | ---------- |
+| `providerSnapshots.list`    | read     | `compute:volumes:read` @ `compute-tenant` + items      | v1.0  | registered |
+| `providerSnapshots.get`     | read     | `compute:volumes:read` @ `compute-provider-snapshot`   | v1.0  | registered |
+| `providerSnapshots.delete`  | mutation | `compute:volumes:manage` @ `compute-provider-snapshot` | v1.0  | registered |
+| `providerSnapshots.restore` | mutation | `compute:volumes:manage` @ `compute-provider-snapshot` | v1.0  | registered |
+
+### `providerAddresses` (vps)
+
+| Method                       | Kind     | Authorization                                           | Phase | Status     |
+| ---------------------------- | -------- | ------------------------------------------------------- | ----- | ---------- |
+| `providerAddresses.create`   | mutation | `compute:addresses:manage` @ `compute-provider-address` | v1.0  | registered |
+| `providerAddresses.list`     | read     | `compute:addresses:read` @ `compute-tenant` + items     | v1.0  | registered |
+| `providerAddresses.get`      | read     | `compute:addresses:read` @ `compute-provider-address`   | v1.0  | registered |
+| `providerAddresses.assign`   | mutation | `compute:addresses:manage` @ `compute-provider-address` | v1.0  | registered |
+| `providerAddresses.unassign` | mutation | `compute:addresses:manage` @ `compute-provider-address` | v1.0  | registered |
+| `providerAddresses.delete`   | mutation | `compute:addresses:manage` @ `compute-provider-address` | v1.0  | registered |
+
+### `certificates` (vps)
+
+| Method                | Kind     | Authorization                                                  | Phase | Status     |
+| --------------------- | -------- | -------------------------------------------------------------- | ----- | ---------- |
+| `certificates.create` | mutation | `compute:certificates:manage` @ `compute-provider-certificate` | v1.0  | registered |
+| `certificates.list`   | read     | `compute:certificates:read` @ `compute-tenant` + items         | v1.0  | registered |
+| `certificates.get`    | read     | `compute:certificates:read` @ `compute-provider-certificate`   | v1.0  | registered |
+| `certificates.delete` | mutation | `compute:certificates:manage` @ `compute-provider-certificate` | v1.0  | registered |
+
+### `loadBalancers` (vps)
+
+| Method                 | Kind     | Authorization                                                      | Phase | Status     |
+| ---------------------- | -------- | ------------------------------------------------------------------ | ----- | ---------- |
+| `loadBalancers.create` | mutation | `compute:load-balancers:manage` @ `compute-provider-load-balancer` | v1.0  | registered |
+| `loadBalancers.list`   | read     | `compute:load-balancers:read` @ `compute-tenant` + items           | v1.0  | registered |
+| `loadBalancers.get`    | read     | `compute:load-balancers:read` @ `compute-provider-load-balancer`   | v1.0  | registered |
+| `loadBalancers.update` | mutation | `compute:load-balancers:manage` @ `compute-provider-load-balancer` | v1.0  | registered |
+| `loadBalancers.delete` | mutation | `compute:load-balancers:manage` @ `compute-provider-load-balancer` | v1.0  | registered |
+
+### `dnsZones` (vps)
+
+| Method            | Kind     | Authorization                                      | Phase | Status     |
+| ----------------- | -------- | -------------------------------------------------- | ----- | ---------- |
+| `dnsZones.create` | mutation | `compute:dns:manage` @ `compute-provider-dns-zone` | v1.0  | registered |
+| `dnsZones.list`   | read     | `compute:dns:read` @ `compute-tenant` + items      | v1.0  | registered |
+| `dnsZones.get`    | read     | `compute:dns:read` @ `compute-provider-dns-zone`   | v1.0  | registered |
+| `dnsZones.delete` | mutation | `compute:dns:manage` @ `compute-provider-dns-zone` | v1.0  | registered |
+
+### `dnsRecords` (vps)
+
+| Method              | Kind     | Authorization                                      | Phase | Status     |
+| ------------------- | -------- | -------------------------------------------------- | ----- | ---------- |
+| `dnsRecords.create` | mutation | `compute:dns:manage` @ `compute-provider-dns-zone` | v1.0  | registered |
+| `dnsRecords.list`   | read     | `compute:dns:read` @ `compute-provider-dns-zone`   | v1.0  | registered |
+| `dnsRecords.get`    | read     | `compute:dns:read` @ `compute-provider-dns-zone`   | v1.0  | registered |
+| `dnsRecords.update` | mutation | `compute:dns:manage` @ `compute-provider-dns-zone` | v1.0  | registered |
+| `dnsRecords.delete` | mutation | `compute:dns:manage` @ `compute-provider-dns-zone` | v1.0  | registered |
 
 ### `kubernetesClusters` (kubernetes)
 
@@ -388,6 +482,28 @@ Every call is authenticated (except public methods), refused before any database
 | `kubernetesNodePools.list`   | read     | `compute:kubernetes:read` @ `compute-kubernetes-cluster`   | v1.0  | registered |
 | `kubernetesNodePools.update` | mutation | `compute:kubernetes:update` @ `compute-kubernetes-cluster` | v1.0  | registered |
 | `kubernetesNodePools.delete` | mutation | `compute:kubernetes:update` @ `compute-kubernetes-cluster` | v1.0  | registered |
+
+### `cloudResources` (cloud-resources)
+
+| Method                    | Kind     | Authorization                                               | Phase | Status  |
+| ------------------------- | -------- | ----------------------------------------------------------- | ----- | ------- |
+| `cloudResources.kinds`    | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | planned |
+| `cloudResources.catalog`  | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | planned |
+| `cloudResources.signals`  | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | planned |
+| `cloudResources.create`   | mutation | `compute:cloud-resources:create` @ `compute-cloud-resource` | v1.0  | planned |
+| `cloudResources.list`     | read     | `compute:cloud-resources:read` @ `compute-tenant` + items   | v1.0  | planned |
+| `cloudResources.get`      | read     | `compute:cloud-resources:read` @ `compute-cloud-resource`   | v1.0  | planned |
+| `cloudResources.update`   | mutation | `compute:cloud-resources:update` @ `compute-cloud-resource` | v1.0  | planned |
+| `cloudResources.delete`   | mutation | `compute:cloud-resources:delete` @ `compute-cloud-resource` | v1.0  | planned |
+| `cloudResources.discover` | read     | `compute:cloud-resources:read` @ `compute-tenant`           | v1.0  | planned |
+| `cloudResources.adopt`    | mutation | `compute:cloud-resources:create` @ `compute-cloud-resource` | v1.0  | planned |
+| `cloudResources.release`  | mutation | `compute:cloud-resources:delete` @ `compute-cloud-resource` | v1.0  | planned |
+
+### `kubernetesSubstrates` (kubernetes)
+
+| Method                     | Kind | Authorization                                | Phase | Status     |
+| -------------------------- | ---- | -------------------------------------------- | ----- | ---------- |
+| `kubernetesSubstrates.get` | read | `compute:kubernetes:read` @ `compute-tenant` | v1.0  | registered |
 
 ### `commandBatches` (quorum)
 

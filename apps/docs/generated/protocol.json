@@ -949,6 +949,68 @@
         ]
       },
       {
+        "name": "CloudSection",
+        "description": "",
+        "fields": [
+          {
+            "name": "provider",
+            "number": 1,
+            "type": "string",
+            "label": "",
+            "description": "\"aws\"."
+          },
+          {
+            "name": "instance_id",
+            "number": 2,
+            "type": "string",
+            "label": "",
+            "description": "e.g. \"i-0123456789abcdef0\"."
+          },
+          {
+            "name": "instance_type",
+            "number": 3,
+            "type": "string",
+            "label": "",
+            "description": "e.g. \"p5.48xlarge\", \"c7i.metal-48xl\"."
+          },
+          {
+            "name": "region",
+            "number": 4,
+            "type": "string",
+            "label": "",
+            "description": "e.g. \"us-east-1\"."
+          },
+          {
+            "name": "zone",
+            "number": 5,
+            "type": "string",
+            "label": "",
+            "description": "The zone name, e.g. \"us-east-1a\" (names map to physical zones per account)."
+          },
+          {
+            "name": "zone_id",
+            "number": 6,
+            "type": "string",
+            "label": "",
+            "description": "The zone id, e.g. \"use1-az4\" (the same physical zone in every account)."
+          },
+          {
+            "name": "lifecycle",
+            "number": 7,
+            "type": "string",
+            "label": "",
+            "description": "\"on-demand\", \"spot\" or \"capacity-block\"; empty when the metadata names something else."
+          },
+          {
+            "name": "efa_devices",
+            "number": 8,
+            "type": "uint32",
+            "label": "",
+            "description": "Elastic Fabric Adapter devices (/sys/class/infiniband/* bound to the efa driver)."
+          }
+        ]
+      },
+      {
         "name": "ImagesSection",
         "description": "",
         "fields": [
@@ -1117,6 +1179,116 @@
             "type": "Tpm",
             "label": "",
             "description": "Absent when no TPM is present."
+          },
+          {
+            "name": "cloud",
+            "number": 14,
+            "type": "CloudInstance",
+            "label": "",
+            "description": "(v0.3) The cloud instance this system is, from the provider's metadata service: absent off a\ncloud, and when the service did not answer. Inventory only: it is not signed, so nothing ever\nuses it as an identity (hardware_key and node join ignore it)."
+          }
+        ]
+      },
+      {
+        "name": "CloudInstance",
+        "description": "What a cloud's instance metadata service reports about the instance (DigitalOcean:\n169.254.169.254/metadata/v1.json, read only on a Droplet). Never user data, vendor data, keys\nor tokens.",
+        "fields": [
+          {
+            "name": "provider",
+            "number": 1,
+            "type": "string",
+            "label": "",
+            "description": "\"digitalocean\"."
+          },
+          {
+            "name": "instance_id",
+            "number": 2,
+            "type": "string",
+            "label": "",
+            "description": "The provider's instance id (the Droplet id, in decimal)."
+          },
+          {
+            "name": "region",
+            "number": 3,
+            "type": "string",
+            "label": "",
+            "description": "Region slug, e.g. \"nyc3\"."
+          },
+          {
+            "name": "tags",
+            "number": 4,
+            "type": "string",
+            "label": "repeated",
+            "description": "Sorted, without duplicates."
+          },
+          {
+            "name": "interfaces",
+            "number": 5,
+            "type": "CloudInterface",
+            "label": "repeated",
+            "description": "Sorted by network, then MAC."
+          }
+        ]
+      },
+      {
+        "name": "CloudInterface",
+        "description": "",
+        "fields": [
+          {
+            "name": "network",
+            "number": 1,
+            "type": "string",
+            "label": "",
+            "description": "\"public\" or \"private\" (the VPC)."
+          },
+          {
+            "name": "mac",
+            "number": 2,
+            "type": "string",
+            "label": "",
+            "description": "Lowercase."
+          },
+          {
+            "name": "ipv4_address",
+            "number": 3,
+            "type": "string",
+            "label": "",
+            "description": ""
+          },
+          {
+            "name": "ipv4_netmask",
+            "number": 4,
+            "type": "string",
+            "label": "",
+            "description": ""
+          },
+          {
+            "name": "ipv4_gateway",
+            "number": 5,
+            "type": "string",
+            "label": "",
+            "description": ""
+          },
+          {
+            "name": "ipv6_address",
+            "number": 6,
+            "type": "string",
+            "label": "",
+            "description": ""
+          },
+          {
+            "name": "ipv6_prefix_length",
+            "number": 7,
+            "type": "uint32",
+            "label": "",
+            "description": "0 = no IPv6."
+          },
+          {
+            "name": "ipv6_gateway",
+            "number": 8,
+            "type": "string",
+            "label": "",
+            "description": ""
           }
         ]
       },
@@ -4119,6 +4291,13 @@
             "type": "InstanceVolume",
             "label": "repeated",
             "description": "(v1.1, agent memory) Persistent volumes to attach (InstancesSection.volumes)."
+          },
+          {
+            "name": "aws_role",
+            "number": 18,
+            "type": "string",
+            "label": "",
+            "description": "(AWS A7) The IAM role ARN the guest's metadata endpoint serves AWS credentials for. bcd exchanges\nthe instance's workload token (audience sts.amazonaws.com) with STS AssumeRoleWithWebIdentity\n(RoleSessionName bc-<instance_id>) and serves the result on the AWS-compatible\n/latest/meta-data/iam/security-credentials/ paths. Empty: no AWS credentials are served."
           }
         ]
       },

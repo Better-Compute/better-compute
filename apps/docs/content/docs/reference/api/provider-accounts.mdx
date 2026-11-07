@@ -7,23 +7,33 @@ description: "Provider accounts connect a tenant to an external provider registe
 
 Provider accounts connect a tenant to an external provider registered with `vps({ providers })`, such as a cloud or a dedicated-server host. Each account's `config` is validated by its provider's manifest and holds secret references, never secret values. Provider pools create instances through an account, and `bootstrap` turns one of its machines into a bcd host. See [Providers](/docs/guides/vps/providers).
 
-All 13 methods are served by @better-compute/server 0.3.0.
+All 23 methods are served by @better-compute/server 0.3.0.
 
-| Method                                    | Kind     | Authorization                                                                                        | Phase | Status     |
-| ----------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------- | ----- | ---------- |
-| [`create`](#create)                       | mutation | `compute:providers:manage` @ `compute-fleet` or `compute:providers:manage` @ `compute-tenant`        | v0.3  | registered |
-| [`list`](#list)                           | read     | `compute:providers:read` @ `compute-tenant` + items                                                  | v0.3  | registered |
-| [`federationSetup`](#federationsetup)     | read     | `compute:providers:read` @ `compute-tenant`                                                          | v1.0  | registered |
-| [`get`](#get)                             | read     | `compute:providers:read` @ `compute-provider-account`                                                | v0.3  | registered |
-| [`offers`](#offers)                       | read     | `compute:providers:read` @ `compute-provider-account`                                                | v0.3  | registered |
-| [`update`](#update)                       | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v0.3  | registered |
-| [`delete`](#delete)                       | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v0.3  | registered |
-| [`bootstrap`](#bootstrap)                 | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v0.3  | registered |
-| [`machines`](#machines)                   | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
-| [`discover`](#discover)                   | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v1.0  | registered |
-| [`reservations`](#reservations)           | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
-| [`bindReservation`](#bindreservation)     | mutation | `compute:providers:manage` @ `compute-provider-account` or `compute:flavors:manage` @ `compute-pool` | v1.0  | registered |
-| [`unbindReservation`](#unbindreservation) | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v1.0  | registered |
+| Method                                          | Kind     | Authorization                                                                                        | Phase | Status     |
+| ----------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------- | ----- | ---------- |
+| [`create`](#create)                             | mutation | `compute:providers:manage` @ `compute-fleet` or `compute:providers:manage` @ `compute-tenant`        | v0.3  | registered |
+| [`list`](#list)                                 | read     | `compute:providers:read` @ `compute-tenant` + items                                                  | v0.3  | registered |
+| [`federationSetup`](#federationsetup)           | read     | `compute:providers:read` @ `compute-tenant`                                                          | v1.0  | registered |
+| [`connectSetup`](#connectsetup)                 | read     | `compute:providers:read` @ `compute-tenant`                                                          | v1.0  | registered |
+| [`connect`](#connect)                           | mutation | `compute:providers:manage` @ `compute-fleet` or `compute:providers:manage` @ `compute-tenant`        | v1.0  | registered |
+| [`get`](#get)                                   | read     | `compute:providers:read` @ `compute-provider-account`                                                | v0.3  | registered |
+| [`offers`](#offers)                             | read     | `compute:providers:read` @ `compute-provider-account`                                                | v0.3  | registered |
+| [`check`](#check)                               | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
+| [`findings`](#findings)                         | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
+| [`billing`](#billing)                           | read     | `compute:providers:manage` @ `compute-provider-account`                                              | v1.0  | registered |
+| [`update`](#update)                             | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v0.3  | registered |
+| [`delete`](#delete)                             | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v0.3  | registered |
+| [`bootstrap`](#bootstrap)                       | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v0.3  | registered |
+| [`machines`](#machines)                         | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
+| [`discover`](#discover)                         | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v1.0  | registered |
+| [`reservations`](#reservations)                 | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
+| [`bindReservation`](#bindreservation)           | mutation | `compute:providers:manage` @ `compute-provider-account` or `compute:flavors:manage` @ `compute-pool` | v1.0  | registered |
+| [`unbindReservation`](#unbindreservation)       | mutation | `compute:providers:manage` @ `compute-provider-account`                                              | v1.0  | registered |
+| [`reservationOfferings`](#reservationofferings) | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
+| [`purchaseReservation`](#purchasereservation)   | mutation | `compute:providers:purchase` @ `compute-provider-account`                                            | v1.0  | registered |
+| [`purchases`](#purchases)                       | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
+| [`clusters`](#clusters)                         | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
+| [`purchaseProposals`](#purchaseproposals)       | read     | `compute:providers:read` @ `compute-provider-account`                                                | v1.0  | registered |
 
 ## create
 
@@ -101,11 +111,66 @@ Returns what a tenant sets up at its cloud to give a provider account keyless si
 | `provider` | string | yes      | at most 64 characters; matches `^[a-z][a-z0-9-]{0,63}$`      |
 | `name`     | string | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$` |
 
+## connectSetup
+
+`POST /api/compute/providerAccounts/connectSetup`
+
+Returns the provider's authorization URL for connecting an account with OAuth (`{ authorizeUrl }`): the person's browser goes there, signs in at the provider and comes back to `redirectUri` with a code and the caller's `state`. See [Connect a DigitalOcean account](/docs/operations/digitalocean).
+
+- **Input.** `tenantId`, `provider`, `redirectUri` (one the platform registered for the provider's OAuth app, exactly as written) and `state` (16 to 256 URL-safe characters: the caller's anti-forgery value, which it keeps and compares on the way back). Nothing is stored and no provider is called.
+- **IAM.** Decided as `compute:providers:read` on the tenant.
+- **Errors.** `UNSUPPORTED` for a provider without a connect flow (DigitalOcean has one only when the host registers at least one redirect URI). `INVALID_INPUT` for an unknown provider, an invalid `state`, or a redirect URI the platform did not register.
+
+- **Kind:** read
+- **Authorization:** `compute:providers:read` @ `compute-tenant`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field         | Type   | Required | Constraints                                                |
+| ------------- | ------ | -------- | ---------------------------------------------------------- |
+| `tenantId`    | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `provider`    | string | yes      | at most 64 characters; matches `^[a-z][a-z0-9-]{0,63}$`    |
+| `redirectUri` | string | yes      | at most 2048 characters                                    |
+| `state`       | string | yes      | matches `^[A-Za-z0-9._~-]{16,256}$`                        |
+
+## connect
+
+`POST /api/compute/providerAccounts/connect`
+
+Stores a provider account whose credential comes from an OAuth authorization code; returns the account, as `create` does.
+
+- **Input.** `tenantId`, `provider`, `name`, `code` (the code the redirect carried; single use), `redirectUri` (the one `connectSetup` was given), `config` (the rest of the account's config, without the credential field: naming it is `INVALID_INPUT`) and an optional `idempotencyKey`.
+- **Flow.** With no transaction open, the provider trades the code for a credential (DigitalOcean: a refresh token), which is sealed in the deployment's secret store for the tenant and named in the provider's credential field (`refreshToken`); the account's config is then checked as in `create` and the account stored. The credential is never stored elsewhere, logged or answered. When the account is not stored (a refused check, a name the tenant already uses, a failed transaction, or a request that never reaches the store) the sealed credential is deleted again.
+- **Idempotency.** As `create`: with a key, a repeat returns the stored account without spending another code; a different `provider` or `name` under the same key is `CONFLICT`. A retry without the key needs a new code.
+- **IAM.** Decided as `compute:providers:manage` on the tenant.
+- **Errors.** `UNSUPPORTED` for a provider without a connect flow. `INVALID_INPUT` for a code the provider refuses, a redirect URI the platform did not register, or a config naming the credential field. `INVALID_CONFIG` when the host runs no secret broker, or as in `create`. `CONFLICT` for a name the tenant already uses.
+
+- **Kind:** mutation
+- **Authorization:** `compute:providers:manage` @ `compute-fleet` or `compute:providers:manage` @ `compute-tenant`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field            | Type   | Required | Constraints                                                    |
+| ---------------- | ------ | -------- | -------------------------------------------------------------- |
+| `tenantId`       | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`     |
+| `provider`       | string | yes      | at most 64 characters; matches `^[a-z][a-z0-9-]{0,63}$`        |
+| `name`           | string | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`   |
+| `code`           | string | yes      | matches `^[A-Za-z0-9._~+/=-]{1,512}$`                          |
+| `redirectUri`    | string | yes      | at most 2048 characters                                        |
+| `config`         | any    |          | default `{}`                                                   |
+| `idempotencyKey` | string |          | at most 128 characters; matches `^[A-Za-z0-9._~:/+=-]{1,128}$` |
+
 ## get
 
 `POST /api/compute/providerAccounts/get`
 
 Returns one provider account of the tenant.
+
+When its provider describes it, the account carries `onboarding`: what the tenant still sets up at its cloud. An `aws` account shows its `mode` (`assume-role`, `web-identity`, `access-key` or `ambient`); a role the control plane assumes also shows the platform-assigned `externalId` its trust must require and, when the host names it, the `platformPrincipalArn` to trust; a keyless (`webIdentityRoleArn`) account shows the `subject` and `audience` its role must trust. It never holds a secret.
 
 An account of another tenant, or none, is `NOT_FOUND`.
 
@@ -147,6 +212,75 @@ The optional `query` filters by `kind` (`metal` or `vps`), `region`, `gpuModel`,
 | `query.minGpus`      | integer               |          | 0-64                                                               |
 | `query.minVcpu`      | integer               |          | 0-1024                                                             |
 | `query.minMemoryGiB` | integer               |          | 0-16384                                                            |
+
+## check
+
+`POST /api/compute/providerAccounts/check`
+
+Asks the provider what a stored account's credential may do, read-only at the provider; returns `{ accountId, provider, checkedAt, ok, missing, optional?, details?, rateLimit? }`.
+
+- **Output.** `ok` is true when the credential may do everything instances need (`missing` is empty). `missing` lists the permissions instances need that it lacks, `optional` those only optional features need (costs, metrics, security findings), in the provider's own names (DigitalOcean: token scopes such as `droplet:read`). `details` is the provider's own detail (DigitalOcean: the account's status and per-family results), never a secret. `rateLimit` is the credential's request rate limit at the provider as its answers to the check counted it, `{ limit, remaining, resetAt? }` (epoch ms; DigitalOcean: the token's hourly limit, which every process using the token spends from); it is left out when the provider does not report one or reports one that is not well-formed.
+- **Reads.** The stored config is validated and its secret references checked again, exactly as for a client. A provider with no probe but an account check answers `ok` when the check passes. The call stops reaching the provider when the request is cancelled.
+- **IAM.** Decided as `compute:providers:read` on the provider account.
+- **Errors.** `NOT_FOUND` for a missing account. `UNSUPPORTED` for a provider that cannot check an account. `INVALID_CONFIG` when the provider refuses the credential outright (a revoked DigitalOcean token, or an OAuth grant that must be connected again, `details.reason` `oauthGrant`); `UNAVAILABLE` or `RATE_LIMITED` when the provider cannot be asked (an OAuth refresh token another process may still be rotating is `UNAVAILABLE`, `oauthRace`, the first time).
+
+- **Kind:** read
+- **Authorization:** `compute:providers:read` @ `compute-provider-account`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field       | Type   | Required | Constraints                                                        |
+| ----------- | ------ | -------- | ------------------------------------------------------------------ |
+| `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `accountId` | string | yes      | at most 58 characters; matches `^pacct_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
+## findings
+
+`POST /api/compute/providerAccounts/findings`
+
+Returns what the provider says an operator should look at on a stored account (DigitalOcean: its latest security scan), read-only at the provider: `{ accountId, provider, readAt, items }`.
+
+- **Items.** Each is `{ id, kind, severity, title, detail?, at?, group? }`: `id` is stable across reads (the provider's rule id) and unique in one answer, `kind` says what it is about (`security`), `severity` is `critical`, `warning` or `info`, and `group` joins findings that read as one. Malformed findings and repeated ids are left out, and at most 200 are kept. A part of the account the credential may not read is itself a finding (DigitalOcean without `security:read`: `security:unreadable`), never an empty answer that looks clean. Never a secret.
+- **Reads.** With the account's own credential, as `check`; the call stops reaching the provider when the request is cancelled. The admin panel reads it at most every ten minutes per account.
+- **IAM.** Decided as `compute:providers:read` on the provider account.
+- **Errors.** `NOT_FOUND` for a missing account; `UNSUPPORTED` for a provider that reports no findings; the provider's errors as in `check`.
+
+- **Kind:** read
+- **Authorization:** `compute:providers:read` @ `compute-provider-account`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field       | Type   | Required | Constraints                                                        |
+| ----------- | ------ | -------- | ------------------------------------------------------------------ |
+| `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `accountId` | string | yes      | at most 58 characters; matches `^pacct_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
+## billing
+
+`POST /api/compute/providerAccounts/billing`
+
+Returns the account's own bill at its provider (DigitalOcean: its balance, month to date, invoices and billing history), read-only at the provider: `{ accountId, provider, readAt, currency, monthToDateMicros?, balanceMicros?, monthToDateUsageMicros?, generatedAt?, invoices, history }`. This is what the provider charges the account, not what compute meters; the platform's margins and leaks are `billing.margins` and `billing.leaks`.
+
+- **Output.** Amounts are integer micros of `currency`. `balanceMicros` is the balance as of the last invoice (negative is credit). `invoices` (`{ id, period, amountMicros }`, `period` `YYYY-MM`) are the final invoices, newest first, at most 120; `history` (`{ at, type, description, amountMicros }`) the newest billing history entries (invoices, payments, credits), newest first, at most 50. Malformed entries are left out and text is bounded. Never a secret.
+- **Reads.** With the account's own credential (DigitalOcean: scope `billing:read`), as `check`; the call stops reaching the provider when the request is cancelled.
+- **IAM.** Decided as `compute:providers:manage` on the provider account: the history names payments, so reading the bill takes the right to manage the account, not only to read it.
+- **Errors.** `NOT_FOUND` for a missing account; `UNSUPPORTED` for a provider that cannot read an account's bill; `ACCESS_DENIED` when the credential may not read billing; the provider's other errors as in `check`.
+
+- **Kind:** read
+- **Authorization:** `compute:providers:manage` @ `compute-provider-account`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field       | Type   | Required | Constraints                                                        |
+| ----------- | ------ | -------- | ------------------------------------------------------------------ |
+| `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `accountId` | string | yes      | at most 58 characters; matches `^pacct_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## update
 
@@ -318,7 +452,7 @@ Makes a reservation usable from a provider pool: creates a flavor in the pool wh
 | ---------------- | ------ | -------- | ------------------------------------------------------------------ |
 | `tenantId`       | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
 | `accountId`      | string | yes      | at most 58 characters; matches `^pacct_[0-9a-hjkmnp-tv-z]{26,52}$` |
-| `reservationId`  | string | yes      | at most 300 characters; matches `^[A-Za-z0-9._/-]{1,300}$`         |
+| `reservationId`  | string | yes      | at most 300 characters; matches `^[A-Za-z0-9._/:-]{1,300}$`        |
 | `poolId`         | string | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$`  |
 | `flavorName`     | string |          | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`       |
 | `idempotencyKey` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
@@ -342,4 +476,127 @@ The flavor `bindReservation` created is deleted if no instance uses it, and arch
 | --------------- | ------ | -------- | ------------------------------------------------------------------ |
 | `tenantId`      | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
 | `accountId`     | string | yes      | at most 58 characters; matches `^pacct_[0-9a-hjkmnp-tv-z]{26,52}$` |
-| `reservationId` | string | yes      | at most 300 characters; matches `^[A-Za-z0-9._/-]{1,300}$`         |
+| `reservationId` | string | yes      | at most 300 characters; matches `^[A-Za-z0-9._/:-]{1,300}$`        |
+
+## reservationOfferings
+
+`POST /api/compute/providerAccounts/reservationOfferings`
+
+Lists capacity the account could buy ahead of time; returns `{ items }`, each `{ id, instanceType, zone, count, startsAt, endsAt, upfrontPrice, currency }`. A provider read: nothing is bought.
+
+- **Input.** `query` names the `instanceType`, `count` (1 to 1000) and `durationHours` (1 to 4368), optionally bounded by `earliestStart` and `latestStart` (epoch ms).
+- **Who.** Root (platform) tenant only, on the platform's own provider accounts, like `purchaseReservation`: anyone else, and root on a tenant's account, is `ACCESS_DENIED`. Decided as `compute:providers:read` on the provider account.
+- **Provider calls.** The call reaches the provider live, with no transaction open.
+- **AWS.** The items are On-Demand Capacity Reservations the account could create now, in each of its zones that offers the type (`upfrontPrice` 0: an ODCR bills on-demand rates for every reserved instance while it is active, used or not), and Capacity Blocks for ML on sale in the account's zones (1 to 64 instances). Offering ids describe themselves: `cb:<zone>/<type>/<count>/<hours>/<start epoch seconds>/<upfront cents>/<offering id>` for a block, `odcr:<zone>/<type>/<count>/<hours>` for an ODCR.
+- **Errors.** `NOT_FOUND` for a missing account. `UNSUPPORTED` when the provider sells nothing ahead of time. `INVALID_INPUT` for an instance type the provider does not know.
+
+- **Kind:** read
+- **Authorization:** `compute:providers:read` @ `compute-provider-account`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field                 | Type    | Required | Constraints                                                        |
+| --------------------- | ------- | -------- | ------------------------------------------------------------------ |
+| `tenantId`            | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `accountId`           | string  | yes      | at most 58 characters; matches `^pacct_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `query`               | object  | yes      |                                                                    |
+| `query.instanceType`  | string  | yes      | at most 64 characters; matches `^[A-Za-z0-9._-]{1,64}$`            |
+| `query.count`         | integer | yes      | 1-1000                                                             |
+| `query.durationHours` | integer | yes      | 1-4368                                                             |
+| `query.earliestStart` | integer |          | 0-140737488355328                                                  |
+| `query.latestStart`   | integer |          | 0-140737488355328                                                  |
+
+## purchaseReservation
+
+`POST /api/compute/providerAccounts/purchaseReservation`
+
+Buys one offering; returns the purchase `{ id, accountId, offeringId, state, attempts, reservationId?, reservation?, error?, createdAt, updatedAt }`. **This spends money.**
+
+- **Who.** Root (platform) tenant only, decided as `compute:providers:purchase` on the provider account; anyone else is `ACCESS_DENIED`, and so is a purchase from a provider account the root tenant does not own (capacity is bought only in the platform's own accounts).
+- **Confirmation.** The request must carry `confirm: true`, else `CONFIRMATION_REQUIRED` (`details.reason` `confirm-spend`, with `offeringId` and `accountId`); retry with `confirm: true` and the same `idempotencyKey`. An agent acting for a person is held back until the person approves; the approval names what is bought (on AWS: instance type and count, zone, start and end, and the up-front price, or that an ODCR bills on-demand rates for its reserved instance-hours).
+- **Idempotency.** `idempotencyKey` is required and scoped to (tenant, caller identity): a retry with the same key returns the same purchase and never buys twice, including two requests racing on one key. The same key for another account or offering is `CONFLICT`.
+- **Exactly once.** The purchase is recorded in the request's transaction and bought by the `vps.purchases` worker outside any transaction, with a key of its own that the provider makes idempotent. An attempt that ends without the provider's answer (a timeout, a dropped connection) is retried with that key, and the provider is told an earlier attempt may have bought: on AWS a Capacity Block (whose purchase call has no idempotency token) is then looked for by what it is, and is not bought again until 15 minutes passed without it showing.
+- **States.** `state` moves `requested` → `purchasing` → `purchased` (the reservation bought, which the reservations worker then lists so it can be bound), `failed` (`error`: the provider refused, nothing was bought) or `unknown` (the attempts ran out while one may have bought: check the account's reservations). A mutation's poll settles on any of the last three. Events: `provider.purchase.requested`, `completed`, `failed`, `unknown`.
+- **Account gate.** The provider must be able to buy for this account: an AWS account must set `allowPurchases` (off by default) and be a platform account. Otherwise the request is `UNSUPPORTED` (`details.reason` `purchases-unavailable`) and nothing is recorded.
+- **AWS.** `offeringId` is an id `reservationOfferings` listed (`cb:…` or `odcr:…`). A Capacity Block is bought only while EC2 still lists it at no more than the price in its id (else `failed` with `CONFLICT`, `price-changed`, or `CAPACITY_UNAVAILABLE`, `offering-gone`).
+
+- **Kind:** mutation
+- **Authorization:** `compute:providers:purchase` @ `compute-provider-account`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field            | Type    | Required | Constraints                                                        |
+| ---------------- | ------- | -------- | ------------------------------------------------------------------ |
+| `tenantId`       | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `accountId`      | string  | yes      | at most 58 characters; matches `^pacct_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `offeringId`     | string  | yes      | at most 300 characters; matches `^[A-Za-z0-9._/:-]{1,300}$`        |
+| `idempotencyKey` | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `confirm`        | boolean |          |                                                                    |
+
+## purchases
+
+`POST /api/compute/providerAccounts/purchases`
+
+Returns the account's purchases, newest first (at most 500), as `items`; root (platform) tenant only, decided as `compute:providers:read` on the provider account.
+
+- **Kind:** read
+- **Authorization:** `compute:providers:read` @ `compute-provider-account`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field       | Type   | Required | Constraints                                                        |
+| ----------- | ------ | -------- | ------------------------------------------------------------------ |
+| `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `accountId` | string | yes      | at most 58 characters; matches `^pacct_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
+## clusters
+
+`POST /api/compute/providerAccounts/clusters`
+
+Lists the managed Kubernetes clusters the account's provider can see, whoever created them, live from the provider; returns `items`. A pool's `policy.kubernetes` names one of them to join its machines to it (for EKS, `policy.kubernetes.eks`).
+
+- **Input.** `tenantId` and `accountId`. Nothing is stored; no transaction is open while the provider is read, and the listing has 55 seconds.
+- **Output.** Each item has `name`, `id` (on EKS `<region>/<name>`), `location`, `state` (`pending`, `ready`, `updating`, `deleting`, `error`), `version` and `endpoint` when the provider reports them, and `managed` (`true` when better-compute created it: on AWS the tag `better-compute:managed=true`). A ready EKS cluster also has `eks`: `{ name, apiServerEndpoint, certificateAuthority, cidr }`, the nodeadm settings `k8s-join` mode `eks` takes. Only these plain fields are returned: no token or kubeconfig. On AWS at most 100 clusters of the account's region are listed.
+- **IAM.** Decided as `compute:providers:read` on the account.
+- **Errors.** An account of another tenant, or none, is `NOT_FOUND`. `UNSUPPORTED` when the provider cannot list clusters. Provider failures pass through (`ACCESS_DENIED` when the account's identity may not list or describe clusters, or fails the account guards; `UNAVAILABLE` or `RATE_LIMITED`, retryable).
+
+- **Kind:** read
+- **Authorization:** `compute:providers:read` @ `compute-provider-account`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field       | Type   | Required | Constraints                                                        |
+| ----------- | ------ | -------- | ------------------------------------------------------------------ |
+| `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `accountId` | string | yes      | at most 58 characters; matches `^pacct_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
+## purchaseProposals
+
+`POST /api/compute/providerAccounts/purchaseProposals`
+
+Returns the account's purchase proposals, newest first (at most 500), as `items`, each `{ id, accountId, reservationId, poolId, tenantId, state, reason?, startsAt, endsAt, query?, offering?, description?, error?, attempts, purchase?, createdAt, updatedAt }`. Nothing is bought: a proposal is capacity a person may decide to buy with `purchaseReservation`.
+
+- **Who.** Root (platform) tenant only, decided as `compute:providers:read` on the provider account; anyone else is `ACCESS_DENIED`. Proposals name other tenants' reservations and what the platform could spend.
+- **Where they come from.** The `vps.purchase-proposals` worker (every 15 minutes, `vps({ purchaseProposals: { every } })`) looks at capacity reservations that are `pending` on a provider pool of one of the platform's own provider accounts and start within the next 48 hours. It asks the provider (`reservationOfferings`, a read) for whole machines of the pool's GPU flavor that wastes the fewest GPUs (a plain offer: not a reservation's or a Spot one), starting in the day before the reservation (not before now) and lasting until it ends, in whole days up to 14 days and whole weeks up to 182 days. It proposes the covering offering (it starts after now, no later than the reservation, and ends no earlier) that starts latest, then the cheapest. Each reservation gets one proposal; `provider.purchase.proposed` is published when an offering is proposed.
+- **States.** `proposed` (`offering`, its `description`, and `purchase { id, state }` once root bought it), `none` (`reason`: `no-flavor` when the pool has no GPU flavor to buy, `no-offering` when nothing covers the reservation, `unsupported` when the provider sells nothing ahead of time), or `error` (`error { code, message }`: the provider read failed; tried again every 15 minutes, at most 5 attempts in all).
+- **AWS.** The proposed offering is a Capacity Block for ML (`cb:…`); an ODCR, which starts at once, is never proposed. Buy it with `purchaseReservation` and `confirm: true` (the account must set `allowPurchases`); bind the bought reservation to the pool with `bindReservation` once the reservations worker lists it.
+
+- **Kind:** read
+- **Authorization:** `compute:providers:read` @ `compute-provider-account`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field       | Type   | Required | Constraints                                                        |
+| ----------- | ------ | -------- | ------------------------------------------------------------------ |
+| `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `accountId` | string | yes      | at most 58 characters; matches `^pacct_[0-9a-hjkmnp-tv-z]{26,52}$` |

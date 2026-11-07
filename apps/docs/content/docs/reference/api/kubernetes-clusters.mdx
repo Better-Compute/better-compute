@@ -61,7 +61,7 @@ The cluster id derives from the tenant, the caller and `idempotencyKey`. A retry
 | `description`                      | string                                               |          | at most 256 characters                                                                      |
 | `nodePools`                        | list of object                                       |          | 0-10 items                                                                                  |
 | `nodePools[].name`                 | string                                               | yes      | at most 40 characters; matches `^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$`                          |
-| `nodePools[].machineType`          | string                                               | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9-]{0,62}$`                                  |
+| `nodePools[].machineType`          | string                                               | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9.-]{0,62}$`                                 |
 | `nodePools[].nodeCount`            | integer                                              | yes      | 0-1000                                                                                      |
 | `nodePools[].autoscaling`          | object                                               |          |                                                                                             |
 | `nodePools[].autoscaling.minNodes` | integer                                              | yes      | 0-1000                                                                                      |

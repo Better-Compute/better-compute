@@ -9,6 +9,15 @@
     "exports": ["."]
   },
   {
+    "name": "@better-compute/aws",
+    "directory": "packages/aws",
+    "description": "AWS platform services behind better-compute seams: Secrets Manager, Parameter Store, KMS, S3, EventBridge, SNS, SQS, Kinesis, Firehose, ACM Private CA, RDS IAM auth and CloudWatch EMF. No AWS SDK.",
+    "private": false,
+    "version": "0.1.0",
+    "release": "not released: not ready: the AWS platform services are still in progress",
+    "exports": ["."]
+  },
+  {
     "name": "@better-compute/aws-core",
     "directory": "packages/aws-core",
     "description": "Zero-dependency AWS plumbing for better-compute: SigV4 signing, endpoints, query and JSON protocol clients, a hardened XML reader and credential sources.",
@@ -40,6 +49,7 @@
       "./fleet",
       "./rollout",
       "./kubernetes",
+      "./cloud-resources",
       "./audit",
       "./observability",
       "./server",
@@ -75,6 +85,15 @@
     "name": "@better-compute/client",
     "directory": "packages/client",
     "description": "Typed, browser-safe client for the better-compute API.",
+    "private": false,
+    "version": "0.3.0",
+    "release": "released",
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/cloud-resources",
+    "directory": "packages/cloud-resources",
+    "description": "Managed data and platform services (databases, apps, functions) on provider accounts for better-compute: one governed, audited, metered resource API.",
     "private": false,
     "version": "0.3.0",
     "release": "released",
@@ -222,6 +241,15 @@
     "private": false,
     "version": "0.3.0",
     "release": "released",
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/provider-aws",
+    "directory": "packages/provider-aws",
+    "description": "Amazon EC2 provider for better-compute: instances through provider pools, offers, attach, and the IAM and trust policies an AWS account needs.",
+    "private": false,
+    "version": "0.3.0",
+    "release": "not released: not ready: the AWS program is still in progress (A1, emulator-tested only)",
     "exports": ["."]
   },
   {

@@ -42,7 +42,7 @@ Publishes `kubernetes.nodepool.created`. Decided as `compute:kubernetes:update` 
 | `tenantId`             | string                                               | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
 | `clusterId`            | string                                               | yes      | at most 56 characters; matches `^kcl_[0-9a-hjkmnp-tv-z]{26,52}$`   |
 | `name`                 | string                                               | yes      | at most 40 characters; matches `^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$` |
-| `machineType`          | string                                               | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9-]{0,62}$`         |
+| `machineType`          | string                                               | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9.-]{0,62}$`        |
 | `nodeCount`            | integer                                              | yes      | 0-1000                                                             |
 | `autoscaling`          | object                                               |          |                                                                    |
 | `autoscaling.minNodes` | integer                                              | yes      | 0-1000                                                             |
