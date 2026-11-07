@@ -194,6 +194,27 @@ describe('provider-aws list prices (Price List Query API)', () => {
     expect(pricing.queries.some((query) => query.NextToken !== undefined)).toBe(true);
   });
 
+  it('a repeated NextToken is a pagination loop, and the failure is not kept', async () => {
+    const { emu, impl, call } = await world();
+    const answer = (token: string) =>
+      new Response(JSON.stringify({ PriceList: [], NextToken: token, FormatVersion: 'aws_v1' }), {
+        status: 200,
+        headers: { 'content-type': 'application/x-amz-json-1.1' },
+      });
+    emu.register(/^api\.pricing\./, {
+      service: 'pricing',
+      protocol: 'json',
+      handle: () => answer('same'),
+    });
+    const looped = await impl.listPrices!({}, call()).catch((error: unknown) => error);
+    expect(isComputeError(looped, 'PROVIDER_ERROR')).toBe(true);
+    expect((looped as { details?: { reason?: string } }).details?.reason).toBe('pagination-loop');
+    // the failure is not kept: the next read asks again
+    const before = emu.calls('GetProducts').length;
+    await impl.listPrices!({}, call()).catch(() => undefined);
+    expect(emu.calls('GetProducts').length).toBeGreaterThan(before);
+  });
+
   it('is absent outside the commercial partition', async () => {
     const { impl } = await world('us-gov-west-1');
     expect(impl.listPrices).toBeUndefined();

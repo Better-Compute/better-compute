@@ -9,12 +9,14 @@ import {
   awsBilling,
   awsConfig,
   awsProvider,
+  costExplorerCosts,
   costMicros,
   usageTypeRegion,
   usageTypeService,
   validateAwsConfig,
   type AwsConfig,
 } from '@better-compute/provider-aws';
+import { jsonClient } from '@better-compute/aws-core';
 import { AwsEmulator, platformAccount } from './support/aws-emulator/index.js';
 import { CeEmulator, type CeLine } from './support/aws-emulator/ce.js';
 
@@ -54,6 +56,14 @@ async function world(overrides: Record<string, unknown> = { costs: 'region' }) {
   const today = emu.now();
   return { emu, ce, impl, read, today };
 }
+
+const callContext = (emu: AwsEmulator): CallContext => ({
+  idempotencyKey: 'costs:direct',
+  signal: new AbortController().signal,
+  clock: emu.clock,
+  secrets: { resolve: async () => '' },
+  log: quiet,
+});
 
 const line = (overrides: Partial<CeLine> = {}): CeLine => ({
   day: '2026-09-29',
@@ -349,6 +359,107 @@ describe('provider-aws costs (Cost Explorer)', () => {
     emu.failNext('GetCostAndUsage', 'AccessDeniedException');
     const denied = await read(today - 3 * DAY, today).catch((error: unknown) => error);
     expect(isComputeError(denied, 'ACCESS_DENIED')).toBe(true);
+  });
+
+  it('a later query failing caches nothing: the next read queries the whole day again', async () => {
+    const { emu, ce, read, today } = await world();
+    ce.lines.push(
+      line({ tags: { [instanceTag]: 'ins_a' } }),
+      line({ usageType: 'BoxUsage:c7i.large', cost: '0.5' }),
+      line({ recordType: 'Tax', usageType: '', cost: '0.11' }),
+    );
+    // the first query answers; the second fails
+    let calls = 0;
+    emu.beforeAction('GetCostAndUsage', () => {
+      if (++calls === 1) emu.failNext('GetCostAndUsage', 'AccessDeniedException');
+    });
+    const failed = await read(today - 3 * DAY, today).catch((error: unknown) => error);
+    expect(isComputeError(failed, 'ACCESS_DENIED')).toBe(true);
+    expect(ce.queries).toHaveLength(1);
+    // no partial day was kept: all three queries run again and the day comes out whole
+    const records = await read(today - 3 * DAY, today);
+    expect(ce.queries).toHaveLength(4);
+    expect(records.map((record) => record.sku).sort()).toEqual([
+      'BoxUsage:c7i.large',
+      'BoxUsage:m7i.large',
+      'Tax',
+    ]);
+  });
+
+  it('a repeated page token is a pagination loop, and endless pages hit the page limit', async () => {
+    const { emu, read, today } = await world();
+    const answer = (token: string) =>
+      new Response(JSON.stringify({ ResultsByTime: [], NextPageToken: token }), {
+        status: 200,
+        headers: { 'content-type': 'application/x-amz-json-1.1' },
+      });
+    emu.register(/^ce\./, { service: 'ce', protocol: 'json', handle: () => answer('same') });
+    const looped = await read(today - 3 * DAY, today).catch((error: unknown) => error);
+    expect(isComputeError(looped, 'PROVIDER_ERROR')).toBe(true);
+    expect((looped as { details?: { reason?: string } }).details?.reason).toBe('pagination-loop');
+
+    let page = 0;
+    emu.register(/^ce\./, {
+      service: 'ce',
+      protocol: 'json',
+      handle: () => answer(`page-${++page}`),
+    });
+    const costs = costExplorerCosts(
+      {
+        ce: jsonClient({
+          service: 'ce',
+          region: 'us-east-1',
+          credentials: emu.ambient,
+          fetch: emu.fetch,
+          clock: emu.clock,
+          jsonVersion: '1.1',
+          targetPrefix: 'AWSInsightsIndexService',
+        }),
+        account: { source: emu.ambient, verify: async () => ({ account: platformAccount }) },
+        config: awsConfig.parse({
+          region: 'us-east-1',
+          zones: ['us-east-1a'],
+          costs: 'region',
+        }) as AwsConfig,
+        clock: emu.clock,
+      },
+      { maxPages: 3 },
+    )!;
+    const endless = await (async () => {
+      for await (const _ of costs({ from: today - 3 * DAY, to: today }, callContext(emu)));
+    })().catch((error: unknown) => error);
+    expect(isComputeError(endless, 'PROVIDER_ERROR')).toBe(true);
+    expect((endless as { details?: { reason?: string } }).details?.reason).toBe('pagination-limit');
+    expect(page).toBe(3);
+  });
+
+  it('a caller identity without a 12-digit account is refused before Cost Explorer is asked', async () => {
+    const { emu, ce, today } = await world();
+    const costs = costExplorerCosts({
+      ce: jsonClient({
+        service: 'ce',
+        region: 'us-east-1',
+        credentials: emu.ambient,
+        fetch: emu.fetch,
+        clock: emu.clock,
+        jsonVersion: '1.1',
+        targetPrefix: 'AWSInsightsIndexService',
+      }),
+      account: { source: emu.ambient, verify: async () => ({ account: '' }) },
+      config: awsConfig.parse({
+        region: 'us-east-1',
+        zones: ['us-east-1a'],
+        costs: 'account',
+      }) as AwsConfig,
+      clock: emu.clock,
+    })!;
+    const refused = await (async () => {
+      for await (const _ of costs({ from: today - 3 * DAY, to: today }, callContext(emu)));
+    })().catch((error: unknown) => error);
+    expect(isComputeError(refused, 'PROVIDER_ERROR')).toBe(true);
+    expect((refused as { details?: { reason?: string } }).details?.reason).toBe('caller-account');
+    expect(ce.queries).toHaveLength(0);
+    expect(emu.calls('GetCostAndUsage')).toHaveLength(0);
   });
 
   it('usage types name their service and region', () => {

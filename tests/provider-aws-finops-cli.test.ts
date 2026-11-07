@@ -190,6 +190,38 @@ describe('provider-aws FinOps CLI', () => {
     expect(emu.requests.length).toBe(calls);
   });
 
+  it('organization-accounts refuses a repeated page token instead of listing forever', async () => {
+    const emu = new AwsEmulator();
+    new OrganizationsEmulator(emu);
+    emu.register(/^organizations\./, {
+      service: 'organizations',
+      protocol: 'json',
+      handle: () =>
+        new Response(
+          JSON.stringify({
+            Accounts: [{ Id: '222222222222', Status: 'ACTIVE' }],
+            NextToken: 'same',
+            Organization: { MasterAccountId: '555555555555' },
+          }),
+          { status: 200, headers: { 'content-type': 'application/x-amz-json-1.1' } },
+        ),
+    });
+    const { out, context } = harness({
+      role: 'better-compute',
+      region: 'us-east-1',
+      zones: 'us-east-1a',
+    });
+    await expect(
+      awsOrganizationAccountsCommand({
+        fetch: emu.fetch,
+        credentials: emu.ambient,
+        clock: emu.clock,
+      }).run(context),
+    ).rejects.toMatchObject({ code: 'PROVIDER_ERROR', message: /page token twice/ });
+    expect(out).toEqual([]);
+    expect(emu.calls('ListAccounts')).toHaveLength(2);
+  });
+
   it('quotas lists the EC2 instance quotas; quota-request asks only with --yes', async () => {
     const emu = new AwsEmulator();
     const quotas = new ServiceQuotasEmulator(emu);
