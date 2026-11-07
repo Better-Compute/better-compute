@@ -761,6 +761,31 @@ describe('provider-aws volumes: attach, detach', () => {
     await rejects(volumes.detachVolume(theirs.id, a.id, call()), 'INVALID_STATE', 'not-managed');
   });
 
+  it('a detach right after its own attach, before by-id reads show it, waits instead of reading detached', async () => {
+    const { volumes, call, ebs, ec2, emu, managed } = world();
+    const instance = owned(ec2);
+    const volume = ebs.addVolume({ tags: managed });
+    expect((await volumes.attachVolume(volume.id, instance.id, call(), 'ins_1')).state).toBe(
+      'pending',
+    );
+    ebs.hideAttachmentById.add(volume.id);
+    expect((await volumes.detachVolume(volume.id, instance.id, call())).state).toBe('deleting');
+    expect(emu.calls('DetachVolume')).toHaveLength(0);
+    // The read shows it now: detached for real.
+    ebs.hideAttachmentById.clear();
+    ebs.tick();
+    expect((await volumes.detachVolume(volume.id, instance.id, call())).state).toBe('deleting');
+    expect(emu.calls('DetachVolume')).toHaveLength(1);
+    // An attach no read shows for the whole window (EC2 dropped it) is detached.
+    const lost = ebs.addVolume({ tags: { ...managed, 'better-compute:volume': 'bc-v-two' } });
+    await volumes.attachVolume(lost.id, instance.id, call(), 'ins_1');
+    ebs.hideAttachmentById.add(lost.id);
+    expect((await volumes.detachVolume(lost.id, instance.id, call())).state).toBe('deleting');
+    emu.clock.advance(120_000);
+    expect((await volumes.detachVolume(lost.id, instance.id, call())).state).toBe('deleted');
+    expect(emu.calls('DetachVolume')).toHaveLength(1);
+  });
+
   it('a volume attached to an instance that terminates reads detached, not deleted', async () => {
     const { volumes, call, ebs, ec2, managed } = world();
     const a = owned(ec2, 'ins_a');

@@ -403,6 +403,13 @@ export class AwsVolumes implements ProviderVolumes {
     letters.set(letter, { volumeId, at: now });
   }
 
+  /** Whether this client attached `volumeId` to `instanceId` within the consistency window. */
+  #attachedHere(instanceId: string, volumeId: string): boolean {
+    for (const entry of this.#devices.get(instanceId)?.values() ?? [])
+      if (entry.volumeId === volumeId && this.#recent(entry.at)) return true;
+    return false;
+  }
+
   /** Lets go of the devices this client gave a volume on an instance (it is being detached). */
   #releaseDevices(instanceId: string, volumeId: string): void {
     const letters = this.#devices.get(instanceId);
@@ -961,6 +968,10 @@ export class AwsVolumes implements ProviderVolumes {
     // Not attached to that machine (or gone): nothing to detach; another machine's is never touched.
     const key = `${id}:${machineId}`;
     if (!volume || volume.attachment?.instanceId !== machineId) {
+      // This client attached it there moments ago and the by-id read does not show any attachment
+      // yet: wait for it (then detach it), never report it detached while it attaches.
+      if (volume && !volume.attachment && this.#attachedHere(machineId, id))
+        return state(id, 'deleting', volumeOutputs(volume, this.config.region));
       this.#forced.delete(key);
       return state(id, 'deleted');
     }
