@@ -1320,6 +1320,36 @@ describe('isolation between tenants, and between tenants and the root tenant', (
           tenant: A,
           call: () => api.instances.delete(root, { tenantId: A, instanceId: w.issued }),
         },
+        // AWS A3 purchases, on the root account: allowed, then refused by the account's provider
+        // (it sells nothing ahead of time) or by the missing confirm: true.
+        {
+          path: 'providerAccounts.reservationOfferings',
+          tenant: R,
+          call: () =>
+            api.providerAccounts.reservationOfferings(root, {
+              tenantId: R,
+              accountId: w.accountId,
+              query: { instanceType: 'a3-highgpu-8g', count: 1, durationHours: 24 },
+            }),
+          expect: 'UNSUPPORTED',
+        },
+        {
+          path: 'providerAccounts.purchaseReservation',
+          tenant: R,
+          call: () =>
+            api.providerAccounts.purchaseReservation(root, {
+              tenantId: R,
+              accountId: w.accountId,
+              offeringId: 'x:1',
+              idempotencyKey: 'buy-1',
+            }),
+          expect: 'CONFIRMATION_REQUIRED',
+        },
+        {
+          path: 'providerAccounts.purchases',
+          tenant: R,
+          call: () => api.providerAccounts.purchases(root, { tenantId: R, accountId: w.accountId }),
+        },
         // Allowed (main's keyless setup read, decided on the tenant), then refused when the host runs no
         // workload issuer.
         {
