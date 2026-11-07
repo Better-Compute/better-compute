@@ -25,7 +25,9 @@ import {
 // minimum and a maximum of replicas. Its GPUs are booked against the tenant's GPU quota on the pool (`quota`: GPUs
 // per replica times the maximum it may scale to), and it bills GPU hours of the size's model at the replicas in
 // service (`usage`, the meters vps bills GPU Droplets on). It is reached with model access keys (`do.inference-key`),
-// so it has no secret outputs of its own. Ownership is by tags, idempotency by the key tag (DO-D4, DO-D5); scaling
+// so it has no secret outputs of its own. On a shared pool, where a tenant may hold no key (a key reaches the whole
+// account), the tenant calls it through the operator's inference proxy (`inferenceProxy`, `endpoint`), which the
+// host gives an operator key. Ownership is by tags, idempotency by the key tag (DO-D4, DO-D5); scaling
 // changes in place, anything else is a new endpoint. Shapes follow the API reference (dedicated_inference), not a
 // recording: the live suite captures real bodies before release.
 

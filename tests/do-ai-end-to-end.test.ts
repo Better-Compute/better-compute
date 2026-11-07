@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cloudResources } from '@better-compute/cloud-resources';
-import { digitaloceanProvider, resetBudgets } from '@better-compute/provider-digitalocean';
+import {
+  digitaloceanProvider,
+  inferenceProxy,
+  resetBudgets,
+} from '@better-compute/provider-digitalocean';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
 import { vps } from '@better-compute/vps';
 import { DoEmulator } from './support/do-emulator/index.js';
@@ -187,6 +191,26 @@ describe('DigitalOcean Dedicated Inference through cloudResources', () => {
       [endpoint.id],
     );
     expect(rates.rows[0]!.meter_rates).toEqual({ 'gpu.h100.hours': 1 });
+
+    // On this shared pool acme holds no key: it reaches the endpoint through the operator's proxy, by its output.
+    const proxied: string[] = [];
+    const proxy = inferenceProxy({
+      fetch: (async (url: string) => {
+        proxied.push(String(url));
+        return new Response(JSON.stringify({ usage: { prompt_tokens: 3, completion_tokens: 4 } }), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }) as unknown as typeof globalThis.fetch,
+      record: () => {},
+    });
+    const answer = await proxy({
+      path: '/v1/chat/completions',
+      body: { model: 'llama3.3-70b-instruct', messages: [] },
+      key: 'operator-model-key',
+      endpoint: ready.outputs.endpoint,
+    });
+    expect(answer.status).toBe(200);
+    expect(proxied).toEqual([`${ready.outputs.endpoint}/v1/chat/completions`]);
 
     // A second endpoint over the quota is refused, with nothing recorded and nothing sent.
     const posts = w.emu.requests.filter((r) => r.method === 'POST').length;

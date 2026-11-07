@@ -211,7 +211,8 @@ keys, guardrails, the Managed Agents objects; `resources/kinds/named.ts`).
   `max(replicas, maxReplicas)`, which the cloud-resources module books against the tenant's GPU quota on the pool
   (`QUOTA_EXCEEDED` refuses a create or a scale-up; delete returns it; adopt is refused with `quotaBooked`). It
   reports `gpu.<model>.hours` (`gpu.h100.hours`, …), which bill once the host names them in
-  `cloudResources({ kindMeters })`. A `vpc` is account-wide.
+  `cloudResources({ kindMeters })`. A `vpc` is account-wide. On a shared pool the tenant reaches its endpoint through
+  the inference proxy (`endpoint`, with an operator key), since it may hold no model access key there.
 - **Model access keys:** `do.inference-key`, the bearer for serverless and dedicated inference. The key is a secret
   output only (sealed by the module); raising `rotation` regenerates it, and a create whose answer was lost
   regenerates the key it finds, so an unsealed secret is never live. Name: `<name>-r<rotation>-bc<hash>`. A key
@@ -222,7 +223,9 @@ keys, guardrails, the Managed Agents objects; `resources/kinds/named.ts`).
   A streamed answer is counted even when the client cancels before its final usage chunk: the proxy reads the rest
   (at most 16 MiB). A `stream` that is not a boolean is refused (`reason 'stream'`); the counting path follows the
   upstream content type; a whole answer without usage is withheld (502) and recorded `uncounted`, as is a stream
-  without a usage chunk. Wiring it to a route is the host's: the server does not import providers.
+  without a usage chunk. `endpoint` (a Dedicated Inference `outputs.endpoint`, only `https://<one label>.<dedicatedDomain>`)
+  sends the call to that endpoint instead, and its usage carries `endpoint`. Wiring it to a route is the host's: the
+  server does not import providers.
 - **Knowledge bases:** `do.knowledge-base`, an embedding model (uuid) over `webSources` and `spacesSources`,
   indexed into an OpenSearch database DigitalOcean makes (or `database`). Sources change in place (added and removed,
   then one indexing job, owed until it starts: a failed start is retried); Spaces sources, `database` and `vpc`

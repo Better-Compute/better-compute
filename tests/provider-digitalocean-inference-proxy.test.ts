@@ -333,6 +333,68 @@ describe('inferenceProxy', () => {
     expect(JSON.stringify(logs)).not.toContain(key);
   });
 
+  it('reaches a Dedicated Inference endpoint by its outputs.endpoint, counted with the endpoint', async () => {
+    const up = upstream(() => completion('llama3.3-70b-instruct'));
+    const usage: InferenceUsage[] = [];
+    const proxy = inferenceProxy({ fetch: up.fetch, record: (entry) => void usage.push(entry) });
+    const endpoint = 'https://5a4981aa-9653-4bd1-bef5-d6bff52042e4.inference.do-ai.run';
+    const response = await proxy({
+      path: '/v1/chat/completions',
+      body: { model: 'llama3.3-70b-instruct', messages: [] },
+      key,
+      endpoint,
+      meta: { tenantId: 'acme' },
+    });
+    expect(response.status).toBe(200);
+    expect(up.seen[0]!.url).toBe(`${endpoint}/v1/chat/completions`);
+    expect(new Headers(up.seen[0]!.init.headers).get('authorization')).toBe(`Bearer ${key}`);
+    expect(usage).toEqual([
+      {
+        route: 'chat.completions',
+        model: 'llama3.3-70b-instruct',
+        inputTokens: 12,
+        outputTokens: 30,
+        totalTokens: 42,
+        meta: { tenantId: 'acme' },
+        endpoint: '5a4981aa-9653-4bd1-bef5-d6bff52042e4.inference.do-ai.run',
+      },
+    ]);
+  });
+
+  it('refuses a dedicated endpoint outside the dedicated domain, so the key goes nowhere else', async () => {
+    const up = upstream(() => completion('m'));
+    const proxy = inferenceProxy({ fetch: up.fetch, record: () => {} });
+    for (const endpoint of [
+      'http://abc.inference.do-ai.run',
+      'https://evil.example',
+      'https://abc.inference.do-ai.run.evil.example',
+      'https://a.b.inference.do-ai.run',
+      'https://inference.do-ai.run',
+      'https://abc.inference.do-ai.run:8443',
+      'https://user:pw@abc.inference.do-ai.run',
+      'https://abc.inference.do-ai.run/v2/account',
+      'https://abc.inference.do-ai.run/?x=1',
+      'not a url',
+      7,
+    ]) {
+      const refused = await failure(
+        proxy({
+          path: '/v1/chat/completions',
+          body: { model: 'm' },
+          key,
+          endpoint: endpoint as string,
+        }),
+      );
+      expect(refused.code).toBe('INVALID_INPUT');
+      expect(refused.details?.reason).toBe('endpoint');
+      expect(refused.message).not.toContain(key);
+    }
+    expect(up.seen).toEqual([]);
+    expect(() =>
+      inferenceProxy({ dedicatedDomain: 'https://x', record: () => {} }),
+    ).toThrow(/domain/);
+  });
+
   it('a failing usage recorder never fails the call, and is logged without the key', async () => {
     const up = upstream(() => completion('m'));
     const logs: string[] = [];

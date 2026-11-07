@@ -85,6 +85,13 @@ await compute.api.cloudResources.create(acme, {
 - **Adopting** an endpoint made outside better-compute is refused (`UNSUPPORTED`, `quotaBooked`): it would run on
   GPUs nothing was charged for.
 
+**Reaching it.** An endpoint takes a model access key of its account. On the tenant's own pool that is a
+`do.inference-key` of its own. On a shared pool the tenant may not hold one (a key reaches the whole platform
+account, see below), so it calls its endpoint through the operator's proxy: `inferenceProxy` with `endpoint` set to
+the resource's `outputs.endpoint`, which the proxy accepts only as `https://<id>.inference.do-ai.run`. The host
+checks the endpoint is one of the caller's tenant's resources and passes an operator key; the call's tokens are
+recorded with the endpoint.
+
 The endpoint reports GPU hours on the GPU model's meter (`gpu.h100.hours` and so on). Those bill only if the host
 lists them in `cloudResources({ kindMeters })` and defines them in IAM billing; `cloud.resource.hours` bills either way.
 

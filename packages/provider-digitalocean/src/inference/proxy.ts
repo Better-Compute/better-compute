@@ -6,6 +6,11 @@ import { ComputeError, type Logger } from '@better-compute/core';
 // tenant may also call DigitalOcean directly with its key; that usage then comes from DigitalOcean billing (P9).
 //
 // - Only the inference routes pass, and only JSON bodies that name a model.
+// - A Dedicated Inference endpoint (`do.dedicated-inference`) is reached the same way, with `endpoint`: its
+//   `outputs.endpoint`, accepted only as `https://<one label>.<dedicatedDomain>` (a code-level option), so no URL a
+//   row or a tenant supplies can send the key elsewhere. On a shared pool, where the tenant may not hold a key
+//   (`do.inference-key` is refused there), this is how it calls its endpoint: the host checks the endpoint is one of
+//   the caller's tenant's resources and passes an operator key.
 // - The upstream origin is a code-level option (https only), never tenant input, and a redirect is never followed.
 // - `stream` must be a boolean and `stream_options` an object when present (a `"true"` an upstream would coerce is
 //   refused), so every streamed call asks for its usage chunk. How an answer is counted follows what upstream sent
@@ -28,6 +33,8 @@ export interface InferenceUsage {
   outputTokens: number;
   totalTokens: number;
   meta?: Readonly<Record<string, string>>;
+  /** For a call to a Dedicated Inference endpoint: the endpoint's host (`<id>.inference.do-ai.run`). */
+  endpoint?: string;
   /**
    * The answer reported no usage, so the counts are zero: the host decides what an uncounted call costs (DigitalOcean
    * billing still has it). A whole answer is withheld then; a stream had already passed.
@@ -38,6 +45,8 @@ export interface InferenceUsage {
 export interface InferenceProxyOptions {
   /** The upstream origin (default `https://inference.do-ai.run`): https, a code-level option. */
   endpoint?: string;
+  /** The domain Dedicated Inference endpoints live under (default `inference.do-ai.run`): a code-level option. */
+  dedicatedDomain?: string;
   fetch?: typeof globalThis.fetch;
   /** Where the counts go: the host writes them as `ai.inference.tokens` usage. Errors are logged, never thrown. */
   record(usage: InferenceUsage): void | Promise<void>;
@@ -51,9 +60,16 @@ export interface InferenceProxyRequest {
   key: string;
   meta?: Readonly<Record<string, string>>;
   signal?: AbortSignal;
+  /**
+   * A Dedicated Inference endpoint to call instead of serverless inference: the resource's `outputs.endpoint`
+   * (`https://<id>.inference.do-ai.run`). The host passes only an endpoint of a resource the caller's tenant owns.
+   */
+  endpoint?: string;
 }
 
 export const defaultInferenceOrigin = 'https://inference.do-ai.run';
+export const defaultDedicatedDomain = 'inference.do-ai.run';
+const hostLabel = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 /** How much of a streamed answer the proxy still reads, for its usage chunk, after the client cancelled: 16 MiB. */
 export const maxDrainBytes = 16 * 1024 * 1024;
 
@@ -95,8 +111,47 @@ export function inferenceProxy(
       'inferenceProxy({ endpoint }) must be an https origin',
     );
   }
+  const dedicatedDomain = (options.dedicatedDomain ?? defaultDedicatedDomain).toLowerCase();
+  if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(dedicatedDomain))
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'inferenceProxy({ dedicatedDomain }) must be a domain name',
+    );
   const fetch = options.fetch ?? globalThis.fetch;
   const log = options.log ?? quiet;
+
+  /** A dedicated endpoint's origin: `https://<one label>.<dedicatedDomain>` and nothing else, or INVALID_INPUT. */
+  const dedicatedOrigin = (endpoint: unknown): { origin: string; host: string } => {
+    const refused = () =>
+      new ComputeError(
+        'INVALID_INPUT',
+        `A dedicated endpoint is https://<endpoint>.${dedicatedDomain}`,
+        undefined,
+        { reason: 'endpoint' },
+      );
+    if (typeof endpoint !== 'string') throw refused();
+    let url: URL;
+    try {
+      url = new URL(endpoint);
+    } catch {
+      throw refused();
+    }
+    const host = url.hostname.toLowerCase();
+    const suffix = `.${dedicatedDomain}`;
+    if (
+      url.protocol !== 'https:' ||
+      url.username ||
+      url.password ||
+      url.port ||
+      (url.pathname !== '/' && url.pathname !== '') ||
+      url.search ||
+      url.hash ||
+      !host.endsWith(suffix) ||
+      !hostLabel.test(host.slice(0, -suffix.length))
+    )
+      throw refused();
+    return { origin: `https://${host}`, host };
+  };
 
   return async function proxy(request: InferenceProxyRequest): Promise<Response> {
     const route = Object.hasOwn(routes, request.path) ? routes[request.path] : undefined;
@@ -129,6 +184,10 @@ export function inferenceProxy(
         undefined,
         { reason: 'stream' },
       );
+    const target =
+      request.endpoint !== undefined
+        ? dedicatedOrigin(request.endpoint)
+        : { origin, host: undefined };
     const model = body.model;
     const streamed = body.stream === true;
     const forwarded = streamed
@@ -148,6 +207,7 @@ export function inferenceProxy(
         model,
         ...(usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0, uncounted: true }),
         ...(request.meta !== undefined ? { meta: request.meta } : {}),
+        ...(target.host !== undefined ? { endpoint: target.host } : {}),
       };
       const failed = (error: unknown) =>
         log.warn('inference proxy: could not record usage', {
@@ -166,7 +226,7 @@ export function inferenceProxy(
 
     let upstream: Response;
     try {
-      upstream = await fetch(`${origin}${request.path}`, {
+      upstream = await fetch(`${target.origin}${request.path}`, {
         method: 'POST',
         headers: {
           authorization: `Bearer ${request.key}`,
