@@ -752,6 +752,30 @@ describe('pool substrates in the document', () => {
     expect((create.input.policy as { substrate: { account: string } }).substrate.account).toBe(
       world.accountId,
     );
+    // A well-formed id is taken only for an account of the tenant (or one the plan creates).
+    const unowned = `pacct_${'0'.repeat(world.accountId.length - 'pacct_'.length)}`;
+    const notOurs = await plan(await withPool(substratePool({ account: unowned })));
+    expect(notOurs.blocked).toBe(true);
+    expect(changeOf(notOurs, 'pool', 'gpu-substrate')?.blocked).toBe(
+      `unknown provider account ${unowned} (policy.substrate.account)`,
+    );
+    expect(notOurs.calls.map((call) => call.path)).not.toContain('pools/create');
+    const byId = await plan(await withPool(substratePool({ account: world.accountId })));
+    expect(changeOf(byId, 'pool', 'gpu-substrate')?.blocked).toBeUndefined();
+    // Another tenant's account, by its real id, is not this tenant's to run a substrate on.
+    // (Fleet is the operator's: the root caller plans tenant B by its tenantId.)
+    const foreign = await world.api.fleet.plan(world.root, {
+      tenantId: world.acmeTenant,
+      config: {
+        version: 1,
+        sites: [{ name: 'acme-site', kind: 'dedicated', region: 'us-central' }],
+        pools: [{ ...substratePool({ account: world.accountId }), site: 'acme-site' }],
+      },
+      prune: false,
+    });
+    expect(changeOf(foreign, 'pool', 'gpu-substrate')?.blocked).toBe(
+      `unknown provider account ${world.accountId} (policy.substrate.account)`,
+    );
     await apply(document);
     expect((await plan(document)).calls).toEqual([]);
     const exportedPool = (await exported()).pools!.find((pool) => pool.name === 'gpu-substrate')!;

@@ -194,6 +194,7 @@ export async function planFleet(
 
   // Pools, owner quotas and offers.
   const poolIds = new Map(state.pools.map((pool) => [pool.name, pool.id]));
+  const knownAccounts = new Set(accountIds.values());
   const wantedPools = new Set<string>();
   const createdPools = new Set<string>();
   /** The provider account each wanted pool's substrate runs on (after name resolution). */
@@ -226,17 +227,22 @@ export async function planFleet(
     }
     // (D25) A substrate may name its provider account by its document name.
     const resolved = resolveSubstrateAccount(pool.policy, accountIds);
-    if (resolved.unknown !== undefined) {
+    const policy = resolved.policy ?? {};
+    const runsOn = substrateAccount(policy);
+    // An id is taken only for an account of the tenant or one this plan creates: the substrate
+    // reconciler reads the account as the pool owner's, so any other id could never converge.
+    const unknownAccount =
+      resolved.unknown ??
+      (runsOn !== undefined && !knownAccounts.has(runsOn) ? runsOn : undefined);
+    if (unknownAccount !== undefined) {
       add({
         kind: 'pool',
         name: pool.name,
         action: current ? 'update' : 'create',
-        blocked: `unknown provider account ${resolved.unknown} (policy.substrate.account)`,
+        blocked: `unknown provider account ${unknownAccount} (policy.substrate.account)`,
       });
       continue;
     }
-    const policy = resolved.policy ?? {};
-    const runsOn = substrateAccount(policy);
     if (runsOn !== undefined) substrateAccounts.set(pool.name, runsOn);
     let poolId: string;
     if (!current) {

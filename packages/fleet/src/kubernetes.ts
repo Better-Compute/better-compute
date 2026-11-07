@@ -42,6 +42,7 @@ const substrateOf = (policy: Policy | undefined): Record<string, unknown> | unde
 /**
  * A pool policy whose `substrate.account` names a provider account of the document, with that
  * name replaced by the account's id; `unknown` when it names neither a known account nor an id.
+ * An id passes through as is: planFleet checks it is an account of the tenant or of the plan.
  */
 export function resolveSubstrateAccount(
   policy: Policy | undefined,
