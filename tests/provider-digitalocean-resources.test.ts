@@ -13,6 +13,7 @@ import {
   tagFor,
 } from '@better-compute/provider-digitalocean';
 import { seedDatabase } from './support/do-emulator/databases.js';
+import { seedVpc } from './support/do-emulator/vpcs.js';
 import { DoEmulator, type RecordedRequest } from './support/do-emulator/index.js';
 import {
   build,
@@ -321,6 +322,73 @@ describe('Managed Database clusters', () => {
       'crs_q',
     );
     expect(plain.state).toBe('ready');
+  });
+
+  it('a cluster joins a tenant network’s VPC in its region, on any account, only as the caller resolved it', async () => {
+    const network = 'net_0123456789abcdefghijklmnop';
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const subnet = seedVpc(emu.state, {
+      name: 'bc-sub-a',
+      region: 'nyc3',
+      description: 'bc:network=bc-net-0123456789abcdefghijklmnop',
+    });
+    seedVpc(emu.state, {
+      name: 'bc-sub-b',
+      region: 'ams3',
+      description: 'bc:network=bc-net-0123456789abcdefghijklmnop',
+    });
+    const kind = resources.kinds().find((entry) => entry.kind === 'do.database.pg')!;
+    expect(kind.networks!({ ...pg, network })).toEqual([network]);
+    expect(kind.accountWide!({ ...pg, network })).toEqual([]);
+    const request = {
+      kind: 'do.database.pg',
+      name: 'bc-r-net',
+      spec: { ...pg, network },
+      labels,
+      accountScope: 'shared' as const,
+    };
+    // Not resolved by the caller: refused, nothing sent (a provider never trusts a bare network id).
+    const unresolved = await failure(resources.ensure(request, ctx('crs_n')));
+    expect(unresolved).toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'network' } });
+    expect(mutations(emu, 'POST', /^\/v2\/databases$/)).toEqual([]);
+    const resolved = { ...request, networks: { [network]: 'bc-net-0123456789abcdefghijklmnop' } };
+    const state = await ready(resources, resolved, 'crs_n');
+    expect(mutations(emu, 'POST', /^\/v2\/databases$/)[0]!.body).toMatchObject({
+      region: 'nyc3',
+      private_network_uuid: subnet.id,
+    });
+    // Converged: nothing more sent; a cluster whose VPC is not the network's is replaceRequired.
+    await resources.ensure({ ...resolved, id: state.id }, ctx('crs_n'));
+    expect(mutations(emu, 'POST', /^\/v2\/databases$/)).toHaveLength(1);
+    emu.state.databases.get(state.id)!.private_network_uuid = '5a4981aa-9653-4bd1-bef5-d6bff52042e4';
+    const moved = await failure(resources.ensure({ ...resolved, id: state.id }, ctx('crs_n')));
+    expect(moved.details).toMatchObject({ reason: 'replaceRequired', field: 'network' });
+    // A network without a subnet in the region, and vpc next to network, are refused before any create.
+    const elsewhere = await failure(
+      resources.ensure(
+        {
+          ...resolved,
+          name: 'bc-r-net2',
+          spec: { ...pg, region: 'sfo3', network },
+        },
+        ctx('crs_n2'),
+      ),
+    );
+    expect(elsewhere.details?.reason).toBe('noSubnetInRegion');
+    const both = await failure(
+      resources.ensure(
+        {
+          ...resolved,
+          accountScope: 'tenant',
+          name: 'bc-r-net3',
+          spec: { ...pg, network, vpc: subnet.id },
+        },
+        ctx('crs_n3'),
+      ),
+    );
+    expect(both).toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'vpcAndNetwork' } });
+    expect(mutations(emu, 'POST', /^\/v2\/databases$/)).toHaveLength(1);
   });
 
   it('the key-tag lookup ignores a cluster another deployment manages: it is never resized', async () => {

@@ -135,6 +135,11 @@ DigitalOcean has no network object, so a tenant network is built from a VPC per 
   `better-compute-instance:<id>` tag, which only that Droplet carries. A `.user` is never bound to the cluster's admin user (role
   `primary`, `doadmin`): that is `INVALID_INPUT` (`primaryUser`), and a delete of it answers `deleted` without a call,
   since it goes with the cluster.
+- **Private networking.** A cluster's `vpc` (a VPC uuid) is account-wide: the tenant's own account only. On any
+  account a cluster may instead name `network`, a better-compute network of the tenant (`net_…`): the module checks it
+  is the tenant's and passes its provider-side name, and the cluster joins that network's subnet VPC in the cluster's
+  region (`noSubnetInRegion` when it has none). `vpc` and `network` together are `INVALID_INPUT` (`vpcAndNetwork`);
+  either changes only by a new cluster (`replaceRequired`).
 - **User options by engine.** Kafka `acl` (`<admin|consume|produce|produceconsume>:<topic pattern>`) and OpenSearch
   `acl` (`<deny|admin|read|readwrite|write>:<index pattern>`) and PostgreSQL `replication` change in place
   (`PUT …/users/{name}`, settings only). A MySQL `authPlugin` (`caching_sha2_password`, `mysql_native_password`)

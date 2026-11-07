@@ -8,7 +8,7 @@ import {
   tagFor,
 } from '@better-compute/provider-digitalocean';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
-import { vps } from '@better-compute/vps';
+import { providerResourceName, vps } from '@better-compute/vps';
 import { DoEmulator } from './support/do-emulator/index.js';
 
 // The real provider-digitalocean under the cloud-resources module, through betterCompute() on PGlite: a root DO
@@ -360,6 +360,67 @@ describe('DigitalOcean Managed Databases through cloudResources', () => {
         (failure: { code?: string; details?: Record<string, unknown> }) => failure,
       );
     expect(changed).toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'instance' } });
+  });
+
+  it('a cluster on a hosted pool joins the tenant’s own network; another tenant’s network is refused', async () => {
+    const w = await world();
+    const network = async (who: { token: string }, tenantId: string, name: string, cidr: string) => {
+      const created = await w.api.networks.create(who, {
+        tenantId,
+        poolId: w.poolId,
+        name,
+        idempotencyKey: `net-${name}`,
+      });
+      await w.api.networks.addSubnet(who, {
+        tenantId,
+        networkId: created.id,
+        name: `${name}-nyc3`,
+        region: 'nyc3',
+        cidr,
+      });
+      for (let round = 0; round < 8; round++) {
+        if ((await w.api.networks.get(who, { tenantId, networkId: created.id })).state === 'ready')
+          return created.id as string;
+        await w.fixture.advance(5_000);
+        await w.fixture.compute.jobs['vps.networks']!.tick();
+      }
+      throw new Error(`network ${name} never became ready`);
+    };
+    const ours = await network(w.acme, w.acmeTenant, 'prod', '10.30.0.0/24');
+    const theirs = await network(w.root, w.fixture.tenants.root.id, 'ops', '10.31.0.0/24');
+    const create = (net: string, key: string) =>
+      w.api.cloudResources.create(w.acme, {
+        tenantId: w.acmeTenant,
+        poolId: w.poolId,
+        kind: 'do.database.pg',
+        name: key,
+        spec: { region: 'nyc3', version: '16', size: 'db-s-1vcpu-1gb', network: net },
+        idempotencyKey: key,
+      });
+    for (const [net, key] of [
+      [theirs, 'db-theirs'],
+      ['net_zzzzzzzzzzzzzzzzzzzzzzzzzz', 'db-none'],
+    ] as const) {
+      const error = await create(net, key).then(
+        () => undefined,
+        (failure: { code?: string; details?: Record<string, unknown> }) => failure,
+      );
+      expect(error).toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'network' } });
+    }
+    expect(w.emu.requests.filter((r) => r.method === 'POST' && r.url.pathname === '/v2/databases')).toEqual([]);
+    const database = await create(ours, 'db-ours');
+    await w.until(database.id, 'ready');
+    const cluster = w.emu.state.databases.get((await w.get(database.id)).providerId)!;
+    const vpc = w.emu.state.vpcs.get(cluster.private_network_uuid);
+    expect(vpc?.description).toBe(`bc:network=${providerResourceName(ours)}`);
+    // The network cannot change in place.
+    const moved = await w.api.cloudResources
+      .update(w.acme, { tenantId: w.acmeTenant, resourceId: database.id, spec: { network: theirs } })
+      .then(
+        () => undefined,
+        (failure: { code?: string; details?: Record<string, unknown> }) => failure,
+      );
+    expect(moved).toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'network' } });
   });
 
   it('a tenant cannot discover or adopt on the platform account it is offered', async () => {

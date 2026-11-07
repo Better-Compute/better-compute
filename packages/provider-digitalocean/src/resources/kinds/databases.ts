@@ -10,6 +10,7 @@ import {
   type ProviderResourceState,
 } from '@better-compute/core';
 import { keyTag, labels as tagKeys, tagFor } from '../../ids.js';
+import { vpcForNetwork } from '../../networks/vpcs.js';
 import {
   assertOwned,
   childId,
@@ -233,6 +234,40 @@ interface ClusterSpec {
   nodes: number;
   storageMiB?: number;
   vpc?: string;
+  /** A better-compute network of the tenant: the cluster joins its VPC in the cluster's region. */
+  network?: string;
+}
+
+/**
+ * The VPC a cluster's spec asks for: `vpc` as it is (the tenant's own account only), or the VPC of `network` in the
+ * region, by the provider-side name the caller resolved for it (`request.networks`). A network the caller did not
+ * resolve is refused: the network id alone proves nothing about whose it is.
+ */
+async function wantedVpc(
+  env: DoKindEnv,
+  kind: string,
+  wanted: Partial<ClusterSpec>,
+  request: ProviderResourceRequest,
+  region: string,
+  signal: AbortSignal,
+): Promise<string | undefined> {
+  if (wanted.network === undefined) return wanted.vpc;
+  if (wanted.vpc !== undefined)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${kind}: name either vpc or network, not both`,
+      undefined,
+      { provider: 'digitalocean', reason: 'vpcAndNetwork', field: 'spec.network' },
+    );
+  const name = request.networks?.[wanted.network];
+  if (typeof name !== 'string' || name.length === 0)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${kind}: network ${wanted.network} was not resolved as a network of this tenant`,
+      undefined,
+      { provider: 'digitalocean', reason: 'network', field: 'spec.network' },
+    );
+  return (await vpcForNetwork(env.client, { network: name }, region, signal)).id;
 }
 
 async function readCluster(
@@ -289,6 +324,10 @@ function clusterKind(info: EngineInfo): DoKind {
       .string({ pattern: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ })
       .optional()
       .describe("A VPC of the tenant's own account (its uuid); refused on a shared account"),
+    network: field
+      .string({ pattern: /^net_[0-9a-z]{26,52}$/ })
+      .optional()
+      .describe("A network of the tenant (net_…): the cluster joins its subnet's VPC in the cluster's region"),
   });
   const what = (id: string) => `${info.name} cluster ${id}`;
 
@@ -298,11 +337,13 @@ function clusterKind(info: EngineInfo): DoKind {
     database: DoDatabase,
     wanted: Partial<ClusterSpec>,
     context: CallContext,
+    request: ProviderResourceRequest,
   ): Promise<ProviderResourceState | undefined> {
     if (wanted.region !== undefined && wanted.region !== database.region)
       throw replaceRequired(kind, 'region');
-    if (wanted.vpc !== undefined && wanted.vpc !== database.private_network_uuid)
-      throw replaceRequired(kind, 'vpc');
+    const vpc = await wantedVpc(env, kind, wanted, request, database.region, context.signal);
+    if (vpc !== undefined && vpc !== database.private_network_uuid)
+      throw replaceRequired(kind, wanted.network !== undefined ? 'network' : 'vpc');
     if (wanted.version !== undefined && wanted.version !== database.version) {
       if (!info.upgradable)
         throw replaceRequired(kind, 'version', `${info.name} has no in-place upgrade`);
@@ -354,6 +395,11 @@ function clusterKind(info: EngineInfo): DoKind {
       // A VPC of the account: the tenant's own account only.
       accountWide: (spec: unknown) =>
         (spec as Partial<ClusterSpec> | undefined)?.vpc !== undefined ? ['vpc'] : [],
+      // A tenant network: the module checks it is the tenant's own and resolves its provider-side name.
+      networks: (spec: unknown) => {
+        const network = (spec as Partial<ClusterSpec> | undefined)?.network;
+        return typeof network === 'string' ? [network] : [];
+      },
     },
 
     async ensure(env, request: ProviderResourceRequest, context) {
@@ -378,6 +424,7 @@ function clusterKind(info: EngineInfo): DoKind {
             undefined,
             { provider: 'digitalocean', reason: 'accountWide', fields: ['vpc'] },
           );
+        const vpc = await wantedVpc(env, kind, full, request, full.region, context.signal);
         try {
           const created = await env.client.request<{ database: DoDatabase }>('POST', '/databases', {
             body: {
@@ -388,7 +435,7 @@ function clusterKind(info: EngineInfo): DoKind {
               size: full.size,
               num_nodes: full.nodes,
               ...(full.storageMiB !== undefined ? { storage_size_mib: full.storageMiB } : {}),
-              ...(full.vpc !== undefined ? { private_network_uuid: full.vpc } : {}),
+              ...(vpc !== undefined ? { private_network_uuid: vpc } : {}),
               tags: ownershipTags(env, request.labels, context),
             },
             signal: context.signal,
@@ -402,7 +449,7 @@ function clusterKind(info: EngineInfo): DoKind {
           if (!database) throw error;
         }
       }
-      return (await change(env, database, wanted, context)) ?? clusterState(database);
+      return (await change(env, database, wanted, context, request)) ?? clusterState(database);
     },
 
     async get(env, id, context) {
