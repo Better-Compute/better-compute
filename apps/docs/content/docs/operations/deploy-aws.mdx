@@ -225,8 +225,9 @@ is yours and deleting the stack never deletes the evidence.
 
 ## Limits and choices
 
-- `control-plane.json` is larger than CloudFormation's 51,200-byte inline limit when pretty-printed: deploy it with
-  `--s3-bucket`, or render with `--compact`.
+- `control-plane.json` is larger than CloudFormation's 51,200-byte inline limit, pretty-printed or minified with
+  `--compact`: deploy it with `--s3-bucket`. The command says when a body is over, and offers `--compact` only when
+  the minified body would fit.
 - The templates use the `AWS::Partition`, `AWS::Region` and `AWS::URLSuffix` pseudo parameters for ARNs, but they
   are tested against the commercial `aws` partition only. CloudFront and some interface endpoint names differ in
   `aws-cn`.

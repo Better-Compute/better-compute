@@ -27,8 +27,8 @@ export const commands = [awsDeployTemplatesCommand()];
 better-compute aws deploy-templates --out cfn --name "$NAME"      # --zones 2 --nat single --readers 0 for staging
 ```
 
-`control-plane.json` is over CloudFormation's 51,200-byte inline limit: pass `--s3-bucket <bucket>` to
-`aws cloudformation deploy` (as below), or render with `--compact`.
+`control-plane.json` is over CloudFormation's 51,200-byte inline limit, minified (`--compact`) or not: pass
+`--s3-bucket <bucket>` to `aws cloudformation deploy` (as below).
 
 ## 1. Image and certificate
 

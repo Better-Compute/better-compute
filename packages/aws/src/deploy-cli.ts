@@ -46,7 +46,7 @@ export function awsDeployTemplatesCommand() {
       zones: { type: 'integer' as const, min: 2, max: 3, default: 3, description: 'Availability zones to span' },
       nat: { type: 'string' as const, choices: ['per-zone', 'single'], default: 'per-zone', description: 'One NAT gateway per zone, or a single shared one' },
       readers: { type: 'integer' as const, min: 0, max: 2, default: 1, description: 'Aurora reader instances beside the writer' },
-      compact: { type: 'boolean' as const, description: 'Write minified JSON (fits the 51200-byte inline template limit)' },
+      compact: { type: 'boolean' as const, description: 'Write minified JSON. It is smaller, but a body still over the 51200-byte inline limit (control-plane.json) needs --s3-bucket' },
     },
     async run(context: AwsCommandContext): Promise<void> {
       const out = text(context, 'out');
@@ -77,10 +77,12 @@ export function awsDeployTemplatesCommand() {
       context.note(`Wrote ${rendered.map(file).join(', ')}.`);
       for (const entry of rendered) {
         const bytes = Buffer.byteLength(entry.body, 'utf8');
-        if (bytes > cfnLimits.inlineTemplateBytes)
-          context.note(
-            `${entry.file} is over ${cfnLimits.inlineTemplateBytes} bytes (${bytes}): pass --s3-bucket <bucket> to aws cloudformation deploy, or render with --compact.`,
-          );
+        if (bytes <= cfnLimits.inlineTemplateBytes) continue;
+        // Offer --compact only when the minified body would actually fit (it grows with the deployment name).
+        const fitsCompact = !compact && Buffer.byteLength(JSON.stringify(entry.template), 'utf8') <= cfnLimits.inlineTemplateBytes;
+        context.note(
+          `${entry.file} is over ${cfnLimits.inlineTemplateBytes} bytes (${bytes}): pass --s3-bucket <bucket> to aws cloudformation deploy${fitsCompact ? ', or render with --compact' : ''}.`,
+        );
       }
       const [network, data, controlPlane] = rendered as [(typeof rendered)[number], (typeof rendered)[number], (typeof rendered)[number]];
       context.note(
@@ -88,7 +90,7 @@ export function awsDeployTemplatesCommand() {
           'Deploy in this order (the control plane starts with zero tasks until the first migrate):',
           `  aws cloudformation deploy --stack-name ${name}-network --template-file ${file(network)} --capabilities CAPABILITY_IAM`,
           `  aws cloudformation deploy --stack-name ${name}-data --template-file ${file(data)} --parameter-overrides NetworkStack=${name}-network`,
-          `  aws cloudformation deploy --stack-name ${name}-control-plane --template-file ${file(controlPlane)} --capabilities CAPABILITY_IAM \\`,
+          `  aws cloudformation deploy --stack-name ${name}-control-plane --template-file ${file(controlPlane)} --s3-bucket <bucket> --capabilities CAPABILITY_IAM \\`,
           `    --parameter-overrides NetworkStack=${name}-network DataStack=${name}-data Image=<repository>@sha256:<digest> \\`,
           '    ApiDomainName=<api host> GatewayDomainName=<gateway host> CertificateArn=<acm arn> ApiCount=0 WorkerCount=0 GatewayCount=0',
           'Then create the database user, put the sealed PKI bundle, run the migrate task and raise the counts (see deploy/aws/README.md).',

@@ -68,13 +68,31 @@ describe('aws deploy-templates', () => {
     expect(text).toContain('--capabilities CAPABILITY_IAM');
   });
 
-  it('says when a template is over the inline body limit and --compact keeps it under', async () => {
-    const pretty = await run({ out: 'cfn' });
-    expect(pretty.notes.join('\n')).toMatch(/control-plane\.json is over 51200 bytes.*--s3-bucket/);
-    const compact = await run({ out: 'cfn', compact: true });
-    expect(compact.notes.join('\n')).not.toMatch(/over 51200 bytes/);
-    const size = (await readFile(join(compact.dir, 'cfn', 'control-plane.json'))).byteLength;
-    expect(size).toBeLessThanOrEqual(51_200);
+  it('says when a template is over the inline body limit, and offers --compact only when that would fit', async () => {
+    // The control-plane body grows with the deployment name; at the longest name even the minified body is over.
+    for (const name of ['better-compute', 'x'.repeat(28)]) {
+      const compactBytes = Buffer.byteLength(JSON.stringify(deploymentTemplates({ name }).find((entry) => entry.stack === 'control-plane')!.template));
+      const pretty = (await run({ out: 'cfn', name })).notes.join('\n');
+      expect(pretty, name).toMatch(/control-plane\.json is over 51200 bytes.*pass --s3-bucket <bucket> to aws cloudformation deploy/);
+      if (compactBytes > 51_200) expect(pretty, name).not.toContain('--compact');
+      const compact = await run({ out: 'cfn', name, compact: true });
+      const size = (await readFile(join(compact.dir, 'cfn', 'control-plane.json'))).byteLength;
+      expect(size, name).toBe(compactBytes);
+      const notes = compact.notes.join('\n');
+      if (size > 51_200) {
+        expect(notes, name).toMatch(/control-plane\.json is over 51200 bytes.*pass --s3-bucket/);
+        expect(notes, name).not.toMatch(/or render with --compact/);
+      } else expect(notes, name).not.toMatch(/over 51200 bytes/);
+    }
+    // A 28-character name is over the limit even minified: --compact is never promised to fit.
+    expect(awsDeployTemplatesCommand().flags.compact.description).not.toMatch(/fits/);
+  });
+
+  it('prints a control-plane deploy line that uploads the template through an S3 bucket', async () => {
+    const text = (await run({ out: 'cfn', name: 'bc-prod' })).notes.join('\n');
+    const line = text.split('\n').find((entry) => entry.includes('--stack-name bc-prod-control-plane'))!;
+    expect(line).toContain('--s3-bucket <bucket>');
+    expect(line).toContain('--capabilities CAPABILITY_IAM');
   });
 
   it('runs as a CLI command a configuration module exports (export const commands = [awsDeployTemplatesCommand()])', async () => {
