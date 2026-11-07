@@ -13,7 +13,7 @@ import type { DoClient } from '../client/http.js';
 import type { DoDroplet } from '../compute/types.js';
 import type { DoConfig } from '../config.js';
 import { deploymentHash, deploymentTag, labels, parseMachineId } from '../ids.js';
-import { vpcForNetwork } from '../networks/vpcs.js';
+import { accountVpcs, vpcForNetwork } from '../networks/vpcs.js';
 import { carries } from '../storage/volumes.js';
 import { ownedCertificateName } from './certificates.js';
 
@@ -27,6 +27,10 @@ import { ownedCertificateName } from './certificates.js';
 // the tag on the account, which nothing here bounds to one tenant. Each target must be an instance
 // of this deployment (its deployment tag and an instance tag) in the load balancer's region, which
 // is checked before any write; so a load balancer reaches only better-compute's own machines.
+// DO balances only to Droplets in the load balancer's own VPC (DO docs; unverified against a
+// recorded response): a target in another VPC is refused (`INVALID_INPUT`, reason `vpc`). The
+// VPC is the subnet's that `network` names, else the account's `vpc` (config), else the region's
+// default VPC; an existing load balancer keeps its own.
 //
 // DO provisions a load balancer in the background (`new`, then `active` with an address). A
 // change is one replace (PUT) of the whole configuration: it carries what the spec sets and keeps
@@ -609,7 +613,7 @@ export class DoLoadBalancers implements ProviderLoadBalancers {
   }
 
   /**
-   * The target Droplets' ids, each checked: it exists, is an instance of this deployment, and is in
+   * The target Droplets, each checked: it exists, is an instance of this deployment, and is in
    * `region`. A few are read one by one; more are found by one list of this deployment's tag, and
    * any it leaves out (GPU Droplets, research S2) are read one by one.
    */
@@ -617,7 +621,7 @@ export class DoLoadBalancers implements ProviderLoadBalancers {
     machines: readonly string[],
     region: string,
     signal: AbortSignal,
-  ): Promise<number[]> {
+  ): Promise<DoDroplet[]> {
     const wanted = [...new Set(machines.map(parseMachineId))];
     const found = new Map<number, DoDroplet>();
     if (wanted.length > directReads) {
@@ -658,7 +662,49 @@ export class DoLoadBalancers implements ProviderLoadBalancers {
           'region',
         );
     }
-    return wanted;
+    return wanted.map((id) => found.get(id)!);
+  }
+
+  /**
+   * The VPC a new regional load balancer is made in: the subnet's (`vpc`, from `network`), else the
+   * account's `vpc` (a uuid, or a VPC name in `region`), else the region's default VPC; undefined
+   * when none is known (the account lists no default VPC there).
+   */
+  protected async newVpc(
+    vpc: string | undefined,
+    region: string,
+    signal: AbortSignal,
+  ): Promise<{ id: string | undefined; send: boolean }> {
+    if (vpc !== undefined) return { id: vpc, send: true };
+    const wanted = this.config.vpc;
+    const vpcs = await accountVpcs(this.client, signal);
+    if (wanted !== undefined) {
+      const found = uuidPattern.test(wanted)
+        ? { id: wanted.toLowerCase() }
+        : vpcs.find((v) => v.name === wanted && v.region === region);
+      if (!found)
+        throw new ComputeError(
+          'INVALID_CONFIG',
+          `the account's VPC ${wanted} does not exist in ${region}`,
+          undefined,
+          { provider: 'digitalocean', reason: 'vpc' },
+        );
+      return { id: found.id, send: true };
+    }
+    return { id: vpcs.find((v) => v.region === region && v.default === true)?.id, send: false };
+  }
+
+  /** Refuses a target Droplet outside `vpc` (DO balances only to its own VPC), or, with none known, Droplets of two VPCs. */
+  protected checkTargetVpc(droplets: readonly DoDroplet[], vpc: string | undefined): void {
+    const inVpc = droplets.filter((d) => typeof d.vpc_uuid === 'string' && d.vpc_uuid !== '');
+    const expected = vpc ?? inVpc[0]?.vpc_uuid;
+    const outside = inVpc.find((d) => d.vpc_uuid!.toLowerCase() !== expected!.toLowerCase());
+    if (outside)
+      throw fail(
+        'INVALID_INPUT',
+        `Droplet ${outside.id} is in VPC ${outside.vpc_uuid}; the load balancer balances only to Droplets in its VPC${vpc ? ` ${vpc}` : ''}`,
+        'vpc',
+      );
   }
 
   /**
@@ -740,15 +786,19 @@ export class DoLoadBalancers implements ProviderLoadBalancers {
     await this.targetCertificates(spec, signal);
     let want: Desired;
     let vpc: string | undefined;
+    let targets: DoDroplet[] = [];
     if (global) {
       await this.targetLoadBalancers(spec.targets.loadBalancers ?? [], signal);
       want = globalDesired(spec);
     } else {
-      const droplets = await this.targetDroplets(spec.targets.machines ?? [], region!, signal);
+      targets = await this.targetDroplets(spec.targets.machines ?? [], region!, signal);
       vpc = spec.network
         ? (await vpcForNetwork(this.client, spec.network, region!, signal)).id
         : undefined;
-      want = regionalDesired(spec, droplets);
+      want = regionalDesired(
+        spec,
+        targets.map((d) => d.id),
+      );
     }
     const network = spec.internal ? 'INTERNAL' : 'EXTERNAL';
 
@@ -760,6 +810,15 @@ export class DoLoadBalancers implements ProviderLoadBalancers {
     current ??= await this.survivor(doName, signal);
 
     if (!current) {
+      let sendVpc = false;
+      if (!global) {
+        const made = await this.newVpc(vpc, region!, signal);
+        if (targets.length > 0) this.checkTargetVpc(targets, made.id);
+        if (made.send) {
+          vpc = made.id;
+          sendVpc = true;
+        }
+      }
       const body = global
         ? { name: doName, type: 'GLOBAL', ...want }
         : {
@@ -767,7 +826,7 @@ export class DoLoadBalancers implements ProviderLoadBalancers {
             type: 'REGIONAL',
             region,
             network,
-            ...(vpc !== undefined ? { vpc_uuid: vpc } : {}),
+            ...(sendVpc && vpc !== undefined ? { vpc_uuid: vpc } : {}),
             ...want,
           };
       const reply = await this.client.request<{ load_balancer: DoLoadBalancer }>(
@@ -792,6 +851,7 @@ export class DoLoadBalancers implements ProviderLoadBalancers {
       if (current.region?.slug !== region) throw replace('region');
       if ((current.network ?? 'EXTERNAL') !== network) throw replace('network (internal)');
       if (vpc !== undefined && current.vpc_uuid !== vpc) throw replace('network');
+      this.checkTargetVpc(targets, current.vpc_uuid || undefined);
     }
 
     if (current.status !== 'active' || !differs(current, want)) return statusState(current);

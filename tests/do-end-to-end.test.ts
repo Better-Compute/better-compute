@@ -591,6 +591,61 @@ describe('provider-digitalocean through vps, end to end', () => {
     expect(w.emu.state.certificates.size).toBe(0);
   });
 
+  it('a load balancer in front of an instance on a tenant subnet is made in that subnet VPC', async () => {
+    const w = await world();
+    const tenantId = w.acmeTenant;
+    const network = await w.api.networks.create(w.acme, {
+      tenantId,
+      poolId: w.poolId,
+      name: 'lbnet',
+      idempotencyKey: 'net-lb',
+    });
+    const withSubnet = await w.api.networks.addSubnet(w.acme, {
+      tenantId,
+      networkId: network.id,
+      name: 'web',
+      region: REGION,
+      cidr: '10.40.0.0/24',
+    });
+    const subnet = withSubnet.subnets[0];
+    const networkView = () => w.api.networks.get(w.acme, { tenantId, networkId: network.id });
+    for (let round = 0; round < 8 && (await networkView()).state !== 'ready'; round++)
+      await w.tick('vps.networks', 5_000);
+    const created = await w.api.instances.create(
+      w.acme,
+      createInput(w, { networkId: network.id, subnetId: subnet.id, idempotencyKey: 'lb-net-vm' }),
+    );
+    expect(await settle(w, created.id, 'running')).toMatchObject({ state: 'running' });
+    const lb = await w.api.loadBalancers.create(w.acme, {
+      tenantId,
+      poolId: w.poolId,
+      name: 'web',
+      region: REGION,
+      targets: { instanceIds: [created.id] },
+      forwarding: [{ entryProtocol: 'http', entryPort: 80, targetProtocol: 'http', targetPort: 8080 }],
+      idempotencyKey: 'lb-net',
+    });
+    expect(lb).toMatchObject({ networkId: network.id, subnetId: subnet.id });
+    const lbView = () => w.api.loadBalancers.get(w.acme, { tenantId, loadBalancerId: lb.id });
+    for (let round = 0; round < 10 && (await lbView()).state !== 'ready'; round++)
+      await w.tick('vps.provider-resources', 5_000);
+    expect(await lbView()).toMatchObject({ state: 'ready' });
+    const vpc = [...w.emu.state.vpcs.values()].find((entry) => entry.name === providerResourceName(subnet.id))!;
+    const droplet = dropletOf(w, created.id)!;
+    expect(droplet.vpc_uuid).toBe(vpc.id);
+    const [doLb] = [...w.emu.state.loadBalancers.values()];
+    expect(doLb).toMatchObject({ vpc_uuid: vpc.id, droplet_ids: [droplet.id] });
+    // The subnet and its network cannot go while the load balancer is on them.
+    await w.api.instances.delete(w.acme, { tenantId, instanceId: created.id });
+    expect(await settle(w, created.id, 'deleted')).toMatchObject({ state: 'deleted' });
+    expect(
+      await w.api.networks.delete(w.acme, { tenantId, networkId: network.id }).then(
+        () => 'deleted',
+        (error: { code?: string }) => error.code,
+      ),
+    ).toBe('INVALID_STATE');
+  });
+
   it('a create DO refuses for capacity ends the instance in error with ProvisionFailed', async () => {
     const w = await world();
     // DO accepts the create with a 202, then its create action ends `errored`.

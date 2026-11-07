@@ -178,6 +178,8 @@ export interface TargetInstance {
   state: string;
   desired_state: string;
   offer_id: string | null;
+  /** The tenant network subnet it is on; null on no tenant network. */
+  subnet_id: string | null;
 }
 
 /**
@@ -191,7 +193,7 @@ export async function targetInstance(
   resource: { provider_account_id: string; region: string },
 ): Promise<TargetInstance> {
   const { rows } = await tx.query<TargetInstance>(
-    `SELECT i.id, i.tenant_id, i.provider_account_id, i.state, i.desired_state, f.offer_id
+    `SELECT i.id, i.tenant_id, i.provider_account_id, i.state, i.desired_state, f.offer_id, i.subnet_id
        FROM instances i LEFT JOIN flavors f ON f.id = i.flavor_id
       WHERE i.id = $1 AND NOT i.draft`,
     [instanceId],

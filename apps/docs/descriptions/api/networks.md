@@ -34,7 +34,7 @@ Changes the network's `description`. The name, pool and account never change, be
 
 Marks the network, its subnets and its rules for deletion and returns it `deleting`, along with its routes, peerings (also those another network holds with it) and NAT gateways. The reconciler deletes the routes, peerings and gateways, then the rules, then the subnets, then the network, and then the network is `deleted` and publishes `network.deleted`.
 
-- `INVALID_STATE` while instances that are not deleted are on the network, with their ids in `details.instanceIds`: delete or move them first.
+- `INVALID_STATE` while instances that are not deleted are on the network, with their ids in `details.instanceIds`: delete or move them first. Likewise while load balancers are on one of its subnets (`details.loadBalancerIds`).
 - Deleting a network that is being deleted returns it unchanged.
 
 Publishes `network.deleting`. Decided as `compute:networks:delete` on the network.
@@ -54,7 +54,7 @@ Publishes `network.subnet.ready` once the provider has the subnet. Decided as `c
 
 ## removeSubnet
 
-Marks a subnet for deletion and returns the network with the subnet `deleting`. `INVALID_STATE` while instances that are not deleted use the subnet, with their ids in `details.instanceIds`. Its range is free for a new subnet at once. Decided as `compute:networks:update` on the network.
+Marks a subnet for deletion and returns the network with the subnet `deleting`. `INVALID_STATE` while instances that are not deleted use the subnet, with their ids in `details.instanceIds`, or load balancers are on it (`details.loadBalancerIds`). Its range is free for a new subnet at once. Decided as `compute:networks:update` on the network.
 
 ## adopt
 

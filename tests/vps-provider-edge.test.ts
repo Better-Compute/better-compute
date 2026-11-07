@@ -393,13 +393,16 @@ const createLoadBalancer = (raw: Record<string, unknown> = {}, who: Caller = ali
   );
 
 /** A provider instance with a machine (the instances API is not under test here). */
-async function insertInstance(options: { tenantId?: string; flavor?: string; state?: string } = {}) {
+async function insertInstance(
+  options: { tenantId?: string; flavor?: string; state?: string; network?: { networkId: string; subnetId: string } } = {},
+) {
   const instanceId = `inst_01jz${String(++keyCounter).padStart(22, '0')}`;
   await db.query(
     `INSERT INTO instances (id, tenant_id, pool_id, flavor_id, flavor, image_id, runtime, draft, state, desired_state,
-                            provider_account_id, external_id, owner_identity_id, idempotency_key, request_hash, version)
+                            provider_account_id, external_id, owner_identity_id, idempotency_key, request_hash, version,
+                            network_id, subnet_id)
      VALUES ($1, $2, $3, $4, '{}'::jsonb, 'img', 'provider', false, $5, 'running', $6, $7, 'usr_alice', $1,
-             decode('00', 'hex'), 1)`,
+             decode('00', 'hex'), 1, $8, $9)`,
     [
       instanceId,
       options.tenantId ?? 'root',
@@ -408,9 +411,30 @@ async function insertInstance(options: { tenantId?: string; flavor?: string; sta
       options.state ?? 'running',
       account,
       `droplet-${keyCounter}`,
+      options.network?.networkId ?? null,
+      options.network?.subnetId ?? null,
     ],
   );
   return { instanceId, machine: `droplet-${keyCounter}` };
+}
+
+/** A ready tenant network with one subnet (the networks API is not under test here). */
+async function insertNetwork(options: { tenantId?: string; region?: string; externalName?: string } = {}) {
+  const n = ++keyCounter;
+  const networkId = `net_01jz${String(n).padStart(22, '0')}`;
+  const subnetId = `snet_01jz${String(n).padStart(22, '0')}`;
+  await db.query(
+    `INSERT INTO networks (id, tenant_id, pool_id, provider_account_id, name, state, desired_state, created_by,
+                           idempotency_key, request_hash, version, external_name)
+     VALUES ($1, $2, $3, $4, $1, 'ready', 'present', 'usr_alice', $1, decode('00', 'hex'), 1, $5)`,
+    [networkId, options.tenantId ?? 'root', pool, account, options.externalName ?? null],
+  );
+  await db.query(
+    `INSERT INTO network_subnets (id, network_id, name, region, cidr, state, desired_state)
+     VALUES ($1, $2, 'app', $3, $4, 'ready', 'present')`,
+    [subnetId, networkId, options.region ?? 'nyc3', `10.${n % 250}.0.0/24`],
+  );
+  return { networkId, subnetId };
 }
 
 const reconciler = () => module.reconcilers!.find((entry) => entry.name === providerResourcesWork)!;
@@ -488,6 +512,8 @@ beforeEach(async () => {
   await db.query(`DELETE FROM provider_certificates`);
   await db.query(`DELETE FROM instance_usage_intervals`);
   await db.query(`DELETE FROM instances`);
+  await db.query(`DELETE FROM network_subnets`);
+  await db.query(`DELETE FROM networks`);
   await db.transaction(async (tx) => {
     await setQuota(tx, 'root', pool, 'loadBalancers', 2);
     await tx.query(`UPDATE quota_usage SET used = 0 WHERE pool_id = $1`, [pool]);
@@ -667,6 +693,64 @@ describe('loadBalancers', () => {
     expect(required).toContainEqual(expect.stringMatching(new RegExp(`^compute:instances:update .*instance/${mine.instanceId}$`)));
     await drain();
     expect(cloud.calls).toEqual([`ensureLoadBalancer ${edgeResourceName(lb.id)} ${mine.machine}`]);
+  });
+
+  it('lives in one VPC: on a subnet it reaches only that subnet, without one only instances on no network', async () => {
+    const net = await insertNetwork();
+    const other = await insertNetwork();
+    const plain = await insertInstance();
+    const onNet = await insertInstance({ network: net });
+    const onNet2 = await insertInstance({ network: net });
+    const onOther = await insertInstance({ network: other });
+    // Named instances on two subnets, or one not on the named subnet, are refused before anything is written.
+    expect(await codeOf(createLoadBalancer({ targets: { instanceIds: [onNet.instanceId, onOther.instanceId] } }))).toBe(
+      'INVALID_INPUT',
+    );
+    expect(await codeOf(createLoadBalancer({ targets: { instanceIds: [plain.instanceId, onNet.instanceId] } }))).toBe(
+      'INVALID_INPUT',
+    );
+    expect(
+      await codeOf(createLoadBalancer({ subnetId: net.subnetId, targets: { instanceIds: [onOther.instanceId] } })),
+    ).toBe('INVALID_INPUT');
+    expect(await quotaUsed('loadBalancers')).toBe(0);
+    // Named instances that share a subnet put the load balancer on it; the provider is told the network and subnet.
+    const named = await createLoadBalancer({ targets: { instanceIds: [onNet.instanceId] } });
+    expect(named).toMatchObject({ networkId: net.networkId, subnetId: net.subnetId });
+    // In pool mode with a subnet it reaches the pool's instances on that subnet only.
+    const pooled = await createLoadBalancer({ subnetId: net.subnetId, targets: { pool: true } });
+    await drain();
+    const specOf = (lbId: string) =>
+      [...cloud.loadBalancers.values()].find((entry) => entry.spec.name === edgeResourceName(lbId))!.spec;
+    const network = { network: providerResourceName(net.networkId), subnet: providerResourceName(net.subnetId) };
+    expect(specOf(named.id)).toMatchObject({ network, targets: { machines: [onNet.machine] } });
+    expect(specOf(pooled.id)).toMatchObject({
+      network,
+      targets: { machines: [onNet.machine, onNet2.machine].sort() },
+    });
+    // An update cannot move it to instances of another subnet (its VPC never changes).
+    expect(
+      await codeOf(
+        call('loadBalancers', 'update', {
+          tenantId: 'root',
+          loadBalancerId: named.id,
+          targets: { instanceIds: [onOther.instanceId] },
+        }),
+      ),
+    ).toBe('INVALID_INPUT');
+    await call('loadBalancers', 'delete', { tenantId: 'root', loadBalancerId: pooled.id });
+    await drain();
+    await setQuota(db, 'root', pool, 'loadBalancers', 3);
+    // Without a subnet, a pool load balancer reaches only the instances on no tenant network.
+    const plainLb = await createLoadBalancer({ targets: { pool: true } });
+    await drain();
+    expect(specOf(plainLb.id).network).toBeUndefined();
+    expect(specOf(plainLb.id).targets.machines).toEqual([plain.machine]);
+    // Another tenant's subnet is not found; a subnet in another region is refused.
+    const theirs = await insertNetwork({ tenantId: 'other' });
+    expect(await codeOf(createLoadBalancer({ subnetId: theirs.subnetId }))).toBe('NOT_FOUND');
+    const sfo = await insertNetwork({ region: 'sfo3' });
+    expect(await codeOf(createLoadBalancer({ subnetId: sfo.subnetId }))).toBe('INVALID_INPUT');
+    expect(await codeOf(createLoadBalancer({ scope: 'global', region: undefined, subnetId: net.subnetId, targets: { loadBalancerIds: [named.id] }, domains: [{ name: 'a.example.net' }] }))).toBe('INVALID_INPUT');
   });
 
   it('terminates TLS with a certificate once it is ready; the certificate is not deleted while used', async () => {

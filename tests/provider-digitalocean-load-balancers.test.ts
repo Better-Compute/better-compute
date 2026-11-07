@@ -291,6 +291,62 @@ describe('provider-digitalocean load balancers: create and find', () => {
     expect(writes(emu)).toHaveLength(0);
   });
 
+  it('a target outside the load balancer VPC is refused before any write (DO balances only to its own VPC)', async () => {
+    const { emu, impl } = await setup();
+    const vpc = seedVpc(emu.state, {
+      name: 'bc-sub1',
+      region: 'nyc3',
+      ip_range: '10.20.0.0/20',
+      description: 'bc:network=bc-net1',
+    });
+    const inSubnet = seedDroplet(emu.state, {
+      region: 'nyc3',
+      vpc_uuid: vpc.id,
+      tags: [deployment, instanceTag('ins_1')],
+    });
+    const inDefault = host(emu, { instance: 'ins_2' });
+    const subnet = { network: { network: 'bc-net1', subnet: 'bc-sub1' } };
+    // No network: the region's default VPC, which the subnet's Droplet is not in.
+    const outside = await failure(impl.loadBalancers.ensureLoadBalancer(spec([inSubnet]), ctx()));
+    expect([outside.code, outside.details?.reason]).toEqual(['INVALID_INPUT', 'vpc']);
+    // On the subnet: the default VPC's Droplet is outside it.
+    const mixed = await failure(
+      impl.loadBalancers.ensureLoadBalancer(spec([inSubnet, inDefault], subnet), ctx()),
+    );
+    expect([mixed.code, mixed.details?.reason]).toEqual(['INVALID_INPUT', 'vpc']);
+    expect(writes(emu)).toHaveLength(0);
+    // The emulator answers as DO does when asked anyway: a 422.
+    const raw = await emu.fetch('https://api.digitalocean.com/v2/load_balancers', {
+      method: 'POST',
+      headers: { authorization: 'Bearer do-token', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'raw',
+        region: 'nyc3',
+        forwarding_rules: [
+          { entry_protocol: 'http', entry_port: 80, target_protocol: 'http', target_port: 80 },
+        ],
+        droplet_ids: [inSubnet.id],
+      }),
+    });
+    expect(raw.status).toBe(422);
+    emu.requests.length = 0;
+    // Each in its own VPC is made, and an existing one keeps refusing a Droplet of another VPC.
+    const onSubnet = await impl.loadBalancers.ensureLoadBalancer(spec([inSubnet], subnet), ctx());
+    expect(emu.state.loadBalancers.get(onSubnet.id!)!.vpc_uuid).toBe(vpc.id);
+    const later = await failure(
+      impl.loadBalancers.ensureLoadBalancer(
+        { ...spec([inSubnet, inDefault]), id: onSubnet.id! },
+        ctx(),
+      ),
+    );
+    expect([later.code, later.details?.reason]).toEqual(['INVALID_INPUT', 'vpc']);
+    await impl.loadBalancers.ensureLoadBalancer(
+      { ...spec([inDefault]), name: 'bc-lb2' },
+      ctx(),
+    );
+    expect(writes(emu)).toHaveLength(2);
+  });
+
   it('a certificate that is not one of this deployment, or is gone, is refused before any write', async () => {
     const { emu, impl } = await setup();
     const ours = host(emu);

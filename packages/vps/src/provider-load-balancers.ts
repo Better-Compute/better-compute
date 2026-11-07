@@ -14,7 +14,7 @@ import {
 } from '@better-compute/core';
 import { readAccount } from './accounts.js';
 import { canonical, fail, id, int, key, object, optional, sha256Hex, tenant } from './input.js';
-import { edgeResourceName } from './networks.js';
+import { edgeResourceName, providerResourceName, zoneRegion } from './networks.js';
 import { domainOf } from './provider-certificates.js';
 import {
   assertNameFree,
@@ -53,6 +53,11 @@ import {
 //
 // Targets are explicit machine ids sent to the provider, never a tag: what a load balancer reaches is computed
 // here, from the tenant's own rows (`provider_load_balancer_targets`), so it never reaches another tenant's machine.
+// A regional load balancer is in one VPC and the provider balances only to machines in it (DigitalOcean: a subnet is
+// a VPC, DO-D9). So it lives on one subnet of a tenant network (`subnetId`, or the one its named instances share) or,
+// without one, on the account's default network, and reaches only the instances placed there: the target set below
+// filters on the instance's subnet, and named instances on another subnet are refused (INVALID_INPUT).
+//
 // The provider is re-ensured when that set changes: an instance of the pool is deleted (`onLoadBalancedInstanceGone`)
 // or reaches a machine, which the periodic pass notices (`applied_targets` differs from the set).
 //
@@ -93,16 +98,22 @@ CREATE TABLE provider_load_balancers (
   -- What the provider was last given: its targets (comma-separated provider ids) and the row version ensured.
   applied_targets text,
   applied_version bigint,
+  -- regional: the tenant network subnet it is on (its VPC); NULL: the account's default network.
+  network_id text REFERENCES networks,
+  subnet_id text REFERENCES network_subnets,
   external_id text,
   address text,
   address_v6 text,
   charged int NOT NULL DEFAULT 0 CHECK (charged >= 0),${columns},
   CHECK ((scope = 'regional') = (region IS NOT NULL)),
+  CHECK ((network_id IS NULL) = (subnet_id IS NULL)),
+  CHECK (scope = 'regional' OR subnet_id IS NULL),
   CHECK ((scope = 'global') = (target_mode = 'loadBalancers'))
 );
 CREATE UNIQUE INDEX provider_load_balancers_name ON provider_load_balancers (tenant_id, name) WHERE state <> 'deleted';
 CREATE INDEX provider_load_balancers_live ON provider_load_balancers (state) WHERE state <> 'deleted';
 CREATE INDEX provider_load_balancers_pool ON provider_load_balancers (pool_id) WHERE state <> 'deleted';
+CREATE INDEX provider_load_balancers_subnet ON provider_load_balancers (subnet_id) WHERE subnet_id IS NOT NULL AND state <> 'deleted';
 CREATE TRIGGER provider_load_balancers_stamp_deleted BEFORE UPDATE ON provider_load_balancers
   FOR EACH ROW EXECUTE FUNCTION vps_stamp_deleted_at();
 
@@ -118,6 +129,8 @@ LANGUAGE sql STABLE AS $$
              AND i.desired_state <> 'deleted'
              AND i.state NOT IN ('provisioning', 'deleting', 'deleted', 'error', 'lost')
              AND (split_part(f.offer_id, '/', 1) = lb.region OR split_part(f.offer_id, '/', 1) LIKE lb.region || '-%')
+             -- The provider balances only to machines in the load balancer's VPC: its subnet, or no tenant network.
+             AND i.subnet_id IS NOT DISTINCT FROM lb.subnet_id
              AND ((lb.target_mode = 'pool' AND i.pool_id = lb.pool_id)
                   OR (lb.target_mode = 'instances' AND i.id = ANY(lb.target_ids)))
           UNION
@@ -180,6 +193,9 @@ export interface ProviderLoadBalancerView extends LoadBalancerSettings {
   description?: string;
   scope: 'regional' | 'global';
   region?: string;
+  /** regional: the tenant network and subnet it is on (absent: the account's default network). */
+  networkId?: string;
+  subnetId?: string;
   targets: LoadBalancerTargetsInput;
   /** Its public (or internal) IPv4 address, once the provider assigned it. */
   address?: string;
@@ -199,6 +215,11 @@ export interface CreateProviderLoadBalancerInput extends LoadBalancerSettings {
   description?: string;
   scope: 'regional' | 'global';
   region?: string;
+  /**
+   * regional: the subnet of a tenant network it is on; it reaches only instances on that subnet. Absent: the subnet
+   * its named instances share, else the account's default network (instances on no tenant network).
+   */
+  subnetId?: string;
   targets: LoadBalancerTargetsInput;
   idempotencyKey: string;
 }
@@ -404,6 +425,7 @@ export function parseCreateProviderLoadBalancer(raw: unknown): CreateProviderLoa
     'description',
     'scope',
     'region',
+    'subnetId',
     'targets',
     ...settingFields,
     'idempotencyKey',
@@ -425,6 +447,11 @@ export function parseCreateProviderLoadBalancer(raw: unknown): CreateProviderLoa
   };
   if (scope === 'regional') out.region = regionOf(input.region);
   else if (input.region !== undefined) fail('a global load balancer has no region');
+  const subnetId = optional(input.subnetId, (value) => id(value, 'snet', 'subnetId'));
+  if (subnetId !== undefined) {
+    if (scope !== 'regional') fail('a global load balancer is on no subnet');
+    out.subnetId = subnetId;
+  }
   const projectId = optional(input.projectId, (value) => id(value, 'prj', 'projectId'));
   if (projectId !== undefined) out.projectId = projectId;
   const description = optional(input.description, descriptionOf);
@@ -558,6 +585,10 @@ export const providerLoadBalancerSchemas = {
       description: descriptionSchema,
       scope: { enum: ['regional', 'global'], default: 'regional', description: 'regional or global (anycast)' },
       region: regionSchema,
+      subnetId: idOf(
+        'snet',
+        'regional: a subnet of a tenant network; the load balancer reaches only instances on it (default: the subnet its named instances share, else the default network)',
+      ),
       targets: targetsSchema,
       ...settingsSchema,
       idempotencyKey: keySchema,
@@ -591,6 +622,8 @@ export interface LoadBalancerRow {
   target_mode: 'pool' | 'instances' | 'loadBalancers';
   target_ids: string[];
   certificate_ids: string[];
+  network_id: string | null;
+  subnet_id: string | null;
   applied_targets: string | null;
   applied_version: number | string | null;
   external_id: string | null;
@@ -607,7 +640,7 @@ export interface LoadBalancerRow {
 }
 
 const loadBalancerColumns = `id, tenant_id, project_id, pool_id, provider_account_id, name, description, scope, region,
-  spec, target_mode, target_ids, certificate_ids, applied_targets, applied_version, external_id, address, address_v6,
+  spec, target_mode, target_ids, certificate_ids, network_id, subnet_id, applied_targets, applied_version, external_id, address, address_v6,
   charged, state, desired_state, message, ensure_requested, encode(request_hash, 'hex') AS request_hash, version,
   created_at`;
 const iso = (value: Date | string) => new Date(value).toISOString();
@@ -636,6 +669,8 @@ export function providerLoadBalancerView(row: LoadBalancerRow): ProviderLoadBala
   if (row.project_id) view.projectId = row.project_id;
   if (row.description) view.description = row.description;
   if (row.region) view.region = row.region;
+  if (row.network_id) view.networkId = row.network_id;
+  if (row.subnet_id) view.subnetId = row.subnet_id;
   if (row.address) view.address = row.address;
   if (row.address_v6) view.addressV6 = row.address_v6;
   if (row.message) view.message = row.message;
@@ -707,14 +742,16 @@ function certificatesOf(settings: Partial<LoadBalancerSettings>): string[] {
 
 /**
  * The certificates and targets a load balancer names must be the tenant's, on its provider account, and not being
- * deleted: another tenant's are NOT_FOUND (never confirmed to exist), others INVALID_INPUT or INVALID_STATE.
+ * deleted: another tenant's are NOT_FOUND (never confirmed to exist), others INVALID_INPUT or INVALID_STATE. Returns
+ * the subnet each named instance is on (null: no tenant network).
  */
 async function checkReferences(
   tx: SqlTx,
   lb: { tenantId: string; accountId: string; region?: string; selfId?: string },
   certificateIds: readonly string[],
   targets: LoadBalancerTargetsInput | undefined,
-): Promise<void> {
+): Promise<{ instanceSubnets: Map<string, string | null> }> {
+  const instanceSubnets = new Map<string, string | null>();
   for (const certificateId of certificateIds) {
     const { rows } = await tx.query<{ provider_account_id: string; desired_state: string }>(
       `SELECT provider_account_id, desired_state FROM provider_certificates
@@ -731,11 +768,13 @@ async function checkReferences(
     if (certificate.desired_state === 'deleted')
       throw new ComputeError('INVALID_STATE', `Certificate ${certificateId} is being deleted`);
   }
-  for (const instanceId of targets?.instanceIds ?? [])
-    await targetInstance(tx, lb.tenantId, instanceId, {
+  for (const instanceId of targets?.instanceIds ?? []) {
+    const instance = await targetInstance(tx, lb.tenantId, instanceId, {
       provider_account_id: lb.accountId,
       region: lb.region!,
     });
+    instanceSubnets.set(instanceId, instance.subnet_id ?? null);
+  }
   for (const loadBalancerId of targets?.loadBalancerIds ?? []) {
     const target = await readLoadBalancer(tx, loadBalancerId, { tenantId: lb.tenantId });
     if (!target || target.state === 'deleted')
@@ -750,6 +789,68 @@ async function checkReferences(
     if (target.desired_state === 'deleted')
       throw new ComputeError('INVALID_STATE', `Load balancer ${loadBalancerId} is being deleted`);
   }
+  return { instanceSubnets };
+}
+
+/**
+ * The subnet a regional load balancer is on: `subnetId`, else the one its named instances share, else none (the
+ * account's default network). The provider balances only to machines in the load balancer's VPC, so named instances
+ * on another subnet (or on none, for a load balancer on a subnet) are INVALID_INPUT. The subnet must be of a network
+ * of the tenant's (another tenant's is NOT_FOUND), on the load balancer's account and region, and not being deleted;
+ * its rows are held (FOR SHARE) until the transaction ends, so networks.delete and removeSubnet see the load balancer.
+ */
+async function placeLoadBalancer(
+  tx: SqlTx,
+  lb: { tenantId: string; accountId: string; region: string },
+  subnetId: string | undefined,
+  instanceSubnets: ReadonlyMap<string, string | null>,
+): Promise<{ networkId: string; subnetId: string } | undefined> {
+  let wanted = subnetId;
+  if (wanted === undefined) {
+    const distinct = [...new Set(instanceSubnets.values())];
+    if (distinct.length > 1)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        'The named instances are on different subnets; a load balancer reaches the instances of one subnet (its VPC)',
+        undefined,
+        { reason: 'subnets' },
+      );
+    wanted = distinct[0] ?? undefined;
+  } else
+    for (const [instanceId, subnet] of instanceSubnets)
+      if (subnet !== wanted)
+        throw new ComputeError(
+          'INVALID_INPUT',
+          `Instance ${instanceId} is not on subnet ${wanted}; a load balancer reaches only the instances of its subnet`,
+          undefined,
+          { reason: 'subnet' },
+        );
+  if (wanted === undefined) return undefined;
+  const { rows } = await tx.query<{
+    network_id: string;
+    region: string;
+    subnet_desired: string;
+    tenant_id: string;
+    provider_account_id: string;
+    network_desired: string;
+  }>(
+    `SELECT s.network_id, s.region, s.desired_state AS subnet_desired, n.tenant_id, n.provider_account_id,
+            n.desired_state AS network_desired
+       FROM network_subnets s JOIN networks n ON n.id = s.network_id
+      WHERE s.id = $1 AND n.state <> 'deleted'
+        FOR SHARE OF s, n`,
+    [wanted],
+  );
+  const subnet = rows[0];
+  if (!subnet || subnet.tenant_id !== lb.tenantId)
+    throw new ComputeError('NOT_FOUND', `Subnet ${wanted} not found`);
+  if (subnet.provider_account_id !== lb.accountId)
+    throw new ComputeError('INVALID_INPUT', `Subnet ${wanted} is not on the provider account ${lb.accountId}`);
+  if (subnet.region !== lb.region && zoneRegion(subnet.region) !== lb.region)
+    throw new ComputeError('INVALID_INPUT', `Subnet ${wanted} is in ${subnet.region}, not in ${lb.region}`);
+  if (subnet.subnet_desired === 'deleted' || subnet.network_desired === 'deleted')
+    throw new ComputeError('INVALID_STATE', `Subnet ${wanted} is being deleted`);
+  return { networkId: subnet.network_id, subnetId: wanted };
 }
 
 // --- API ---------------------------------------------------------------------------------------
@@ -830,7 +931,7 @@ export async function createProviderLoadBalancer(
   const provider = await resourceProvider(deps, tx, input.tenantId, input.poolId, 'loadBalancers');
   if (input.region !== undefined) assertRegion(provider, input.region);
   const certificateIds = certificatesOf(input);
-  await checkReferences(
+  const { instanceSubnets } = await checkReferences(
     tx,
     {
       tenantId: input.tenantId,
@@ -840,6 +941,15 @@ export async function createProviderLoadBalancer(
     certificateIds,
     input.targets,
   );
+  const placed =
+    input.scope === 'regional'
+      ? await placeLoadBalancer(
+          tx,
+          { tenantId: input.tenantId, accountId: provider.accountId, region: input.region! },
+          input.subnetId,
+          instanceSubnets,
+        )
+      : undefined;
   await lockTenant(tx, input.tenantId);
   await assertNameFree(tx, 'provider_load_balancers', input.tenantId, input.name);
   await chargeQuota(tx, input.tenantId, input.poolId, { [loadBalancerQuotaResource]: 1 });
@@ -847,10 +957,11 @@ export async function createProviderLoadBalancer(
   try {
     await tx.query(
       `INSERT INTO provider_load_balancers (id, tenant_id, project_id, pool_id, provider_account_id, name, description,
-                                            scope, region, spec, target_mode, target_ids, certificate_ids, charged,
-                                            state, desired_state, created_by, idempotency_key, request_hash, version)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12::text[], $13::text[], 1, 'pending', 'present',
-               $14, $15, decode($16, 'hex'), 1)`,
+                                            scope, region, spec, target_mode, target_ids, certificate_ids, network_id,
+                                            subnet_id, charged, state, desired_state, created_by, idempotency_key,
+                                            request_hash, version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12::text[], $13::text[], $17, $18, 1, 'pending',
+               'present', $14, $15, decode($16, 'hex'), 1)`,
       [
         loadBalancerId,
         input.tenantId,
@@ -868,6 +979,8 @@ export async function createProviderLoadBalancer(
         identity,
         input.idempotencyKey,
         hash,
+        placed?.networkId ?? null,
+        placed?.subnetId ?? null,
       ],
     );
   } catch (error) {
@@ -943,7 +1056,7 @@ export async function updateProviderLoadBalancer(
   for (const field of settingFields)
     if (input[field] !== undefined) (settings as unknown as Record<string, unknown>)[field] = input[field];
   const certificateIds = certificatesOf(settings);
-  await checkReferences(
+  const { instanceSubnets } = await checkReferences(
     tx,
     {
       tenantId: row.tenant_id,
@@ -954,6 +1067,17 @@ export async function updateProviderLoadBalancer(
     certificateIds.filter((certificateId) => !row.certificate_ids.includes(certificateId)),
     input.targets,
   );
+  // The subnet (the provider-side VPC) never changes: named instances must be on it.
+  for (const [instanceId, subnet] of instanceSubnets)
+    if (subnet !== row.subnet_id)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        row.subnet_id
+          ? `Instance ${instanceId} is not on subnet ${row.subnet_id}; a load balancer reaches only the instances of its subnet`
+          : `Instance ${instanceId} is on a tenant network; this load balancer reaches only instances on no tenant network`,
+        undefined,
+        { reason: 'subnet' },
+      );
   const targets = input.targets ?? targetsView(row);
   const mode = targets.pool ? 'pool' : targets.instanceIds ? 'instances' : 'loadBalancers';
   await tx.query(
@@ -1037,6 +1161,8 @@ export async function onLoadBalancedInstanceGone(
 interface LoadedLoadBalancer {
   lb: LoadBalancerRow;
   targets: string[];
+  /** regional on a subnet: its network's and subnet's provider-side names, as instances on it were placed. */
+  network?: { network: string; subnet: string };
   /** vps certificate id -> its provider id, state and whether it is wanted. */
   certificates: Map<string, { external_id: string | null; state: string; desired_state: string }>;
 }
@@ -1053,9 +1179,21 @@ async function loadLoadBalancer(tx: SqlTx, loadBalancerId: string): Promise<Load
       WHERE id = ANY($1::text[]) AND tenant_id = $2 AND provider_account_id = $3`,
     [lb.certificate_ids, lb.tenant_id, lb.provider_account_id],
   );
+  let network: { network: string; subnet: string } | undefined;
+  if (lb.network_id && lb.subnet_id) {
+    const { rows } = await tx.query<{ external_name: string | null }>(
+      `SELECT external_name FROM networks WHERE id = $1`,
+      [lb.network_id],
+    );
+    network = {
+      network: providerResourceName(lb.network_id, rows[0]?.external_name),
+      subnet: providerResourceName(lb.subnet_id),
+    };
+  }
   return {
     lb,
     targets: [...(targets.rows[0]?.targets ?? [])],
+    ...(network ? { network } : {}),
     certificates: new Map(certificates.rows.map((row) => [row.id, row])),
   };
 }
@@ -1140,6 +1278,7 @@ function loadBalancerSpec(
     forwarding,
     targets: lb.scope === 'regional' ? { machines: loaded.targets } : { loadBalancers: loaded.targets },
     ...(lb.region ? { region: lb.region } : {}),
+    ...(loaded.network ? { network: loaded.network } : {}),
     ...(lb.spec.healthCheck ? { healthCheck: lb.spec.healthCheck } : {}),
     ...(lb.spec.stickySessions ? { stickySessions: lb.spec.stickySessions } : {}),
     ...(lb.spec.sourceRanges ? { sourceRanges: lb.spec.sourceRanges } : {}),

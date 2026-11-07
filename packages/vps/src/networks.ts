@@ -1534,6 +1534,14 @@ export async function removeSubnet(
       undefined,
       { instanceIds },
     );
+  const loadBalancerIds = await loadBalancersOn(tx, 'subnet_id', subnet.id);
+  if (loadBalancerIds.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Subnet ${subnet.name} holds ${loadBalancerIds.length} load balancer(s); delete them first`,
+      undefined,
+      { loadBalancerIds },
+    );
   await tx.query(
     `UPDATE network_subnets SET desired_state = 'deleted', state = 'deleting', message = NULL WHERE id = $1`,
     [subnet.id],
@@ -1545,6 +1553,22 @@ export async function removeSubnet(
 }
 
 // --- Edge: NAT gateways, peerings and routes (DO P4) ----------------------------------------------
+
+/**
+ * The load balancers on a subnet or network (DO P4: a regional load balancer lives in its subnet's VPC), until the
+ * provider deleted them: the subnet cannot go before them.
+ */
+async function loadBalancersOn(
+  tx: SqlTx,
+  column: 'subnet_id' | 'network_id',
+  value: string,
+): Promise<string[]> {
+  const { rows } = await tx.query<{ id: string }>(
+    `SELECT id FROM provider_load_balancers WHERE ${column} = $1 AND state <> 'deleted' ORDER BY id LIMIT 50`,
+    [value],
+  );
+  return rows.map((row) => row.id);
+}
 
 /**
  * Marks for deletion every live edge row on a subnet (its gateway, its routes, the peerings it takes part in) or of
@@ -1858,6 +1882,14 @@ export async function deleteNetwork(
       `Network ${row.name} has ${instanceIds.length} instance(s) on it`,
       undefined,
       { instanceIds },
+    );
+  const loadBalancerIds = await loadBalancersOn(tx, 'network_id', row.id);
+  if (loadBalancerIds.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Network ${row.name} holds ${loadBalancerIds.length} load balancer(s); delete them first`,
+      undefined,
+      { loadBalancerIds },
     );
   const clusterIds = await liveKubernetesClusters(tx, 'network_id', row.id);
   if (clusterIds.length > 0)

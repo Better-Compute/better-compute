@@ -11,7 +11,8 @@ import { defaultVpc, uuidFrom } from './vpcs.js';
 //
 // What DO validates and the provider must not trip over: a regional load balancer names a region
 // and at least one forwarding rule; it targets `droplet_ids` or a `tag`, never both, and every
-// Droplet must be in its region (the 422 `must be in the same region`); an `https`/`http2` entry
+// Droplet must be in its region (the 422 `must be in the same region`) and in its VPC (the 422
+// `must be in the same VPC`; DO docs, unverified); an `https`/`http2` entry
 // names a certificate that exists unless it passes TLS through; `firewall` entries are `ip:` or
 // `cidr:`. A global load balancer has no region and targets regional load balancers
 // (`target_load_balancer_ids`) or Droplets, with `glb_settings`. A replace (PUT) keeps the type,
@@ -88,6 +89,7 @@ function refusal(
   body: Json,
   type: string,
   regionSlug: string | undefined,
+  vpcUuid: string,
 ): RouteResult | undefined {
   if (typeof body.name !== 'string' || body.name === '') return unprocessable('Name is required');
   const rules = body.forwarding_rules;
@@ -110,6 +112,8 @@ function refusal(
     if (!droplet) return unprocessable(`Droplet ${String(id)} was not found`);
     if (type !== 'GLOBAL' && droplet.region.slug !== regionSlug)
       return unprocessable('Droplets must be in the same region as the load balancer');
+    if (type !== 'GLOBAL' && droplet.vpc_uuid && droplet.vpc_uuid !== vpcUuid)
+      return unprocessable('Droplets must be in the same VPC as the load balancer');
   }
   for (const id of (body.target_load_balancer_ids ?? []) as string[]) {
     const target = state.loadBalancers.get(id);
@@ -190,7 +194,7 @@ function create(emulator: DoEmulator, context: RouteContext): RouteResult {
       vpcUuid = body.vpc_uuid;
     } else vpcUuid = defaultVpc(state, regionSlug).id;
   } else if (body.region) return unprocessable('A global load balancer has no region');
-  const refused = refusal(state, body, type, regionSlug);
+  const refused = refusal(state, body, type, regionSlug, vpcUuid);
   if (refused) return refused;
   if (state.loadBalancers.size >= emulator.loadBalancerLimit)
     return emulator.error('422-load-balancer-limit');
@@ -231,7 +235,7 @@ function replace(context: RouteContext): RouteResult {
     return unprocessable('The VPC cannot be changed');
   if ((body.network ?? 'EXTERNAL') !== lb.network)
     return unprocessable('The network cannot be changed');
-  const refused = refusal(state, body, lb.type, lb.region?.slug);
+  const refused = refusal(state, body, lb.type, lb.region?.slug, lb.vpc_uuid);
   if (refused) return refused;
   Object.assign(lb, mutable({ ...body, type: lb.type }), { name: body.name });
   return { status: 200, body: { load_balancer: structuredClone(lb) } };
