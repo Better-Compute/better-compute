@@ -520,6 +520,30 @@ describe('DigitalOcean App Platform and Functions through cloudResources', () =>
     expect(w.emu.state.apps.size).toBe(0);
   });
 
+  it('an app whose first deployment failed keeps its id, so deleting it deletes the app at DigitalOcean', async () => {
+    const w = await world();
+    w.emu.failDeployments = true;
+    const app = await w.api.cloudResources.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      kind: 'do.app',
+      name: 'broken',
+      spec: {
+        region: 'nyc',
+        services: [{ name: 'web', image: { registry_type: 'DOCKER_HUB', repository: 'nginx' } }],
+      },
+      idempotencyKey: 'broken',
+    });
+    await w.until(app.id, 'error');
+    const failed = await w.get(app.id);
+    expect(failed.message).toMatch(/ended ERROR/);
+    expect(w.emu.state.apps.size).toBe(1);
+    expect(failed.providerId).toBe([...w.emu.state.apps.keys()][0]);
+    await w.api.cloudResources.delete(w.acme, { tenantId: w.acmeTenant, resourceId: app.id });
+    await w.until(app.id, 'deleted');
+    expect(w.emu.state.apps.size).toBe(0);
+  });
+
   it('a Functions namespace’s key is sealed; a trigger lives in it and goes first on delete', async () => {
     const w = await world();
     const namespace = await w.api.cloudResources.create(w.acme, {
