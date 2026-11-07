@@ -1684,13 +1684,21 @@ async function teardown(
     if (cluster.provider_id !== null && deps.substrate && ['ready', 'updating', 'error'].includes(cluster.state)) {
       const removed = await removeBcd(deps, sql, row, cluster, signal);
       if (removed === 'retry') return deps.clock.now() + substrateRetryMs;
-      if (removed !== 'done') {
-        const message = `bcd could not be removed from the adopted cluster (it stays on its nodes until it is): ${removed.error}`.slice(
-          0,
-          500,
-        );
+      if (removed !== 'done' && 'error' in removed) {
+        const message = (
+          removed.revoking
+            ? `The substrate's credential identity could not be revoked from the adopted cluster (it keeps cluster-admin until it is): ${removed.error}`
+            : `bcd could not be removed from the adopted cluster (it stays on its nodes until it is): ${removed.error}`
+        ).slice(0, 500);
         if (row.message !== message) await setState(deps, sql, row, { state: 'deleting', message });
         return deps.clock.now() + substrateTeardownRetryMs;
+      }
+      if (removed !== 'done' && row.message !== removed.left) {
+        deps.log.warn('kubernetes: the provider cannot revoke the substrate credential identity on an adopted cluster', {
+          poolId: row.pool_id,
+          subject: substrateSubject,
+        });
+        await setState(deps, sql, row, { state: 'deleting', message: removed.left });
       }
     }
     await sql.transaction(async (tx) => {
@@ -1714,11 +1722,12 @@ async function teardown(
   if (retired === undefined) return poll();
   await sql.transaction(async (tx) => {
     const { rows } = await tx.query(
+      // A credential identity the provider could not revoke stays reported (doctor: substrate-credentials-left).
       `UPDATE kubernetes_pool_substrates
-          SET state = 'deleted', message = NULL, deleted_at = compute_now(), updated_at = compute_now(),
-              version = version + 1
+          SET state = 'deleted', message = CASE WHEN message = $2 THEN message END, deleted_at = compute_now(),
+              updated_at = compute_now(), version = version + 1
         WHERE pool_id = $1 AND state <> 'deleted' RETURNING pool_id`,
-      [row.pool_id],
+      [row.pool_id, credentialsLeftMessage],
     );
     if (rows.length > 0)
       await publishSubstrate(deps, tx, row, 'kubernetes.substrate.deleted', {
@@ -1767,12 +1776,18 @@ async function retireTornDownNodes(deps: SubstrateDeps, sql: SqlExecutor, row: S
   return rows.length === nodesPerRun ? undefined : retired;
 }
 
+/** What an adopted cluster keeps when its provider cannot revoke credentials (`ProviderKubernetes.revokeCredentials`). */
+export const credentialsLeftMessage = `The provider cannot revoke credentials: Kubernetes service account ${substrateSubject} (namespace bc-access, cluster-admin) remains on the adopted cluster; delete it and its ClusterRoleBinding bc-access:${substrateSubject}`;
+
 /**
  * Deletes bcd's objects from the cluster, only those carrying the substrate's label (`owned`): the DaemonSet first,
- * the Namespace last. On a created cluster (deleted next anyway) one that cannot be reached is left as it is. On an
- * ADOPTED cluster, which stays, teardown fails closed: a credential, an account or a delete that fails is an error
- * teardown retries, since bcd left running there keeps a privileged DaemonSet on the tenant's nodes; only a cluster
- * the provider no longer has counts as nothing to delete.
+ * the Namespace last; on an adopted cluster, then the identity the substrate's credentials were minted for
+ * (`revokeCredentials`: the `bc-substrate` service account and its cluster-admin binding), which would otherwise
+ * stay on a cluster better-compute no longer manages. On a created cluster (deleted next anyway) one that cannot be
+ * reached is left as it is. On an ADOPTED cluster, which stays, teardown fails closed: a credential, an account, a
+ * delete or a revoke that fails is an error teardown retries, since bcd left running there keeps a privileged
+ * DaemonSet on the tenant's nodes; only a cluster the provider no longer has counts as nothing to delete. A driver
+ * without `revokeCredentials` answers `left`: teardown goes on and the substrate reports the identity that stays.
  */
 async function removeBcd(
   deps: SubstrateDeps,
@@ -1780,7 +1795,7 @@ async function removeBcd(
   row: SubstrateRow,
   cluster: ClusterRow,
   signal: AbortSignal,
-): Promise<'done' | 'retry' | { error: string }> {
+): Promise<'done' | 'retry' | { error: string; revoking?: boolean } | { left: string }> {
   const agent = deps.substrate!.agent;
   const failed = (error: string): 'done' | { error: string } => {
     if (!cluster.adopted) {
@@ -1836,6 +1851,14 @@ async function removeBcd(
       if (outcome !== 'done') return outcome;
     }
   }
+  if (!cluster.adopted) return 'done';
+  if (typeof kubernetes.revokeCredentials !== 'function') return { left: credentialsLeftMessage };
+  const revoked = await attempt(deps, row.pool_id, signal, () =>
+    kubernetes.revokeCredentials!(cluster.provider_id!, substrateSubject, call),
+  );
+  if (!revoked) return 'retry';
+  if ('error' in revoked)
+    return { error: `service account ${substrateSubject} could not be revoked: ${revoked.error}`, revoking: true };
   return 'done';
 }
 

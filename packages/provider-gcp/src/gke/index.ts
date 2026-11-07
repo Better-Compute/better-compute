@@ -35,7 +35,7 @@ import {
   clusterState,
   nextClusterUpdate,
 } from './clusters.js';
-import { checkCredentialRequest, mintCredentials } from './credentials.js';
+import { checkCredentialRequest, mintCredentials, revokeCredentials } from './credentials.js';
 import {
   autoscalingChange,
   checkNodePoolImmutable,
@@ -488,6 +488,23 @@ export class GcpKubernetes implements ProviderKubernetes {
       expiresAt: credentials.expiresAt,
     });
     return credentials;
+  }
+
+  /** Deletes `subject`'s binding and service account on the cluster; a cluster that is gone has nothing left. */
+  async revokeCredentials(cluster: string, subject: string, context: CallContext): Promise<void> {
+    const { location, name } = parseClusterId(cluster);
+    const found = await this.#findCluster(location, name, context.signal);
+    if (!found) return;
+    const googleToken = await this.#tokens.token({ signal: context.signal, clock: this.#clock });
+    await revokeCredentials({
+      id: cluster,
+      cluster: found,
+      subject,
+      googleToken,
+      transport: this.#transport,
+      signal: context.signal,
+    });
+    context.log.info('gke.credentials.revoked', { cluster, subject });
   }
 
   // --------------------------------------------------------------------------------- versions

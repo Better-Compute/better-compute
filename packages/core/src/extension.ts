@@ -898,6 +898,13 @@ export interface ProviderKubernetes {
     request: KubernetesCredentialRequest,
     context: CallContext,
   ): Promise<KubernetesCredentials>;
+  /**
+   * Optional: removes what `credentials` created on the cluster for `subject` (its service account and role
+   * binding), so no identity better-compute minted for stays on a cluster it no longer manages (an adopted cluster
+   * after its pool substrate is torn down). Idempotent: a subject or a cluster that is gone resolves. A driver
+   * without it leaves the subject in place (the kubernetes module reports that).
+   */
+  revokeCredentials?(cluster: string, subject: string, context: CallContext): Promise<void>;
   versions(location: string, context: CallContext): Promise<KubernetesVersions>;
 }
 

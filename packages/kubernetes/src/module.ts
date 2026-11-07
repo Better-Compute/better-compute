@@ -422,6 +422,22 @@ export function kubernetes(
           count: Math.min(failing.length, 100),
         });
       }
+      // Torn-down substrates whose adopted cluster keeps the substrate's credential identity (the provider cannot
+      // revoke credentials): a cluster-admin service account better-compute no longer manages.
+      const { rows: left } = await context.sql.query<{ pool_id: string }>(
+        `SELECT pool_id FROM kubernetes_pool_substrates WHERE state = 'deleted' AND message IS NOT NULL
+          ORDER BY pool_id LIMIT 101`,
+      );
+      if (left.length > 0) {
+        const shown = left.slice(0, 5).map((row) => row.pool_id);
+        findings.push({
+          check: 'kubernetes.substrate-credentials-left',
+          severity: 'warning',
+          message: `${left.length > 100 ? '100+' : left.length} torn-down substrate(s) left the service account bc-substrate (cluster-admin) on their adopted cluster: ${shown.join(', ')}${left.length > shown.length ? ', …' : ''}`,
+          fix: 'Delete ServiceAccount bc-access/bc-substrate and ClusterRoleBinding bc-access:bc-substrate on each adopted cluster (kubernetesSubstrates.get names it), or use a provider whose kubernetes driver implements revokeCredentials',
+          count: Math.min(left.length, 100),
+        });
+      }
       return findings;
     },
     // §12.8: a deleted tenant's clusters are deleted at the provider; DONE once all are gone.
