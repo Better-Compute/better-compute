@@ -19,6 +19,7 @@ import {
 import type { Json } from './support/gce-emulator.js';
 import { platformAccount, secrets } from './support/gcp-harness.js';
 import { emulatedCaData, emulatedCaPem, GkeEmulator } from './support/gke-emulator.js';
+import { KubeAccessStore } from './support/kube-access.js';
 
 // provider-gcp managed Kubernetes (GKE) against the GKE emulator: clusters (Standard and
 // Autopilot), in-place updates, node pools, versions and credentials minted through a fake
@@ -538,14 +539,29 @@ describe('gke node pools', () => {
 
 class FakeKube {
   calls: KubeRequest[] = [];
-  namespaces = new Set<string>();
-  serviceAccounts = new Set<string>();
-  bindings = new Map<string, Json>();
+  readonly store = new KubeAccessStore();
   issued: string[] = [];
   /** Answers every request with this status (an error body) instead. */
   failWith?: number;
   /** Throws instead of answering (a network failure). */
   unreachable = false;
+  /** A cluster before Kubernetes 1.30: no ValidatingAdmissionPolicy API. */
+  noAdmissionApi = false;
+  get bindings() {
+    return this.store.bindings;
+  }
+  get serviceAccounts() {
+    return this.store.serviceAccounts;
+  }
+  get namespaces() {
+    return this.store.namespaces;
+  }
+  get clusterRoles() {
+    return this.store.clusterRoles;
+  }
+  get admissionPolicies() {
+    return this.store.admissionPolicies;
+  }
 
   transport: KubeTransport = async (request) => {
     this.calls.push(request);
@@ -555,61 +571,23 @@ class FakeKube {
         status: this.failWith,
         body: { kind: 'Status', message: 'forbidden', reason: 'Forbidden' },
       };
-    const path = new URL(request.url).pathname;
-    const body = request.body as Json | undefined;
-    const ok = (status: number, payload: unknown) => ({ status, body: payload });
-    const exists = { kind: 'Status', reason: 'AlreadyExists', message: 'already exists' };
-    const missing = { kind: 'Status', reason: 'NotFound', message: 'not found' };
-    let m: RegExpExecArray | null;
-    if (request.method === 'POST' && path === '/api/v1/namespaces') {
-      if (this.namespaces.has(body!.metadata.name)) return ok(409, exists);
-      this.namespaces.add(body!.metadata.name);
-      return ok(201, body);
-    }
-    if (
-      (m = /^\/api\/v1\/namespaces\/([^/]+)\/serviceaccounts$/.exec(path)) &&
-      request.method === 'POST'
-    ) {
-      if (!this.namespaces.has(m[1]!)) return ok(404, missing);
-      const key = `${m[1]}/${body!.metadata.name}`;
-      if (this.serviceAccounts.has(key)) return ok(409, exists);
-      this.serviceAccounts.add(key);
-      return ok(201, body);
-    }
-    if (
-      (m = /^\/api\/v1\/namespaces\/([^/]+)\/serviceaccounts\/([^/]+)$/.exec(path)) &&
-      request.method === 'DELETE'
-    ) {
-      if (!this.serviceAccounts.delete(`${m[1]}/${m[2]}`)) return ok(404, missing);
-      return ok(200, { kind: 'Status', status: 'Success' });
-    }
-    if ((m = /^\/api\/v1\/namespaces\/([^/]+)\/serviceaccounts\/([^/]+)\/token$/.exec(path))) {
-      if (!this.serviceAccounts.has(`${m[1]}/${m[2]}`)) return ok(404, missing);
-      const token = `kube-sa-token-${this.issued.length + 1}`;
-      this.issued.push(token);
-      const ttl = body!.spec.expirationSeconds as number;
-      return ok(201, {
-        ...body,
-        status: { token, expirationTimestamp: new Date(1_000_000 + ttl * 1000).toISOString() },
-      });
-    }
-    const bindings = '/apis/rbac.authorization.k8s.io/v1/clusterrolebindings';
-    if (path === bindings && request.method === 'POST') {
-      if (this.bindings.has(body!.metadata.name)) return ok(409, exists);
-      this.bindings.set(body!.metadata.name, body!);
-      return ok(201, body);
-    }
-    if (path.startsWith(`${bindings}/`)) {
-      const name = decodeURIComponent(path.slice(bindings.length + 1));
-      const found = this.bindings.get(name);
-      if (!found) return ok(404, missing);
-      if (request.method === 'GET') return ok(200, found);
-      if (request.method === 'DELETE') {
-        this.bindings.delete(name);
-        return ok(200, { kind: 'Status', status: 'Success' });
-      }
-    }
-    return ok(404, missing);
+    const answer = this.store.handle(
+      {
+        method: request.method,
+        path: new URL(request.url).pathname,
+        ...(request.body !== undefined ? { body: request.body } : {}),
+      },
+      {
+        issue: () => {
+          const token = `kube-sa-token-${this.issued.length + 1}`;
+          this.issued.push(token);
+          return token;
+        },
+        now: () => 1_000_000,
+        noAdmissionApi: this.noAdmissionApi,
+      },
+    );
+    return answer ?? { status: 404, body: { kind: 'Status', reason: 'NotFound', message: 'not found' } };
   };
 
   routes(): string[] {
@@ -639,6 +617,11 @@ describe('gke credentials', () => {
       expiresAt: 1_000_000 + 3600 * 1000,
     });
     expect(s.kube.routes()).toEqual([
+      // The access guard and better-compute:edit come first, before any subject exists.
+      'POST /apis/rbac.authorization.k8s.io/v1/clusterroles',
+      'POST /apis/rbac.authorization.k8s.io/v1/clusterroles',
+      'POST /apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies',
+      'POST /apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings',
       'POST /api/v1/namespaces',
       'POST /api/v1/namespaces/bc-access/serviceaccounts',
       'GET /apis/rbac.authorization.k8s.io/v1/clusterrolebindings/bc-access:bc-u-alice',
@@ -652,7 +635,7 @@ describe('gke credentials', () => {
       expect(call.url.startsWith('https://34.118.0.10/')).toBe(true);
     }
     expect(s.kube.bindings.get('bc-access:bc-u-alice')).toMatchObject({
-      roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: 'edit' },
+      roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: 'better-compute:edit' },
       subjects: [{ kind: 'ServiceAccount', name: 'bc-u-alice', namespace: 'bc-access' }],
       metadata: { labels: { 'app.kubernetes.io/managed-by': 'better-compute' } },
     });
@@ -691,36 +674,116 @@ describe('gke credentials', () => {
     expect(s.kube.bindings.get('bc-access:bc-u-bob')!.roleRef.name).toBe('cluster-admin');
   });
 
-  it('revokes a subject: its binding and service account go, idempotently', async () => {
+  it('an edit subject cannot reach an admin subject (impersonation, tokens, pods, exec)', async () => {
     const s = await withKube();
-    await s.k8s.credentials(s.cluster, { subject: 'bc-substrate', role: 'admin', ttlSeconds: 600 }, s.ctx());
-    await s.k8s.credentials(s.cluster, { subject: 'bc-u-alice', role: 'view', ttlSeconds: 600 }, s.ctx());
-    s.kube.calls = [];
-    await s.k8s.revokeCredentials!(s.cluster, 'bc-substrate', s.ctx());
-    expect(s.kube.routes()).toEqual([
-      'DELETE /apis/rbac.authorization.k8s.io/v1/clusterrolebindings/bc-access:bc-substrate',
-      'DELETE /api/v1/namespaces/bc-access/serviceaccounts/bc-substrate',
+    const admin = await s.k8s.credentials(
+      s.cluster,
+      { subject: 'bc-u-root', role: 'admin', ttlSeconds: 600 },
+      s.ctx(),
+    );
+    const edit = await s.k8s.credentials(
+      s.cluster,
+      { subject: 'bc-u-alice', role: 'edit', ttlSeconds: 600 },
+      s.ctx(),
+    );
+    const view = await s.k8s.credentials(
+      s.cluster,
+      { subject: 'bc-u-vic', role: 'view', ttlSeconds: 600 },
+      s.ctx(),
+    );
+    expect(s.kube.bindings.get('bc-access:bc-u-alice')!.roleRef.name).toBe('better-compute:edit');
+    const can = (token: string, verb: string, resource: string, namespace?: string, group = '') =>
+      s.kube.store.can(token, { verb, resource, group, ...(namespace ? { namespace } : {}) });
+    // The built-in edit would allow all of these in bc-access; better-compute:edit plus the guard allows none.
+    expect(can(edit.token, 'create', 'deployments', 'default', 'apps')).toBe(true);
+    expect(can(edit.token, 'create', 'pods', 'default')).toBe(true);
+    for (const namespace of ['bc-access', 'kube-system']) {
+      expect(can(edit.token, 'create', 'pods', namespace)).toBe(false);
+      expect(can(edit.token, 'create', 'pods/exec', namespace)).toBe(false);
+      expect(can(edit.token, 'create', 'serviceaccounts/token', namespace)).toBe(false);
+      expect(can(edit.token, 'impersonate', 'serviceaccounts', namespace)).toBe(false);
+      expect(can(admin.token, 'create', 'pods', namespace)).toBe(true);
+    }
+    expect(can(view.token, 'get', 'pods', 'default')).toBe(true);
+    expect(can(view.token, 'create', 'pods', 'default')).toBe(false);
+    expect(can(view.token, 'get', 'secrets', 'default')).toBe(false);
+    expect(s.kube.admissionPolicies.get('better-compute-access-guard')!.spec.failurePolicy).toBe(
+      'Fail',
+    );
+    // Written once per cluster by this process.
+    const writes = s.kube.routes().filter((route) => route.includes('admissionregistration'));
+    expect(writes).toHaveLength(2);
+    await s.k8s.credentials(
+      s.cluster,
+      { subject: 'bc-u-bob', role: 'edit', ttlSeconds: 600 },
+      s.ctx(),
+    );
+    expect(s.kube.routes().filter((route) => route.includes('admissionregistration'))).toHaveLength(2);
+    // Another process replaces what is there with what it wants.
+    const t = await withKube();
+    t.kube.admissionPolicies.set('better-compute-access-guard', {
+      metadata: { name: 'better-compute-access-guard' },
+      spec: {},
+    });
+    await t.k8s.credentials(
+      t.cluster,
+      { subject: 'bc-u-root', role: 'admin', ttlSeconds: 600 },
+      t.ctx(),
+    );
+    expect(t.kube.routes()).toContain(
+      'PUT /apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies/better-compute-access-guard',
+    );
+    expect(t.kube.admissionPolicies.get('better-compute-access-guard')!.spec.failurePolicy).toBe(
+      'Fail',
+    );
+  });
+
+  it('mints nothing on a cluster without ValidatingAdmissionPolicy (before 1.30)', async () => {
+    const s = await withKube();
+    s.kube.noAdmissionApi = true;
+    const error = await rejection(
+      s.k8s.credentials(s.cluster, { subject: 'bc-u-alice', role: 'view', ttlSeconds: 600 }, s.ctx()),
+    );
+    expect(isComputeError(error, 'INVALID_STATE'), String(error)).toBe(true);
+    expect((error as Error).message).toMatch(/1\.30/);
+    expect(s.kube.serviceAccounts.size).toBe(0);
+    expect(s.kube.issued).toHaveLength(0);
+  });
+
+  it('revokeCredentials removes the subject, and bc-access once no subject is left', async () => {
+    const s = await withKube();
+    const root = await s.k8s.credentials(
+      s.cluster,
+      { subject: 'bc-u-root', role: 'admin', ttlSeconds: 600 },
+      s.ctx(),
+    );
+    await s.k8s.credentials(s.cluster, { subject: 'bc-u-bob', role: 'view', ttlSeconds: 600 }, s.ctx());
+    await s.k8s.revokeCredentials!(s.cluster, 'bc-u-root', s.ctx());
+    expect(s.kube.store.subjectObjects()).toEqual([
+      'ClusterRoleBinding/bc-access:bc-u-bob',
+      'Namespace/bc-access',
+      'ServiceAccount/bc-access/bc-u-bob',
     ]);
-    expect(s.kube.bindings.has('bc-access:bc-substrate')).toBe(false);
-    expect(s.kube.serviceAccounts.has('bc-access/bc-substrate')).toBe(false);
-    // Another subject and the shared namespace stay.
-    expect(s.kube.bindings.has('bc-access:bc-u-alice')).toBe(true);
-    expect(s.kube.namespaces.has('bc-access')).toBe(true);
-    for (const call of s.kube.calls) expect(s.gke.gce.mintedTokens).toContain(call.token);
-    // Already gone, and a cluster that is gone: nothing left to revoke.
-    await s.k8s.revokeCredentials!(s.cluster, 'bc-substrate', s.ctx());
-    await s.k8s.revokeCredentials!('us-central1/bc-k-none', 'bc-substrate', s.ctx());
-    expect(s.logs.some((entry) => entry.message === 'gke.credentials.revoked')).toBe(true);
-    // A refusal is an error that names no token; a bad subject calls nothing.
-    s.kube.failWith = 403;
-    const refused = await rejection(s.k8s.revokeCredentials!(s.cluster, 'bc-u-alice', s.ctx()));
-    expect(isComputeError(refused, 'ACCESS_DENIED')).toBe(true);
-    for (const token of s.gke.gce.mintedTokens) expect(String((refused as Error).message)).not.toContain(token);
-    delete s.kube.failWith;
-    s.kube.calls = [];
-    const invalid = await rejection(s.k8s.revokeCredentials!(s.cluster, 'Bad Subject', s.ctx()));
-    expect(isComputeError(invalid, 'INVALID_INPUT')).toBe(true);
-    expect(s.kube.calls).toEqual([]);
+    // Its token no longer works.
+    expect(s.kube.store.can(root.token, { verb: 'get', resource: 'pods', namespace: 'default' })).toBe(
+      false,
+    );
+    await s.k8s.revokeCredentials!(s.cluster, 'bc-u-bob', s.ctx());
+    expect(s.kube.store.subjectObjects()).toEqual([]);
+    // Again: nothing left, nothing fails; a cluster that is gone has nothing to forget.
+    await s.k8s.revokeCredentials!(s.cluster, 'bc-u-bob', s.ctx());
+    await s.k8s.revokeCredentials!('us-central1/bc-k-none', 'bc-u-bob', s.ctx());
+    // A namespace better-compute did not make stays.
+    await s.k8s.credentials(s.cluster, { subject: 'bc-u-bob', role: 'view', ttlSeconds: 600 }, s.ctx());
+    s.kube.namespaces.get('bc-access')!.metadata.labels = {};
+    await s.k8s.revokeCredentials!(s.cluster, 'bc-u-bob', s.ctx());
+    expect(s.kube.store.subjectObjects()).toEqual(['Namespace/bc-access']);
+    // Failures throw (the caller retries), with no token in them.
+    s.kube.failWith = 503;
+    const error = await rejection(s.k8s.revokeCredentials!(s.cluster, 'bc-u-bob', s.ctx()));
+    expect(isComputeError(error, 'UNAVAILABLE')).toBe(true);
+    for (const token of s.gke.gce.mintedTokens) expect(String(error)).not.toContain(token);
+    expect(isComputeError(await rejection(s.k8s.revokeCredentials!(s.cluster, 'Bad_Subject', s.ctx())), 'INVALID_INPUT')).toBe(true);
   });
 
   it('validates the subject, role and ttl before calling anything', async () => {

@@ -176,6 +176,28 @@ await dev.waitFor(nodes); // adopted, generation ≥ 1 applied
 await dev.close();
 ```
 
+## Managed Kubernetes conformance
+
+`kubernetesProviderConformanceCases()` is what the kubernetes module's clusters and pool substrates need of any
+`ProviderImpl.kubernetes` (GKE, EKS, DOKS or your own), as framework-agnostic cases like vps'
+`providerConformanceCases()`. The subject names the provider's vocabulary (a region, a CPU and a GPU node pool shape);
+the cases are the same for every provider: idempotent create, the ready outputs, no mode change in place, labelled GPU
+and Spot pools that resize in place and never change shape, minted credentials for the cluster endpoint, deletes that
+count twice, and reading an adoptable cluster.
+
+```ts
+import { runConformance } from '@better-compute/core/conformance';
+import { kubernetesProviderConformanceCases } from '@better-compute/testing';
+
+const report = await runConformance(kubernetesProviderConformanceCases(), () => ({
+  provider: myProvider({ fetch: emulator.fetch }),
+  config: { region: 'us-east-1' },
+  location: 'us-east-1',
+  nodePool: { machineType: 'm7i.large', nodeCount: 1 },
+  gpuNodePool: { machineType: 'g6.xlarge', nodeCount: 1, accelerators: { type: 'nvidia-l4', count: 1 } },
+}));
+```
+
 ## Documentation
 
 - [Testing](https://better-compute.com/docs/operations/testing)

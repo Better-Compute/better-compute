@@ -1075,24 +1075,29 @@ async function joinedNodes(sql: SqlExecutor, poolId: string): Promise<number> {
 
 /**
  * Retires the substrate's nodes that joined with its hosted token more than `substrateFirstConnectGraceSeconds` ago
- * and never connected (bcd spent a use, then died: its Node scaled away, Spot-reclaimed or replaced). Nothing else
- * would retire them (a Node is learned only once its bcd connects): they would stay provisioned with valid
- * certificates. Their reservations end first (capacity's lock order), then `retireNode`.
+ * and never connected (bcd spent a use, then died: its Node scaled away, Spot-reclaimed or replaced), and those that
+ * connected but went away before their Node name was ever reported (no inventory: `learned_at` NULL) and stayed away
+ * that long (`never-reported`). Nothing else would retire them (a Node is learned only from a connected node's
+ * report, and only a matched node is checked for gone): they would stay provisioned with valid certificates. A node
+ * whose report named no listed Node (EKS short hostnames) is not one of them: a disconnect never retires it. Their
+ * reservations end first (capacity's lock order), then `retireNode`.
  */
 async function retireNeverConnected(deps: SubstrateDeps, sql: SqlExecutor, row: SubstrateRow): Promise<void> {
   if (!deps.desired) return;
   const from = `nodes n JOIN kubernetes_substrate_nodes m ON m.node_id = n.id AND m.pool_id = $1 AND m.owned
                 LEFT JOIN node_sessions s ON s.node_id = n.id`;
   const stale = `n.pool_id = $1 AND n.provision_state NOT IN ('retiring', 'retired') AND n.deleted_at IS NULL
-                 AND n.connectivity <> 'connected' AND s.connected_at IS NULL
-                 AND m.joined_at <= compute_now() - make_interval(secs => $2)
-                 AND NOT ($3 = ANY(n.no_schedule_reasons))`;
+                 AND n.connectivity <> 'connected' AND NOT ($3 = ANY(n.no_schedule_reasons))
+                 AND ((s.connected_at IS NULL AND m.joined_at <= compute_now() - make_interval(secs => $2))
+                      OR (s.connected_at IS NOT NULL AND m.learned_at IS NULL AND m.kubernetes_node IS NULL
+                          AND COALESCE(s.disconnected_at, s.last_seen, s.connected_at)
+                              <= compute_now() - make_interval(secs => $2)))`;
   const params = [row.pool_id, substrateFirstConnectGraceSeconds, substrateTeardownReason];
-  const { rows } = await sql.query<{ id: string }>(
-    `SELECT n.id FROM ${from} WHERE ${stale} ORDER BY n.id LIMIT ${nodesPerRun}`,
+  const { rows } = await sql.query<{ id: string; connected: boolean }>(
+    `SELECT n.id, s.connected_at IS NOT NULL AS connected FROM ${from} WHERE ${stale} ORDER BY n.id LIMIT ${nodesPerRun}`,
     params,
   );
-  for (const { id } of rows)
+  for (const { id, connected } of rows)
     await sql.transaction(async (tx) => {
       // Re-read: one that connected meanwhile is not stale.
       const { rows: still } = await tx.query(`SELECT n.id FROM ${from} WHERE ${stale} AND n.id = $4`, [...params, id]);
@@ -1111,7 +1116,7 @@ async function retireNeverConnected(deps: SubstrateDeps, sql: SqlExecutor, row: 
       });
       await publishSubstrate(deps, tx, row, 'kubernetes.substrate.node-removed', {
         nodeId: id,
-        reason: 'never-connected',
+        reason: connected ? 'never-reported' : 'never-connected',
         released: ended.released.length,
         requeued: ended.requeued.length,
         retired,
@@ -1222,19 +1227,31 @@ async function removeGoneNodes(
       WHERE ${live} AND n.connectivity = 'connected'
         AND (m.learned_at IS NULL
              OR (m.kubernetes_node IS NULL AND m.learned_at < compute_now() - interval '${relearnAfter}'))
-      ORDER BY m.learned_at NULLS FIRST, n.id LIMIT ${nodesPerRun}`,
+      ORDER BY m.learned_at NULLS FIRST, m.checked_at NULLS FIRST, n.id LIMIT ${nodesPerRun}`,
     [row.pool_id, substrateTeardownReason],
   );
+  const unreported: string[] = [];
   for (const { id } of unmatched) {
     const snapshot = await deps.inventory.get(id);
     const name = reportedNodeName(snapshot?.sections);
-    const node = name !== undefined ? listed.get(name) : undefined;
+    // No Node name reported yet (its first inventory is not in): look again next run, not an hour later. Its look is
+    // recorded (`checked_at`, unused while no Node is matched) so the next run takes the ones not looked at first:
+    // more than `nodesPerRun` unreported nodes never hide one that reports.
+    if (name === undefined) {
+      unreported.push(id);
+      continue;
+    }
+    const node = listed.get(name);
     await sql.query(
       `UPDATE kubernetes_substrate_nodes SET kubernetes_node = $2, kubernetes_uid = $3, learned_at = compute_now()
         WHERE node_id = $1`,
       [id, node?.name ?? null, node?.uid ?? null],
     );
   }
+  if (unreported.length > 0)
+    await sql.query(`UPDATE kubernetes_substrate_nodes SET checked_at = compute_now() WHERE node_id = ANY($1)`, [
+      unreported,
+    ]);
   // A connected node's Node re-created under its name: the new uid.
   const { rows: matched } = await sql.query<{ node_id: string; kubernetes_node: string; kubernetes_uid: string | null }>(
     `SELECT m.node_id, m.kubernetes_node, m.kubernetes_uid

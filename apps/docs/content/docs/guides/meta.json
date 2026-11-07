@@ -15,6 +15,7 @@
     "---Fleet---",
     "nodes",
     "fleet-config",
+    "kubernetes-fleet-pools",
     "rollouts",
     "access",
     "---Compute---",

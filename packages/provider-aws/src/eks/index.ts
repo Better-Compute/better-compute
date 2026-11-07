@@ -48,6 +48,7 @@ import {
   checkCredentialRequest,
   endpointOf,
   ensureAdminAccess,
+  revokeCredentials,
   mintCredentials,
   principalArnOf,
 } from './credentials.js';
@@ -593,29 +594,7 @@ export class AwsKubernetes implements ProviderKubernetes {
         { provider: 'aws', service: 'eks', reason: 'authenticationMode' },
       );
     const key = `${found.arn ?? name}@${String(found.createdAt ?? '')}`;
-    if (!this.#admitted.has(key)) {
-      const principalArn = principalArnOf((await this.#identity(context)).arn, this.#principalRoles);
-      const changed = await ensureAdminAccess({
-        client: this.#client,
-        cluster: name,
-        principalArn,
-        partition: partitionOf(this.#region).partition,
-        signal,
-      });
-      if (changed) this.#granted.set(key, this.#clock.now());
-      this.#admitted.add(key);
-    }
-    const granted = this.#granted.get(key);
-    const fresh = granted !== undefined && this.#clock.now() - granted < accessPropagationMs;
-    if (granted !== undefined && !fresh) this.#granted.delete(key);
-    const token = await eksToken({
-      cluster: name,
-      credentials: this.#credentials,
-      region: this.#region,
-      signal,
-      clock: this.#clock,
-      ...(this.#stsEndpoint !== undefined ? { stsEndpoint: this.#stsEndpoint } : {}),
-    });
+    const { token, fresh } = await this.#clusterToken(name, key, context);
     let credentials: KubernetesCredentials;
     try {
       credentials = await mintCredentials({
@@ -644,6 +623,73 @@ export class AwsKubernetes implements ProviderKubernetes {
       expiresAt: credentials.expiresAt,
     });
     return credentials;
+  }
+
+  /**
+   * The account principal's eksToken for a cluster, its admin access entry made first when this
+   * process has not seen it yet (`fresh`: granted less than accessPropagationMs ago, so an
+   * authorization failure is transient).
+   */
+  async #clusterToken(
+    name: string,
+    key: string,
+    context: CallContext,
+  ): Promise<{ token: string; fresh: boolean }> {
+    const { signal } = context;
+    if (!this.#admitted.has(key)) {
+      const principalArn = principalArnOf((await this.#identity(context)).arn, this.#principalRoles);
+      const changed = await ensureAdminAccess({
+        client: this.#client,
+        cluster: name,
+        principalArn,
+        partition: partitionOf(this.#region).partition,
+        signal,
+      });
+      if (changed) this.#granted.set(key, this.#clock.now());
+      this.#admitted.add(key);
+    }
+    // Until accessPropagationMs after this process granted access, an authorization failure is transient.
+    const granted = this.#granted.get(key);
+    const fresh = granted !== undefined && this.#clock.now() - granted < accessPropagationMs;
+    if (granted !== undefined && !fresh) this.#granted.delete(key);
+    const token = await eksToken({
+      cluster: name,
+      credentials: this.#credentials,
+      region: this.#region,
+      signal,
+      clock: this.#clock,
+      ...(this.#stsEndpoint !== undefined ? { stsEndpoint: this.#stsEndpoint } : {}),
+    });
+    return { token, fresh };
+  }
+
+  /**
+   * Removes the service account and binding `credentials` made for `subject` (and `bc-access` once
+   * empty). A cluster that is gone has nothing left to remove; the principal's access entry stays.
+   */
+  async revokeCredentials(cluster: string, subject: string, context: CallContext): Promise<void> {
+    const { name } = parseClusterId(cluster, this.#region);
+    const { signal } = context;
+    const found = await this.#client.cluster(name, signal);
+    if (!found || found.status === 'DELETING') return;
+    const key = `${found.arn ?? name}@${String(found.createdAt ?? '')}`;
+    const { token, fresh } = await this.#clusterToken(name, key, context);
+    try {
+      await revokeCredentials({
+        id: cluster,
+        cluster: found,
+        subject,
+        token,
+        fresh,
+        transport: this.#transport,
+        signal,
+      });
+    } catch (error) {
+      if (isComputeError(error, 'ACCESS_DENIED') || isComputeError(error, 'UNAVAILABLE'))
+        this.#admitted.delete(key);
+      throw error;
+    }
+    context.log.info('eks.credentials.revoked', { cluster, subject });
   }
 
   // -------------------------------------------------------------------------------- discovery

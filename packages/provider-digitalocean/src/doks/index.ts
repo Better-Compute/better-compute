@@ -49,7 +49,7 @@ import {
   nodePoolUpdate,
   spotUnhonoured,
 } from './node-pools.js';
-import { checkCredentialRequest, mintCredentials } from './credentials.js';
+import { checkCredentialRequest, revokeCredentials, mintCredentials } from './credentials.js';
 import { httpsKubeTransport, type KubeTransport } from './transport.js';
 import type { DoksAssociatedResources, DoksCluster, DoksNodePool, DoksVersion } from './types.js';
 import {
@@ -62,7 +62,14 @@ import {
 } from './versions.js';
 
 export { kubernetesTag } from './clusters.js';
-export { accessNamespace, adminCredentialSeconds, clusterRoles } from './credentials.js';
+export {
+  accessGuard,
+  accessManifests,
+  accessNamespace,
+  adminCredentialSeconds,
+  clusterRoles,
+  guardedNamespaces,
+} from './credentials.js';
 export { parseClusterId as parseDoksClusterId } from './common.js';
 export { compareDoksVersion, parseDoksVersion } from './versions.js';
 export {
@@ -108,6 +115,17 @@ function spotUnverified(): ComputeError {
   );
 }
 
+/** Why a size cannot be the accelerators a spec asks for (DO sizes come with their GPUs), or undefined. */
+function acceleratorMismatch(spec: KubernetesNodePoolSpec, size: DoSize): string | undefined {
+  if (!spec.accelerators) return undefined;
+  const gpu = size.gpu_info;
+  const model = (gpu?.model ?? '').toLowerCase();
+  const wanted = spec.accelerators.type.toLowerCase().replaceAll('-', '_');
+  const sameModel = wanted === model || wanted === model.replace(/^(nvidia|amd)_/, '');
+  if (gpu && sameModel && gpu.count === spec.accelerators.count) return undefined;
+  return `Size ${size.slug} carries ${gpu ? `${gpu.count} ${gpu.model}` : 'no GPUs'}, not ${spec.accelerators.count} ${spec.accelerators.type}`;
+}
+
 export class DoKubernetes implements ProviderKubernetes {
   readonly #client: DoClient;
   readonly #config: DoConfig;
@@ -123,6 +141,10 @@ export class DoKubernetes implements ProviderKubernetes {
   #spotDropped = false;
   /** The ids of clusters and pools made on-demand instead of Spot, deleted until they are gone. */
   readonly #unverifiedSpot = new Set<string>();
+  /** Clusters (id and endpoint) this process put the access guard and better-compute:edit on. */
+  readonly #guarded = new Set<string>();
+  /** Sizes read from /sizes, by slug. */
+  readonly #sizes = new Map<string, DoSize>();
 
   constructor(options: DoKubernetesOptions) {
     this.#client = options.client;
@@ -588,29 +610,29 @@ export class DoKubernetes implements ProviderKubernetes {
         'spotDisabled',
       );
     if (!spec.accelerators && !spec.spot && !spec.machineType.startsWith('gpu-')) return false;
-    let size: DoSize | undefined;
-    for await (const candidate of this.#client.pages<DoSize>('/sizes', 'sizes', {
-      signal,
-      budget: 'observe',
-    }))
-      if (candidate.slug === spec.machineType) {
-        size = candidate;
-        break;
-      }
+    const size = await this.#size(spec.machineType, signal);
     if (!size) throw invalid(`DigitalOcean has no size ${spec.machineType}`, 'size');
     const gpu = size.gpu_info;
     if (spec.spot && !gpu)
       throw invalid(`Node pool ${spec.name}: Spot node pools are GPU sizes only`, 'spot');
-    if (!spec.accelerators) return gpu !== undefined;
-    const model = (gpu?.model ?? '').toLowerCase();
-    const wanted = spec.accelerators.type.toLowerCase().replaceAll('-', '_');
-    const sameModel = wanted === model || wanted === model.replace(/^(nvidia|amd)_/, '');
-    if (!gpu || !sameModel || gpu.count !== spec.accelerators.count)
-      throw invalid(
-        `Size ${size.slug} carries ${gpu ? `${gpu.count} ${gpu.model}` : 'no GPUs'}, not ${spec.accelerators.count} ${spec.accelerators.type}`,
-        'accelerators',
-      );
-    return true;
+    const mismatch = acceleratorMismatch(spec, size);
+    if (mismatch) throw invalid(mismatch, 'accelerators');
+    return gpu !== undefined;
+  }
+
+  /** A size of `/sizes`, read once per process (sizes and their GPUs do not change). */
+  async #size(slug: string, signal: AbortSignal): Promise<DoSize | undefined> {
+    const cached = this.#sizes.get(slug);
+    if (cached) return cached;
+    for await (const candidate of this.#client.pages<DoSize>('/sizes', 'sizes', {
+      signal,
+      budget: 'observe',
+    }))
+      if (candidate.slug === slug) {
+        this.#sizes.set(slug, candidate);
+        return candidate;
+      }
+    return undefined;
   }
 
   /**
@@ -739,6 +761,18 @@ export class DoKubernetes implements ProviderKubernetes {
       );
     await this.#checkPoolSpot(clusterId, spec, pool, context);
     checkNodePoolImmutable(id, spec, pool);
+    if (spec.accelerators) {
+      // A pool's GPUs are its size's: other accelerators would need another pool.
+      const size = await this.#size(pool.size ?? spec.machineType, signal);
+      const mismatch = size ? acceleratorMismatch(spec, size) : undefined;
+      if (mismatch)
+        throw fail(
+          'INVALID_STATE',
+          `Node pool ${id} exists and ${mismatch[0]!.toLowerCase()}${mismatch.slice(1)}; only nodeCount and autoscaling change in place (create a new node pool)`,
+          'immutable',
+          { field: 'accelerators' },
+        );
+    }
     if (!serving) return nodePoolState(id, pool);
     const update = nodePoolUpdate(spec, pool);
     if (!update) return nodePoolState(id, pool);
@@ -822,15 +856,24 @@ export class DoKubernetes implements ProviderKubernetes {
     checkCredentialRequest(request);
     const found = await this.#read(id, context.signal);
     if (!found) throw clusterNotFound(id);
-    const credentials = await mintCredentials({
-      id,
-      cluster: found,
-      request,
-      client: this.#client,
-      transport: this.#transport,
-      signal: context.signal,
-      clock: this.#client.clock,
-    });
+    const key = `${id}|${found.endpoint ?? ''}`;
+    let credentials: KubernetesCredentials;
+    try {
+      credentials = await mintCredentials({
+        id,
+        cluster: found,
+        request,
+        client: this.#client,
+        transport: this.#transport,
+        signal: context.signal,
+        clock: this.#client.clock,
+        guarded: this.#guarded.has(key),
+      });
+    } catch (error) {
+      this.#guarded.delete(key);
+      throw error;
+    }
+    this.#guarded.add(key);
     context.log.info('doks.credentials', {
       cluster: id,
       subject: request.subject,
@@ -838,6 +881,25 @@ export class DoKubernetes implements ProviderKubernetes {
       expiresAt: credentials.expiresAt,
     });
     return credentials;
+  }
+
+  /**
+   * Removes the service accounts and bindings `credentials` made for `subject` (and `bc-access`
+   * once empty). A cluster that is gone has nothing left to remove.
+   */
+  async revokeCredentials(cluster: string, subject: string, context: CallContext): Promise<void> {
+    const id = parseClusterId(cluster);
+    const found = await this.#read(id, context.signal);
+    if (!found) return;
+    await revokeCredentials({
+      id,
+      cluster: found,
+      subject,
+      client: this.#client,
+      transport: this.#transport,
+      signal: context.signal,
+    });
+    context.log.info('doks.credentials.revoked', { cluster: id, subject });
   }
 
   // --------------------------------------------------------------------------------- versions
