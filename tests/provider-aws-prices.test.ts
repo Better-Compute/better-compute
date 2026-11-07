@@ -7,6 +7,7 @@ import {
   type ProviderListPrice,
 } from '@better-compute/core';
 import {
+  AwsCompute,
   awsConfig,
   awsProvider,
   memoryWeightPerGib,
@@ -213,6 +214,18 @@ describe('provider-aws list prices (Price List Query API)', () => {
     const before = emu.calls('GetProducts').length;
     await impl.listPrices!({}, call()).catch(() => undefined);
     expect(emu.calls('GetProducts').length).toBeGreaterThan(before);
+  });
+
+  it('a listPrices the EC2 client already has is a collision, never overwritten', async () => {
+    const proto = AwsCompute.prototype as unknown as Record<string, unknown>;
+    proto.listPrices = async () => [];
+    try {
+      await expect(world()).rejects.toThrow(/already has listPrices/);
+    } finally {
+      delete proto.listPrices;
+    }
+    const { impl } = await world();
+    expect(impl.listPrices).toBeTypeOf('function');
   });
 
   it('is absent outside the commercial partition', async () => {

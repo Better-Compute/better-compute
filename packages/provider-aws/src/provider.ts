@@ -38,8 +38,15 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
         types: instanceTypeCache(ec2, { clock: context.clock }),
         zones: zoneCache(ec2, { clock: context.clock }),
       });
-      // A11: costs (and list prices) beside the EC2 client, present only when the account has them.
-      return Object.assign(compute, finopsMembers(config, context, options, account));
+      // A11: costs (and list prices) beside the EC2 client, present only when the account has them. A member the
+      // EC2 client already has (another lane's listPrices, say) is a merge collision: refused, never overwritten.
+      const members = finopsMembers(config, context, options, account);
+      for (const name of Object.keys(members))
+        if (name in compute)
+          throw new Error(
+            `provider-aws: AwsCompute already has ${name}; the FinOps member collides`,
+          );
+      return Object.assign(compute, members);
     },
   });
 }
