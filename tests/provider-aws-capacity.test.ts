@@ -872,6 +872,58 @@ describe('purchases', () => {
     expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(0);
   });
 
+  it('a block another purchase recorded is never taken for this one', async () => {
+    const w = world({ allowPurchases: true });
+    const start = offerings(w);
+    const requestedAt = w.emu.now();
+    // Bought by another in-flight purchase whose tag does not show yet; vps recorded it for that one.
+    const theirs = w.capacity.add({
+      type: 'p5.48xlarge',
+      zone: 'us-east-1a',
+      total: 2,
+      reservationType: 'capacity-block',
+      state: 'scheduled',
+      start,
+      end: start + DAY,
+    });
+    w.emu.clock.advance(30_000);
+    const id = blockId(w, start, 'cb-0aaaaaaaaaaaaaaa1', 235968);
+    const attempt = { attempt: 2, requestedAt, uncertainSince: requestedAt };
+    await expect(
+      w.compute.purchaseReservation(id, w.call('buy-1'), {
+        ...attempt,
+        excludeReservationIds: [`cb:${theirs.id}`],
+      }),
+    ).rejects.toMatchObject({ code: 'UNAVAILABLE', details: { reason: 'purchase-propagating' } });
+    // Without the exclusion it would be taken for this purchase's.
+    await expect(w.compute.purchaseReservation(id, w.call('buy-1'), attempt)).resolves.toMatchObject(
+      { id: `cb:${theirs.id}` },
+    );
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(0);
+  });
+
+  it('an answer it cannot read after EC2 sold is retried as uncertain, never a failure', async () => {
+    const w = world({ allowPurchases: true });
+    const start = offerings(w);
+    // A state this code does not know yet.
+    w.capacity.purchaseAnswerState = 'payment-processing';
+    const id = blockId(w, start, 'cb-0aaaaaaaaaaaaaaa1', 235968);
+    await expect(w.compute.purchaseReservation(id, w.call('buy-1'))).rejects.toMatchObject({
+      code: 'UNAVAILABLE',
+      details: { reason: 'purchase-answer-unreadable' },
+    });
+    // The retry finds it by its tag.
+    w.capacity.purchaseAnswerState = undefined;
+    const bought = await w.compute.purchaseReservation(id, w.call('buy-1'), {
+      attempt: 2,
+      requestedAt: w.emu.now(),
+      uncertainSince: w.emu.now(),
+    });
+    expect(bought.id).toMatch(/^cb:cr-/);
+    expect(w.capacity.purchases).toHaveLength(1);
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(1);
+  });
+
   it('refuses malformed, foreign-zone and tenant-account purchases', async () => {
     const w = world({ allowPurchases: true });
     offerings(w);

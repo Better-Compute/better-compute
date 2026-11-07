@@ -97,6 +97,8 @@ export class CapacityEmulator {
    * sight (eventual consistency), in DescribeCapacityReservations calls.
    */
   purchaseLag = { hiddenReads: 0, tagsHiddenReads: 0 };
+  /** A state PurchaseCapacityBlock answers with instead of the block's own (reads show the real one). */
+  purchaseAnswerState: string | undefined = undefined;
 
   constructor(
     private readonly emu: AwsEmulator,
@@ -288,7 +290,9 @@ export class CapacityEmulator {
     });
     return ec2Response(
       'PurchaseCapacityBlock',
-      `<capacityReservation>${this.#xml(reservation)}</capacityReservation>`,
+      `<capacityReservation>${this.#xml(
+        this.purchaseAnswerState ? { ...reservation, state: this.purchaseAnswerState } : reservation,
+      )}</capacityReservation>`,
     );
   }
 
