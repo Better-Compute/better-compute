@@ -38,6 +38,14 @@ const state = (
   extra: Partial<ProviderFilesystemState> = {},
 ): ProviderFilesystemState => ({ id, state: value, ...extra });
 
+const bytesPerGiB = 2 ** 30;
+
+/** `{ sizeGiB }` of a size AWS reported in `unit`s (GiB = 1, bytes = 2^30), or nothing when it is no size. */
+const sizeOf = (value: unknown, perGiB: number): { sizeGiB?: number } =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? { sizeGiB: Math.round((value / perGiB) * 1e6) / 1e6 }
+    : {};
+
 const awsCode = (error: unknown): string | undefined =>
   isComputeError(error) ? (error.details?.code as string | undefined) : undefined;
 
@@ -45,6 +53,8 @@ interface EfsFileSystem {
   FileSystemId: string;
   CreationToken: string;
   LifeCycleState: string;
+  /** The metered size; `Value` is bytes. */
+  SizeInBytes?: { Value?: number };
   Tags?: { Key: string; Value: string }[];
 }
 interface EfsMountTarget {
@@ -287,7 +297,11 @@ export class AwsFilesystems implements ProviderFilesystems {
     }
     if (made || live.some((t) => t.LifeCycleState !== 'available'))
       return state(fs.FileSystemId, 'pending', { outputs, message: 'Creating mount targets' });
-    return state(fs.FileSystemId, 'ready', { outputs, mount: this.#efsMount(fs.FileSystemId) });
+    return state(fs.FileSystemId, 'ready', {
+      outputs,
+      mount: this.#efsMount(fs.FileSystemId),
+      ...sizeOf(fs.SizeInBytes?.Value, bytesPerGiB),
+    });
   }
 
   /** Deletes the mount targets, then the file system; true once EFS no longer shows it. */
@@ -390,6 +404,7 @@ export class AwsFilesystems implements ProviderFilesystems {
         return state(fs.FileSystemId, 'ready', {
           outputs,
           mount: { fstype: 'lustre', source: `${fs.DNSName}@tcp:/${mountName}`, options: lustreMountOptions },
+          ...sizeOf(fs.StorageCapacity, 1),
         });
       }
       case 'FAILED':

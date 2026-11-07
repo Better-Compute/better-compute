@@ -828,6 +828,12 @@ export interface ProviderMount {
 /** (AWS A10) A filesystem's state; `mount` (how a machine mounts it) once it is ready. */
 export interface ProviderFilesystemState extends ProviderResourceState {
   mount?: Omit<ProviderMount, 'path'>;
+  /**
+   * The size the provider bills for, in GiB, once it is ready: the provisioned capacity (FSx for
+   * Lustre) or the metered size, which grows and shrinks with use (EFS). Absent when unknown; the
+   * module then bills the size asked for, if any.
+   */
+  sizeGiB?: number;
 }
 
 /**

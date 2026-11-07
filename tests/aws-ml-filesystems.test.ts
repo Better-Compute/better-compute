@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { awsProvider } from '@better-compute/provider-aws';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
+import { defaultMeterGpuModels, meterCatalog } from '@better-compute/core';
 import {
+  filesystemMeterOf,
+  meteredFilesystemKinds,
   parseCreateFilesystem,
   parseInstanceFilesystems,
   providerResourceName,
@@ -353,6 +356,155 @@ describe('filesystems through vps on AWS (A10 F8, F9)', () => {
     ).rejects.toMatchObject({ code: expect.stringMatching(/NOT_FOUND|INVALID_INPUT/) });
     // No partially created draft is left behind by a refusal.
     expect(w.ec2.instances.size).toBe(0);
+  });
+});
+
+const HOUR = 3_600_000;
+
+/** The usage windows of a filesystem (`network` sources keyed by its id). */
+async function fsWindows(w: World, filesystemId: string) {
+  const { rows } = await w.fixture.database.query<{
+    source_kind: string;
+    idempotency_key: string;
+    tenant_id: string;
+    meter: string;
+    quantity: string;
+    start_ms: number;
+    tags: Record<string, string> | string;
+  }>(
+    `SELECT source_kind, idempotency_key, tenant_id, meter, quantity::text,
+            (extract(epoch FROM window_start) * 1000)::float8 AS start_ms, tags
+       FROM usage_windows WHERE source_id = $1 ORDER BY window_start, meter`,
+    [filesystemId],
+  );
+  return rows.map((row) => ({
+    kind: row.source_kind,
+    key: row.idempotency_key,
+    tenantId: row.tenant_id,
+    meter: row.meter,
+    quantity: Number(row.quantity),
+    start: Number(row.start_ms),
+    tags: typeof row.tags === 'string' ? JSON.parse(row.tags) : row.tags,
+  }));
+}
+
+async function provisionedAt(w: World, filesystemId: string): Promise<number | null> {
+  const { rows } = await w.fixture.database.query<{ at: number | null }>(
+    `SELECT (extract(epoch FROM provisioned_at) * 1000)::float8 AS at FROM filesystems WHERE id = $1`,
+    [filesystemId],
+  );
+  return rows[0]!.at === null ? null : Number(rows[0]!.at);
+}
+
+/** Moves sim time to the next top of the hour plus `hours` and a settle past the 5 minute grace. */
+async function meterAfter(w: World, hours: number): Promise<number> {
+  const now = w.fixture.clock.now();
+  const target = (Math.floor(now / HOUR) + 1 + hours) * HOUR + 6 * 60_000;
+  await w.fixture.advance(target - now);
+  for (let round = 0; round < 2; round++) await w.fixture.compute.jobs['vps.ancillary-usage']!.tick();
+  return target;
+}
+
+describe('filesystem metering (A10)', () => {
+  it('an nfs filesystem bills the GiB EFS meters, from its first ready, as filesystem.nfs.gib.hours', async () => {
+    const w = await world();
+    const net = await w.network();
+    const created = await w.api.filesystems.create(w.acme, nfsInput(w, net.id));
+    // Pending bills nothing and starts nothing.
+    expect(await provisionedAt(w, created.id)).toBeNull();
+    await w.settleFs(net.id, created.id);
+    const start = (await provisionedAt(w, created.id))!;
+    expect(start).toBeGreaterThan(0);
+    // EFS now meters 10 GiB; the periodic pass picks the size up.
+    [...w.efs.fileSystems.values()][0]!.sizeBytes = 10 * 2 ** 30;
+    await w.tick('vps.filesystems', 5 * 60_000);
+    const { rows } = await w.fixture.database.query<{ billed_gib: number }>(
+      `SELECT billed_gib FROM filesystems WHERE id = $1`,
+      [created.id],
+    );
+    expect(Number(rows[0]!.billed_gib)).toBe(10);
+
+    await meterAfter(w, 2);
+    const windows = await fsWindows(w, created.id);
+    expect(windows.length).toBeGreaterThanOrEqual(3);
+    for (const window of windows)
+      expect(window).toMatchObject({
+        kind: 'network',
+        tenantId: w.acmeTenant,
+        meter: 'filesystem.nfs.gib.hours',
+        key: `cmp:network:${created.id}:${window.start}:filesystem.nfs.gib.hours`,
+        tags: { pool: w.poolId, provider: 'aws', region: 'us-east-1', source: 'filesystem' },
+      });
+    // The first partial hour bills its share; whole hours bill 10 GiB each.
+    expect(windows[0]!.start).toBe(Math.floor(start / HOUR) * HOUR);
+    expect(windows[0]!.quantity).toBeCloseTo((10 * (HOUR - (start % HOUR))) / HOUR, 5);
+    for (const window of windows.slice(1)) expect(window.quantity).toBe(10);
+    // A repeated pass writes nothing more.
+    const before = JSON.stringify(windows);
+    for (let round = 0; round < 2; round++) await w.fixture.compute.jobs['vps.ancillary-usage']!.tick();
+    expect(JSON.stringify(await fsWindows(w, created.id))).toBe(before);
+  });
+
+  it('a lustre filesystem bills its provisioned capacity until it is deleted', async () => {
+    const w = await world();
+    const net = await w.network();
+    const created = await w.api.filesystems.create(
+      w.acme,
+      nfsInput(w, net.id, {
+        name: 'scratch',
+        kind: 'lustre',
+        sizeGiB: 2400,
+        zone: 'us-east-1a',
+        idempotencyKey: 'fs-scratch',
+      }),
+    );
+    await w.settleFs(net.id, created.id);
+    await meterAfter(w, 1);
+    const whole = (await fsWindows(w, created.id)).slice(1);
+    expect(whole.length).toBeGreaterThanOrEqual(1);
+    for (const window of whole)
+      expect(window).toMatchObject({ meter: 'filesystem.lustre.gib.hours', quantity: 2400 });
+
+    await w.api.filesystems.delete(w.acme, {
+      tenantId: w.acmeTenant,
+      networkId: net.id,
+      filesystemId: created.id,
+    });
+    expect(await w.settleFs(net.id, created.id)).toMatchObject({ state: 'deleted' });
+    await meterAfter(w, 0);
+    const settled = await fsWindows(w, created.id);
+    // Nothing past the deletion: hours later, no new window.
+    await meterAfter(w, 5);
+    expect(await fsWindows(w, created.id)).toEqual(settled);
+    const { rows } = await w.fixture.database.query<{ done: boolean }>(
+      `SELECT metered_until = deleted_at AS done FROM filesystems WHERE id = $1`,
+      [created.id],
+    );
+    expect(rows[0]!.done).toBe(true);
+  });
+
+  it('a pool in billing mode none bills no filesystem hours, and the watermark still advances', async () => {
+    const w = await world();
+    const net = await w.network();
+    const created = await w.api.filesystems.create(w.acme, nfsInput(w, net.id));
+    await w.settleFs(net.id, created.id);
+    await w.fixture.database.query(
+      `UPDATE pools SET policy = coalesce(policy, '{}'::jsonb) || '{"billing":{"mode":"none"}}'::jsonb WHERE id = $1`,
+      [w.poolId],
+    );
+    const at = await meterAfter(w, 2);
+    expect(await fsWindows(w, created.id)).toEqual([]);
+    const { rows } = await w.fixture.database.query<{ until: number }>(
+      `SELECT (extract(epoch FROM metered_until) * 1000)::float8 AS until FROM filesystems WHERE id = $1`,
+      [created.id],
+    );
+    expect(Number(rows[0]!.until)).toBe(Math.floor((at - 5 * 60_000) / HOUR) * HOUR);
+  });
+
+  it('every filesystem meter is in meterCatalog', () => {
+    const keys = new Set(meterCatalog({ gpuModels: defaultMeterGpuModels }).map((m) => m.key));
+    expect(meteredFilesystemKinds).toEqual(['nfs', 'lustre']);
+    for (const kind of meteredFilesystemKinds) expect(keys.has(filesystemMeterOf(kind))).toBe(true);
   });
 });
 

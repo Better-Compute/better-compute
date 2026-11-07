@@ -56,6 +56,12 @@ CREATE TABLE filesystems (
   -- How a machine mounts it ({ fstype, source, options }), once the provider made it: DNS names and
   -- mount names only, never a secret.
   mount jsonb,
+  -- Billing (vps.ancillary-usage): first ready, the size the provider bills (GiB; EFS meters it, FSx
+  -- provisions it), how far windows are written, and when it stopped existing (stamped on 'deleted').
+  provisioned_at timestamptz,
+  billed_gib double precision CHECK (billed_gib >= 0),
+  metered_until timestamptz,
+  deleted_at timestamptz,
   created_by text NOT NULL,
   idempotency_key text NOT NULL,
   request_hash bytea NOT NULL,
@@ -66,6 +72,12 @@ CREATE TABLE filesystems (
 -- A deleted filesystem's name is free again.
 CREATE UNIQUE INDEX filesystems_name ON filesystems (network_id, name) WHERE state <> 'deleted';
 CREATE INDEX filesystems_live ON filesystems (state) WHERE state <> 'deleted';
+CREATE TRIGGER filesystems_stamp_deleted BEFORE UPDATE ON filesystems
+  FOR EACH ROW EXECUTE FUNCTION vps_stamp_deleted_at();
+-- What the ancillary reconciler scans: filesystems that bill (or billed until a deletion it has not covered).
+CREATE INDEX filesystems_unmetered ON filesystems ((coalesce(metered_until, provisioned_at)))
+ WHERE provisioned_at IS NOT NULL
+   AND (state <> 'deleted' OR (deleted_at IS NOT NULL AND metered_until IS DISTINCT FROM deleted_at));
 
 -- The filesystems an instance mounts, and where. A refused draft instance takes its rows with it.
 CREATE TABLE instance_filesystems (
@@ -789,7 +801,11 @@ export async function reconcileFilesystem(
     // A ready filesystem always says how to mount it; one that does not is not ready.
     return writeBack(deps, sql, row, 'error', 'The provider gave no mount for a ready filesystem');
   }
-  return writeBack(deps, sql, row, state, message, mount);
+  const sizeGiB =
+    state === 'ready' && typeof outcome.sizeGiB === 'number' && Number.isFinite(outcome.sizeGiB)
+      ? Math.max(0, outcome.sizeGiB)
+      : undefined;
+  return writeBack(deps, sql, row, state, message, mount, sizeGiB);
 }
 
 async function writeBack(
@@ -799,15 +815,20 @@ async function writeBack(
   state: FilesystemState,
   message: string | null,
   mount?: Omit<ProviderMount, 'path'> | null,
+  sizeGiB?: number,
 ): Promise<number | undefined> {
   const now = deps.clock.now();
   const written = await sql.transaction(async (tx) => {
+    // The first ready starts billing (provisioned_at); each ready look refreshes the billed size.
     const { rows } = await tx.query(
       `UPDATE filesystems SET state = $3, message = $4,
-              mount = CASE WHEN $5::boolean THEN $6::jsonb ELSE mount END
+              mount = CASE WHEN $5::boolean THEN $6::jsonb ELSE mount END,
+              provisioned_at = CASE WHEN $3 = 'ready' THEN coalesce(provisioned_at, compute_now()) ELSE provisioned_at END,
+              billed_gib = coalesce($7::float8, billed_gib)
         WHERE id = $1 AND version = $2
           AND (state IS DISTINCT FROM $3 OR message IS DISTINCT FROM $4
-               OR ($5::boolean AND mount IS DISTINCT FROM $6::jsonb))
+               OR ($5::boolean AND mount IS DISTINCT FROM $6::jsonb)
+               OR ($7::float8 IS NOT NULL AND billed_gib IS DISTINCT FROM $7::float8))
         RETURNING id`,
       [
         row.id,
@@ -818,6 +839,7 @@ async function writeBack(
         mount
           ? JSON.stringify({ fstype: mount.fstype, source: mount.source, options: mount.options })
           : null,
+        sizeGiB ?? null,
       ],
     );
     if (rows.length === 0) return false;

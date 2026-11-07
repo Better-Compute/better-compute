@@ -56,8 +56,13 @@ filesystems … This is its own sub-plan") and the service table rows for EFS an
 - **FD10 vps.** A `filesystems` group (`filesystems.create|get|list|delete`), tenant scoped, one network each,
   `vps/0112_filesystems` (table) and `vps/0113_instance_filesystems` (an instance's mounts). `instances.create`
   takes `filesystems: [{ filesystem, path }]` on the filesystem's network only; vps resolves them to `ProviderMount`s
-  from the provider state's mount (never secrets: these are DNS names and mount names). Metering of filesystem
-  storage is a follow-up (needs a meter in the core catalog, `core/0062` reserved for it).
+  from the provider state's mount (never secrets: these are DNS names and mount names).
+- **FD11 metering (F10).** `filesystem.nfs.gib.hours` and `filesystem.lustre.gib.hours` in the core catalog;
+  `vps.ancillary-usage` bills each filesystem from its first `ready` until it is deleted, by the size the provider
+  last reported (`ProviderFilesystemState.sizeGiB`: EFS's metered size, refreshed by the 5-minute pass; FSx's
+  provisioned capacity), else the size asked for. Columns in `vps/0112` (unreleased, so no new migration; `core/0062`
+  stays unused). Windows are `network` sources keyed by the filesystem id, tagged `source: filesystem` (the
+  usage source-kind CHECK is redefined by other modules' migrations, so a new kind would race them).
 
 ## Contract (core, additive)
 
@@ -109,8 +114,10 @@ export interface ProviderFilesystems {
   rows and descriptions, and instances.create `filesystems`.
 - [ ] **F9 end to end.** A tenant makes a network, an `nfs` filesystem, and an instance mounting it: the RunInstances
   user data carries the mount part; deleting the filesystem while an instance mounts it is refused (`INVALID_STATE`).
+- [x] **F10 metering** (FD11): `filesystem.<kind>.gib.hours` from the first `ready` until deleted, by the
+  provider's reported size (tests/aws-ml-filesystems.test.ts "filesystem metering").
 
 ## Out of scope
 
 Access points and per-tenant POSIX identities, EFS replication and backups, FSx data repository associations (S3
-import/export), Filestore/DigitalOcean implementations, and metering (follow-up with `core/0062`).
+import/export), Filestore/DigitalOcean implementations.

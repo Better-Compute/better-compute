@@ -135,7 +135,12 @@ describe('filesystems: EFS (nfs)', () => {
         source: `${fs!.id}.efs.us-east-1.amazonaws.com:/`,
         options: efsMountOptions,
       },
+      // EFS bills its metered size: the emulator's empty file system, 6144 bytes.
+      sizeGiB: Math.round((6144 / 2 ** 30) * 1e6) / 1e6,
     });
+    // The size follows what EFS meters.
+    fs!.sizeBytes = 3 * 2 ** 30;
+    expect((await w.filesystems.ensureFilesystem(nfs, w.call())).sizeGiB).toBe(3);
     const group = fsGroup(w, 'bc-fs-1')!;
     const targets = [...w.efs.mountTargets.values()];
     expect(targets.map((t) => t.zone).sort()).toEqual(['us-east-1a', 'us-east-1b']);
@@ -303,6 +308,8 @@ describe('filesystems: FSx for Lustre', () => {
       source: `${fs!.id}.fsx.us-east-1.amazonaws.com@tcp:/${fs!.mountName}`,
       options: lustreMountOptions,
     });
+    // FSx bills its provisioned capacity.
+    expect(ready.sizeGiB).toBe(1200);
     const net = netGroup(w).id;
     expect(ingress(w, group.id)).toEqual(
       [

@@ -19,6 +19,8 @@ export interface EmuFileSystem {
   tags: Map<string, string>;
   /** Describes left before the state moves on. */
   reads: number;
+  /** The metered size EFS reports (default 6144 bytes, an empty file system). */
+  sizeBytes?: number;
 }
 
 export interface EmuMountTarget {
@@ -110,7 +112,7 @@ export class EfsEmulator {
       NumberOfMountTargets: [...this.mountTargets.values()].filter(
         (target) => target.fileSystemId === fs.id && target.lifeCycleState !== 'deleted',
       ).length,
-      SizeInBytes: { Value: 6144 },
+      SizeInBytes: { Value: fs.sizeBytes ?? 6144 },
       PerformanceMode: fs.performanceMode,
       ThroughputMode: fs.throughputMode,
       Encrypted: fs.encrypted,

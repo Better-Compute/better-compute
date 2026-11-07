@@ -2180,7 +2180,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       grantsReconciler(grantDeps),
       {
         // Platform compute billing (D9): tenant networks' hours (and snapshots' GiB-hours) as `network` and
-        // `snapshot` sources. A public address and a disk are lines of the instance's own intervals instead.
+        // `snapshot` sources, and shared filesystems' GiB-hours (AWS A10) as `network` sources of their own. A public address and a disk are lines of the instance's own intervals instead.
         name: 'vps.ancillary-usage',
         shardBy: 'none',
         periodic: [{ key: 'all', every: '5m' }],
