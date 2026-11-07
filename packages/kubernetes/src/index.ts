@@ -6,6 +6,7 @@
  */
 export { kubernetes, type KubernetesApi, type KubernetesOptions } from './module.js';
 export * from './types.js';
+export { describeCreateCluster } from './describe.js';
 export * from './migrations.js';
 export { kubernetesSchemas, maxNodePoolsPerCluster, maxAuthorizedNetworks } from './parse.js';
 export { clustersWork, providerClusterName, type KubernetesDeps } from './store.js';
