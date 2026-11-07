@@ -153,6 +153,8 @@ export class AwsCompute implements ProviderImpl {
   readonly #created = new Map<string, number>();
   /** Instance id → when this client last claimed it with `managed` (tags lag behind writes). */
   readonly #managedClaims = new Map<string, number>();
+  /** Instance id → when this client last wrote or saw its own ownership tag on it in `claim`. */
+  readonly #claims = new Map<string, number>();
   /** AMI id → its root device and whether a tenant may launch it (DescribeImages, cached a day). */
   readonly #images = new Map<
     string,
@@ -585,6 +587,13 @@ export class AwsCompute implements ProviderImpl {
       if (this.recent(this.#created, id)) return { id, state: 'pending', addresses: [] };
       return undefined;
     }
+    // Just claimed by this client: a lagging read may not show the ownership tag yet. vps would take
+    // the missing label as lost ownership, so that is a retryable UNAVAILABLE inside the window.
+    if (
+      !instance.items('tagSet').some((item) => item.textOf('key') === tags.instance) &&
+      this.recent(this.#claims, id)
+    )
+      throw tagPropagation(id);
     const machine = await this.machine(instance, context.signal);
     if (instance.child('instanceState')?.textOf('name') === 'terminated') {
       const failure = terminatedFailure(instance.child('stateReason')?.textOf('code'));
@@ -867,6 +876,7 @@ export class AwsCompute implements ProviderImpl {
     const after = await this.#tagged(id, context.signal);
     const now = after.tags.get(tags.instance);
     if (!now || (options.managed && after.tags.get(tags.managed) !== 'true')) {
+      this.#remember(this.#claims, id);
       if (options.managed) this.#remember(this.#managedClaims, id);
       throw tagPropagation(id);
     }
@@ -880,12 +890,16 @@ export class AwsCompute implements ProviderImpl {
           reason: 'lost-race',
         },
       );
+    this.#remember(this.#claims, id);
     if (options.managed) this.#remember(this.#managedClaims, id);
     return this.machine(after.instance, context.signal);
   }
 
   /** Removes the ownership (and managed) tags if they name `instanceId`; a missing instance is fine. */
   async release(id: string, instanceId: string, context: CallContext): Promise<void> {
+    // A released instance legitimately reads without the tag from here on.
+    this.#claims.delete(id);
+    this.#managedClaims.delete(id);
     let current;
     try {
       current = await this.#tagged(id, context.signal);
