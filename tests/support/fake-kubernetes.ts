@@ -187,7 +187,18 @@ export function fakeProviderKubernetes(cloud: FakeKubernetes): ProviderKubernete
     async getCluster(id) {
       cloud.calls.push(`getCluster ${id}`);
       const found = cloud.clusters.get(id);
-      return found ? { id, state: found.ready ? 'ready' : 'pending' } : undefined;
+      if (!found) return undefined;
+      if (!found.ready) return { id, state: 'pending' };
+      return {
+        id,
+        state: 'ready',
+        outputs: {
+          endpoint: found.endpoint,
+          version: found.version,
+          nodeVersion: found.version,
+          location: found.spec.location,
+        },
+      };
     },
     async deleteCluster(id) {
       begin(cloud, `deleteCluster ${id}`);
