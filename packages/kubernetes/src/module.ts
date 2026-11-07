@@ -57,6 +57,7 @@ import { substratePolicyValidator } from './substrate-policy.js';
 import {
   getSubstrate,
   substratesReconciler,
+  substratesWork,
   type SubstrateDeps,
   type SubstrateOptions,
   type SubstrateView,
@@ -440,16 +441,28 @@ export function kubernetes(
       }
       return findings;
     },
-    // §12.8: a deleted tenant's clusters are deleted at the provider; DONE once all are gone.
+    // §12.8: a deleted tenant's clusters are deleted at the provider; DONE once all are gone. A pool substrate's
+    // cluster goes through its substrate (capacity's part of the teardown archives the pool): marked deleted here, the
+    // substrate's teardown would skip removing bcd, and an adopted cluster (never deleted) would keep bcd's privileged
+    // DaemonSet, its token Secret and the substrate's credential identity. The substrate is woken instead.
     async tenantDeleted(context, tenantId) {
       const deps = depsOf(context);
       return context.sql.transaction(async (tx) => {
-        const { rows } = await tx.query<{ id: string; tenant_id: string; desired_state: string }>(
-          `SELECT id, tenant_id, desired_state FROM kubernetes_clusters
+        const { rows } = await tx.query<{
+          id: string;
+          tenant_id: string;
+          desired_state: string;
+          substrate_pool_id: string | null;
+        }>(
+          `SELECT id, tenant_id, desired_state, substrate_pool_id FROM kubernetes_clusters
             WHERE tenant_id = $1 AND state <> 'deleted' ORDER BY id FOR UPDATE`,
           [tenantId],
         );
         for (const row of rows) {
+          if (row.substrate_pool_id !== null) {
+            await deps.work.enqueue(tx, substratesWork, row.substrate_pool_id);
+            continue;
+          }
           if (row.desired_state !== 'deleted') {
             await markDeleted(tx, row.id);
             await deps.events.publish(tx, {
@@ -461,7 +474,13 @@ export function kubernetes(
           }
           await deps.work.enqueue(tx, clustersWork, row.id);
         }
-        return rows.length > 0 ? 'SYNC_AGAIN' : 'DONE';
+        // Substrates still tearing down (their cluster may be gone already: the nodes are retired after it).
+        const { rows: substrates } = await tx.query<{ pool_id: string }>(
+          `SELECT pool_id FROM kubernetes_pool_substrates WHERE tenant_id = $1 AND state <> 'deleted' ORDER BY pool_id`,
+          [tenantId],
+        );
+        for (const substrate of substrates) await deps.work.enqueue(tx, substratesWork, substrate.pool_id);
+        return rows.length > 0 || substrates.length > 0 ? 'SYNC_AGAIN' : 'DONE';
       });
     },
   });
