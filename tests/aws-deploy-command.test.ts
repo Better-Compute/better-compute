@@ -116,6 +116,44 @@ describe('aws deploy-templates', () => {
   });
 });
 
+describe('apps/docs operations/deploy-aws.mdx', () => {
+  // The page's configuration example is never run; this keeps it to what the task definitions actually set.
+  const page = async () => {
+    const text = await readFile(join(import.meta.dirname, '..', 'apps', 'docs', 'content', 'docs', 'operations', 'deploy-aws.mdx'), 'utf8');
+    const section = text.slice(text.indexOf('## The configuration in the image'), text.indexOf('## Alarms'));
+    const example = /```ts\n([\s\S]*?)```/.exec(section)?.[1] ?? '';
+    return { prose: section.slice(0, section.indexOf('```ts')), example };
+  };
+  const taskEnvironment = () => {
+    const template = deploymentTemplates().find((entry) => entry.stack === 'control-plane')!.template;
+    const names = new Set<string>();
+    for (const resource of Object.values(template.Resources)) {
+      if (resource.Type !== 'AWS::ECS::TaskDefinition') continue;
+      for (const container of (resource.Properties as { ContainerDefinitions: { Environment?: { Name: string }[]; Secrets?: { Name: string }[] }[] }).ContainerDefinitions)
+        for (const entry of [...(container.Environment ?? []), ...(container.Secrets ?? [])]) names.add(entry.Name);
+    }
+    return names;
+  };
+
+  it('lists every variable the tasks set, and the example reads only those', async () => {
+    const { prose, example } = await page();
+    const names = taskEnvironment();
+    expect(names.size).toBeGreaterThan(10);
+    for (const name of names) expect(prose, name).toContain(`\`${name}\``);
+    expect(example.length).toBeGreaterThan(0);
+    for (const [, name] of example.matchAll(/env\.([A-Z][A-Z0-9_]*)/g)) expect(names.has(name!), `env.${name}`).toBe(true);
+  });
+
+  it('the example serves only once the snapshot store can sign download URLs', async () => {
+    const { example } = await page();
+    // Built before the options, warmed under `serve`, and refusing to start when warm() is false.
+    expect(example).toMatch(/const snapshots = s3SnapshotStore\(/);
+    expect(example).toMatch(/if \(command === 'serve' && !\(await snapshots\.warm\(\)\)\) throw /);
+    expect(example).toContain('vps({ snapshots })');
+    expect(example).toMatch(/defineConfig\(async \(\{ command, env = process\.env \} = \{\}\) =>/);
+  });
+});
+
 describe('deploy/aws/README.md', () => {
   // The runbook's commands are never run by the suite; this keeps their options to what the AWS CLI accepts.
   const commands = async () => {

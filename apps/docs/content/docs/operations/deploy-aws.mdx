@@ -159,9 +159,12 @@ import {
   s3AuditSink, s3BlobStore, s3SnapshotStore,
 } from '@better-compute/aws';
 
-export default defineConfig(({ env = process.env } = {}) => {
+export default defineConfig(async ({ command, env = process.env } = {}) => {
   const aws = { region: env.AWS_REGION!, credentials: ambientCredentials({ region: env.AWS_REGION }) };
   const sse = { kind: 'aws:kms', keyId: env.BC_KMS_KEY_ARN } as const;
+  const snapshots = s3SnapshotStore({ ...aws, bucket: env.BC_SNAPSHOTS_BUCKET!, sse });
+  // A restore rendered before the download credentials load cannot be fetched: serve only once they have.
+  if (command === 'serve' && !(await snapshots.warm())) throw new Error('snapshot download credentials did not load');
   const host = env.BC_DATABASE_HOST!;
   const port = Number(env.BC_DATABASE_PORT);
   const user = env.BC_DATABASE_USER!;
@@ -184,7 +187,7 @@ export default defineConfig(({ env = process.env } = {}) => {
     },
     downloads: { blob: s3BlobStore({ ...aws, bucket: env.BC_DOWNLOADS_BUCKET! }) },
     supportBundles: { blob: s3BlobStore({ ...aws, bucket: env.BC_BLOBS_BUCKET!, sse }) },
-    modules: [vps({ snapshots: s3SnapshotStore({ ...aws, bucket: env.BC_SNAPSHOTS_BUCKET!, sse }) })],
+    modules: [vps({ snapshots })],
     // …your tenancy, IAM, PKI (from env.BC_PKI_BUNDLE) and modules, as in examples/postgres.
   };
 });
@@ -194,6 +197,11 @@ export default defineConfig(({ env = process.env } = {}) => {
 endpoint. It ships with the aws-core credential sources of the AWS foundation phase (A0); `@better-compute/aws`'s
 own `envCredentialSource` reads only `AWS_ACCESS_KEY_ID` and its siblings, so it cannot use a task role. Name the
 file `better-compute.config.ts` (the example is TypeScript), or drop the `!` and `as const` for a `.mjs` file.
+
+The snapshot store signs restore URLs inside NodeSpec's transaction, from credentials it holds in memory. Until they
+load, a restore rendered for a host keeps its `s3://` identifier, which bcd cannot fetch, and the instance fails. So
+the example builds the store first and, for `serve`, refuses to start when `warm()` resolves `false`; ECS then
+replaces the task. `migrate` renders no NodeSpec and skips the wait.
 
 The `host` export's `gateway` should advertise each task's own address as its internal URL (from the
 ECS task metadata endpoint), listen on `BC_GATEWAY_INTERNAL_PORT`, and name `BC_GATEWAY_PUBLIC_HOST`. The
