@@ -180,6 +180,13 @@ describe('control-plane template', () => {
     expect(ingress('GatewaySecurityGroup')).toEqual([
       expect.objectContaining({ FromPort: 8443, ToPort: 8443, SourceSecurityGroupId: { Ref: 'GatewayLoadBalancerSecurityGroup' } }),
       expect.objectContaining({ FromPort: { Ref: 'GatewayInternalPort' }, SourceSecurityGroupId: { Ref: 'ApiSecurityGroup' } }),
+      // `serve --roles controllers,scheduler,sinks,iam` installs the IAM handlers, which close a revoked
+      // agent's or delegation's tunnels through every gateway's internal control API.
+      expect.objectContaining({
+        FromPort: { Ref: 'GatewayInternalPort' },
+        ToPort: { Ref: 'GatewayInternalPort' },
+        SourceSecurityGroupId: { Ref: 'WorkerSecurityGroup' },
+      }),
     ]);
     expect(ingress('WorkerSecurityGroup')).toBeUndefined();
   });

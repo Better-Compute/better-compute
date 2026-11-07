@@ -46,7 +46,7 @@ environments (the image, the domains, the certificate, task counts, sizes) is a 
 | --- | --- | --- | --- |
 | `api` | `serve --roles api --port 3000 --no-migrate` | ALB, HTTPS 443, health check `/readyz` | 3000 from the ALB only |
 | `worker` | `serve --roles controllers,scheduler,sinks,iam --no-migrate` | none | nothing |
-| `gateway` | `serve --roles gateway --no-migrate` | NLB, TCP 443 to 8443 | 8443 from the NLB; the internal API port from api tasks |
+| `gateway` | `serve --roles gateway --no-migrate` | NLB, TCP 443 to 8443 | 8443 from the NLB; the internal API port from api and worker tasks |
 | `migrate` (task) | `migrate` | none | nothing |
 
 Every task runs in the private subnets without a public address, with a read-only root file system, all Linux

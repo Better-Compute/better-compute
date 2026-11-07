@@ -472,6 +472,14 @@ export function controlPlaneTemplate(options: AwsDeploymentOptions = {}): CfnTem
       SourceSecurityGroupId: cfnRef('ApiSecurityGroup'),
       Description: 'the internal control API, from api tasks',
     },
+    // The worker's iam role (installIamHandlers) closes a revoked agent's or delegation's tunnels on every gateway.
+    {
+      IpProtocol: 'tcp',
+      FromPort: cfnRef('GatewayInternalPort'),
+      ToPort: cfnRef('GatewayInternalPort'),
+      SourceSecurityGroupId: cfnRef('WorkerSecurityGroup'),
+      Description: 'the internal control API, from worker tasks (iam revocations)',
+    },
   ]);
   resources.WorkerSecurityGroup = group('worker', 'worker and migrate tasks (no ingress)');
 
