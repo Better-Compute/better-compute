@@ -168,6 +168,11 @@ for in each mode.
       type: 'boolean',
       description: "Offered to at most one tenant besides the owner, never with includeDescendants (a second offer is INVALID_STATE). VPS container runtimes, which share the host kernel, require it. pools.update refuses to turn it on while more than one other tenant, or an includeDescendants offer, holds the pool.",
     },
+    replacePreempted: {
+      type: 'boolean',
+      description: "(P3) Provider pools: when the provider reclaims an instance's Spot machine, recreate the instance in place on a new machine under the same id instead of leaving it lost. Replacements back off and stop after three in a row that never reach running. pools.create and pools.update refuse a value that is not a boolean (INVALID_INPUT). See /docs/guides/vps/instances#spot-preemption.",
+      default: 'false',
+    },
     workloadIdentity: {
       type: 'boolean',
       description: "VPS pools (v0.5): hosted instances may get workload identity tokens from their host's metadata service. Off by default. See /docs/guides/vps/instances#workload-identity.",
