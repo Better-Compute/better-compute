@@ -46,6 +46,7 @@ import {
   type InstanceRow,
   providerPlacementGroup,
 } from './instances.js';
+import { providerMounts } from './filesystems.js';
 import { closeOpenInterval, openInterval } from './instance-usage.js';
 import { releaseAddress } from './ipam.js';
 import { networkTag, providerResourceName } from './networks.js';
@@ -556,6 +557,10 @@ async function reconcileProvider(
                     : {}),
                 },
               }
+            : {}),
+          // (AWS A10) The network's filesystems it mounts at boot (the provider renders them).
+          ...(row.filesystems !== undefined && row.filesystems.length > 0
+            ? { mounts: providerMounts(row.filesystems) }
             : {}),
           // (v1.0) On a tenant network: its subnet, and the tag the firewall rules target.
           ...(row.networkId !== undefined && row.subnetId !== undefined

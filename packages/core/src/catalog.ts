@@ -672,6 +672,13 @@ group('firewallRules', 'vps', [
   ['update', 'mutation', 'networks:update', 'network', 'v1.0'],
   ['delete', 'mutation', 'networks:update', 'network', 'v1.0'],
 ]);
+// (AWS A10) Shared filesystems (EFS, FSx for Lustre) on a network, decided on it like firewall rules.
+group('filesystems', 'vps', [
+  ['create', 'mutation', 'networks:update', 'network', 'v1.0'],
+  ['list', 'read', 'networks:read', 'network', 'v1.0'],
+  ['get', 'read', 'networks:read', 'network', 'v1.0'],
+  ['delete', 'mutation', 'networks:update', 'network', 'v1.0'],
+]);
 // Managed Kubernetes (GKE, …) on a provider account; the provider runs the control plane (kubernetes module).
 group('kubernetesClusters', 'kubernetes', [
   ['create', 'mutation', 'kubernetes:create', 'kubernetes-cluster', 'v1.0'],

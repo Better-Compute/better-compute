@@ -269,6 +269,25 @@ export const schemas = {
         },
         ['group', 'strategy'],
       ),
+      filesystems: {
+        type: 'array',
+        maxItems: 16,
+        items: strictObject(
+          {
+            filesystem: idOf('fs', 'A ready filesystem of the instance network (filesystems.create)'),
+            path: {
+              type: 'string',
+              pattern: '^(/[A-Za-z0-9._-]+)+$',
+              maxLength: 200,
+              description:
+                'Where the machine mounts it: an absolute path of plain segments outside the system directories',
+            },
+          },
+          ['filesystem', 'path'],
+        ),
+        description:
+          '(provider pools on a network) Shared filesystems of the network the machine mounts at boot; needs networkId',
+      },
       ownerIdentityId: {
         type: 'string',
         pattern: '^[A-Za-z0-9._:@-]{1,128}$',

@@ -838,6 +838,12 @@ export interface ProviderFilesystemState extends ProviderResourceState {
 export interface ProviderFilesystems {
   /** The kinds this provider makes. */
   readonly kinds: readonly ProviderFilesystemSpec['kind'][];
+  /**
+   * Refuses a spec this provider can never make (`INVALID_INPUT`), before anything is recorded:
+   * the module calls it at create, so a bad size or zone is the caller's error, not a filesystem in
+   * `error`. Optional: `ensureFilesystem` checks again.
+   */
+  validate?(spec: ProviderFilesystemSpec): void;
   ensureFilesystem(
     spec: ProviderFilesystemSpec,
     context: CallContext,

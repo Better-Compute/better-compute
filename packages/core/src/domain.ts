@@ -509,6 +509,13 @@ export interface InstancePlacementGroup {
   partition?: number;
 }
 
+/** (AWS A10) A shared filesystem (vps `filesystems`) an instance mounts at boot, and where. */
+export interface InstanceFilesystem {
+  filesystemId: string;
+  /** Absolute path on the machine. */
+  path: string;
+}
+
 export interface Instance {
   id: string;
   tenantId: string;
@@ -535,6 +542,8 @@ export interface Instance {
   labels?: Record<string, string>;
   /** (AWS A10) The tenant's placement group for the machine (provider pools), as asked at create. */
   placement?: InstancePlacementGroup;
+  /** (AWS A10) The shared filesystems the machine mounts at boot (provider pools on a network), as asked at create. */
+  filesystems?: InstanceFilesystem[];
   addresses: string[];
   ownerIdentityId: string;
   idempotencyKey: string;

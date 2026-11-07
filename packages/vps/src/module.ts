@@ -330,6 +330,21 @@ import {
   type UpdateRuleInput,
 } from './networks.js';
 import {
+  createFilesystem,
+  deleteFilesystem,
+  filesystemSchemas,
+  filesystemsReconciler,
+  getFilesystem,
+  listFilesystems,
+  parseCreateFilesystem,
+  parseFilesystemList,
+  parseFilesystemRef,
+  type CreateFilesystemInput,
+  type FilesystemListInput,
+  type FilesystemRef,
+  type FilesystemView,
+} from './filesystems.js';
+import {
   deleteSnapshot,
   getSnapshot,
   instanceSnapshotKind,
@@ -540,6 +555,13 @@ export type VpsApi = {
     list: MethodDefinition<NetworkRef, { items: FirewallRuleView[] }>;
     update: MethodDefinition<UpdateRuleInput, FirewallRuleView>;
     delete: MethodDefinition<RuleRef, FirewallRuleView>;
+  };
+  /** (AWS A10) Shared filesystems (EFS, FSx for Lustre) on a tenant network (filesystems.ts). */
+  filesystems: {
+    create: MethodDefinition<CreateFilesystemInput, FilesystemView>;
+    list: MethodDefinition<FilesystemListInput, { items: FilesystemView[] }>;
+    get: MethodDefinition<FilesystemRef, FilesystemView>;
+    delete: MethodDefinition<FilesystemRef, FilesystemView>;
   };
 };
 
@@ -1951,6 +1973,37 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         handler: (context, input) => deleteRule(networkDeps(context), context.sql, input),
       }),
     },
+    // (AWS A10) Shared filesystems belong to a network and are decided on it, like firewall rules.
+    filesystems: {
+      create: defineMethod({
+        action: 'compute:networks:update',
+        kind: 'mutation',
+        resource: networkResource,
+        validate: describedBy(filesystemSchemas.create, parseCreateFilesystem),
+        handler: (context, input) => createFilesystem(networkDeps(context), context, input),
+      }),
+      list: defineMethod({
+        action: 'compute:networks:read',
+        kind: 'read',
+        resource: networkResource,
+        validate: describedBy(filesystemSchemas.list, parseFilesystemList),
+        handler: (context, input) => listFilesystems(context.sql, input),
+      }),
+      get: defineMethod({
+        action: 'compute:networks:read',
+        kind: 'read',
+        resource: networkResource,
+        validate: describedBy(filesystemSchemas.filesystem, parseFilesystemRef),
+        handler: (context, input) => getFilesystem(context.sql, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:networks:update',
+        kind: 'mutation',
+        resource: networkResource,
+        validate: describedBy(filesystemSchemas.filesystem, parseFilesystemRef),
+        handler: (context, input) => deleteFilesystem(networkDeps(context), context.sql, input),
+      }),
+    },
   });
 
   return defineModule({
@@ -2123,6 +2176,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       },
       // Tenant networks: VPCs, subnets, firewall rules and instance tags converged through the provider.
       networksReconciler(networkDeps),
+      // (AWS A10) Shared filesystems converged through the provider once their network is.
+      filesystemsReconciler(networkDeps),
     ],
     selfCheck: async (context) => [
       ...(await vpsSelfCheck(context.sql, runtimeTable, runtimes[0]!)),

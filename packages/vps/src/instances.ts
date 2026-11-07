@@ -45,6 +45,13 @@ import {
 import { leaseAddress } from './ipam.js';
 import { placeOnNetwork } from './networks.js';
 import {
+  checkInstanceFilesystems,
+  recordInstanceFilesystems,
+  parseInstanceFilesystems,
+  type InstanceFilesystemInput,
+  type InstanceMountRow,
+} from './filesystems.js';
+import {
   chooseHostPlacement,
   placementResources,
   type FlavorPlacement,
@@ -154,6 +161,8 @@ export interface CreateInstanceInput {
   labels?: Record<string, string>;
   /** (AWS A10) The placement group to launch into (provider pools). */
   placement?: InstancePlacementGroup;
+  /** (AWS A10) Ready filesystems of the instance's network it mounts at boot. */
+  filesystems?: InstanceFilesystemInput[];
   /**
    * (v1.0) Who owns the instance in the tenant (default: the caller), so it shows in their
    * `scope: 'mine'` list and owner policies apply to them. Only the platform (a root caller
@@ -326,6 +335,7 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
     'subnetId',
     'labels',
     'placement',
+    'filesystems',
     'ownerIdentityId',
     'idempotencyKey',
     'wait',
@@ -377,6 +387,14 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
     if (Object.keys(labels).length > 0) result.labels = labels;
   }
   if (input.placement !== undefined) result.placement = instancePlacement(input.placement);
+  if (input.filesystems !== undefined) {
+    const filesystems = parseInstanceFilesystems(input.filesystems);
+    if (filesystems.length > 0) {
+      if (networkId === undefined)
+        fail('filesystems need a networkId: an instance mounts filesystems of its own network only');
+      result.filesystems = filesystems;
+    }
+  }
   if (input.ownerIdentityId !== undefined) {
     if (
       typeof input.ownerIdentityId !== 'string' ||
@@ -527,6 +545,7 @@ interface RawInstance {
   subnet_id: string | null;
   labels: Record<string, string> | string | null;
   placement: InstancePlacementGroup | string | null;
+  filesystems?: InstanceMountRow[] | string | null;
   network_external_name: string | null;
 }
 
@@ -659,6 +678,8 @@ export interface InstanceRow {
   labels?: Record<string, string>;
   /** (AWS A10) The tenant's placement group (`instances.create`, vps/0111). */
   placement?: InstancePlacementGroup;
+  /** (AWS A10) The filesystems it mounts, with how (`instances.create`, vps/0112). */
+  filesystems?: InstanceMountRow[];
 }
 
 const json = <T>(value: T | string): T =>
@@ -719,6 +740,8 @@ function toRow(raw: RawInstance): InstanceRow {
     row.networkExternalName = raw.network_external_name;
   if (raw.labels !== null && raw.labels !== undefined) row.labels = json(raw.labels);
   if (raw.placement !== null && raw.placement !== undefined) row.placement = json(raw.placement);
+  if (raw.filesystems !== null && raw.filesystems !== undefined)
+    row.filesystems = json(raw.filesystems);
   return row;
 }
 
@@ -732,6 +755,10 @@ const columns = `i.id, i.tenant_id, i.pool_id, i.project_id, i.flavor_id, i.flav
   i.identity_rebind_ref, i.origin, i.on_delete, i.provider_claimed_at IS NOT NULL AS claimed,
   coalesce(i.reboot_requested_at > coalesce(i.rebooted_at, '-infinity'), false) AS reboot_pending,
   i.reboot_hard, i.network_id, i.subnet_id, i.labels, i.placement,
+  (SELECT jsonb_agg(jsonb_build_object('filesystemId', x.filesystem_id, 'path', x.path, 'mount', f.mount)
+                    ORDER BY x.path)
+     FROM instance_filesystems x JOIN filesystems f ON f.id = x.filesystem_id
+    WHERE x.instance_id = i.id) AS filesystems,
   (SELECT n.external_name FROM networks n WHERE n.id = i.network_id) AS network_external_name`;
 
 export async function readInstance(
@@ -774,6 +801,11 @@ export function instanceView(row: InstanceRow): Instance {
   if (row.subnetId !== undefined) view.subnetId = row.subnetId;
   if (row.labels !== undefined) view.labels = { ...row.labels };
   if (row.placement !== undefined) view.placement = { ...row.placement };
+  if (row.filesystems !== undefined)
+    view.filesystems = row.filesystems.map((mount) => ({
+      filesystemId: mount.filesystemId,
+      path: mount.path,
+    }));
   return view;
 }
 
@@ -1382,6 +1414,16 @@ export async function prepareCreateInstance(
     });
   }
 
+  // (AWS A10) Its filesystems: the tenant's, on its network, ready; locked until this commits.
+  if (input.filesystems !== undefined) {
+    if (!placement) throw new ComputeError('INVALID_INPUT', 'filesystems need a networkId');
+    await checkInstanceFilesystems(
+      tx,
+      { tenantId: input.tenantId, networkId: placement.networkId },
+      input.filesystems,
+    );
+  }
+
   const shape = shapeOf(flavor);
   // Ruling F6-3: a provider instance bills the meter its flavor had when it was admitted, even if root changes the
   // flavor later; `{}` says "no meter" (a snapshot without the key is a row from before, which reads the live flavor).
@@ -1428,6 +1470,8 @@ export async function prepareCreateInstance(
         input.placement ? JSON.stringify(input.placement) : null,
       ],
     );
+  if (!existing && input.filesystems !== undefined)
+    await recordInstanceFilesystems(tx, instanceId, input.filesystems);
   await context.authz.upsert(tx, {
     type: 'instance',
     id: instanceId,

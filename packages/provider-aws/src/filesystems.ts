@@ -120,6 +120,10 @@ export class AwsFilesystems implements ProviderFilesystems {
     ];
   }
 
+  validate(spec: ProviderFilesystemSpec): void {
+    validateFilesystemSpec(spec, this.#config);
+  }
+
   async ensureFilesystem(
     spec: ProviderFilesystemSpec,
     context: CallContext,

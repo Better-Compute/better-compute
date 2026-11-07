@@ -35,6 +35,7 @@ Changes the network's `description`. The name, pool and account never change, be
 Marks the network, its subnets and its rules for deletion and returns it `deleting`. The reconciler deletes the rules, then the subnets, then the network, and then the network is `deleted` and publishes `network.deleted`.
 
 - `INVALID_STATE` while instances that are not deleted are on the network, with their ids in `details.instanceIds`: delete or move them first.
+- `INVALID_STATE` while [filesystems](/docs/reference/api/filesystems) that are not deleted are on the network, with their ids in `details.filesystemIds`: delete them first.
 - Deleting a network that is being deleted returns it unchanged.
 
 Publishes `network.deleting`. Decided as `compute:networks:delete` on the network.

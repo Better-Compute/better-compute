@@ -251,7 +251,7 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     subject: 'network/{id}',
     module: 'vps',
     description:
-      'Tenant networks (VPCs): created, adopted (an existing provider VPC, networks.adopt: { externalNetwork, sharedTagScoped }), ready, error, deleting, deleted; network.subnet.ready and network.rule.ready/error when a subnet or firewall rule converges; data { networkId, ... }',
+      'Tenant networks (VPCs): created, adopted (an existing provider VPC, networks.adopt: { externalNetwork, sharedTagScoped }), ready, error, deleting, deleted; network.subnet.ready and network.rule.ready/error when a subnet or firewall rule converges; network.filesystem.created/ready/error/deleting/deleted for its shared filesystems { filesystemId, ... }; data { networkId, ... }',
   },
   {
     type: 'kubernetes.cluster.*',

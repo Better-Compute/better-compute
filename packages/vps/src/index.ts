@@ -34,6 +34,7 @@ export * from './snapshots.js';
 export * from './volumes.js';
 export * from './volume-storage.js';
 export * from './networks.js';
+export * from './filesystems.js';
 export * from './tenancy.js';
 export * from './describe.js';
 export * from './placement.js';
