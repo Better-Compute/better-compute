@@ -915,10 +915,36 @@ describe('the reservation lifecycle', () => {
 
     // The substrate cordons the gone node, then ends what it held.
     await db.query(`UPDATE nodes SET connectivity = 'unreachable', no_schedule_reasons = '{gone}' WHERE id = $1`, [node]);
+    // Every statement, to check capacity's lock order across both reservations.
+    const statements: string[] = [];
     const ended = await db.transaction((tx) =>
-      endNodeReservations(moduleContext(db), tx, node, 'node-removed'),
+      endNodeReservations(
+        moduleContext(db),
+        new Proxy(tx, {
+          get(target, property) {
+            if (property === 'query')
+              return (text: string, params?: unknown[]) => {
+                statements.push(text);
+                return target.query(text, params as never);
+              };
+            const value = (target as any)[property];
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        }),
+        node,
+        'node-removed',
+      ),
     );
     expect(ended).toEqual({ requeued: [later.id], released: [bound.id] });
+    // Reservation rows, then quota, before any booking is released (quota_usage → … → devices).
+    const firstRelease = statements.findIndex((text) => /device_bookings|UPDATE allocations/.test(text));
+    const lastEarly = Math.max(
+      ...statements.map((text, index) =>
+        /FROM reservations[\s\S]*FOR UPDATE|quota_usage/.test(text) ? index : -1,
+      ),
+    );
+    expect(firstRelease).toBeGreaterThan(-1);
+    expect(lastEarly).toBeLessThan(firstRelease);
     const get = async (id: string) =>
       (await call('reservations', 'get', { tenantId: 'acme', reservationId: id })) as Rsv;
     expect(await get(bound.id)).toMatchObject({
