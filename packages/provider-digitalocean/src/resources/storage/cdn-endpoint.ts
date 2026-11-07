@@ -242,13 +242,24 @@ export function cdnEndpointKind(deps: {
       return endpoint ? { ...state(endpoint), spec: specOf(endpoint) } : undefined;
     },
 
-    async adopt(id, _labels, ctx) {
+    async adopt(id, labels, ctx) {
       // Endpoints carry no labels: one in front of a bucket this deployment manages is already
-      // its own, so adopting it only checks that.
+      // its own, and the row adopt makes serves delete and purge, so the origin bucket's marker
+      // must name the caller's tenant (none: the operator's), as ensure requires.
       const endpoint = await read(id, ctx.signal);
       if (!endpoint)
         throw storageError('NOT_FOUND', `CDN endpoint ${id} not found`, 'cdnEndpoint');
-      await requireManagedOrigin(endpoint.origin, ctx.signal);
+      const match = originPattern.exec(endpoint.origin);
+      const marker = match
+        ? await readMarker(deps.spaces(match[2]!), match[1]!, deps.deploymentTag, ctx.signal)
+        : undefined;
+      if (marker?.owner !== 'mine')
+        throw storageError(
+          'INVALID_STATE',
+          `The CDN origin ${endpoint.origin} is not a bucket better-compute manages`,
+          'notManaged',
+        );
+      if (!sameTenant(marker, labels)) otherTenant(`The CDN origin ${endpoint.origin}`);
       return { ...state(endpoint), spec: specOf(endpoint) };
     },
 

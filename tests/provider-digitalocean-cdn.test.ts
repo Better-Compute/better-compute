@@ -140,6 +140,29 @@ describe('do.cdn-endpoint', () => {
     expect(cdnEndpoints(w.emu).get(created.id)!.ttl).toBe(3600);
   });
 
+  it("never adopts another tenant's endpoint, or one in front of the operator's bucket", async () => {
+    const w = await world();
+    await w.ensure('do.spaces-bucket', 'tenant-b-assets', { region: 'nyc3' }, w.ctx(), {
+      labels: { 'better-compute-tenant': 'ten_b', 'better-compute-resource': 'crs_bucket_b' },
+    });
+    // An operator bucket: marked by this deployment, with no tenant.
+    await w.ensure('do.spaces-bucket', 'operator-site', { region: 'nyc3' }, w.ctx());
+    const theirs = seedCdnEndpoint(w.emu, { origin: 'tenant-b-assets.nyc3.digitaloceanspaces.com' });
+    const ops = seedCdnEndpoint(w.emu, { origin: 'operator-site.nyc3.digitaloceanspaces.com' });
+    const before = w.emu.requests.length;
+    for (const endpoint of [theirs, ops]) {
+      const refused = await failure(w.resources.adopt('do.cdn-endpoint', endpoint.id, tenantA, w.ctx()));
+      expect([refused.code, refused.details?.reason]).toEqual(['ACCESS_DENIED', 'otherTenant']);
+    }
+    expect(
+      w.emu.requests.slice(before).filter((r) => r.method !== 'GET'),
+    ).toHaveLength(0);
+    expect(cdnEndpoints(w.emu).has(theirs.id)).toBe(true);
+    expect(cdnPurges(w.emu)).toHaveLength(0);
+    // Tenant B (the bucket's own tenant) may adopt its endpoint.
+    expect((await w.resources.adopt('do.cdn-endpoint', theirs.id, tenantB, w.ctx())).id).toBe(theirs.id);
+  });
+
   it('validates ttl, custom domain and origin', async () => {
     const w = await world();
     const reason = async (spec: Record<string, unknown>) =>

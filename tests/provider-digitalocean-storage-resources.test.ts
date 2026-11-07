@@ -396,7 +396,7 @@ describe('refusals and discovery', () => {
 
   it('adopts a CDN endpoint only in front of a bucket it manages', async () => {
     const w = await world();
-    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
+    await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx(), { labels });
     const mine = seedCdnEndpoint(w.emu, { origin: 'tenant-a-assets.nyc3.digitaloceanspaces.com' });
     expect(await w.resources.adopt('do.cdn-endpoint', mine.id, labels, w.ctx())).toMatchObject({
       id: mine.id,
