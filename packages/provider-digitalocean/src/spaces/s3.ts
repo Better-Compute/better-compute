@@ -1,4 +1,5 @@
 import { ComputeError, type Clock, type ErrorCode, type Logger } from '@better-compute/core';
+import { readCappedBytes } from './capped.js';
 import {
   emptyPayloadHash,
   encodeS3Key,
@@ -145,29 +146,7 @@ export function xmlEscape(text: string): string {
 }
 
 async function readCapped(response: Response, cap: number): Promise<string> {
-  if (!response.body) return '';
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    while (size < cap) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      size += value.length;
-    }
-  } finally {
-    await reader.cancel().catch(() => undefined);
-  }
-  const all = new Uint8Array(Math.min(size, cap));
-  let offset = 0;
-  for (const chunk of chunks) {
-    const take = Math.min(chunk.length, all.length - offset);
-    all.set(chunk.subarray(0, take), offset);
-    offset += take;
-    if (offset >= all.length) break;
-  }
-  return new TextDecoder().decode(all);
+  return new TextDecoder().decode(await readCappedBytes(response, cap));
 }
 
 /** The ComputeError for a failed Spaces (S3) response. `what` names the call, never a credential. */

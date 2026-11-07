@@ -182,7 +182,7 @@ Tenants are kept apart too, with `ACCESS_DENIED` before anything is sent:
 
 Adopting and releasing:
 
-- `adopt` on a bucket writes the marker, with the cloud resource id from the `better-compute-resource` label. A bucket another deployment marked is refused.
+- `adopt` on a bucket writes the marker, with the cloud resource id from the `better-compute-resource` label. A bucket another deployment marked is refused. An unmarked bucket is the operator's (the `spacesBlobStore` bucket, which holds every tenant's downloads, is one), so an `adopt` that carries a `better-compute-tenant` label and would claim one is refused with `ACCESS_DENIED` (`tenantAdopt`) unless the operator sets the code option `spacesTenantBucketAdopt`. Re-adopting a bucket already marked for the same tenant is allowed.
 - `release` removes the marker and leaves the bucket and its data in place.
 - `adopt` on a CDN endpoint writes nothing (an endpoint has nothing to label). Its origin must be a managed bucket whose marker names the caller's tenant, or no tenant for an operator call, as for `ensure`: the row adopt makes serves `delete` and `purge`, so another tenant's endpoint is refused with `otherTenant`.
 - Keys and registries are owned by their names, so `adopt` and `release` are `UNSUPPORTED` with `reason` `adopt`. The provider-side name is `bc-<deployment hash>-<rest>` (`managedNamePrefix(deployment)`, the 12 hex characters of the deployment tag), derived from the requested `bc-` name and hashed down to 63 characters when needed. Discovery reports `managedBy: 'this'` for this deployment's prefix and `'other'` for any other `bc-` name.
@@ -191,11 +191,11 @@ Adopting and releasing:
 Tenant data is never deleted to delete a resource:
 
 - A bucket is deleted only when it holds nothing but its marker. Otherwise the delete is refused with `bucketNotEmpty`. If the bucket delete fails (an object arrived meanwhile, or any other error), the same marker is put back. A delete cut off between the marker delete and the bucket delete (a crash) leaves an empty, unmarked bucket that is refused as `notManaged`; `adopt` and then `delete` it.
-- Only a 404 means a bucket is gone. A 403 (a rotated or narrowed account key) is `ACCESS_DENIED` (`spacesAccess`) and a 301 is `INVALID_STATE` (`region`), from `get` and `delete` alike, so a row is never dropped while its bucket stays up.
+- Only a 404 means a bucket is gone. A 403 (a rotated or narrowed account key) is `ACCESS_DENIED` (`spacesAccess`) and a 301 is `INVALID_STATE` (`region`), from `get`, `delete` and an `ensure` that carries the bucket's `id` alike, so a row is never dropped while its bucket stays up. Only an `ensure` without an `id` (a first create) reads a 403 as a name another account holds (`CONFLICT`, `bucketNameTaken`).
 - A bucket is not deleted while a CDN endpoint has it as its origin (`cdnEndpointAttached`): the endpoint is managed only through the bucket's marker, so it would be left with nothing able to delete it. Delete the endpoint first.
 - A registry is deleted only when it holds no repositories. Otherwise the delete is refused with `registryNotEmpty`.
 
-Creating a bucket never leaves it unmarked and never takes another deployment's. After the create, the marker is read: another deployment's marker (a create can answer 200 for a bucket the account already holds) is refused with `managedByAnother`, and the marker is written only where there is none. If that check or write fails, the bucket that was just made, which is empty, is removed, so the next pass starts over rather than finding an unmarked bucket it must refuse. A marker over 4 KiB is not read; it counts as another's.
+Creating a bucket never leaves it unmarked and never takes another deployment's. After the create, the marker is read: another deployment's marker (a create can answer 200 for a bucket the account already holds) is refused with `managedByAnother`, and the marker is written only where there is none. If that check or write fails, the bucket that was just made, which is empty, is removed, so the next pass starts over rather than finding an unmarked bucket it must refuse. A marker over 4 KiB is not read; it counts as another's. A marker sent without a length is read only up to that cap.
 
 A bucket needs the account's Spaces key pair (the `spacesAccessKey` and `spacesSecretKey` config fields, both secret references). Without it, every bucket call fails closed with `INVALID_CONFIG` and `reason` `spacesKeys`. A bucket name that another account holds is `CONFLICT` with `bucketNameTaken`.
 

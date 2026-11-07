@@ -1,5 +1,6 @@
 import { field, isComputeError, manifest, type CallContext } from '@better-compute/core';
 import type { DoClient } from '../../client/http.js';
+import { readCappedBytes } from '../../spaces/capped.js';
 import { spacesRegionPattern, xmlValue, xmlValues, type SpacesClient } from '../../spaces/s3.js';
 import {
   hasCode,
@@ -84,13 +85,17 @@ export async function readMarker(
   signal: AbortSignal,
 ): Promise<BucketMarker> {
   const response = await s3.request('GET', bucket, bucketMarkerKey, { signal, allow: [404] });
-  // Anything in a bucket can be written by its key holders: a marker too big to be one is not read.
+  if (response.status === 404) {
+    await response.body?.cancel();
+    return { owner: 'missing' };
+  }
+  // Anything in a bucket can be written by its key holders: a marker too big to be one is not read,
+  // and a body without a (true) length is read only up to the cap.
   if (Number(response.headers.get('content-length') ?? 0) > maxMarkerBytes) {
     await response.body?.cancel();
     return { owner: 'other' };
   }
-  const body = new Uint8Array(await response.arrayBuffer());
-  if (response.status === 404) return { owner: 'missing' };
+  const body = await readCappedBytes(response, maxMarkerBytes + 1);
   if (body.length > maxMarkerBytes) return { owner: 'other' };
   try {
     const parsed = JSON.parse(new TextDecoder().decode(body)) as {
@@ -147,6 +152,12 @@ export function spacesBucketKind(deps: {
   deploymentTag: string;
   /** The account's DigitalOcean API client: a delete looks for CDN endpoints in front of the bucket. */
   client: DoClient;
+  /**
+   * Lets an `adopt` carrying a tenant label claim an unmarked bucket for that tenant. Off by
+   * default: every unmarked bucket of the account is the operator's (its spacesBlobStore bucket,
+   * say), so only an operator call (no tenant label) may adopt one. Operator code only.
+   */
+  allowTenantAdopt?: boolean;
 }): DoResourceKind<SpacesBucketSpec> {
   /** The marker's bytes; it names the cloud resource when the caller passed its labels. */
   const markerFor = (labels?: Readonly<Record<string, string>>) =>
@@ -320,6 +331,14 @@ export function spacesBucketKind(deps: {
         );
       const s3 = deps.spaces(target.region);
       const status = await head(s3, target.bucket, ctx.signal);
+      // For a bucket this account made (the caller holds its id), a 403 is a narrowed or revoked
+      // account key, never a name another account took.
+      if (status === 403 && id !== undefined)
+        throw storageError(
+          'ACCESS_DENIED',
+          `The account's Spaces key may not read bucket ${target.bucket}`,
+          'spacesAccess',
+        );
       if (status === 403)
         throw storageError(
           'CONFLICT',
@@ -403,6 +422,14 @@ export function spacesBucketKind(deps: {
       if (owner === 'other') refuseOwnership(owner, target.bucket);
       if (owner === 'mine' && !sameTenant(marker, labels)) otherTenant(`Bucket ${target.bucket}`);
       if (owner === 'missing') {
+        // An unmarked bucket is the operator's until claimed: a tenant may not claim one (and so be
+        // granted keys on it) unless the operator turned tenant adoption on in code.
+        if (labels[tenantLabel] !== undefined && !deps.allowTenantAdopt)
+          throw storageError(
+            'ACCESS_DENIED',
+            `Bucket ${target.bucket} is not managed by better-compute; only the operator may adopt it`,
+            'tenantAdopt',
+          );
         await putMarker(s3, target.bucket, markerFor(labels), ctx.signal);
         ctx.log.info('digitalocean.spaces-bucket.adopted', {
           bucket: target.bucket,

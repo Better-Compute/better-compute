@@ -194,6 +194,47 @@ describe('do.spaces-bucket ensure', () => {
     expect(error.details?.reason).toBe('managedByAnother');
   });
 
+  it('reads a marker sent without a length only up to its cap', async () => {
+    // A marker is tenant-writable: a chunked answer of any size must not be read into memory.
+    let pulled = 0;
+    let spaces: import('./support/spaces-emulator.js').SpacesEmulator | undefined;
+    const endless: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      if ((init?.method ?? 'GET') === 'GET' && url.pathname.endsWith(`/${bucketMarkerKey}`)) {
+        const chunk = new TextEncoder().encode('x'.repeat(1024));
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              pulled += chunk.length;
+              if (pulled > 8 * 1024 * 1024) controller.close();
+              else controller.enqueue(chunk);
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      return spaces!.fetch(input, init);
+    };
+    const w = await storageWorld(storageAccount, { spacesFetch: endless }, (world) => {
+      spaces = world.spaces;
+    });
+    w.spaces.seedBucket('padded');
+    const error = await failure(w.ensure('do.spaces-bucket', 'padded', { region: 'nyc3' }, w.ctx()));
+    expect(error.details?.reason).toBe('managedByAnother');
+    expect(pulled).toBeLessThan(64 * 1024);
+  });
+
+  it('reads a 403 on a bucket it holds the id of as lost access, not a taken name', async () => {
+    const w = await storageWorld();
+    const created = await w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx());
+    w.spaces.failNext('HEAD /tenant-a-assets$', 403, 'AccessDenied');
+    const refused = await failure(
+      w.ensure('do.spaces-bucket', 'tenant-a-assets', { region: 'nyc3' }, w.ctx(), { id: created.id }),
+    );
+    expect([refused.code, refused.details?.reason]).toEqual(['ACCESS_DENIED', 'spacesAccess']);
+    expect(w.spaces.buckets.has('tenant-a-assets')).toBe(true);
+  });
+
   it('validates the name and spec before any request', async () => {
     const w = await storageWorld();
     for (const [name, spec] of [

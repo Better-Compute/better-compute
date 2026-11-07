@@ -32,6 +32,12 @@ export interface DoStorageOptions extends DoProviderOptions {
    * default: tenant keys are granted bucket by bucket. An operator-only code option.
    */
   spacesKeyFullAccess?: boolean;
+  /**
+   * Lets a tenant (an `adopt` carrying `better-compute-tenant`) adopt an unmarked Spaces bucket.
+   * Off by default: unmarked buckets are the operator's (its spacesBlobStore bucket among them),
+   * so only operator calls adopt them. An operator-only code option.
+   */
+  spacesTenantBucketAdopt?: boolean;
 }
 
 /**
@@ -102,7 +108,12 @@ export function storageKindHandlers(
       deploymentTag: tag,
       ...(options.spacesKeyFullAccess ? { allowFullAccess: true } : {}),
     }),
-    spacesBucketKind({ spaces, deploymentTag: tag, client }),
+    spacesBucketKind({
+      spaces,
+      deploymentTag: tag,
+      client,
+      ...(options.spacesTenantBucketAdopt ? { allowTenantAdopt: true } : {}),
+    }),
     cdnEndpointKind({ client, spaces, deploymentTag: tag }),
     containerRegistryKind(client, names),
     registryGcKind(client, names),

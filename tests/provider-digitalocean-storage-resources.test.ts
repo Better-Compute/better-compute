@@ -210,7 +210,9 @@ describe('doStorageKinds, for the provider-wide dispatcher', () => {
       versioning: false,
     });
     await bucketKind.release!(env, created.id, w.ctx());
-    expect((await bucketKind.adopt!(env, created.id, labels, w.ctx())).state).toBe('ready');
+    // A released bucket is unmarked: only the operator (no tenant label) adopts it back.
+    const { 'better-compute-tenant': _tenant, ...operator } = labels;
+    expect((await bucketKind.adopt!(env, created.id, operator, w.ctx())).state).toBe('ready');
     expect((await bucketKind.delete(env, created.id, w.ctx())).state).toBe('deleted');
     expect(
       (await failure(bucketKind.ensure(env, { kind: 'do.spaces-bucket', name: 'x', spec: {} }, w.ctx())))
@@ -221,8 +223,33 @@ describe('doStorageKinds, for the provider-wide dispatcher', () => {
 });
 
 describe('do.spaces-bucket adopt and release', () => {
-  it('adopts a bucket by writing the marker, then manages it by its id', async () => {
+  it("never lets a tenant adopt an unmarked bucket (the operator's blob store, say) by default", async () => {
     const w = await world();
+    // The spacesBlobStore bucket: the operator's, holding every tenant's downloads, never marked.
+    w.spaces.seedBucket('acme-bc-ops');
+    const before = w.spaces.requests.length;
+    const refused = await failure(w.resources.adopt('do.spaces-bucket', 'nyc3/acme-bc-ops', labels, w.ctx()));
+    expect([refused.code, refused.details?.reason]).toEqual(['ACCESS_DENIED', 'tenantAdopt']);
+    expect(w.spaces.requests.slice(before).some((r) => r.method !== 'GET' && r.method !== 'HEAD')).toBe(false);
+    expect(w.spaces.buckets.get('acme-bc-ops')!.objects.has(bucketMarkerKey)).toBe(false);
+    // So no tenant key can be granted it either.
+    const key = await failure(
+      w.ensure('do.spaces-key', 'bc-key1', { grants: ['nyc3/acme-bc-ops:readwrite'] }, w.ctx(), { labels }),
+    );
+    expect([key.code, key.details?.reason]).toEqual(['ACCESS_DENIED', 'grantBucket']);
+    expect(w.emu.requests.some((r) => r.method === 'POST')).toBe(false);
+    // The operator (no tenant label) may adopt it.
+    const { 'better-compute-tenant': _t, ...operator } = labels;
+    expect((await w.resources.adopt('do.spaces-bucket', 'nyc3/acme-bc-ops', operator, w.ctx())).state).toBe('ready');
+  });
+
+  it('adopts a bucket by writing the marker, then manages it by its id', async () => {
+    // Tenant adoption of an unmarked bucket is an operator code option.
+    const w = await storageWorld(undefined, { spacesTenantBucketAdopt: true }, ({ emu, spaces }) => {
+      registerSpacesKeys(emu, spaces);
+      registerCdn(emu);
+      registerRegistry(emu);
+    });
     w.spaces.seedBucket('hand-made', { acl: 'public-read' });
     const adopted = await w.resources.adopt('do.spaces-bucket', 'nyc3/hand-made', labels, w.ctx());
     expect(adopted).toMatchObject({
