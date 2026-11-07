@@ -27,13 +27,17 @@ export interface SubstrateWorld extends KubernetesWorld {
   substrate(poolId: string): Promise<any>;
   /**
    * Inserts `count` adopted nodes in the pool, as bcd joining would; with `hostnames`, node `i` reports inventory
-   * `os.hostname` `hostnames[i]` (its Kubernetes Node name), plus the inventory sections `sections[i]`.
+   * `os.hostname` `hostnames[i]` (its Kubernetes Node name), plus the inventory sections `sections[i]`. Each is
+   * admitted, as JoinService records it (the `node.joined` audit row), by the substrate's latest hosted token;
+   * `foreign` joins them with a token of their own (a machine joined into the pool some other way), and
+   * `connected: false` leaves them joined but never connected (no session yet).
    */
   joinNodes(
     poolId: string,
     count: number,
     hostnames?: readonly (string | undefined)[],
     sections?: readonly (Record<string, unknown> | undefined)[],
+    options?: { foreign?: boolean; connected?: boolean },
   ): Promise<string[]>;
   /** The Node names the fake Kubernetes API lists for the substrate's cluster now. */
   nodeNames(poolId: string): Promise<string[]>;
@@ -115,8 +119,15 @@ export async function substrateWorld(
       count: number,
       hostnames?: readonly (string | undefined)[],
       sections?: readonly (Record<string, unknown> | undefined)[],
+      options: { foreign?: boolean; connected?: boolean } = {},
     ) {
       const ids: string[] = [];
+      const connected = options.connected ?? true;
+      const { rows: tokens } = await world.fixture.database.query<{ token_id: string }>(
+        `SELECT token_id FROM kubernetes_substrate_tokens WHERE pool_id = $1 ORDER BY issued_at DESC, token_id DESC LIMIT 1`,
+        [poolId],
+      );
+      const tokenId = options.foreign ? newId('jt') : tokens[0]?.token_id;
       const { rows } = await world.fixture.database.query<{ site_id: string; owner_tenant_id: string }>(
         `SELECT site_id, owner_tenant_id FROM pools WHERE id = $1`,
         [poolId],
@@ -127,13 +138,28 @@ export async function substrateWorld(
           `INSERT INTO nodes (id, site_id, pool_id, owner_tenant_id, role, provision_state, maintenance, cordoned,
                               connectivity, trust, generation, observed_generation, next_cmd_seq, identity_gen, shard,
                               version)
-           VALUES ($1, $2, $3, $4, 'host', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 1, 0, 1)`,
-          [id, rows[0]!.site_id, poolId, rows[0]!.owner_tenant_id],
+           VALUES ($1, $2, $3, $4, 'host', $5, false, false, $6, 'platform', 1, 1, 1, 1, 0, 1)`,
+          [
+            id,
+            rows[0]!.site_id,
+            poolId,
+            rows[0]!.owner_tenant_id,
+            connected ? 'adopted' : 'adopting',
+            connected ? 'connected' : 'disconnected',
+          ],
         );
         await world.fixture.database.query(
-          `INSERT INTO node_sessions (node_id, session_epoch, connected_at) VALUES ($1, 1, compute_now())`,
+          connected
+            ? `INSERT INTO node_sessions (node_id, session_epoch, connected_at) VALUES ($1, 1, compute_now())`
+            : `INSERT INTO node_sessions (node_id, session_epoch, last_seen) VALUES ($1, 0, compute_now())`,
           [id],
         );
+        if (tokenId !== undefined)
+          await world.fixture.database.query(
+            `INSERT INTO audit_events (id, tenant_id, action, resource_type, resource_id, details)
+             VALUES ($1, $2, 'node.joined', 'node', $3, $4::jsonb)`,
+            [newId('aud'), rows[0]!.owner_tenant_id, id, JSON.stringify({ attestor: 'join-token', tokenId })],
+          );
         const hostname = hostnames?.[i];
         const extra = sections?.[i];
         if (hostname !== undefined || extra !== undefined)

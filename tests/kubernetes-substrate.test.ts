@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { newId } from '@better-compute/core';
-import { substrateCapacityLabel, substratePoolLabel, substrateSubject } from '@better-compute/kubernetes';
+import {
+  substrateCapacityLabel,
+  substrateFirstConnectGraceSeconds,
+  substratePoolLabel,
+  substrateSubject,
+} from '@better-compute/kubernetes';
 import { substrateWorld, type SubstrateWorld } from './support/substrate-world.js';
 
 // Pool substrates, create mode: a pool whose machines are the nodes of a managed cluster the kubernetes module
@@ -593,4 +598,81 @@ describe('substrate: which Kubernetes Node a pool node is', () => {
     );
     expect(Number(stuck[0]!.count)).toBe(501);
   }, 60_000);
+});
+
+describe('substrate: owned nodes', () => {
+  it('a node that joined with the hosted token but never connects counts only for the grace window, then is retired', async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(createSpec([gpu]));
+    await world.converge(pool.id, 6);
+    const [alive] = await world.joinNodes(pool.id, 1);
+    // bcd spends a use and creates its node row, then dies before it ever connects (its Node is replaced).
+    const [dead] = await world.joinNodes(pool.id, 1, undefined, undefined, { connected: false });
+    await world.converge(pool.id, 3);
+    // Still starting: it counts, so no token is kept for it.
+    expect(await world.substrate(pool.id)).toMatchObject({ nodes_listed: 2, nodes_joined: 2, join_token_id: null });
+
+    await world.fixture.advance(substrateFirstConnectGraceSeconds * 1000);
+    await world.converge(pool.id, 3);
+    const row = await world.substrate(pool.id);
+    // It no longer counts: the replacement Node gets a token with one use.
+    expect(row).toMatchObject({ nodes_listed: 2, nodes_joined: 1, token_applied: true });
+    const { rows: token } = await world.fixture.database.query<any>(`SELECT uses_left FROM join_tokens WHERE id = $1`, [
+      row.join_token_id,
+    ]);
+    expect(token[0].uses_left).toBe(1);
+    // And it is retired with its certificates revoked, not left provisioned for good.
+    const { rows } = await world.fixture.database.query<any>(
+      `SELECT id, provision_state, no_schedule_reasons FROM nodes WHERE id = ANY($1)`,
+      [[alive, dead]],
+    );
+    const byId = new Map(rows.map((node: any) => [node.id, node]));
+    expect(byId.get(dead)).toMatchObject({ provision_state: 'retired', no_schedule_reasons: ['substrate-node-removed'] });
+    expect(byId.get(alive)).toMatchObject({ provision_state: 'adopted', no_schedule_reasons: [] });
+    const removed = (await world.events('kubernetes.substrate.node-removed')).map((event) => event.data);
+    expect(removed).toEqual([expect.objectContaining({ nodeId: dead, reason: 'never-connected', retired: true })]);
+  });
+
+  it('machines joined into the pool some other way never count as joined, and teardown leaves them alone', async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(createSpec([gpu]));
+    // Two metal machines joined the pool with a token of their own.
+    const metal = await world.joinNodes(pool.id, 2, undefined, undefined, { foreign: true });
+    await world.converge(pool.id, 6);
+    // The cluster's two Nodes still get a token with two uses.
+    const first = await world.substrate(pool.id);
+    expect(first).toMatchObject({ state: 'ready', nodes_listed: 2, nodes_joined: 0, token_applied: true });
+    const { rows: token } = await world.fixture.database.query<any>(`SELECT uses_left FROM join_tokens WHERE id = $1`, [
+      first.join_token_id,
+    ]);
+    expect(token[0].uses_left).toBe(2);
+    const owned = await world.joinNodes(pool.id, 2);
+    await world.converge(pool.id, 3);
+    expect(await world.substrate(pool.id)).toMatchObject({ nodes_joined: 2, join_token_id: null });
+    // A booking on a metal machine does not hold the teardown.
+    await world.fixture.database.query(
+      `INSERT INTO allocations (id, tenant_id, pool_id, node_id, owner_kind, owner_id, during, version)
+       VALUES ($1, $2, $3, $4, 'reservation', $5, tstzrange(compute_now(), compute_now() + interval '1 day'), 1)`,
+      [newId('alloc'), world.rootTenant, pool.id, metal[0], newId('res')],
+    );
+
+    // The pool stays live without its substrate: only the substrate's own nodes are cordoned and retired.
+    const { substrate: _substrate, ...without } = pool.policy;
+    await world.api.pools.update(world.root, { tenantId: world.rootTenant, poolId: pool.id, policy: without });
+    await world.converge(pool.id, 12);
+    expect(await world.substrate(pool.id)).toMatchObject({ state: 'deleted' });
+    const { rows } = await world.fixture.database.query<any>(
+      `SELECT id, provision_state, cordoned, no_schedule_reasons FROM nodes WHERE pool_id = $1`,
+      [pool.id],
+    );
+    const byId = new Map(rows.map((node: any) => [node.id, node]));
+    for (const id of owned) expect(byId.get(id)).toMatchObject({ provision_state: 'retired', cordoned: true });
+    for (const id of metal)
+      expect(byId.get(id)).toMatchObject({ provision_state: 'adopted', cordoned: false, no_schedule_reasons: [] });
+    const { rows: certs } = await world.fixture.database.query<any>(
+      `SELECT count(*)::int AS n FROM node_certs WHERE node_id = ANY($1) AND revoked_at IS NOT NULL`,
+      [metal],
+    );
+    expect(certs[0].n).toBe(0);
+  });
 });

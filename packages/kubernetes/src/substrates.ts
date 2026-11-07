@@ -49,8 +49,10 @@ import {
 //   2. once the cluster is ready, mints a short-lived credential (`ProviderKubernetes.credentials`, held in memory
 //      for this run only, never stored, logged or published), lists the substrate's Nodes, and server-side applies
 //      bcd (the injected `SubstrateAgent`: provider-kubernetes' DaemonSet, device plugin only);
-//   3. keeps a hosted `kubernetes` join token (and its Secret) only while Nodes outnumber the pool's joined nodes,
-//      with exactly that many uses; once every node joined, the token is revoked and the Secret deleted.
+//   3. keeps a hosted `kubernetes` join token (and its Secret) only while Nodes outnumber the substrate's joined
+//      nodes, with exactly that many uses; once every node joined, the token is revoked and the Secret deleted.
+// The substrate owns only the pool nodes its own hosted tokens admitted (`learnOwnership`): machines joined into the
+// pool some other way are never counted, drained for, cordoned or retired by it.
 // Rows are read in one transaction, the provider and the cluster API are called with none open, and each result is
 // written in its own short transaction guarded by the row version it was decided on.
 
@@ -667,11 +669,11 @@ export const substrateUpgradeReason = 'substrate-upgrade';
 /** How often a drain before an upgrade looks again for the bookings it waits on. */
 export const substrateUpgradeRecheckMs = 60_000;
 
-/** Bookings on the pool's nodes that have not ended. */
+/** Bookings on the substrate's own nodes (`ownedNode`) that have not ended. */
 async function liveBookings(sql: Pick<SqlTx, 'query'>, poolId: string): Promise<number> {
   const { rows } = await sql.query<{ count: string }>(
     `SELECT count(*)::text AS count FROM allocations a JOIN nodes n ON n.id = a.node_id
-      WHERE n.pool_id = $1 AND a.released_at IS NULL
+      WHERE n.pool_id = $1 AND ${ownedNode('n')} AND a.released_at IS NULL
         AND (upper_inf(a.during) OR upper(a.during) > compute_now())`,
     [poolId],
   );
@@ -686,7 +688,7 @@ function runsVersion(actual: string | null, version: string): boolean {
 
 /**
  * Pushes a changed release channel, version or authorized networks to the created cluster (an upgrade). With
- * `upgrades: 'drain'`, a version bump waits: the pool's nodes go NoSchedule `substrate-upgrade` (no new bookings),
+ * `upgrades: 'drain'`, a version bump waits: the substrate's nodes go NoSchedule `substrate-upgrade` (no new bookings),
  * and the version is pushed once their bookings ended, or once the drain took `drainTimeout`; the other settings
  * are pushed at once meanwhile. Returns what was pushed, and the drain still waiting.
  */
@@ -712,8 +714,9 @@ async function syncCreateSpec(
     let since =
       row.upgrade_version === version && row.upgrade_since !== null ? new Date(row.upgrade_since).getTime() : undefined;
     await tx.query(
-      `UPDATE nodes SET no_schedule_reasons = array_append(no_schedule_reasons, $2), version = version + 1
-        WHERE pool_id = $1 AND provision_state NOT IN ('retiring', 'retired') AND NOT ($2 = ANY(no_schedule_reasons))`,
+      `UPDATE nodes n SET no_schedule_reasons = array_append(no_schedule_reasons, $2), version = version + 1
+        WHERE pool_id = $1 AND ${ownedNode('n')} AND provision_state NOT IN ('retiring', 'retired')
+          AND NOT ($2 = ANY(no_schedule_reasons))`,
       [row.pool_id, substrateUpgradeReason],
     );
     const bookings = await liveBookings(tx, row.pool_id);
@@ -1015,21 +1018,105 @@ async function prepare(
   });
 }
 
+/** A node that joined but never connected counts as joined this long after its join (its bcd is still starting). */
+export const substrateFirstConnectGraceSeconds = 600;
+
+/** SQL: node `alias` is one the substrate owns (`learnOwnership`); `$1` is the pool id. */
+const ownedNode = (alias: string) =>
+  `EXISTS (SELECT 1 FROM kubernetes_substrate_nodes o WHERE o.node_id = ${alias}.id AND o.pool_id = $1 AND o.owned)`;
+
 /**
- * The pool's nodes whose bcd joined and is connected now, or joined and has not connected yet (not retired, not left
- * over from a substrate torn down). One that connected and went away does not count, so a Node replaced by a surge
- * upgrade, a scale-down or a Spot reclaim leaves room for the replacement's token; a bcd pod that only restarted
- * joins again without spending a use.
+ * Records, for each pool node not looked at yet, whether the substrate owns it: whether the join that last admitted
+ * it (JoinService's `node.joined` / `node.reclaimed` audit row, written in the node's own transaction) used one of
+ * the hosted tokens this pool's substrate minted (`kubernetes_substrate_tokens`). A substrate pool may also hold
+ * machines joined some other way (a token the tenant made, another attestor, nodes there before the pool had a
+ * substrate): those are never counted as the cluster's joined Nodes, drained for, cordoned or retired by the
+ * substrate. A node with no such audit row is not owned (fail closed).
+ */
+async function learnOwnership(sql: Pick<SqlExecutor, 'query'>, poolId: string): Promise<void> {
+  await sql.query(
+    `INSERT INTO kubernetes_substrate_nodes (node_id, pool_id, owned, join_token_id, joined_at, learned_at)
+     SELECT n.id, $1, t.token_id IS NOT NULL, t.token_id, j.occurred_at, NULL
+       FROM nodes n
+       LEFT JOIN LATERAL (
+         SELECT a.details->>'tokenId' AS token_id, a.occurred_at FROM audit_events a
+          WHERE a.resource_type = 'node' AND a.resource_id = n.id AND a.action IN ('node.joined', 'node.reclaimed')
+          ORDER BY a.occurred_at DESC LIMIT 1
+       ) j ON true
+       LEFT JOIN kubernetes_substrate_tokens t ON t.token_id = j.token_id AND t.pool_id = $1
+      WHERE n.pool_id = $1 AND n.deleted_at IS NULL AND n.provision_state <> 'retired'
+        AND NOT EXISTS (SELECT 1 FROM kubernetes_substrate_nodes m WHERE m.node_id = n.id)
+      ORDER BY n.id LIMIT ${nodesPerRun * 2}
+     ON CONFLICT (node_id) DO NOTHING`,
+    [poolId],
+  );
+}
+
+/**
+ * The substrate's own nodes (`learnOwnership`) whose bcd is connected now, or joined less than
+ * `substrateFirstConnectGraceSeconds` ago and has not connected yet (not retired, not left over from a substrate torn
+ * down). One that connected and went away does not count, so a Node replaced by a surge upgrade, a scale-down or a
+ * Spot reclaim leaves room for the replacement's token; a bcd pod that only restarted joins again without spending a
+ * use. One that never connected stops counting after the grace window (`retireNeverConnected` then retires it).
  */
 async function joinedNodes(sql: SqlExecutor, poolId: string): Promise<number> {
   const { rows } = await sql.query<{ count: string }>(
-    `SELECT count(*)::text AS count FROM nodes n LEFT JOIN node_sessions s ON s.node_id = n.id
-      WHERE n.pool_id = $1 AND n.provision_state NOT IN ('retiring', 'retired')
-        AND (n.connectivity = 'connected' OR s.connected_at IS NULL)
+    `SELECT count(*)::text AS count
+       FROM nodes n JOIN kubernetes_substrate_nodes m ON m.node_id = n.id AND m.pool_id = $1 AND m.owned
+       LEFT JOIN node_sessions s ON s.node_id = n.id
+      WHERE n.pool_id = $1 AND n.provision_state NOT IN ('retiring', 'retired') AND n.deleted_at IS NULL
+        AND (n.connectivity = 'connected'
+             OR (s.connected_at IS NULL AND m.joined_at > compute_now() - make_interval(secs => $4)))
         AND NOT ($2 = ANY(n.no_schedule_reasons)) AND NOT ($3 = ANY(n.no_schedule_reasons))`,
-    [poolId, substrateTeardownReason, substrateNodeRemovedReason],
+    [poolId, substrateTeardownReason, substrateNodeRemovedReason, substrateFirstConnectGraceSeconds],
   );
   return Number(rows[0]?.count ?? 0);
+}
+
+/**
+ * Retires the substrate's nodes that joined with its hosted token more than `substrateFirstConnectGraceSeconds` ago
+ * and never connected (bcd spent a use, then died: its Node scaled away, Spot-reclaimed or replaced). Nothing else
+ * would retire them (a Node is learned only once its bcd connects): they would stay provisioned with valid
+ * certificates. Their reservations end first (capacity's lock order), then `retireNode`.
+ */
+async function retireNeverConnected(deps: SubstrateDeps, sql: SqlExecutor, row: SubstrateRow): Promise<void> {
+  if (!deps.desired) return;
+  const from = `nodes n JOIN kubernetes_substrate_nodes m ON m.node_id = n.id AND m.pool_id = $1 AND m.owned
+                LEFT JOIN node_sessions s ON s.node_id = n.id`;
+  const stale = `n.pool_id = $1 AND n.provision_state NOT IN ('retiring', 'retired') AND n.deleted_at IS NULL
+                 AND n.connectivity <> 'connected' AND s.connected_at IS NULL
+                 AND m.joined_at <= compute_now() - make_interval(secs => $2)
+                 AND NOT ($3 = ANY(n.no_schedule_reasons))`;
+  const params = [row.pool_id, substrateFirstConnectGraceSeconds, substrateTeardownReason];
+  const { rows } = await sql.query<{ id: string }>(
+    `SELECT n.id FROM ${from} WHERE ${stale} ORDER BY n.id LIMIT ${nodesPerRun}`,
+    params,
+  );
+  for (const { id } of rows)
+    await sql.transaction(async (tx) => {
+      // Re-read: one that connected meanwhile is not stale.
+      const { rows: still } = await tx.query(`SELECT n.id FROM ${from} WHERE ${stale} AND n.id = $4`, [...params, id]);
+      if (still.length === 0) return;
+      const ended = await endNodeReservations(
+        { clock: deps.clock, events: deps.events, work: deps.work, desired: deps.desired! },
+        tx,
+        id,
+        'node-removed',
+      );
+      const retired = await retireNode(tx, {
+        nodeId: id,
+        poolId: row.pool_id,
+        ownerTenantId: row.tenant_id,
+        reason: substrateNodeRemovedReason,
+      });
+      await publishSubstrate(deps, tx, row, 'kubernetes.substrate.node-removed', {
+        nodeId: id,
+        reason: 'never-connected',
+        released: ended.released.length,
+        requeued: ended.requeued.length,
+        retired,
+      });
+    });
 }
 
 /** The NoSchedule reason on a pool node whose Kubernetes Node is gone (scale-down, Spot reclaim, repair). */
@@ -1129,11 +1216,11 @@ async function removeGoneNodes(
                 AND NOT ($2 = ANY(n.no_schedule_reasons))`;
   const listed = new Map(selected.nodes.map((node) => [node.name, node]));
 
-  // Learn the Node of connected nodes not matched yet.
+  // Learn the Node of the substrate's connected nodes not matched yet.
   const { rows: unmatched } = await sql.query<{ id: string }>(
-    `SELECT n.id FROM nodes n LEFT JOIN kubernetes_substrate_nodes m ON m.node_id = n.id
+    `SELECT n.id FROM nodes n JOIN kubernetes_substrate_nodes m ON m.node_id = n.id AND m.pool_id = $1 AND m.owned
       WHERE ${live} AND n.connectivity = 'connected'
-        AND (m.node_id IS NULL
+        AND (m.learned_at IS NULL
              OR (m.kubernetes_node IS NULL AND m.learned_at < compute_now() - interval '${relearnAfter}'))
       ORDER BY m.learned_at NULLS FIRST, n.id LIMIT ${nodesPerRun}`,
     [row.pool_id, substrateTeardownReason],
@@ -1143,19 +1230,16 @@ async function removeGoneNodes(
     const name = reportedNodeName(snapshot?.sections);
     const node = name !== undefined ? listed.get(name) : undefined;
     await sql.query(
-      `INSERT INTO kubernetes_substrate_nodes (node_id, pool_id, kubernetes_node, kubernetes_uid, learned_at)
-       VALUES ($1, $2, $3, $4, compute_now())
-       ON CONFLICT (node_id) DO UPDATE
-         SET pool_id = excluded.pool_id, kubernetes_node = excluded.kubernetes_node,
-             kubernetes_uid = excluded.kubernetes_uid, learned_at = excluded.learned_at`,
-      [id, row.pool_id, node?.name ?? null, node?.uid ?? null],
+      `UPDATE kubernetes_substrate_nodes SET kubernetes_node = $2, kubernetes_uid = $3, learned_at = compute_now()
+        WHERE node_id = $1`,
+      [id, node?.name ?? null, node?.uid ?? null],
     );
   }
   // A connected node's Node re-created under its name: the new uid.
   const { rows: matched } = await sql.query<{ node_id: string; kubernetes_node: string; kubernetes_uid: string | null }>(
     `SELECT m.node_id, m.kubernetes_node, m.kubernetes_uid
        FROM kubernetes_substrate_nodes m JOIN nodes n ON n.id = m.node_id
-      WHERE ${live} AND n.connectivity = 'connected' AND m.kubernetes_node = ANY($3)`,
+      WHERE ${live} AND m.owned AND n.connectivity = 'connected' AND m.kubernetes_node = ANY($3)`,
     [row.pool_id, substrateTeardownReason, [...listed.keys()]],
   );
   for (const entry of matched) {
@@ -1171,7 +1255,7 @@ async function removeGoneNodes(
   const { rows: candidates } = await sql.query<{ id: string; kubernetes_node: string; kubernetes_uid: string | null }>(
     `SELECT n.id, m.kubernetes_node, m.kubernetes_uid
        FROM nodes n JOIN kubernetes_substrate_nodes m ON m.node_id = n.id
-      WHERE ${live} AND n.connectivity <> 'connected' AND m.kubernetes_node IS NOT NULL
+      WHERE ${live} AND m.owned AND n.connectivity <> 'connected' AND m.kubernetes_node IS NOT NULL
       ORDER BY m.checked_at NULLS FIRST, n.id LIMIT ${nodesPerRun}`,
     [row.pool_id, substrateTeardownReason],
   );
@@ -1383,6 +1467,9 @@ async function applyBcd(
     return undefined;
   }
   const nodes = listed.value;
+  // Which pool nodes are the substrate's; those that never connected within the grace window are retired.
+  await learnOwnership(sql, row.pool_id);
+  await retireNeverConnected(deps, sql, row);
   // Nodes gone from the cluster first: their bookings end, and they no longer count as joined.
   if (!(await removeGoneNodes(deps, sql, row, api, { nodes, full: selector === undefined }, signal)))
     deps.log.warn('kubernetes: substrate could not list every Node; removed nodes are checked next time', {
@@ -1409,6 +1496,10 @@ async function applyBcd(
           maxUses: Math.min(gap, 10_000),
           hosted: 'kubernetes',
         });
+        await tx.query(
+          `INSERT INTO kubernetes_substrate_tokens (token_id, pool_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+          [token.id, pool.id],
+        );
         const { rows } = await tx.query(
           `UPDATE kubernetes_pool_substrates SET join_token_id = $3, token_applied = false, version = version + 1
             WHERE pool_id = $1 AND version = $2 RETURNING pool_id`,
@@ -1500,7 +1591,7 @@ async function applyBcd(
   const written = await setState(deps, sql, row, {
     state: drain ? 'updating' : 'ready',
     message: drain
-      ? `Draining before the upgrade to ${drain.version}: waiting for ${drain.bookings} booking(s) on the pool's nodes to end (no new bookings meanwhile)`
+      ? `Draining before the upgrade to ${drain.version}: waiting for ${drain.bookings} booking(s) on the substrate's nodes to end (no new bookings meanwhile)`
       : null,
     fields: {
       ...(due ? { applied: true, manifests_sha256: hash } : {}),
@@ -1528,9 +1619,9 @@ export const substrateDrainRecheckMs = 5 * 60_000;
 
 /**
  * The pool was archived or its substrate removed: tear down what the substrate made, with drain semantics.
- *   1. The substrate goes `deleting`, its join token is revoked and the pool's nodes are cordoned (NoSchedule
+ *   1. The substrate goes `deleting`, its join token is revoked and the substrate's own nodes are cordoned (NoSchedule
  *      `substrate-teardown`); nothing new lands on them.
- *   2. It waits until the pool's nodes hold no live booking: nothing is force-released (an archived pool's
+ *   2. It waits until those nodes hold no live booking: nothing is force-released (an archived pool's
  *      reservations keep their bookings until they end).
  *   3. bcd's objects leave the cluster (DaemonSet, ConfigMap, token Secret, Namespace), then the cluster row is
  *      deleted: a created cluster at the provider, an adopted one only its substrate node pools (never the cluster).
@@ -1550,12 +1641,6 @@ async function teardown(
       if (!locked || Number(locked.version) !== Number(row.version)) return undefined;
       await revokeToken(tx, locked.join_token_id);
       await tx.query(
-        `UPDATE nodes SET cordoned = true, version = version + 1,
-                no_schedule_reasons = array_append(no_schedule_reasons, $2)
-          WHERE pool_id = $1 AND NOT ($2 = ANY(no_schedule_reasons))`,
-        [row.pool_id, substrateTeardownReason],
-      );
-      await tx.query(
         `UPDATE kubernetes_pool_substrates
             SET desired_state = 'deleted', state = 'deleting', message = NULL, join_token_id = NULL,
                 token_applied = false, updated_at = compute_now(), version = version + 1
@@ -1570,10 +1655,19 @@ async function teardown(
     if (!marked) return deps.clock.now();
     row = marked;
   }
-  // Drain semantics: wait for the bookings on the pool's nodes to end.
+  // The substrate's own nodes (a node that joined just before the token was revoked included) are cordoned: nothing
+  // new lands on them. Machines joined into the pool some other way are left alone.
+  await learnOwnership(sql, row.pool_id);
+  await sql.query(
+    `UPDATE nodes n SET cordoned = true, version = version + 1,
+            no_schedule_reasons = array_append(no_schedule_reasons, $2)
+      WHERE pool_id = $1 AND ${ownedNode('n')} AND provision_state <> 'retired' AND NOT ($2 = ANY(no_schedule_reasons))`,
+    [row.pool_id, substrateTeardownReason],
+  );
+  // Drain semantics: wait for the bookings on the substrate's nodes to end.
   const bookings = await liveBookings(sql, row.pool_id);
   if (bookings > 0) {
-    const message = `Waiting for ${bookings} booking(s) on the pool's nodes to end before the cluster is torn down`;
+    const message = `Waiting for ${bookings} booking(s) on the substrate's nodes to end before the cluster is torn down`;
     if (row.message !== message) await setState(deps, sql, row, { state: 'deleting', message });
     return deps.clock.now() + substrateDrainRecheckMs;
   }
@@ -1615,7 +1709,7 @@ async function teardown(
     return poll();
   }
   if (cluster && cluster.state !== 'deleted') return poll();
-  // bcd is gone from the cluster (or the cluster is): the pool's nodes are machines that left for good.
+  // bcd is gone from the cluster (or the cluster is): the substrate's nodes are machines that left for good.
   const retired = await retireTornDownNodes(deps, sql, row);
   if (retired === undefined) return poll();
   await sql.transaction(async (tx) => {
@@ -1636,7 +1730,7 @@ async function teardown(
 }
 
 /**
- * The last step of a teardown: the pool's nodes cordoned for it (`substrate-teardown`) are retired (`retireNode`), so
+ * The last step of a teardown: the substrate's nodes cordoned for it (`substrate-teardown`) are retired (`retireNode`), so
  * none stays provisioned with valid certificates after its machine left; reservations they still hold (ended ones
  * not released yet: live ones were waited for) end first. Returns how many were retired, or undefined while more
  * are left for the next run.
@@ -1645,10 +1739,10 @@ async function retireTornDownNodes(deps: SubstrateDeps, sql: SqlExecutor, row: S
   if (!deps.desired) return 0;
   const { rows } = await sql.query<{ id: string }>(
     // States the provision table retires from (a hosted node is adopted; nothing else is waited for).
-    `SELECT id FROM nodes WHERE pool_id = $1 AND deleted_at IS NULL
-        AND provision_state IN ('adopting', 'adopted', 'enrolling', 'ready', 'failed', 'retiring')
-        AND $2 = ANY(no_schedule_reasons)
-      ORDER BY id LIMIT ${nodesPerRun}`,
+    `SELECT n.id FROM nodes n WHERE n.pool_id = $1 AND ${ownedNode('n')} AND n.deleted_at IS NULL
+        AND n.provision_state IN ('adopting', 'adopted', 'enrolling', 'ready', 'failed', 'retiring')
+        AND $2 = ANY(n.no_schedule_reasons)
+      ORDER BY n.id LIMIT ${nodesPerRun}`,
     [row.pool_id, substrateTeardownReason],
   );
   let retired = 0;
