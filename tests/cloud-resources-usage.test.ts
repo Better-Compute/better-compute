@@ -274,6 +274,10 @@ describe('cloud-resources/0002_metering', () => {
       'cost',
       'kubernetes',
       'cloud-resource',
+      // core/0044 and core/0060, which run before the module migrations; 'loadBalancer' is read case-sensitively.
+      'volume',
+      'address',
+      'loadBalancer',
     ])
       expect(rows[0]!.def).toContain(`'${kind}'`);
     expect(rows[0]!.def).toContain('NOT VALID');
@@ -290,7 +294,7 @@ describe('cloud-resources/0002_metering', () => {
         WHERE conname = 'usage_windows_source_kind_ck' AND conrelid = 'usage_windows'::regclass`,
     );
     expect(rows).toHaveLength(1);
-    for (const kind of ['instance', 'cost', 'kubernetes', 'cloud-resource'])
+    for (const kind of ['instance', 'cost', 'kubernetes', 'cloud-resource', 'loadBalancer'])
       expect(rows[0]!.def).toContain(`'${kind}'`);
     const findings = await module.selfCheck!({ sql: fixture.database } as never);
     expect(findings.map((finding) => finding.check)).not.toContain('cloud-resources.usage-source');

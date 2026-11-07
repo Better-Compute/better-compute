@@ -99,7 +99,7 @@ BEGIN
   SELECT array_agg(DISTINCT m.value[1]) INTO kinds
     FROM pg_constraint c
     -- Each value, as PostgreSQL renders it: ARRAY['a'::text, …] or '{a,b}'::text[].
-    CROSS JOIN LATERAL regexp_matches(pg_get_constraintdef(c.oid), '[''{,]([a-z0-9_-]+)(?=[''},])', 'g') AS m(value)
+    CROSS JOIN LATERAL regexp_matches(pg_get_constraintdef(c.oid), '[''{,]([A-Za-z0-9_-]+)(?=[''},])', 'g') AS m(value)
    WHERE c.conname = 'usage_windows_source_kind_ck' AND c.conrelid = 'usage_windows'::regclass;
   IF kinds IS NULL THEN
     kinds := ARRAY['allocation', 'instance', 'grant', 'network', 'snapshot', 'cost'];
