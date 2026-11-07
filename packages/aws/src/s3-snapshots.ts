@@ -17,10 +17,12 @@ export interface S3SnapshotStore extends SnapshotStore {
   downloadUrl(input: { tenantId: string; snapshotId: string; url: string }): Promise<string>;
   /**
    * Loads (or reloads) the credentials `downloadUrl` signs with. The store starts this when it is
-   * made and again ahead of expiry; a host may await it at startup. Never rejects (failures are
-   * logged by code).
+   * made and again ahead of expiry. Resolves true when `downloadUrl` can sign, false when the
+   * credentials did not load; never rejects (failures are logged by code). A host awaits it before
+   * it serves and refuses to start on false: a restore rendered without a download URL keeps its
+   * `s3://` identifier, which bcd cannot fetch, and the instance fails.
    */
-  warm(): Promise<void>;
+  warm(): Promise<boolean>;
   /** Drops the cached download credentials: `downloadUrl` is UNAVAILABLE until the next warm-up. */
   invalidateCredentials(): void;
 }
@@ -40,6 +42,10 @@ function cachedCredentials(source: CredentialSource, clock: Clock, refreshBefore
         inflight = undefined;
       }
     })());
+  const usable = () => {
+    const remaining = current?.expiresAt === undefined ? Number.POSITIVE_INFINITY : current.expiresAt - clock.now();
+    return current !== undefined && remaining > minValidMs;
+  };
   const cached: CredentialSource = {
     kind: `${source.kind}-cached`,
     async credentials() {
@@ -56,6 +62,7 @@ function cachedCredentials(source: CredentialSource, clock: Clock, refreshBefore
   return {
     source: cached,
     refresh,
+    usable,
     invalidate() {
       current = undefined;
       source.invalidate?.();
@@ -130,7 +137,7 @@ export function s3SnapshotStore(options: S3SnapshotStoreOptions): S3SnapshotStor
       return s3Download.presign(key, { method: 'GET', expiresInSeconds: downloadExpires, at });
     },
 
-    warm: () => credentialCache.refresh(),
+    warm: () => credentialCache.refresh().then(() => credentialCache.usable()),
     invalidateCredentials: () => credentialCache.invalidate(),
 
     async delete(input) {

@@ -68,7 +68,8 @@ async function awsHost() {
 
   // Sandbox snapshots in S3: restores get presigned GETs through NodeSpec (vps's nodeSpec hook).
   const snapshots = s3SnapshotStore({ ...aws, bucket: 'bc-blobs', prefix: 'snapshots' });
-  await snapshots.warm();
+  // As the README composition: the host does not serve until download credentials have loaded.
+  if (!(await snapshots.warm())) throw new Error('snapshot download credentials did not load');
   const vpsModule = vps({ snapshots });
 
   const fixture = await computeFixture({ modules: [vpsModule] });

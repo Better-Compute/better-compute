@@ -39,6 +39,9 @@ const local = localSealedSecretStore({
   keys: await kmsSealingKeys({ ...aws, keyId: process.env.BC_SEALING_KMS_KEY!, current: 'k1', wrapped: { k1: process.env.BC_SEALING_KEY_K1! } }),
 });
 const blob = s3BlobStore({ ...aws, bucket: 'bc-blobs', sse: { kind: 'aws:kms' } });
+const snapshots = s3SnapshotStore({ ...aws, bucket: 'bc-snapshots', sse: { kind: 'aws:kms' } });
+// Before serving: restores rendered without download credentials cannot be fetched (see s3SnapshotStore).
+if (!(await snapshots.warm())) throw new Error('snapshot download credentials did not load');
 
 betterCompute({
   // …
@@ -46,7 +49,7 @@ betterCompute({
   sinks: { events: [eventBridgeSink(aws)], audit: [s3AuditSink({ ...aws, bucket: 'bc-audit', prefix: 'audit' })] },
   downloads: { blob },
   supportBundles: { blob },
-  modules: [vps({ snapshots: s3SnapshotStore({ ...aws, bucket: 'bc-snapshots', sse: { kind: 'aws:kms' } }) })],
+  modules: [vps({ snapshots })],
 });
 ```
 
@@ -118,7 +121,7 @@ Sandbox snapshots at `<prefix>/<tenantId>/<sandboxId>/<snapshotId>`. The stored 
 
 vps asks for a download URL only while a restore is pending (instance `provisioning` or `starting`). Once the host has restored the instance, its spec carries the stable `s3://` identifier, so the spec stops changing and no live presigned link stays in `nodes.spec`. bcd keeps the snapshot file by digest and fetches only for an instance it does not have yet. A presigned GET is in `nodes.spec` only while its restore is pending, and it expires after `downloadExpiresSeconds`.
 
-`downloadUrl` runs inside NodeSpec's transaction, so it makes no network call. It signs with credentials held in memory: they load when the store is made (`await store.warm()` at startup to be sure), refresh in the background once less than one URL lifetime is left, and are never used within a minute of expiry. While no credentials are loaded, `downloadUrl` is `UNAVAILABLE`. vps then logs the code, keeps that restore on its stored url for this pass, and still renders the rest of the node. A stored url that is not `s3://` (written before the host switched to this store) passes through unchanged. Same IAM as the blob store, including the prefix-scoped `s3:ListBucket` statement.
+`downloadUrl` runs inside NodeSpec's transaction, so it makes no network call. It signs with credentials held in memory: they load when the store is made, refresh in the background once less than one URL lifetime is left, and are never used within a minute of expiry. While no credentials are loaded, `downloadUrl` is `UNAVAILABLE`. vps then logs the code, keeps that restore on its stored url for this pass, and still renders the rest of the node. bcd cannot fetch an `s3://` url, reports the restore as an instance error, and vps fails the instance. So await `warm()` before the host serves, and refuse to start when it resolves `false` (credentials did not load), as the composition above does. A stored url that is not `s3://` (written before the host switched to this store) passes through unchanged. Same IAM as the blob store, including the prefix-scoped `s3:ListBucket` statement.
 
 ### `s3AuditSink(options)`
 

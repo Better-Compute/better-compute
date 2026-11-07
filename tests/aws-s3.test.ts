@@ -263,6 +263,29 @@ describe('S3 SnapshotStore downloadUrl inside NodeSpec (review)', () => {
     expect(source.calls()).toBe(1);
   });
 
+  it('warm() says whether downloadUrl can sign, so a host can refuse to start serving without it (review)', async () => {
+    const world = s3World();
+    let fail = true;
+    const credentials = {
+      kind: 'flaky',
+      async credentials() {
+        if (fail) throw new ComputeError('UNAVAILABLE', 'instance metadata unreachable');
+        return { accessKeyId: 'AKIATESTKEY0000000001', secretAccessKey: 'testsecret' };
+      },
+    };
+    const snapshots = s3SnapshotStore({ ...world.base, credentials, bucket: 'bc-blobs', prefix: 'snapshots' });
+    expect(await snapshots.warm()).toBe(false);
+    await expect(snapshots.downloadUrl!({ tenantId: 'acme', snapshotId: 'snap_1', url })).rejects.toMatchObject({ code: 'UNAVAILABLE' });
+    fail = false;
+    expect(await snapshots.warm()).toBe(true);
+    await expect(snapshots.downloadUrl!({ tenantId: 'acme', snapshotId: 'snap_1', url })).resolves.toMatch(/^http:\/\//);
+    // The documented composition warms the store, and checks it, before the host serves.
+    const readme = readFileSync(new URL('../packages/aws/README.md', import.meta.url), 'utf8');
+    const composition = readme.slice(readme.indexOf('## Composition'), readme.indexOf('## Secrets'));
+    expect(composition).toContain('await snapshots.warm()');
+    expect(composition.indexOf('await snapshots.warm()')).toBeLessThan(composition.indexOf('betterCompute({'));
+  });
+
   it('before credentials are loaded it fails fast (UNAVAILABLE) instead of waiting on the source', async () => {
     const world = s3World();
     let release!: () => void;
