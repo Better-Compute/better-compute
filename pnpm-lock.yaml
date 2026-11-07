@@ -339,6 +339,21 @@ importers:
         specifier: workspace:*
         version: link:../pki
 
+  packages/aws:
+    dependencies:
+      '@better-compute/aws-core':
+        specifier: workspace:*
+        version: link:../aws-core
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../core
+      '@better-compute/pki':
+        specifier: workspace:*
+        version: link:../pki
+      '@better-compute/vps':
+        specifier: workspace:*
+        version: link:../vps
+
   packages/aws-core:
     dependencies:
       '@better-compute/core':
@@ -359,6 +374,9 @@ importers:
       '@better-compute/client':
         specifier: workspace:*
         version: link:../client
+      '@better-compute/cloud-resources':
+        specifier: workspace:*
+        version: link:../cloud-resources
       '@better-compute/core':
         specifier: workspace:*
         version: link:../core
@@ -505,6 +523,18 @@ importers:
       '@better-compute/core':
         specifier: workspace:*
         version: link:../core
+
+  packages/cloud-resources:
+    dependencies:
+      '@better-compute/capacity':
+        specifier: workspace:*
+        version: link:../capacity
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../core
+      '@better-compute/vps':
+        specifier: workspace:*
+        version: link:../vps
 
   packages/console-kit:
     dependencies:
@@ -694,6 +724,18 @@ importers:
       '@bufbuild/protobuf':
         specifier: ^2.15.0
         version: 2.15.0
+
+  packages/provider-aws:
+    dependencies:
+      '@better-compute/aws-core':
+        specifier: workspace:*
+        version: link:../aws-core
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../core
+      '@better-compute/vps':
+        specifier: workspace:*
+        version: link:../vps
 
   packages/provider-digitalocean:
     dependencies:
