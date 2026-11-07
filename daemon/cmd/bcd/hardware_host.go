@@ -24,6 +24,10 @@ const hardwareBackend = "host"
 // devBuild refuses dev-only configuration in production builds.
 const devBuild = false
 
+// dropletMetadata is shared by every collection, so a metadata read that fails once reuses the
+// last good answer instead of dropping the system section's Cloud (and changing its hash).
+var dropletMetadata = inventory.DigitalOceanMetadata{Memory: &inventory.CloudMemory{}}
+
 // collectInventory reads the host's inventory from procfs and sysfs (inventory.Collector), the GPUs
 // completed by nvidia-smi (MIG, NVLink, topology, ECC, row remapping) when the driver is installed,
 // and the system section's cloud instance from DigitalOcean's metadata service on a Droplet.
@@ -32,7 +36,7 @@ func collectInventory() (*inventory.NodeInventory, error) {
 		DMI: dmiSource, PassedThrough: passedThrough(), NICFirmware: inventory.EthtoolFirmware,
 		NVMeHealth: inventory.NVMeHealth, DiskHealth: inventory.SmartctlHealth, BMC: inventory.IPMIBMC,
 		// On a Droplet: its id, region, tags and interfaces (inventory only, never identity).
-		Cloud: inventory.DigitalOceanMetadata{}.Instance,
+		Cloud: dropletMetadata.Instance,
 	}
 	inv, err := withHelperHW(collector, hwSource).Collect()
 	if err != nil {

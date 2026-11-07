@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"google.golang.org/protobuf/proto"
@@ -275,5 +276,84 @@ func TestSystemCloudEncodingMatchesGenerated(t *testing.T) {
 	}
 	if string(sections[0].Content) != string(want) {
 		t.Fatalf("mirror %x\ngen    %x", sections[0].Content, want)
+	}
+}
+
+// A read that fails on a Droplet (a timeout, a non-200, a malformed document) reuses the last good
+// answer, so the system section's hash does not flip with the metadata service; past MaxAge, or
+// when the service never answered, there is none.
+func TestDigitalOceanMetadataKeepsTheLastGoodAnswer(t *testing.T) {
+	var status atomic.Int32
+	status.Store(http.StatusOK)
+	body := atomic.Value{}
+	body.Store(dropletMetadata)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(int(status.Load()))
+		_, _ = w.Write([]byte(body.Load().(string)))
+	}))
+	t.Cleanup(srv.Close)
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	memory := &CloudMemory{MaxAge: time.Hour, Now: func() time.Time { return now }}
+	d := DigitalOceanMetadata{URL: srv.URL + "/metadata/v1.json", Memory: memory}
+
+	good := d.Instance("DigitalOcean", "Droplet")
+	if good == nil || good.InstanceId != "2756294" {
+		t.Fatalf("first read: %+v", good)
+	}
+	for name, fail := range map[string]func(){
+		"server error": func() { status.Store(http.StatusInternalServerError) },
+		"not json":     func() { status.Store(http.StatusOK); body.Store(`<html>captive portal</html>`) },
+	} {
+		fail()
+		got := d.Instance("DigitalOcean", "Droplet")
+		if !reflect.DeepEqual(got, good) {
+			t.Fatalf("%s: got %+v, want the last good %+v", name, got, good)
+		}
+		if got == good {
+			t.Fatalf("%s: the remembered instance is shared, not copied", name)
+		}
+	}
+	// A canonicalization of the returned copy never reaches what is remembered.
+	again := d.Instance("DigitalOcean", "Droplet")
+	again.Tags[0] = "mutated"
+	if got := d.Instance("DigitalOcean", "Droplet"); got.Tags[0] == "mutated" {
+		t.Fatal("a caller's change reached the memory")
+	}
+
+	// A new good answer replaces it.
+	status.Store(http.StatusOK)
+	body.Store(strings.Replace(dropletMetadata, `"pool-a", "better-compute-managed:true"`, `"pool-b"`, 1))
+	if got := d.Instance("DigitalOcean", "Droplet"); got == nil || !reflect.DeepEqual(got.Tags, []string{"pool-a", "pool-b"}) {
+		t.Fatalf("new answer: %+v", got)
+	}
+
+	// The service stops answering at all (connection refused): still the last answer, until MaxAge.
+	srv.Close()
+	now = now.Add(59 * time.Minute)
+	if got := d.Instance("DigitalOcean", "Droplet"); got == nil || got.InstanceId != "2756294" {
+		t.Fatalf("within MaxAge: %+v", got)
+	}
+	now = now.Add(2 * time.Minute)
+	if got := d.Instance("DigitalOcean", "Droplet"); got != nil {
+		t.Fatalf("past MaxAge: %+v", got)
+	}
+	// Off a Droplet the memory is never consulted.
+	memory2 := &CloudMemory{}
+	srv2 := metadataServer(t, http.StatusOK, dropletMetadata, nil)
+	d2 := DigitalOceanMetadata{URL: srv2.URL + "/metadata/v1.json", Memory: memory2}
+	if d2.Instance("DigitalOcean", "Droplet") == nil {
+		t.Fatal("no first answer")
+	}
+	if got := d2.Instance("QEMU", "Standard PC"); got != nil {
+		t.Fatalf("off a Droplet: %+v", got)
+	}
+}
+
+// Never answered: a failed read is nil even with a memory.
+func TestDigitalOceanMetadataNothingRememberedIsNil(t *testing.T) {
+	srv := metadataServer(t, http.StatusInternalServerError, dropletMetadata, nil)
+	d := DigitalOceanMetadata{URL: srv.URL + "/metadata/v1.json", Memory: &CloudMemory{}}
+	if got := d.Instance("DigitalOcean", "Droplet"); got != nil {
+		t.Fatalf("got %+v", got)
 	}
 }

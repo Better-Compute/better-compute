@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -25,6 +26,76 @@ type DigitalOceanMetadata struct {
 	URL string
 	// Client defaults to a direct client (no proxy, no redirects) with a 2-second timeout.
 	Client *http.Client
+	// Memory, when set, keeps the last good answer for reads that fail (see CloudMemory). bcd node
+	// shares one across collections; without it every failed read is nil.
+	Memory *CloudMemory
+}
+
+// defaultCloudMemoryAge is how long a remembered answer stands in for failed reads.
+const defaultCloudMemoryAge = 6 * time.Hour
+
+// CloudMemory keeps the last instance a metadata read returned. The system section is canonical
+// and hashed, so a read that fails once (a timeout, a non-200, a malformed document) would drop
+// Cloud, change the section's hash and upload an inventory "change", then another when the
+// service answers again. A failed read reuses the last good answer instead, for up to MaxAge after
+// it was read; nil only when the service has never answered (or not within MaxAge). Safe for
+// concurrent use.
+type CloudMemory struct {
+	// MaxAge defaults to 6 hours.
+	MaxAge time.Duration
+	// Now defaults to time.Now.
+	Now func() time.Time
+
+	mu   sync.Mutex
+	last *CloudInstance
+	at   time.Time
+}
+
+func (m *CloudMemory) now() time.Time {
+	if m.Now != nil {
+		return m.Now()
+	}
+	return time.Now()
+}
+
+// remember keeps a copy of a good answer.
+func (m *CloudMemory) remember(c *CloudInstance) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.last, m.at = cloneCloud(c), m.now()
+}
+
+// recall returns a copy of the last good answer while it is fresh enough, else nil.
+func (m *CloudMemory) recall() *CloudInstance {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	maxAge := m.MaxAge
+	if maxAge <= 0 {
+		maxAge = defaultCloudMemoryAge
+	}
+	if m.last == nil || m.now().Sub(m.at) > maxAge {
+		return nil
+	}
+	return cloneCloud(m.last)
+}
+
+// cloneCloud copies an instance deeply, so canonicalizing one inventory never changes another.
+func cloneCloud(c *CloudInstance) *CloudInstance {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	if c.Tags != nil {
+		out.Tags = append([]string{}, c.Tags...)
+	}
+	if c.Interfaces != nil {
+		out.Interfaces = make([]*CloudInterface, len(c.Interfaces))
+		for i, nic := range c.Interfaces {
+			n := *nic
+			out.Interfaces[i] = &n
+		}
+	}
+	return &out
 }
 
 const (
@@ -83,11 +154,25 @@ type doInterface struct {
 
 // Instance returns the Droplet's cloud instance, or nil: off a Droplet (vendor is not
 // "DigitalOcean"), when the service does not answer 200 directly, or when the document is
-// malformed or too large. It is the Collector's Cloud hook.
+// malformed or too large. With a Memory, a failed read on a Droplet returns the last good answer
+// instead (CloudMemory). It is the Collector's Cloud hook.
 func (d DigitalOceanMetadata) Instance(vendor, _ string) *CloudInstance {
 	if vendor != digitalOceanVendor {
 		return nil
 	}
+	got := d.read()
+	if d.Memory == nil {
+		return got
+	}
+	if got == nil {
+		return d.Memory.recall()
+	}
+	d.Memory.remember(got)
+	return got
+}
+
+// read asks the metadata service once; nil on any failure.
+func (d DigitalOceanMetadata) read() *CloudInstance {
 	url := d.URL
 	if url == "" {
 		url = digitalOceanMetadataURL

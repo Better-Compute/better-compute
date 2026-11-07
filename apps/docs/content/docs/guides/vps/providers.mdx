@@ -1043,7 +1043,9 @@ The token needs the custom scopes `account:read`, `regions:read`, `sizes:read`, 
   each command through `sudo -n`; a release removes bcd's install and state before the claim.
 - **Droplet metadata.** On a Droplet, bcd reads the metadata service into the inventory system section's `cloud`
   (Droplet id, region, tags, interfaces; never user data, keys or tokens). It is inventory only: the service is
-  unsigned, so Droplets join with tokens, and the control plane reads it with `cloudInstanceOf`.
+  unsigned, so Droplets join with tokens, and the control plane reads it with `cloudInstanceOf`. A read that fails
+  (a timeout, a non-200) reuses `bcd node`'s last good answer for up to six hours, so one blip does not change the
+  section's hash and upload a spurious inventory change.
 - **Rate budget.** DigitalOcean allows 250 requests a minute and 5,000 an hour per token, shared by every reconciler
   that uses it. The provider keeps each token under both limits: discovery and listing may spend at most 20% of a
   window, single reads 30%, and writes whatever is left, so discovery defers first. Over its share a call is
