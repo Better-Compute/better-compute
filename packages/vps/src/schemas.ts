@@ -258,6 +258,18 @@ export const schemas = {
         description:
           'Who owns it in the tenant (default: the caller); only a root caller creating in another tenant names someone else',
       },
+      workloadIdentity: strictObject(
+        {
+          awsRoleArn: {
+            type: 'string',
+            pattern: '^arn:(aws|aws-cn|aws-us-gov):iam::[0-9]{12}:role/[A-Za-z0-9_+=,.@/-]{1,512}$',
+            maxLength: 2048,
+            description:
+              "The IAM role its workloads assume through the host's metadata endpoint (hosted pools whose policy.workloadRoles.aws allows it)",
+          },
+        },
+        ['awsRoleArn'],
+      ),
       idempotencyKey,
       wait: strictObject(
         {

@@ -1,6 +1,7 @@
 export * from './config.js';
 export * from './ids.js';
 export * from './account.js';
+export * from './federation.js';
 export * from './shapes.js';
 export * from './compute.js';
 export * from './networks.js';
@@ -17,3 +18,4 @@ export * from './markets/iam.js';
 export * from './eks/index.js';
 export * from './events.js';
 export * from './event-rules.js';
+export * from './onboarding.js';

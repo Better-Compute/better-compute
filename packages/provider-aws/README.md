@@ -27,6 +27,7 @@ One provider account is one AWS account in one region. A fleet in several region
 | `zones`                      | (required) | Availability Zone names as this account sees them (`us-east-1a`), or Local Zones (`us-west-2-lax-1a`). Offers and creates are limited to these. |
 | `credentials`                | –          | A secret reference to `{ "accessKeyId", "secretAccessKey" }`. Allowed, but a role is better.                                                    |
 | `assumeRoleArn`              | –          | The IAM role to assume, in the region's partition.                                                                                              |
+| `webIdentityRoleArn`         | –          | Keyless: the IAM role the account's own workload identity assumes (AssumeRoleWithWebIdentity). Excludes `credentials` and `assumeRoleArn`. |
 | `subnetId`                   | –          | The subnet create uses (else the zone's default subnet).                                                                                        |
 | `securityGroupIds`           | –          | The security groups create uses.                                                                                                                |
 | `instanceProfile`            | –          | The instance profile ARN passed to every `RunInstances` of the account. Never give its role an EKS access entry: see `eksNodeInstanceProfile`. |
@@ -58,6 +59,7 @@ One provider account is one AWS account in one region. A fleet in several region
 | tenant                 | set           | set             | AssumeRole from the static key                          |
 | tenant                 | –             | set             | AssumeRole from the platform identity                   |
 | tenant                 | –             | –               | refused (`INVALID_CONFIG`, reason `ambientCredentials`) |
+| any                    | –             | – (`webIdentityRoleArn` set) | AssumeRoleWithWebIdentity with the account's workload identity |
 
 Ambient credentials are the control plane's own identity, so only platform accounts may use them (ruling F1).
 
@@ -70,11 +72,82 @@ To onboard a tenant's AWS account:
 3. Give it the trust policy from `better-compute aws trust-policy --platform-principal <the control plane's role ARN> --external-id better-compute:<the id from step 1>`.
 4. The account's first EC2 call (its first reconcile) assumes the role and runs the identity checks above; it fails with `ACCESS_DENIED` until the role and its trust policy exist.
 
+`providerAccounts.get` shows what the tenant still has to set up as the account's `onboarding`: `mode`
+(`assume-role`, `web-identity`, `access-key` or `ambient`), and for a role the `externalId` and, when the host
+passes `awsProvider({ platformPrincipalArn })`, the principal to trust. That option is display only and never
+derived (reading the host's identity would be a network call on every read); a value that is not an IAM role or
+user ARN fails `awsProvider` (`INVALID_CONFIG`, `platformPrincipalArn`), and without it tenants see the ExternalId
+only and must get the principal from the operator. A keyless (`web-identity`) account shows the `subject` and
+`audience` its role trusts and, when the host configures `pki.workloadIssuer`, the `issuer` URL that
+`aws onboarding-template --issuer` takes. `better-compute aws onboarding-template
+--account <pa_…> --platform-principal <arn>` renders steps 2 and 3 as one CloudFormation template (the role, its
+trust and the ABAC policy; the same `--region`, `--instance-profile`, `--kms-key` and `--discover-tag` flags).
+
+### Keyless accounts (workload identity federation)
+
+As with provider-gcp's `federationAudience`, a tenant's AWS account can sign in with no key and without the
+platform's own AWS identity: set `webIdentityRoleArn`. vps fixes the account's subject,
+`compute-account:<tenantId>/aws/<name>`; the provider mints a token for it from the host's workload issuer
+(`ComputeOptions.pki.workloadIssuer`, audience `sts.amazonaws.com`) and exchanges it, unsigned, with
+`AssumeRoleWithWebIdentity`. Without an issuer the account is `INVALID_CONFIG` (`noWorkloadIssuer`); with
+`credentials` or `assumeRoleArn` too, `webIdentityExclusive`; a tenant role in a `platformAccounts` account,
+`platform-account-role`.
+
+Before such an account is stored, `checkAccount` proves the role trusts exactly that subject: the account's own
+subject must be accepted (`federationRefused`) as the role's account (`assumed-identity-mismatch`); then a
+stranger's probe (another tenant, the same name) and a sibling's (this tenant, another name) must be refused by the
+trust condition, `AccessDenied` (`federationTrustsAnySubject` if accepted); and it must read EC2 (`ec2Access`). A
+probe answered with any other STS error, such as `InvalidIdentityToken` when STS cannot fetch the issuer's keys, is
+`UNAVAILABLE` (`federationProbeInconclusive`), never a pass. That, throttling, 5xx and timeouts (`checkTimeoutMs`,
+default 10 s) store nothing and a retry runs the check again.
+
+`better-compute aws onboarding-template --issuer <issuer URL> --tenant <tenantId> --name <account name>` renders
+the IAM OIDC provider for the issuer (client id `sts.amazonaws.com`; `--oidc-provider-arn` reuses one) and the role
+trusting exactly that subject, with the ABAC policy.
+
+### Workload roles
+
+Instances of a hosted pool can assume an IAM role with no static keys. The pool turns workload identity on
+(`policy.workloadIdentity: true`) and lists the roles its instances may name in `policy.workloadRoles.aws` (ARN
+globs); an instance names one as `instances.create` `workloadIdentity.awsRoleArn`. vps sends it to the host as
+`InstanceSpec.awsRole` while the pool allows it; bcd exchanges the instance's workload token (audience
+`sts.amazonaws.com`, subject `t:<tenantId>:instance:<id>`, from the gateway's workload broker, which must list
+that audience) for the role's credentials and serves them on the guest's AWS-compatible metadata paths.
+`better-compute aws workload-role --tenant <tenantId> --issuer <issuer URL> [--role-name <name>] [--policy-arn <arn>]`
+renders the OIDC provider and the role, trusting `aud` `sts.amazonaws.com`, `sub` like `t:<tenantId>:instance:*`
+and the session tag `bc-role` equal to the role itself (`aws:RequestTag/bc-role` = its ARN without a path, with
+`sts:TagSession` allowed; the `RoleTag` output shows the value).
+
+The workload broker mints a token for `sts.amazonaws.com` (requested, or the issuer's default audience) only for
+an instance that names a role its pool still allows (refusal `audience`, reason `aws-role-not-allowed`), decided
+before anything is signed, and tags it with that role (`https://aws.amazon.com/tags` `principal_tags.bc-role`).
+So a token minted for one workload role assumes no other role of the tenant, even when the guest fetches it
+itself from `/latest/identity-token`. A role you write by hand needs the same trust: without the tag condition it
+accepts any of the tenant's STS tokens. A role name with a comma cannot be a tag value; the broker refuses such a
+role (`aws-role-untaggable`) and `aws workload-role` refuses the name.
+
+When a pool's workload settings change, `pools.update` recomputes the specs of the hosts running its role-bearing
+instances at once. Credentials bcd already obtained stay valid until they expire (at most an hour; bcd's cache
+renews 5 minutes before expiry).
+
+IAM Roles Anywhere for bcd nodes outside AWS (plan question AQ9) is deferred, as the plan's default: workloads get
+AWS credentials only through this web identity exchange.
+
 The commands ship with this package (the CLI never imports providers). Add them to your configuration:
 
 ```ts
-import { awsIamPolicyCommand, awsTrustPolicyCommand } from '@better-compute/provider-aws';
-export const commands = [awsIamPolicyCommand(), awsTrustPolicyCommand()];
+import {
+  awsIamPolicyCommand,
+  awsOnboardingTemplateCommand,
+  awsTrustPolicyCommand,
+  awsWorkloadRoleCommand,
+} from '@better-compute/provider-aws';
+export const commands = [
+  awsIamPolicyCommand(),
+  awsTrustPolicyCommand(),
+  awsOnboardingTemplateCommand(),
+  awsWorkloadRoleCommand(),
+];
 ```
 
 ## Tags and the guard
@@ -205,7 +278,7 @@ Without a queue, `pollEvents` reads scheduled events with `DescribeInstanceStatu
 
 ## What comes next
 
-EC2 hosts joining as bcd nodes (A6), workload roles (A7), placement groups and EFA (A10), and costs (A11), per `docs/superpowers/plans/2026-10-18-aws-integration-program.md`.
+EC2 hosts joining as bcd nodes (A6), bcd's AWS-compatible credential endpoints (the Go half of A7), placement groups and EFA (A10), and costs (A11), per `docs/superpowers/plans/2026-10-18-aws-integration-program.md`.
 
 ## Testing
 

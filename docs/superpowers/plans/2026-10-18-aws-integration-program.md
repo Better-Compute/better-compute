@@ -204,7 +204,7 @@ is how "all services" is met without a few hundred adapters.
 | Credentials leak through logs, errors, config or API reads | Secrets are refs only (`assertNoInlineSecrets`); `aws-core` redacts `Authorization`, `X-Amz-Security-Token`, `X-Amz-Signature` and credential JSON; a test sweeps every log line and error | A0 Task 5 `never logs credentials` |
 | SSRF through region strings, endpoints, container-credential URIs or IID cert URLs | A strict region regex (A0 Task 3 `assertRegion`, the only path from config text to an endpoint host); endpoint overrides are host options only, never account config; the container-credential full URI is restricted to loopback, `169.254.170.2` and `169.254.170.23` | A0 Task 3 (regions), Task 5 (container URI) |
 | XML entity expansion / billion laughs from a malicious endpoint | The XML reader refuses `<!DOCTYPE` and `<!ENTITY`, caps depth at 64 and the document at 16 MiB | A0 Task 1 |
-| A guest steals another tenant's AWS role (A7) | Pool policy allow-list of role ARNs, **and** a generated trust policy that pins `sub` to `t:<tenantId>:instance:*` and `aud` to `sts.amazonaws.com` | A7 `refuses a role ARN outside the pool allow-list` |
+| A guest steals another tenant's AWS role (A7) | Pool policy allow-list of role ARNs, **and** a generated trust policy that pins `sub` to `t:<tenantId>:instance:*`, `aud` to `sts.amazonaws.com` and the session tag `bc-role` to the role itself (the broker tags each STS token with the instance's allowed role) | A7 `refuses a role ARN outside the pool allow-list`; `a token the broker minted for one workload role never assumes another` |
 | An EC2 instance in the account joins as a node uninvited (A6) | AD14: admit only recorded instances; single-use IID; 30-minute window | A6 `refuses an unrecorded instance` |
 | Clock skew makes requests fail or replayable | One retry with the offset from the server `Date` header; never more | A0 Task 5 |
 
@@ -590,6 +590,14 @@ region on a multi-zone account is refused (`zone-required`); vps names an AWS vo
 - **Workload identity to AWS IAM:**
   - **InstanceSpec:** the additive core field `InstanceSpec.awsRole?: string`, set by vps from the instance's
     `workloadIdentity.awsRoleArn`, which must match pool policy `workloadIdentity.aws.roleArns` (ARN glob list).
+    *As built:* the field is `policy.workloadRoles.aws`, because `policy.workloadIdentity` was already the pool's
+    boolean switch; a non-empty list needs `workloadIdentity: true`, and an entry holds at most 8 `*` (matched in
+    linear time). The workload broker also enforces the allow-list: it mints `aud sts.amazonaws.com` only for an
+    instance whose pool allows its role, and binds the token to that role with the AWS session tag `bc-role`
+    (`https://aws.amazon.com/tags`); every generated trust requires `aws:RequestTag/bc-role` = the role's ARN
+    without its path and allows `sts:TagSession`. So a guest that fetches its own STS token still assumes only its
+    instance's role; bcd's guest endpoint refusing that audience (Go half) is defence in depth, not the boundary.
+    `pools.update` invalidates the specs of hosts running role-bearing instances when workload settings change.
   - **bcd IMDS** (`daemon/internal/imds`) gains AWS-compatible endpoints:
     - `PUT /latest/api/token`: accepts `X-aws-ec2-metadata-token-ttl-seconds`; the session token is valid under
       `X-aws-ec2-metadata-token` as well as `x-bc-metadata-token`.
@@ -601,8 +609,13 @@ region on a multi-zone account is refused (`zone-required`); vps names an AWS vo
     5 min before expiry.
   - **CLI:** `aws workload-role --tenant <id> --issuer <url>` renders the IAM OIDC provider plus a role trust policy
     (`<issuer>:aud = sts.amazonaws.com`, `<issuer>:sub StringLike t:<tenantId>:instance:*`).
+    *As built:* also `aws:RequestTag/bc-role = arn:${AWS::Partition}:iam::${AWS::AccountId}:role/<name>` and
+    `sts:TagSession`, so each role accepts only tokens tagged for it.
 - **Optional:** **IAM Roles Anywhere** for non-AWS bcd nodes. The node CA becomes the trust anchor, and bcd signs
-  `CreateSession` with its node key (`AWS4-X509-ECDSA-SHA256`). It is deferred behind AQ9.
+  `CreateSession` with its node key (`AWS4-X509-ECDSA-SHA256`). It is deferred behind AQ9. *As built:* deferred (the
+  AQ9 default), recorded in the provider-aws README.
+- *As built:* `providerAccounts.get` shows `platformPrincipalArn` only when the host passes
+  `awsProvider({ platformPrincipalArn })` (validated at start, never derived: that would need a network call).
 
 **Tests:**
 - `tests/vps-workload-aws-role.test.ts`:

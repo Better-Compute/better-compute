@@ -112,6 +112,14 @@ export interface PoolPolicy {
    */
   workloadIdentity?: boolean;
   /**
+   * (AWS A7) Cloud roles an instance of this pool may name for its workloads (`instances.create`
+   * `workloadIdentity`): `aws` lists IAM role ARN globs (`*`, `?` in the path and name; the account
+   * literal), at most 8 `*` each, at most 64. A non-empty list needs `workloadIdentity: true`
+   * (pools.create/update refuse it otherwise). The role's own trust pins only the tenant; the workload
+   * broker mints `sts.amazonaws.com` tokens only for an instance whose role the pool allows.
+   */
+  workloadRoles?: { aws?: string[] };
+  /**
    * (v1.1 §3.8) What each host keeps for itself, out of its bookable CPU and memory (default 2 CPUs
    * and 8 GiB); hugepage pools come out of memory on top of it.
    */
@@ -527,6 +535,8 @@ export interface Instance {
   subnetId?: string;
   /** Provider labels the tenant asked for at create (provider pools; better-compute's own are not shown). */
   labels?: Record<string, string>;
+  /** (AWS A7) The cloud role the instance's workloads assume through its host's metadata endpoint. */
+  workloadIdentity?: { awsRoleArn: string };
   addresses: string[];
   ownerIdentityId: string;
   idempotencyKey: string;
@@ -767,6 +777,12 @@ export interface InstanceSpec {
   placement?: InstancePlacement;
   /** (v1.1, agent memory) Host volumes attached as extra virtio disks, in order. */
   volumes?: { volumeId: string; readOnly?: boolean }[];
+  /**
+   * (AWS A7) The IAM role ARN the host's metadata endpoint serves AWS credentials for: bcd exchanges
+   * the instance's workload token (aud sts.amazonaws.com) with AssumeRoleWithWebIdentity. Set only
+   * while the pool allows it.
+   */
+  awsRole?: string;
 }
 /** One instance NIC: the host bridge or network, its MAC and its IPAM addresses. */
 export interface InstanceNicSpec {

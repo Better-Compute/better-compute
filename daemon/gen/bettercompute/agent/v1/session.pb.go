@@ -3755,7 +3755,12 @@ type InstanceSpec struct {
 	// (floating vCPUs, host memory).
 	Placement *InstancePlacement `protobuf:"bytes,16,opt,name=placement,proto3" json:"placement,omitempty"`
 	// (v1.1, agent memory) Persistent volumes to attach (InstancesSection.volumes).
-	Volumes       []*InstanceVolume `protobuf:"bytes,17,rep,name=volumes,proto3" json:"volumes,omitempty"`
+	Volumes []*InstanceVolume `protobuf:"bytes,17,rep,name=volumes,proto3" json:"volumes,omitempty"`
+	// (AWS A7) The IAM role ARN the guest's metadata endpoint serves AWS credentials for. bcd exchanges
+	// the instance's workload token (audience sts.amazonaws.com) with STS AssumeRoleWithWebIdentity
+	// (RoleSessionName bc-<instance_id>) and serves the result on the AWS-compatible
+	// /latest/meta-data/iam/security-credentials/ paths. Empty: no AWS credentials are served.
+	AwsRole       string `protobuf:"bytes,18,opt,name=aws_role,json=awsRole,proto3" json:"aws_role,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3907,6 +3912,13 @@ func (x *InstanceSpec) GetVolumes() []*InstanceVolume {
 		return x.Volumes
 	}
 	return nil
+}
+
+func (x *InstanceSpec) GetAwsRole() string {
+	if x != nil {
+		return x.AwsRole
+	}
+	return ""
 }
 
 type InstancePlacement struct {
@@ -6810,7 +6822,7 @@ const file_bettercompute_agent_v1_session_proto_rawDesc = "" +
 	"\x06serial\x18\x03 \x01(\tR\x06serial\"J\n" +
 	"\x0eInstanceVolume\x12\x1b\n" +
 	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\x12\x1b\n" +
-	"\tread_only\x18\x02 \x01(\bR\breadOnly\"\xd5\x06\n" +
+	"\tread_only\x18\x02 \x01(\bR\breadOnly\"\xf0\x06\n" +
 	"\fInstanceSpec\x12\x1f\n" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
 	"instanceId\x12Q\n" +
@@ -6831,7 +6843,8 @@ const file_bettercompute_agent_v1_session_proto_rawDesc = "" +
 	"\x13identity_rebind_ref\x18\x0e \x01(\tR\x11identityRebindRef\x12+\n" +
 	"\x12ssh_from_host_only\x18\x0f \x01(\bR\x0fsshFromHostOnly\x12G\n" +
 	"\tplacement\x18\x10 \x01(\v2).bettercompute.agent.v1.InstancePlacementR\tplacement\x12@\n" +
-	"\avolumes\x18\x11 \x03(\v2&.bettercompute.agent.v1.InstanceVolumeR\avolumes\"\x85\x01\n" +
+	"\avolumes\x18\x11 \x03(\v2&.bettercompute.agent.v1.InstanceVolumeR\avolumes\x12\x19\n" +
+	"\baws_role\x18\x12 \x01(\tR\aawsRole\"\x85\x01\n" +
 	"\x11InstancePlacement\x12\x12\n" +
 	"\x04cpus\x18\x01 \x01(\tR\x04cpus\x12\x12\n" +
 	"\x04mems\x18\x02 \x01(\tR\x04mems\x12.\n" +

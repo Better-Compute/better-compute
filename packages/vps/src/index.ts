@@ -66,3 +66,4 @@ export type {
 } from '@better-compute/core';
 export * from './conformance.js';
 export * from './usage.js';
+export * from './workload-roles.js';

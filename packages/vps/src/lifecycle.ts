@@ -1,3 +1,4 @@
+import { allowedAwsRole, type PoolWorkloadPolicy } from './workload-roles.js';
 import {
   ComputeError,
   instanceStateTable,
@@ -1034,11 +1035,18 @@ export async function instanceSpecs(
     identity_rebind_ref: string | null;
     host_placement: HostPlacement | string | null;
     sandboxed: boolean;
+    aws_role_arn: string | null;
+    workload_policy: PoolWorkloadPolicy | string | null;
   }>(
     `SELECT i.id, i.tenant_id, i.state, i.desired_state, i.runtime, i.flavor, i.image, i.user_data, i.ssh_keys,
             i.allocation_id, a.atoms, i.restore_from, i.network_policy, i.identity_rebind_ref,
             i.host_placement,
             (i.sandbox_id IS NOT NULL OR i.warm_template_id IS NOT NULL) AS sandboxed,
+            i.aws_role_arn,
+            CASE WHEN i.aws_role_arn IS NOT NULL THEN
+              (SELECT jsonb_build_object('workloadIdentity', wp.policy->'workloadIdentity',
+                                         'workloadRoles', wp.policy->'workloadRoles')
+                 FROM pools wp WHERE wp.id = i.pool_id) END AS workload_policy,
             host(l.address) || '/' || masklen(p.cidr) AS address,
             CASE WHEN l.address IS NOT NULL THEN host(p.gateway) END AS gateway,
             CASE WHEN l.address IS NOT NULL THEN ARRAY(SELECT host(d) FROM unnest(p.dns) d) END AS dns,
@@ -1089,6 +1097,14 @@ export async function instanceSpecs(
     if (row.sandboxed) spec.sshFromHostOnly = true;
     // A memory restore's own identity, which the host installs into the resumed guest (§3.7).
     if (row.identity_rebind_ref) spec.identityRebindRef = row.identity_rebind_ref;
+    // (AWS A7) The workload role, only while the pool still allows it (fail closed).
+    const awsRole = allowedAwsRole(
+      typeof row.workload_policy === 'string'
+        ? (JSON.parse(row.workload_policy) as PoolWorkloadPolicy)
+        : row.workload_policy,
+      row.aws_role_arn,
+    );
+    if (awsRole) spec.awsRole = awsRole;
     // Where its vCPUs and memory live on the host (§3.8), as chosen at placement.
     const placement = specPlacement(
       typeof row.host_placement === 'string' ? JSON.parse(row.host_placement) : (row.host_placement ?? undefined),

@@ -1,4 +1,5 @@
 import type { Migration } from '@better-compute/core';
+import { vpsInstanceAwsRoleMigration } from './workload-roles.js';
 import { vpsProviderBootstrapsMigration } from './bootstraps.js';
 import { poolMachinesMigration, providerMachinesMigration } from './discovery.js';
 import { instanceAttachMigration } from './attach.js';
@@ -224,4 +225,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   providerPurchasesAttemptsMigration,
   providerEventsMigration,
   providerInterruptionsMigration,
+  vpsInstanceAwsRoleMigration,
 ]);

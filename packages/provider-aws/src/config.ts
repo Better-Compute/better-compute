@@ -33,6 +33,12 @@ export const awsConfig = manifest({
     .describe(
       'IAM role to assume (arn:aws:iam::<account>:role/<name>); better-compute sends a platform-assigned ExternalId',
     ),
+  webIdentityRoleArn: field
+    .string({ maxLength: 2048 })
+    .optional()
+    .describe(
+      "Keyless sign-in (A7): the IAM role this account's workload identity assumes with AssumeRoleWithWebIdentity (audience sts.amazonaws.com); excludes credentials and assumeRoleArn",
+    ),
   subnetId: field
     .string({ pattern: '^subnet-[0-9a-f]{8,17}$' })
     .optional()
@@ -147,6 +153,7 @@ export interface AwsConfig {
   zones: string[];
   credentials?: SecretRef;
   assumeRoleArn?: string;
+  webIdentityRoleArn?: string;
   subnetId?: string;
   securityGroupIds?: string[];
   instanceProfile?: string;
@@ -194,6 +201,12 @@ export interface AwsProviderOptions {
   /** ExternalId prefix: `${externalIdPrefix}:${providerAccountId}` (default 'better-compute'). */
   externalIdPrefix?: string;
   /**
+   * The control plane's own IAM principal (the identity that calls AssumeRole), shown to tenants as
+   * `providerAccounts.get` `onboarding.platformPrincipalArn` for their role's trust (A7). Display
+   * only: nothing is signed with it.
+   */
+  platformPrincipalArn?: string;
+  /**
    * AWS account ids a tenant account's `assumeRoleArn` may never name (the ambient identity's own
    * account is always refused too, at first use).
    */
@@ -214,20 +227,41 @@ export interface AwsProviderOptions {
    * tenant and EC2 launches it as the account.
    */
   imageOwners?: readonly string[];
+  /** How long one network call of a keyless account's `checkAccount` may take (default 10 000). */
+  checkTimeoutMs?: number;
 }
 
 function invalid(message: string, reason: string): ComputeError {
   return new ComputeError('INVALID_CONFIG', message, undefined, { provider: 'aws', reason });
 }
 
+/**
+ * The audience of the account's web identity token (A7): the client id the tenant's IAM OIDC provider
+ * lists and its role's trust pins (`<issuer>:aud`). Fixed, never account config.
+ */
+export const webIdentityAudience = 'sts.amazonaws.com';
+
 /** The role ARN, checked: an IAM role in the region's partition. */
 export function roleArnOf(config: Pick<AwsConfig, 'region' | 'assumeRoleArn'>) {
-  if (config.assumeRoleArn === undefined) return undefined;
+  return checkedRoleArn(config.region, config.assumeRoleArn, 'assumeRoleArn');
+}
+
+/** The web identity role ARN (A7), checked as `roleArnOf` checks `assumeRoleArn`. */
+export function webIdentityRoleArnOf(config: Pick<AwsConfig, 'region' | 'webIdentityRoleArn'>) {
+  return checkedRoleArn(config.region, config.webIdentityRoleArn, 'webIdentityRoleArn');
+}
+
+function checkedRoleArn(
+  region: string,
+  text: string | undefined,
+  name: 'assumeRoleArn' | 'webIdentityRoleArn',
+) {
+  if (text === undefined) return undefined;
   let arn;
   try {
-    arn = parseArn(config.assumeRoleArn);
+    arn = parseArn(text);
   } catch {
-    throw invalid('assumeRoleArn is not an IAM role ARN', 'assumeRoleArn');
+    throw invalid(`${name} is not an IAM role ARN`, name);
   }
   if (
     arn.service !== 'iam' ||
@@ -235,11 +269,11 @@ export function roleArnOf(config: Pick<AwsConfig, 'region' | 'assumeRoleArn'>) {
     !/^\d{12}$/.test(arn.account) ||
     !/^role\/[\w+=,.@/-]{1,512}$/.test(arn.resource)
   )
-    throw invalid('assumeRoleArn is not an IAM role ARN', 'assumeRoleArn');
-  if (arn.partition !== partitionOf(config.region).partition)
+    throw invalid(`${name} is not an IAM role ARN`, name);
+  if (arn.partition !== partitionOf(region).partition)
     throw invalid(
-      `assumeRoleArn is in partition ${arn.partition}, but region ${config.region} is in ${partitionOf(config.region).partition}`,
-      'assumeRoleArn',
+      `${name} is in partition ${arn.partition}, but region ${region} is in ${partitionOf(region).partition}`,
+      name,
     );
   return arn;
 }
@@ -264,6 +298,7 @@ export function validateAwsConfig(config: AwsConfig): void {
         'zones',
       );
   roleArnOf(config);
+  webIdentityRoleArnOf(config);
   // The Price List API does not exist in GovCloud: on-demand pricing could never price anything
   // there ('all' still reads Spot prices from EC2).
   if (config.pricing === 'on-demand' && partitionOf(config.region).partition === 'aws-us-gov')

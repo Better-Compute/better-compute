@@ -61,6 +61,11 @@ sources:
     'packages/provider-aws/src/account.ts',
     'packages/provider-aws/src/volumes.ts',
     'tests/provider-aws-volumes.test.ts',
+    'packages/provider-aws/src/federation.ts',
+    'packages/provider-aws/src/onboarding.ts',
+    'packages/vps/src/workload-roles.ts',
+    'tests/aws-account-federation.test.ts',
+    'tests/vps-workload-aws-role.test.ts',
     'packages/provider-digitalocean/src/config.ts',
     'packages/provider-digitalocean/src/compute/droplets.ts',
     'packages/provider-digitalocean/src/networks/index.ts',
@@ -1077,6 +1082,11 @@ in one region: a fleet in several regions is several accounts.
       description:
         "The IAM role to assume, in the region's partition. better-compute sends a platform-assigned ExternalId.",
     },
+    webIdentityRoleArn: {
+      type: 'string',
+      description:
+        "Keyless: the IAM role the account's own workload identity assumes with AssumeRoleWithWebIdentity (audience sts.amazonaws.com). Excludes credentials and assumeRoleArn.",
+    },
     subnetId: {
       type: 'string',
       description: "The subnet create uses (else the zone's default subnet).",
@@ -1135,8 +1145,30 @@ in one region: a fleet in several regions is several accounts.
   identity must be the role's own account.
 - **Onboarding a tenant.** `better-compute aws iam-policy` prints the role's permissions policy and
   `better-compute aws trust-policy --platform-principal <arn> --external-id better-compute:<providerAccountId>` its
-  trust policy. Both commands ship with the provider; add `awsIamPolicyCommand()` and `awsTrustPolicyCommand()` to
-  your configuration's `commands`.
+  trust policy; `better-compute aws onboarding-template --account <providerAccountId> --platform-principal <arn>`
+  renders both as one CloudFormation template. `providerAccounts.get` shows the account's `onboarding`: its `mode`,
+  and for a role the `externalId` and (with `awsProvider({ platformPrincipalArn })`) the principal to trust; a keyless
+  account shows its `subject`, `audience` and the host's workload `issuer` URL. The
+  commands ship with the provider; add `awsIamPolicyCommand()`, `awsTrustPolicyCommand()`,
+  `awsOnboardingTemplateCommand()` and `awsWorkloadRoleCommand()` to your configuration's `commands`.
+- **Keyless accounts.** As with GCP's `federationAudience`, `webIdentityRoleArn` signs the account in with no key:
+  its workload identity (subject `compute-account:<tenantId>/aws/<name>`, audience `sts.amazonaws.com`) is exchanged
+  with `AssumeRoleWithWebIdentity`, so it needs a workload issuer but never the platform's AWS identity. Before it is
+  stored, the provider checks that the role accepts the account's own subject (`federationRefused`) in the role's
+  account, then refuses a stranger's and a sibling's with `AccessDenied` (`federationTrustsAnySubject`; any other
+  STS answer to a probe is `UNAVAILABLE`, `federationProbeInconclusive`), and can read EC2 (`ec2Access`). `aws onboarding-template --issuer <url> --tenant <id> --name <name>` renders the IAM OIDC
+  provider and that role.
+- **Workload roles.** An instance of a hosted pool with `policy.workloadIdentity: true` may name an IAM role as
+  `workloadIdentity.awsRoleArn`, if the pool lists it in `policy.workloadRoles.aws` (ARN globs; `INVALID_INPUT`,
+  reason `awsRoleNotAllowed`, otherwise). The host gets it as `InstanceSpec.awsRole` while the pool allows it, and bcd
+  serves the role's credentials to the guest from the instance's workload token. `aws workload-role --tenant <id>
+  --issuer <url>` renders the role, trusting `sub` like `t:<tenantId>:instance:*` and the session tag `bc-role`
+  equal to the role itself (`sts:TagSession` allowed). The workload broker mints a `sts.amazonaws.com` token only for
+  an instance naming a role its pool still allows (refusal `audience`, reason `aws-role-not-allowed`), and tags it
+  with that role, so the token assumes no other workload role of the tenant, even in the guest's hands. A
+  hand-written role needs the same tag condition. `pools.update` recomputes the affected hosts' specs when the
+  pool's workload settings change; credentials already issued stay valid until they expire. IAM Roles Anywhere for
+  non-AWS nodes is deferred.
 - **Tags and the guard.** Instances and root volumes are tagged `better-compute:managed=true` and
   `better-compute:instance=<id>`. `delete` needs the first, `power` and `reinstall` the second, and the generated
   policy makes AWS enforce the same rules (ABAC).
@@ -1181,4 +1213,5 @@ in one region: a fleet in several regions is several accounts.
 `tests/provider-aws-cli.test.ts`, `tests/provider-aws-networks.test.ts` and `tests/provider-aws-volumes.test.ts` run
 the conformance cases and the EC2, VPC and EBS specifics against an in-process AWS emulator passed as `fetch`, and
 `tests/aws-end-to-end.test.ts`, `tests/aws-networks-end-to-end.test.ts` and `tests/aws-volumes-end-to-end.test.ts` run
-the provider through vps. No live AWS suite has been run yet.
+the provider through vps; `tests/aws-account-federation.test.ts` and `tests/vps-workload-aws-role.test.ts` cover
+keyless accounts and workload roles. No live AWS suite has been run yet.

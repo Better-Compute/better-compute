@@ -1449,6 +1449,16 @@ export interface ProviderInput<C> {
    */
   describeOffering?(offeringId: string): string | undefined;
   /**
+   * (AWS A7) What `providerAccounts.get` shows as the account's `onboarding`: what a tenant still
+   * has to set up at its cloud for this account (e.g. the platform-assigned ExternalId its role must
+   * require). Pure; no I/O; never a secret. A throw or a non-object result shows nothing.
+   * `account.issuer` is the host's workload issuer URL (`pki.workload`), when it configures one.
+   */
+  describeAccount?(
+    config: C,
+    account: { id: string; tenantId: string; name: string; platform: boolean; issuer?: string },
+  ): Record<string, Json> | undefined;
+  /**
    * (v1.0, D11/D12) How this provider's cost rows relate to what compute meters. Pure; no I/O. A record may
    * be a probe built from a pass-through rule's pattern (`sku` and `skuDescription` = the pattern, `service`
    * empty): a matcher treats an empty service as possibly its compute service.

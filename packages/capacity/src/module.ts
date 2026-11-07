@@ -31,6 +31,12 @@ import {
 } from '@better-compute/core';
 import { readAllocation, releaseAllocation } from './bookings.js';
 import { capacityMigrations } from './migrations.js';
+import {
+  isAwsRoleGlob,
+  maxAwsRoleGlobStars,
+  maxAwsRoleGlobs,
+  roleBearingHosts,
+} from './workload-roles.js';
 import { nodeResourcesWork, syncNodeResources } from './host-resources.js';
 import { describeCreateReservation, describeExtendReservation } from './describe.js';
 import { planGangs } from './gang.js';
@@ -651,6 +657,24 @@ export interface SetQuotaInput {
   max: number;
 }
 
+/**
+ * (AWS A7) `policy.workloadRoles`: `{ aws?: string[] }`, IAM role ARN globs with a literal account
+ * (`isAwsRoleGlob`, at most 8 `*` each; vps matches them when an instance names a role), at most 64.
+ */
+function checkWorkloadRoles(roles: unknown): void {
+  if (roles === undefined) return;
+  if (typeof roles !== 'object' || roles === null || Array.isArray(roles))
+    fail('policy.workloadRoles must be an object');
+  for (const key of Object.keys(roles))
+    if (key !== 'aws') fail(`policy.workloadRoles.${key.slice(0, 32)} is not a known field`);
+  const aws = (roles as { aws?: unknown }).aws;
+  if (aws === undefined) return;
+  if (!Array.isArray(aws) || aws.length > maxAwsRoleGlobs || !aws.every(isAwsRoleGlob))
+    fail(
+      `policy.workloadRoles.aws lists at most ${maxAwsRoleGlobs} IAM role ARNs (arn:aws:iam::<12-digit account>:role/<name>; ? and at most ${maxAwsRoleGlobStars} * in the name)`,
+    );
+}
+
 /** A pool policy object; the fields capacity enforces are type-checked. */
 function checkPolicy(policy: unknown): PoolPolicy {
   if (typeof policy !== 'object' || policy === null || Array.isArray(policy))
@@ -658,6 +682,13 @@ function checkPolicy(policy: unknown): PoolPolicy {
   const singleTenant = (policy as Record<string, unknown>).singleTenant;
   if (singleTenant !== undefined && typeof singleTenant !== 'boolean')
     fail('policy.singleTenant must be true or false');
+  const workloadRoles = (policy as Record<string, unknown>).workloadRoles;
+  checkWorkloadRoles(workloadRoles);
+  // Roles a pool lists only matter with workload identity on: refuse them otherwise rather than
+  // store a list that silently allows nothing.
+  const listed = (workloadRoles as { aws?: unknown[] } | undefined)?.aws;
+  if (listed?.length && (policy as Record<string, unknown>).workloadIdentity !== true)
+    fail('policy.workloadRoles.aws needs policy.workloadIdentity: true');
   const billing = (policy as Record<string, unknown>).billing;
   if (billing !== undefined) {
     if (typeof billing !== 'object' || billing === null || Array.isArray(billing))
@@ -1204,6 +1235,17 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
           );
           for (const agent of agents) await context.desired.invalidate(tx, agent.id);
         }
+        // AWS A7: a host's instance specs carry the AWS role the pool allows (InstanceSpec.awsRole).
+        // When the pool's workload settings change, recompute the specs of the hosts running its
+        // role-bearing instances now rather than at the level-triggered resync (credentials bcd
+        // already holds stay valid until they expire; the broker refuses new STS tokens at once).
+        const workload = (policy: PoolPolicy) => {
+          const record = policy as Record<string, unknown>;
+          return JSON.stringify([record.workloadIdentity ?? null, record.workloadRoles ?? null]);
+        };
+        if (pool.class === 'vps-host' && workload(pool.policy) !== workload(next.policy))
+          for (const host of await roleBearingHosts(tx, pool.id))
+            await context.desired.invalidate(tx, host);
         // Every tenant view of the pool carries the new attributes.
         const offers = await tx.query<{ tenant_id: string }>(
           `SELECT tenant_id FROM pool_offers WHERE pool_id = $1`,

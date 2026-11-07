@@ -5,6 +5,8 @@ import {
   imdsSessionHeader,
   imdsSessionTtlHeader,
 } from '@better-compute/pki';
+import { systemClock } from '@better-compute/core';
+import { createWorkloadBroker } from '@better-compute/server';
 import { instanceStatusHandler, setIpPool, vps } from '@better-compute/vps';
 import { createDevStack, type DevStack, type FakeDaemon } from '@better-compute/testing';
 
@@ -25,6 +27,7 @@ const IMAGE = {
   format: 'qcow2' as const,
   verified: true,
 };
+const AWS_ROLE = 'arn:aws:iam::222222222222:role/ml-readers';
 let dev: DevStack;
 let api: any;
 let tenantId: string;
@@ -50,13 +53,17 @@ async function until<T>(
 const daemon = (nodeId: string): FakeDaemon => dev.daemons.get(nodeId)!;
 
 /** A running instance in `poolId`; resolves to its id and host. */
-async function running(poolId: string): Promise<{ id: string; nodeId: string }> {
+async function running(
+  poolId: string,
+  extra: Record<string, unknown> = {},
+): Promise<{ id: string; nodeId: string }> {
   const instance = await api.instances.create(dev.root, {
     tenantId,
     poolId,
     flavor: 's',
     imageId: 'base',
     idempotencyKey: `imds-${++keys}`,
+    ...extra,
   });
   await until(`instance ${instance.id} running`, async () => {
     const current = await api.instances.get(dev.root, { tenantId, instanceId: instance.id });
@@ -90,7 +97,7 @@ beforeAll(async () => {
     modules: [vps({ images: { resolve: async () => IMAGE }, hostSyncEvery: '1s' })],
     reports: { status: instanceStatusHandler({ log: () => {} }) },
     daemon: { instances: { runtimes: ['libvirt-kvm'] } },
-    workloadIdentity: { issuer, audiences: ['https://vault.example'] },
+    workloadIdentity: { issuer, audiences: ['https://vault.example', 'sts.amazonaws.com'] },
   });
   api = dev.compute.api;
   tenantId = dev.rootTenantId;
@@ -125,7 +132,10 @@ beforeAll(async () => {
     });
     return pool.id as string;
   };
-  enabledPool = await make('imds-on', { workloadIdentity: true });
+  enabledPool = await make('imds-on', {
+    workloadIdentity: true,
+    workloadRoles: { aws: [AWS_ROLE] },
+  });
   disabledPool = await make('imds-off', {});
   nodes = [
     ...(await dev.join({ poolId: enabledPool, count: 2, seed: 'imds-on' })),
@@ -293,5 +303,103 @@ describe('IMDS workload identity (§16 v0.5)', () => {
     expect(rows.map((row) => row.data.reason)).toEqual(
       expect.arrayContaining(['not-placed-here', 'disabled']),
     );
+  }, 60_000);
+
+  it('mints for STS (aud sts.amazonaws.com) only an instance whose pool allows its AWS role (AWS A7)', async () => {
+    const plain = await running(enabledPool);
+    const plainToken = await session(plain.nodeId, plain.id);
+    // Another audience the host allows still works for it; STS does not.
+    expect((await identity(plain.nodeId, plain.id, plainToken, 'https://vault.example')).status).toBe(200);
+    expect((await identity(plain.nodeId, plain.id, plainToken, 'sts.amazonaws.com')).status).toBe(400);
+
+    const role = await running(enabledPool, { workloadIdentity: { awsRoleArn: AWS_ROLE } });
+    const token = await session(role.nodeId, role.id);
+    const allowed = await identity(role.nodeId, role.id, token, 'sts.amazonaws.com');
+    expect(allowed.status).toBe(200);
+    expect(claims(await allowed.text())).toMatchObject({
+      aud: 'sts.amazonaws.com',
+      sub: `t:${tenantId}:instance:${role.id}`,
+      // Bound to the instance's role: every workload role's trust requires its own bc-role tag, so
+      // this token assumes no other workload role of the tenant.
+      'https://aws.amazon.com/tags': { principal_tags: { 'bc-role': [AWS_ROLE] } },
+    });
+    // Tokens for other audiences carry no AWS session tags.
+    const vault = await identity(role.nodeId, role.id, token, 'https://vault.example');
+    expect(claims(await vault.text())['https://aws.amazon.com/tags']).toBeUndefined();
+
+    // A role the pool stops allowing gets no new STS token (fail closed).
+    const policy = (
+      await dev.database.query<{ policy: Record<string, unknown> }>('SELECT policy FROM pools WHERE id = $1', [
+        enabledPool,
+      ])
+    ).rows[0]!.policy;
+    await dev.database.query('UPDATE pools SET policy = $2::jsonb WHERE id = $1', [
+      enabledPool,
+      JSON.stringify({ ...policy, workloadRoles: { aws: ['arn:aws:iam::222222222222:role/other'] } }),
+    ]);
+    try {
+      expect((await identity(role.nodeId, role.id, token, 'sts.amazonaws.com')).status).toBe(400);
+    } finally {
+      await dev.database.query('UPDATE pools SET policy = $2::jsonb WHERE id = $1', [
+        enabledPool,
+        JSON.stringify(policy),
+      ]);
+    }
+    const { rows } = await dev.database.query<{ data: Record<string, unknown> }>(
+      `SELECT payload->'data' AS data FROM outbox WHERE topic = 'security.workload.refused' ORDER BY seq`,
+    );
+    expect(rows.filter((row) => row.data.reason === 'aws-role-not-allowed').map((row) => row.data.instanceId)).toEqual(
+      expect.arrayContaining([plain.id, role.id]),
+    );
+  }, 60_000);
+
+  it('holds an issuer whose default audience is STS to the same rule, before minting anything', async () => {
+    const stsIssuer = createWorkloadIssuer({
+      issuer: 'https://sts-default.compute.example',
+      defaultAudience: 'sts.amazonaws.com',
+    });
+    const issued: unknown[] = [];
+    const published: { type: string; data: Record<string, unknown> }[] = [];
+    const broker = createWorkloadBroker({
+      issuer: {
+        issuer: stsIssuer.issuer,
+        defaultAudience: stsIssuer.defaultAudience,
+        issue: (input) => {
+          issued.push(input);
+          return stsIssuer.issue(input);
+        },
+      },
+      database: dev.database,
+      clock: systemClock,
+      events: {
+        publish: async (_tx: unknown, event: { type: string; data: Record<string, unknown> }) => {
+          published.push(event);
+        },
+      } as never,
+      rootTenantId: tenantId,
+    });
+    const ask = (instance: { id: string; nodeId: string }) => {
+      const { request } = createWorkloadTokenRequest({
+        nodeKey: daemon(instance.nodeId).nodeKey!,
+        instanceId: instance.id,
+      });
+      return broker.workloadToken(request, { peerNodeId: instance.nodeId });
+    };
+    // No role: refused, and no token was ever signed (nothing to drop, nothing unaudited).
+    const plain = await running(enabledPool);
+    expect(await ask(plain)).toMatchObject({ error: 'audience', jwe: '' });
+    expect(issued).toEqual([]);
+    expect(published.map((event) => event.data.reason)).toEqual(['aws-role-not-allowed']);
+    // The rate and replay budget were not spent: a retried request is refused for the same reason.
+    expect(await ask(plain)).toMatchObject({ error: 'audience' });
+    // An allowed role: minted, tagged with that role.
+    const role = await running(enabledPool, { workloadIdentity: { awsRoleArn: AWS_ROLE } });
+    expect((await ask(role)).jwe).not.toBe('');
+    expect(issued).toEqual([
+      expect.objectContaining({
+        instanceId: role.id,
+        claims: { 'https://aws.amazon.com/tags': { principal_tags: { 'bc-role': [AWS_ROLE] } } },
+      }),
+    ]);
   }, 60_000);
 });

@@ -19,7 +19,13 @@ export interface IamStatement {
   Action: string | readonly string[];
   /** Absent in a trust policy, where IAM refuses it. */
   Resource?: string | readonly string[];
-  Condition?: Readonly<Record<string, Readonly<Record<string, string | readonly string[]>>>>;
+  /** A value may be a CloudFormation intrinsic (`Fn::Sub`) in a rendered template. */
+  Condition?: Readonly<
+    Record<
+      string,
+      Readonly<Record<string, string | readonly string[] | { readonly 'Fn::Sub': string }>>
+    >
+  >;
   Principal?: unknown;
 }
 

@@ -27,6 +27,7 @@ import {
   checkAccountConfig,
   createAccount,
   deleteAccount,
+  describedAccount,
   listAccounts,
   parseAccountBilling,
   parseCreateAccount,
@@ -1431,7 +1432,12 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           const account = await readAccount(context.sql, input.accountId, input.tenantId);
           if (!account)
             throw new ComputeError('NOT_FOUND', `Provider account ${input.accountId} not found`);
-          return account;
+          return describedAccount(
+            providers,
+            account,
+            context.iam.rootTenantId,
+            context.pki?.workload?.issuer,
+          );
         },
       }),
       offers: defineMethod({
