@@ -704,6 +704,27 @@ describe('what lives in a cluster', () => {
     expect(mutations(emu, 'PUT', /\/firewall$/)).toEqual([]);
   });
 
+  it('every child delete in a cluster this deployment does not manage is refused (notManaged), sending nothing', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const theirs = seedDatabase(emu.state, { name: 'by-hand' });
+    const other = seedDatabase(emu.state, {
+      name: 'another-deployment',
+      tags: [managedTag, deploymentTag('elsewhere')],
+    });
+    for (const cluster of [theirs, other])
+      for (const [kind, name] of [
+        ['do.database.pg.user', 'app'],
+        ['do.database.pg.pool', 'web'],
+        ['do.database.pg.replica', 'read-1'],
+        ['do.database.pg.firewall', 'firewall'],
+      ] as const) {
+        const refused = await failure(resources.delete(kind, `${cluster.id}/${name}`, ctx()));
+        expect(refused.details?.reason, `${kind} in ${cluster.name}`).toBe('notManaged');
+      }
+    expect(emu.requests.filter((request) => request.method !== 'GET')).toEqual([]);
+  });
+
   it('trusted sources replace the cluster firewall; deleting them restores none', async () => {
     const { emu, resources, mine } = await cluster();
     const spec = { ipAddresses: ['203.0.113.0/24'], tags: ['bc-pool-1'], droplets: ['42'] };
