@@ -1149,7 +1149,7 @@ in one region: a fleet in several regions is several accounts.
   and GiB prices that compose back to it, for price proposals. `aws iam-policy --costs --prices` adds the permissions.
 - **Governance.** These commands run as the operator's own AWS identity; `aws governance-policy` prints its IAM
   policy, with each action that changes AWS opt-in. `aws organization-accounts` renders FleetConfig provider accounts
-  for an organization's member accounts, `aws quotas` and `aws quota-request --yes` read and raise EC2 vCPU quotas,
+  for an organization's ACTIVE member accounts (not its management account, unless `--include-management`), `aws quotas` and `aws quota-request --yes` read and raise EC2 vCPU quotas,
   `aws tag-policy` renders an Organizations tag policy for the better-compute keys, and `aws budget-template` an AWS
   Budgets template over everything tagged `better-compute:managed=true` (it refuses `--tenant` and `--pool`:
   provider-aws does not write those tags).

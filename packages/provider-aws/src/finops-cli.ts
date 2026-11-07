@@ -130,9 +130,12 @@ export interface OrganizationProviderAccount {
   config: { region: string; zones: string[]; assumeRoleArn: string };
 }
 
+const accountId = /^\d{12}$/;
+
 /**
  * The FleetConfig entries for organization member accounts: one `aws` provider account per ACTIVE account, each
- * assuming `role` in it (better-compute sends the platform-assigned ExternalId). Pure; no I/O.
+ * assuming `role` in it (better-compute sends the platform-assigned ExternalId). An account whose state is not
+ * known is left out, as are `exclude` and `management` (the organization's management account). Pure; no I/O.
  */
 export function organizationProviderAccounts(input: {
   accounts: readonly { id: string; status?: string }[];
@@ -141,6 +144,8 @@ export function organizationProviderAccounts(input: {
   zones: readonly string[];
   prefix?: string;
   exclude?: readonly string[];
+  /** The organization's management account: left out (the caller passes none to include it). */
+  management?: string;
 }): OrganizationProviderAccount[] {
   if (!/^[\w+=,.@-]{1,64}(?:\/[\w+=,.@-]{1,64})*$/.test(input.role))
     throw usage('--role is an IAM role name (or path/name)');
@@ -158,10 +163,14 @@ export function organizationProviderAccounts(input: {
   const prefix = input.prefix ?? 'aws';
   if (!/^[a-z0-9][a-z0-9-]{0,20}$/.test(prefix)) throw usage('--prefix is a short lower-case name');
   const partition = partitionOf(region).partition;
+  for (const id of input.exclude ?? [])
+    if (!accountId.test(id))
+      throw usage(`--exclude ${JSON.stringify(id.slice(0, 32))} is not a 12-digit account id`);
   const excluded = new Set(input.exclude ?? []);
+  if (input.management !== undefined) excluded.add(input.management);
   return input.accounts
-    .filter((account) => /^\d{12}$/.test(account.id) && !excluded.has(account.id))
-    .filter((account) => account.status === undefined || account.status === 'ACTIVE')
+    .filter((account) => accountId.test(account.id) && !excluded.has(account.id))
+    .filter((account) => account.status === 'ACTIVE')
     .map((account) => ({
       name: `${prefix}-${account.id}-${region}`,
       provider: 'aws' as const,
@@ -180,7 +189,7 @@ export function awsOrganizationAccountsCommand(options: AwsCliOptions = {}) {
     group: 'Providers' as const,
     summary: 'Print FleetConfig provider accounts for the member accounts of an AWS organization',
     description:
-      "aws organization-accounts lists the organization's accounts (organizations:ListAccounts, or ListAccountsForParent with --parent) as the operator's own AWS identity, run in the management or a delegated administrator account, and prints a FleetConfig document with one aws provider account per ACTIVE account: --region and --zones, and assumeRoleArn naming --role in that account. It only reads and renders; fleet apply creates the accounts. Zone names differ between AWS accounts (us-east-1a is not the same zone everywhere): check each account's before applying.",
+      "aws organization-accounts lists the organization's accounts (organizations:ListAccounts, or ListAccountsForParent with --parent) as the operator's own AWS identity, run in the management or a delegated administrator account, and prints a FleetConfig document with one aws provider account per ACTIVE account: --region and --zones, and assumeRoleArn naming --role in that account. The organization's management account (organizations:DescribeOrganization) is left out unless --include-management, and so is an account whose state AWS does not give. It only reads and renders; fleet apply creates the accounts. Zone names differ between AWS accounts (us-east-1a is not the same zone everywhere): check each account's before applying.",
     target: 'none' as const,
     output: 'text' as const,
     flags: {
@@ -205,7 +214,11 @@ export function awsOrganizationAccountsCommand(options: AwsCliOptions = {}) {
       exclude: {
         type: 'string' as const,
         value: 'IDS',
-        description: 'Comma-separated account ids to leave out (the management account, say)',
+        description: 'Comma-separated 12-digit account ids to leave out',
+      },
+      'include-management': {
+        type: 'boolean' as const,
+        description: "Also render the organization's management account (left out by default)",
       },
       prefix: {
         type: 'string' as const,
@@ -243,6 +256,22 @@ export function awsOrganizationAccountsCommand(options: AwsCliOptions = {}) {
       });
       const client = awsCliClient('organizations', 'AWSOrganizationsV20161128', region, options);
       const signal = AbortSignal.timeout(60_000);
+      let management: string | undefined;
+      if (context.flags['include-management'] !== true) {
+        const { Organization: organization } = await client.call<{
+          Organization?: { MasterAccountId?: unknown; ManagementAccountId?: unknown };
+        }>('DescribeOrganization', {}, { signal });
+        const id = organization?.ManagementAccountId ?? organization?.MasterAccountId;
+        // Fail closed: rendering the management account by mistake would ask to assume a role there.
+        if (typeof id !== 'string' || !accountId.test(id))
+          throw new ComputeError(
+            'PROVIDER_ERROR',
+            'AWS DescribeOrganization gave no management account id: pass --include-management, and --exclude it by id',
+            undefined,
+            { provider: 'aws', reason: 'management-account' },
+          );
+        management = id;
+      }
       const accounts: { id: string; status?: string }[] = [];
       for await (const account of pages(
         client,
@@ -268,10 +297,18 @@ export function awsOrganizationAccountsCommand(options: AwsCliOptions = {}) {
         region,
         zones,
         exclude,
+        ...(management !== undefined ? { management } : {}),
         ...(text(context.flags.prefix) ? { prefix: text(context.flags.prefix)! } : {}),
       });
+      const unknown = accounts.filter((account) => account.status === undefined).length;
+      const left = [
+        ...(management !== undefined && accounts.some((account) => account.id === management)
+          ? [`the management account ${management} (--include-management renders it)`]
+          : []),
+        ...(unknown > 0 ? [`${unknown} account${unknown === 1 ? '' : 's'} of unknown state`] : []),
+      ];
       context.note(
-        `${providerAccounts.length} of ${accounts.length} accounts; zone names differ between AWS accounts: check each account's zones before applying`,
+        `${providerAccounts.length} of ${accounts.length} accounts${left.length > 0 ? `, leaving out ${left.join(' and ')}` : ''}; zone names differ between AWS accounts: check each account's zones before applying`,
       );
       await emitJson(context, { version: 1, providerAccounts });
     },

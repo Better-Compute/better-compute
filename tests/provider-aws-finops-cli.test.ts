@@ -107,7 +107,11 @@ describe('provider-aws FinOps CLI', () => {
     expect(out.join('\n')).not.toContain('@example.com');
     expect(notes.join('\n')).toMatch(/zone names/i);
     // it only reads
-    expect(emu.requests.every((request) => /^ListAccounts/.test(request.operation))).toBe(true);
+    expect(
+      emu.requests.every((request) =>
+        /^(?:ListAccounts|DescribeOrganization$)/.test(request.operation),
+      ),
+    ).toBe(true);
 
     const byOu = harness({
       role: 'bc',
@@ -134,6 +138,56 @@ describe('provider-aws FinOps CLI', () => {
       await expect(command.run(harness(flags).context)).rejects.toMatchObject({
         code: 'INVALID_INPUT',
       });
+  });
+
+  it('organization-accounts leaves out the management account, accounts of unknown state and bad --exclude ids', async () => {
+    const emu = new AwsEmulator();
+    const orgs = new OrganizationsEmulator(emu);
+    orgs.managementAccountId = '555555555555';
+    orgs.accounts.push(
+      { Id: '222222222222', Name: 'ml-prod', Email: 'ml@example.com', Status: 'ACTIVE' },
+      { Id: '555555555555', Name: 'payer', Email: 'payer@example.com', Status: 'ACTIVE' },
+      // no State or Status (an API change, or truncated data): not rendered
+      { Id: '666666666666', Name: 'unknown', Email: 'u@example.com' } as never,
+    );
+    const command = awsOrganizationAccountsCommand({
+      fetch: emu.fetch,
+      credentials: emu.ambient,
+      clock: emu.clock,
+    });
+    const flags = { role: 'better-compute', region: 'us-east-1', zones: 'us-east-1a' };
+    const plain = harness(flags);
+    await command.run(plain.context);
+    expect(
+      JSON.parse(plain.out.join('\n')).providerAccounts.map(
+        (entry: { name: string }) => entry.name,
+      ),
+    ).toEqual(['aws-222222222222-us-east-1']);
+    expect(plain.notes.join('\n')).toMatch(/1 of 3 accounts/);
+    expect(plain.notes.join('\n')).toMatch(/management account 555555555555/);
+    expect(plain.notes.join('\n')).toMatch(/1 account of unknown state/);
+    // --include-management renders it, and does not ask for the organization
+    const before = emu.calls('DescribeOrganization').length;
+    const included = harness({ ...flags, 'include-management': true });
+    await command.run(included.context);
+    expect(
+      JSON.parse(included.out.join('\n')).providerAccounts.map(
+        (entry: { name: string }) => entry.name,
+      ),
+    ).toEqual(['aws-222222222222-us-east-1', 'aws-555555555555-us-east-1']);
+    expect(emu.calls('DescribeOrganization')).toHaveLength(before);
+    // a management account it cannot read refuses, rather than rendering it
+    orgs.managementAccountId = '';
+    await expect(command.run(harness(flags).context)).rejects.toMatchObject({
+      code: 'PROVIDER_ERROR',
+    });
+    // --exclude ids are 12-digit account ids, checked before any call
+    const calls = emu.requests.length;
+    for (const exclude of ['55555555555', '555555555555,acct', 'all'])
+      await expect(command.run(harness({ ...flags, exclude }).context)).rejects.toMatchObject({
+        code: 'INVALID_INPUT',
+      });
+    expect(emu.requests.length).toBe(calls);
   });
 
   it('quotas lists the EC2 instance quotas; quota-request asks only with --yes', async () => {

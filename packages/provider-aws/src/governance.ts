@@ -372,7 +372,11 @@ export function governancePolicy(options: GovernancePolicyOptions = {}): IamPoli
     {
       Sid: 'OrganizationAccounts',
       Effect: 'Allow',
-      Action: ['organizations:ListAccounts', 'organizations:ListAccountsForParent'],
+      Action: [
+        'organizations:DescribeOrganization',
+        'organizations:ListAccounts',
+        'organizations:ListAccountsForParent',
+      ],
       Resource: '*',
     },
     {
@@ -413,7 +417,7 @@ export function awsGovernancePolicyCommand() {
     group: 'Providers' as const,
     summary: 'Print the IAM policy for the operator identity that runs the AWS governance commands',
     description:
-      "aws governance-policy prints the IAM policy for the operator's own AWS identity that runs aws cost-allocation-tags, aws organization-accounts and aws quotas: ce:ListCostAllocationTags, organizations:ListAccounts and ListAccountsForParent, and servicequotas:GetServiceQuota and ListServiceQuotas. Each action that changes AWS is opt-in: --activate-tags adds ce:UpdateCostAllocationTagsStatus (aws cost-allocation-tags --activate --yes), --quota-requests servicequotas:RequestServiceQuotaIncrease on EC2 quotas only (aws quota-request --yes), and --spend ce:GetCostAndUsage for the live suite's spend guard. It is not the provider account's role policy (aws iam-policy).",
+      "aws governance-policy prints the IAM policy for the operator's own AWS identity that runs aws cost-allocation-tags, aws organization-accounts and aws quotas: ce:ListCostAllocationTags, organizations:DescribeOrganization, ListAccounts and ListAccountsForParent, and servicequotas:GetServiceQuota and ListServiceQuotas. Each action that changes AWS is opt-in: --activate-tags adds ce:UpdateCostAllocationTagsStatus (aws cost-allocation-tags --activate --yes), --quota-requests servicequotas:RequestServiceQuotaIncrease on EC2 quotas only (aws quota-request --yes), and --spend ce:GetCostAndUsage for the live suite's spend guard. It is not the provider account's role policy (aws iam-policy).",
     target: 'none' as const,
     output: 'text' as const,
     flags: {

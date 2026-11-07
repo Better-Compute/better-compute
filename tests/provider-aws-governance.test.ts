@@ -171,6 +171,7 @@ describe('provider-aws governance', () => {
     expect(read.Version).toBe('2012-10-17');
     expect(actions(read)).toEqual([
       'ce:ListCostAllocationTags',
+      'organizations:DescribeOrganization',
       'organizations:ListAccounts',
       'organizations:ListAccountsForParent',
       'servicequotas:GetServiceQuota',

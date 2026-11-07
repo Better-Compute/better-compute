@@ -11,18 +11,21 @@ export interface OrgAccount {
   Id: string;
   Name: string;
   Email: string;
-  Status: 'ACTIVE' | 'SUSPENDED' | 'PENDING_CLOSURE';
+  Status?: 'ACTIVE' | 'SUSPENDED' | 'PENDING_CLOSURE';
   /** The OU (or root) the account sits in. */
   parent?: string;
 }
 
 /**
- * AWS Organizations (`AWSOrganizationsV20161128`, JSON 1.1): ListAccounts and ListAccountsForParent, paged by
- * `pageSize`. Read-only, as the CLI that uses it.
+ * AWS Organizations (`AWSOrganizationsV20161128`, JSON 1.1): DescribeOrganization (its management account is
+ * `managementAccountId`), and ListAccounts and ListAccountsForParent, paged by `pageSize`. Read-only, as the CLI
+ * that uses it.
  */
 export class OrganizationsEmulator {
   readonly accounts: OrgAccount[] = [];
   pageSize = 20;
+  /** DescribeOrganization's MasterAccountId; empty answers an organization without one (a malformed answer). */
+  managementAccountId = '000000000000';
 
   constructor(emu: AwsEmulator) {
     emu.register(/^organizations\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$/, {
@@ -36,6 +39,15 @@ export class OrganizationsEmulator {
     if (!request.headers.get('x-amz-target')?.startsWith('AWSOrganizationsV20161128.'))
       return jsonError('UnknownOperationException', 'wrong target prefix');
     const body = JSON.parse(request.body || '{}') as { NextToken?: string; ParentId?: string };
+    if (request.operation === 'DescribeOrganization')
+      return json({
+        Organization: {
+          Id: 'o-example',
+          Arn: `arn:aws:organizations::${this.managementAccountId}:organization/o-example`,
+          FeatureSet: 'ALL',
+          ...(this.managementAccountId ? { MasterAccountId: this.managementAccountId } : {}),
+        },
+      });
     let accounts: OrgAccount[];
     if (request.operation === 'ListAccounts') accounts = this.accounts;
     else if (request.operation === 'ListAccountsForParent') {
