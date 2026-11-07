@@ -341,6 +341,64 @@ describe('provider-aws event intake', () => {
     ]);
   });
 
+  it('a stopped instance still reports its completed instance-stop event', async () => {
+    // instance-stop and instance-retirement stop the instance: without IncludeAllInstances EC2
+    // lists running instances only, and the completion would never be seen.
+    const { emu, ec2, poll } = await world({});
+    const vm = ec2.addInstance({ id: 'i-0abc12345678def01' });
+    const notBefore = emu.now() + 86_400_000;
+    ec2.scheduledEvents.set(vm.id, [
+      { id: 'instance-event-0123456789abcdef1', code: 'instance-stop', description: 'The instance is running on degraded hardware', notBefore },
+    ]);
+    expect((await poll()).events).toMatchObject([{ details: { code: 'instance-stop', status: 'scheduled' } }]);
+    vm.state = 'stopped';
+    ec2.scheduledEvents.set(vm.id, [
+      { id: 'instance-event-0123456789abcdef1', code: 'instance-stop', description: '[Completed] The instance is running on degraded hardware', notBefore },
+    ]);
+    emu.clock.advance(5 * 60_000);
+    expect((await poll()).events).toEqual([
+      expect.objectContaining({
+        id: 'status/i-0abc12345678def01/instance-event-0123456789abcdef1/completed',
+        machineId: vm.id,
+        details: { code: 'instance-stop', status: 'completed' },
+      }),
+    ]);
+    expect(emu.calls('DescribeInstanceStatus').at(-1)!.params.get('IncludeAllInstances')).toBe('true');
+  });
+
+  it('a scheduled event that a complete scan no longer lists is completed', async () => {
+    // EC2 rescheduled it under a new id, or it aged out: the old one is over either way.
+    const { emu, ec2, poll } = await world({});
+    const vm = ec2.addInstance({ id: 'i-0abc12345678def01' });
+    const other = ec2.addInstance({ id: 'i-0abc12345678def02' });
+    const notBefore = emu.now() + 86_400_000;
+    ec2.scheduledEvents.set(vm.id, [
+      { id: 'instance-event-0123456789abcdef2', code: 'system-reboot', description: 'reboot', notBefore },
+    ]);
+    ec2.scheduledEvents.set(other.id, [
+      { id: 'instance-event-0123456789abcdef3', code: 'system-maintenance', description: 'maintenance', notBefore },
+    ]);
+    expect((await poll()).events).toHaveLength(2);
+    ec2.scheduledEvents.set(vm.id, [
+      { id: 'instance-event-0123456789abcdef4', code: 'system-reboot', description: 'reboot', notBefore: notBefore + 3_600_000 },
+    ]);
+    emu.clock.advance(5 * 60_000);
+    const next = (await poll()).events;
+    expect(next.map((event) => event.id).sort()).toEqual([
+      'status/i-0abc12345678def01/instance-event-0123456789abcdef2/completed',
+      'status/i-0abc12345678def01/instance-event-0123456789abcdef4/scheduled',
+      'status/i-0abc12345678def02/instance-event-0123456789abcdef3/scheduled',
+    ]);
+    expect(next.find((event) => event.id.endsWith('def2/completed'))).toMatchObject({
+      kind: 'maintenance-scheduled',
+      machineId: vm.id,
+      details: { code: 'system-reboot', status: 'completed' },
+    });
+    // Reported once: the next scan does not complete it again.
+    emu.clock.advance(5 * 60_000);
+    expect((await poll()).events.filter((event) => event.id.endsWith('/completed'))).toEqual([]);
+  });
+
   it('a failed DescribeInstanceStatus scan is retried on the next poll', async () => {
     const { emu, ec2, poll } = await world({});
     ec2.addInstance({ id: 'i-0abc12345678def01' });

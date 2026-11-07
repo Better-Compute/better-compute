@@ -387,16 +387,30 @@ function scheduledStatus(description: string): 'scheduled' | 'completed' | 'canc
   return 'scheduled';
 }
 
+/** A scheduled event a complete scan listed as scheduled, by `<machineId>/<eventId>`. */
+export interface ScheduledEvent {
+  machineId: string;
+  eventId: string;
+  code: string;
+}
+
 /**
  * Every instance's scheduled events, as `maintenance-scheduled` events. The id carries the event's
  * status, so a completion or cancellation is a new event while an unchanged one stays a duplicate.
+ * Every instance, stopped ones included (`IncludeAllInstances`: instance-stop and
+ * instance-retirement stop it, and the completion must still be seen). A complete scan is
+ * authoritative: an event `previous` listed as scheduled that is gone now (rescheduled under a new
+ * id, or aged out) comes back as `completed`. `scheduled` is this scan's set, for the next one.
  */
 export async function scanScheduledEvents(
   call: (action: string, params: QueryParams, signal: AbortSignal) => Promise<XmlElement>,
   signal: AbortSignal,
   now: number,
-): Promise<ProviderEvent[]> {
+  previous: ReadonlyMap<string, ScheduledEvent> = new Map(),
+): Promise<{ events: ProviderEvent[]; scheduled: Map<string, ScheduledEvent> }> {
   const events: ProviderEvent[] = [];
+  const current = new Map<string, ScheduledEvent>();
+  const listed = new Set<string>();
   const seen = new Set<string>();
   let token: string | undefined;
   do {
@@ -404,6 +418,7 @@ export async function scanScheduledEvents(
       'DescribeInstanceStatus',
       {
         Filter: [{ Name: 'event.code', Value: scheduledCodes }],
+        IncludeAllInstances: true,
         MaxResults: 1000,
         NextToken: token,
       },
@@ -418,6 +433,9 @@ export async function scanScheduledEvents(
         if (!eventId || !/^instance-event-[0-9a-f]{8,17}$/.test(eventId) || !code) continue;
         const status = scheduledStatus(scheduled.textOf('description') ?? '');
         const notBefore = Date.parse(scheduled.textOf('notBefore') ?? '');
+        listed.add(`${machineId}/${eventId}`);
+        if (status === 'scheduled')
+          current.set(`${machineId}/${eventId}`, { machineId, eventId, code: code.slice(0, 64) });
         events.push({
           id: `status/${machineId}/${eventId}/${status}`,
           kind: 'maintenance-scheduled',
@@ -436,5 +454,14 @@ export async function scanScheduledEvents(
       });
     if (token) seen.add(token);
   } while (token);
-  return events;
+  for (const [key, gone] of previous)
+    if (!listed.has(key))
+      events.push({
+        id: `status/${gone.machineId}/${gone.eventId}/completed`,
+        kind: 'maintenance-scheduled',
+        machineId: gone.machineId,
+        at: now,
+        details: { code: gone.code, status: 'completed' },
+      });
+  return { events, scheduled: current };
 }

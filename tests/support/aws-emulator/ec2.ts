@@ -390,10 +390,14 @@ export class Ec2Emulator {
         return this.#run(request);
       case 'DescribeInstanceStatus': {
         const codes = filtersOf(p).get('event.code');
-        const found = [...this.instances.values()].filter((instance) =>
-          (this.scheduledEvents.get(instance.id) ?? []).some(
-            (event) => !codes || codes.includes(event.code),
-          ),
+        // As EC2: only running instances unless IncludeAllInstances is true.
+        const all = p.get('IncludeAllInstances') === 'true';
+        const found = [...this.instances.values()].filter(
+          (instance) =>
+            (all || instance.state === 'running') &&
+            (this.scheduledEvents.get(instance.id) ?? []).some(
+              (event) => !codes || codes.includes(event.code),
+            ),
         );
         const { page, next } = this.#page(found, p);
         const iso = (ms: number) => new Date(ms).toISOString();

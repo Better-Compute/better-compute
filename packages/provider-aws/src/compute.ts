@@ -21,6 +21,7 @@ import {
   pollQueue,
   scanScheduledEvents,
   scheduledEventScanMs,
+  type ScheduledEvent,
 } from './events.js';
 import {
   aliasRootDeviceOf,
@@ -173,6 +174,8 @@ export class AwsCompute implements ProviderImpl {
   readonly #ssmPrefixes: readonly string[];
   /** (A4, no queue) When the last DescribeInstanceStatus scan succeeded. */
   #scannedAt: number | undefined;
+  /** (A4) The scheduled events the last complete scan listed (a vanished one is completed). */
+  #scheduled: ReadonlyMap<string, ScheduledEvent> = new Map();
   readonly #imageOwners: readonly string[];
 
   constructor(
@@ -942,12 +945,14 @@ export class AwsCompute implements ProviderImpl {
       const now = this.context.clock.now();
       if (this.#scannedAt !== undefined && now - this.#scannedAt < scheduledEventScanMs)
         return { events: [], received: 0, ack: async () => {} };
-      const events = await scanScheduledEvents(
+      const { events, scheduled } = await scanScheduledEvents(
         (action, params, signal) => this.call(action, params, signal),
         context.signal,
         now,
+        this.#scheduled,
       );
       this.#scannedAt = now;
+      this.#scheduled = scheduled;
       // Not a queue: nothing more to read until the next scan, however many events it found.
       return { events, received: 0, ack: async () => {} };
     }
