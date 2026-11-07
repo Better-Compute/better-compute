@@ -329,9 +329,10 @@ describe('do.inference-key (a model access key)', () => {
       outputs: ['endpoint'],
       secretOutputs: ['key'],
       updatable: ['rotation'],
-      meters: [{ meter: 'ai.inference.tokens', unit: 'token' }],
     });
     expect(kind.quota).toBeUndefined();
+    // Tokens are not an hourly rate (what kind meters bill): they reach billing through the proxy's record.
+    expect(kind.meters ?? []).toEqual([]);
     // An account-wide bearer: declared so the API refuses it on a shared account before recording anything.
     expect(kind.accountWide?.({ rotation: 0 })).toEqual(['rotation']);
   });

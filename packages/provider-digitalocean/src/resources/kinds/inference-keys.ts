@@ -15,7 +15,8 @@ import { found, type DoKind, type DoKindEnv } from '../kind.js';
 // Model keys carry no tags, so ownership and the applied rotation live in the name: `<name>-r<rotation>-bc<deployment
 // hash>`. A create whose answer was lost finds its key by name and regenerates it, so a secret no one sealed is never
 // live; bumping `rotation` regenerates it on purpose. Usage is by tokens (`ai.inference.tokens`): the operator proxy
-// counts them, or DigitalOcean billing reports them (P9). Shapes follow the API reference (genai), not a recording.
+// counts them, or DigitalOcean billing reports them (P9). The kind declares no `meters`: kind meters bill an hourly
+// rate the provider reports, and a key has none; its tokens reach billing through the proxy's `record`. Shapes follow the API reference (genai), not a recording.
 //
 // A model access key is an account-wide bearer: it reaches every model and every Dedicated Inference endpoint of the
 // account, and a tenant that reads it can call DigitalOcean directly, past the proxy, on the account's bill. So only
@@ -187,7 +188,6 @@ export function inferenceKeyKind(endpoint: string = defaultInferenceEndpoint): D
       secretOutputs: ['key'],
       regional: false,
       updatable: ['rotation'],
-      meters: [{ meter: inferenceTokensMeter, unit: 'token' }],
       // An account-wide bearer: the tenant's own account only, whatever the spec.
       accountWide: () => ['rotation'],
     },
