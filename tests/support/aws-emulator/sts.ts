@@ -14,9 +14,23 @@ function like(pattern: string, value: string): boolean {
   return new RegExp(`^${source}$`).test(value);
 }
 
+/** The session tags a web identity token passes (`https://aws.amazon.com/tags` principal_tags). */
+function sessionTags(claims: Record<string, unknown>): Record<string, unknown> | undefined {
+  const tags = claims['https://aws.amazon.com/tags'];
+  if (typeof tags !== 'object' || tags === null) return undefined;
+  const principal = (tags as { principal_tags?: unknown }).principal_tags;
+  return typeof principal === 'object' && principal !== null
+    ? (principal as Record<string, unknown>)
+    : undefined;
+}
+
 /** Whether a web role's trust (its `condition`, else its `trust` rule) accepts the claims. */
 function trusts(role: StsWebRole, claims: Record<string, unknown>): boolean {
   const sub = typeof claims.sub === 'string' ? claims.sub : undefined;
+  // IAM: a token that passes session tags needs sts:TagSession in the trust as well.
+  const tags = sessionTags(claims);
+  const actions = role.actions === undefined ? [] : [role.actions].flat();
+  if (tags !== undefined && !actions.includes('sts:TagSession')) return false;
   if (role.condition === undefined) return sub !== undefined && role.trust?.(sub) === true;
   const provider = role.issuer.replace(/^https:\/\//, '');
   const operators = Object.entries(role.condition);
@@ -31,8 +45,11 @@ function trusts(role: StsWebRole, claims: Record<string, unknown>): boolean {
     if (!match) return false;
     return Object.entries(keys).every(([key, expected]) => {
       const at = key.lastIndexOf(':');
-      if (key.slice(0, at) !== provider) return false;
-      const claim = claims[key.slice(at + 1)];
+      let claim: unknown;
+      // aws:RequestTag/<key>: the session tag the token passes.
+      if (key.startsWith('aws:RequestTag/')) claim = tags?.[key.slice('aws:RequestTag/'.length)];
+      else if (key.slice(0, at) !== provider) return false;
+      else claim = claims[key.slice(at + 1)];
       const values = (Array.isArray(claim) ? claim : [claim]).filter(
         (item): item is string => typeof item === 'string',
       );
@@ -77,6 +94,12 @@ export interface StsWebRole {
    * matches.
    */
   condition?: Record<string, Record<string, string | readonly string[]>>;
+  /**
+   * The trust statement's `Action`. A token passing session tags is refused unless it includes
+   * `sts:TagSession`, as IAM does (default: only AssumeRoleWithWebIdentity). Condition keys
+   * `aws:RequestTag/<key>` match the token's `https://aws.amazon.com/tags` principal_tags.
+   */
+  actions?: string | readonly string[];
   /** Override: the account GetCallerIdentity reports for the minted credentials. */
   identityAccount?: string;
 }

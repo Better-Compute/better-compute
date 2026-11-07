@@ -17,6 +17,10 @@ import { capacityMigrations, capacityModule, createCapacityPort } from '@better-
 import {
   awsRoleAllowed,
   awsRoleGlobMatches,
+  awsRoleSessionTag,
+  awsRoleSessionTagClaims,
+  awsRoleSessionTagKey,
+  awsSessionTagsClaim,
   instanceSpecs,
   instanceWork,
   parseCreateInstance,
@@ -301,6 +305,32 @@ describe('instance AWS workload roles (A7)', () => {
     expect(awsRoleAllowed([eight], arn)).toBe(false);
     expect(awsRoleAllowed([eight], `${arn}b`)).toBe(true);
     expect(performance.now() - start).toBeLessThan(50);
+  });
+
+  it('binds an STS token to its role: the session tag is the role ARN without its path', () => {
+    expect(awsRoleSessionTagKey).toBe('bc-role');
+    expect(awsSessionTagsClaim).toBe('https://aws.amazon.com/tags');
+    expect(awsRoleSessionTag(ALLOWED)).toBe(ALLOWED);
+    expect(awsRoleSessionTag('arn:aws:iam::333333333333:role/team-a/jobs/reader')).toBe(
+      'arn:aws:iam::333333333333:role/reader',
+    );
+    expect(awsRoleSessionTag('arn:aws-cn:iam::333333333333:role/r+=.@_-')).toBe(
+      'arn:aws-cn:iam::333333333333:role/r+=.@_-',
+    );
+    // A comma is a valid role-name character but not a valid tag value: no tag, so no STS token.
+    for (const arn of [
+      'arn:aws:iam::333333333333:role/a,b',
+      'arn:aws:iam::333333333333:role/path/',
+      `arn:aws:iam::333333333333:role/${'n'.repeat(65)}`,
+      'arn:aws:iam::333333333333:user/bob',
+      'arn:aws:iam::*:role/x',
+      '',
+    ])
+      expect(awsRoleSessionTag(arn), arn).toBeUndefined();
+    expect(awsRoleSessionTagClaims(ALLOWED)).toEqual({
+      'https://aws.amazon.com/tags': { principal_tags: { 'bc-role': [ALLOWED] } },
+    });
+    expect(awsRoleSessionTagClaims('arn:aws:iam::333333333333:role/a,b')).toBeUndefined();
   });
 
   it('refuses a role ARN outside the pool allow-list', async () => {

@@ -1,4 +1,4 @@
-import { allowedAwsRole } from '@better-compute/capacity';
+import { allowedAwsRole, awsRoleSessionTagClaims } from '@better-compute/capacity';
 import {
   isComputeError,
   newId,
@@ -15,6 +15,7 @@ import {
   sealWorkloadTokenResponse,
   type NodeCertLookup,
   type OpenedWorkloadTokenRequest,
+  type WorkloadClaimValue,
   type WorkloadIssuer,
   type WorkloadTokenRefusal,
 } from '@better-compute/pki';
@@ -32,16 +33,22 @@ import type { GatewayCallContext } from './service.js';
 //  2. the instance is live and placed on that node, with a live allocation there;
 //  3. its pool turned workload identity on (`policy.workloadIdentity: true`);
 //  4. the audience is the issuer's default ('') or one of the configured audiences, and a token for
-//     AWS STS (aud `sts.amazonaws.com`, AWS A7) only for an instance that names an AWS role its pool
-//     still allows (`policy.workloadRoles.aws`, as vps's instance spec): every `aws workload-role`
-//     trusts the whole tenant's instances, so the pool allow-list is enforced here, not only by which
-//     role bcd asks for;
+//     AWS STS (aud `sts.amazonaws.com`, requested or the issuer's default; AWS A7) only for an
+//     instance that names an AWS role its pool still allows (`policy.workloadRoles.aws`, as vps's
+//     instance spec), carrying that role as its `bc-role` session tag: every `aws workload-role`
+//     trusts the tenant's instances and requires its own tag, so the token assumes only that role,
+//     whoever presents it. The audience is decided before the request id or a rate token is spent;
 //  5. the request id was not used before, and the instance is within its rate.
 // Tokens live at most 15 minutes. The audit row carries the jti, never the token.
 
 export interface WorkloadIdentityOptions {
-  /** pki's `createWorkloadIssuer(...)`: its discovery document and JWKS are served by the host. */
-  issuer: Pick<WorkloadIssuer, 'issue' | 'issuer'>;
+  /**
+   * pki's `createWorkloadIssuer(...)`: its discovery document and JWKS are served by the host. Its
+   * `defaultAudience` decides the audience of a request that names none before anything is minted
+   * (an issuer without it never hands out a token whose audience turns out to be STS).
+   */
+  issuer: Pick<WorkloadIssuer, 'issue' | 'issuer'> &
+    Partial<Pick<WorkloadIssuer, 'defaultAudience'>>;
   /** Audiences an instance may ask for besides the issuer's default. */
   audiences?: readonly string[];
   /** Token lifetime (default and maximum 900 s). */
@@ -281,11 +288,15 @@ export function createWorkloadBroker(options: WorkloadBrokerOptions): WorkloadBr
         }
         return { opened, instance };
       });
-      // 5. The audience.
+      // 5. The audience, decided before anything is spent or signed: the requested one, else the
+      //    issuer's default.
       if (opened.audience !== '' && !audiences.has(opened.audience))
         throw new Refused('audience', 'audience', instance.tenant_id);
-      const roleAllowed = () =>
-        allowedAwsRole(
+      const audience = opened.audience || options.issuer.defaultAudience;
+      let awsRole: string | undefined;
+      let claims: Record<string, WorkloadClaimValue> | undefined;
+      if (audience === stsWorkloadAudience) {
+        awsRole = allowedAwsRole(
           {
             workloadIdentity: instance.enabled,
             workloadRoles:
@@ -294,9 +305,14 @@ export function createWorkloadBroker(options: WorkloadBrokerOptions): WorkloadBr
                 : instance.workload_roles,
           },
           instance.aws_role_arn,
-        ) !== undefined;
-      if (opened.audience === stsWorkloadAudience && !roleAllowed())
-        throw new Refused('audience', 'aws-role-not-allowed', instance.tenant_id);
+        );
+        if (awsRole === undefined)
+          throw new Refused('audience', 'aws-role-not-allowed', instance.tenant_id);
+        // Bound to that role: its trust requires this session tag, so the token assumes no other.
+        claims = awsRoleSessionTagClaims(awsRole);
+        if (claims === undefined)
+          throw new Refused('audience', 'aws-role-untaggable', instance.tenant_id);
+      }
       // 6. Replay and rate: a relayed copy of an answered request burns nothing.
       if (!remember(`${nodeId}\0${opened.requestId}`, now))
         throw new Refused('access-denied', 'replayed', instance.tenant_id);
@@ -308,10 +324,12 @@ export function createWorkloadBroker(options: WorkloadBrokerOptions): WorkloadBr
         instanceId: opened.instanceId,
         ttlSeconds,
         ...(opened.audience ? { audience: opened.audience } : {}),
+        ...(claims ? { claims } : {}),
       });
-      // An issuer whose default audience is STS is held to the same rule; the token is dropped.
-      if (opened.audience === '' && tokenAudience(issued.token) === stsWorkloadAudience && !roleAllowed())
-        throw new Refused('audience', 'aws-role-not-allowed', instance.tenant_id);
+      // Only an issuer that does not say its default audience gets here unchecked: an untagged STS
+      // token is never handed out (AWS would refuse it anyway).
+      if (audience === undefined && tokenAudience(issued.token) === stsWorkloadAudience)
+        throw new Refused('audience', 'sts-default-audience-unknown', instance.tenant_id);
       await database.transaction((tx) =>
         tx.query(
           `INSERT INTO audit_events (id, tenant_id, action, resource_type, resource_id, details)
@@ -326,6 +344,7 @@ export function createWorkloadBroker(options: WorkloadBrokerOptions): WorkloadBr
               serial: opened.serial,
               jti: issued.jti,
               audience: opened.audience || null,
+              ...(awsRole !== undefined ? { awsRole } : {}),
               issuer: options.issuer.issuer,
               expiresAt: new Date(issued.expiresAt).toISOString(),
               ...(context.gatewayId ? { gatewayId: context.gatewayId } : {}),

@@ -63,6 +63,22 @@ describe('workload tokens', () => {
     ).toThrow(/443/);
   });
 
+  it('expose their default audience and carry a JSON object claim (AWS session tags, A7)', () => {
+    const issuer = createWorkloadIssuer({ issuer: ISSUER, defaultAudience: AUDIENCE });
+    expect(issuer.defaultAudience).toBe(AUDIENCE);
+    const tags = { principal_tags: { 'bc-role': ['arn:aws:iam::222222222222:role/ml'] } };
+    const { token } = issuer.issue({
+      tenantId: 't',
+      instanceId: 'i',
+      audience: 'sts.amazonaws.com',
+      claims: { 'https://aws.amazon.com/tags': tags },
+    });
+    expect(decode(token)).toMatchObject({
+      aud: 'sts.amazonaws.com',
+      'https://aws.amazon.com/tags': tags,
+    });
+  });
+
   it('rotates without invalidating any issued token', () => {
     const clock = manualClock(Date.UTC(2026, 8, 24, 12));
     const issuer = createWorkloadIssuer({ issuer: ISSUER, defaultAudience: AUDIENCE, clock });

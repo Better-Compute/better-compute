@@ -12,7 +12,9 @@ import {
   workloadRoleTemplate,
   type AwsCommandContext,
 } from '@better-compute/provider-aws';
-import { accountSubject } from '@better-compute/vps';
+import { createWorkloadIssuer } from '@better-compute/pki';
+import { accountSubject, awsRoleSessionTagClaims } from '@better-compute/vps';
+import { AwsEmulator } from './support/aws-emulator/index.js';
 
 // AWS A7 onboarding: the CloudFormation a tenant deploys in its own AWS account. Either a role the
 // control plane assumes (the platform principal + the platform-assigned ExternalId, AD4), or a
@@ -153,7 +155,7 @@ describe('aws onboarding-template', () => {
 });
 
 describe('aws workload-role', () => {
-  it("trusts the issuer for the tenant's instances, with the STS audience", () => {
+  it("trusts the issuer for the tenant's instances, with the STS audience and its own role tag", () => {
     const template = workloadRoleTemplate({ tenantId: 't_acme', issuer: ISSUER });
     const role = template.Resources.Role as any;
     expect(role.Properties.RoleName).toBe('bc-workload');
@@ -162,14 +164,24 @@ describe('aws workload-role', () => {
         Sid: 'BetterComputeWorkloads',
         Effect: 'Allow',
         Principal: { Federated: { Ref: 'OidcProvider' } },
-        Action: 'sts:AssumeRoleWithWebIdentity',
+        // The broker tags an STS token with the one role it was minted for (bc-role), so a token
+        // for one workload role never assumes another.
+        Action: ['sts:AssumeRoleWithWebIdentity', 'sts:TagSession'],
         Condition: {
-          StringEquals: { 'compute.example.test/api/compute/workload:aud': 'sts.amazonaws.com' },
+          StringEquals: {
+            'compute.example.test/api/compute/workload:aud': 'sts.amazonaws.com',
+            'aws:RequestTag/bc-role': {
+              'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/bc-workload',
+            },
+          },
           StringLike: { 'compute.example.test/api/compute/workload:sub': 't:t_acme:instance:*' },
         },
       },
     ]);
     expect(role.Properties.ManagedPolicyArns).toBeUndefined();
+    expect(template.Outputs.RoleTag!.Value).toEqual({
+      'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/bc-workload',
+    });
     expect(template.Outputs.Subject!.Value).toBe('t:t_acme:instance:*');
   });
 
@@ -189,6 +201,17 @@ describe('aws workload-role', () => {
     ]);
     expect(template.Resources.OidcProvider).toBeUndefined();
     expect(role.Properties.AssumeRolePolicyDocument.Statement[0].Principal.Federated).toBe(provider);
+    expect(
+      role.Properties.AssumeRolePolicyDocument.Statement[0].Condition.StringEquals[
+        'aws:RequestTag/bc-role'
+      ],
+    ).toEqual({ 'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/ml-readers' });
+  });
+
+  it('refuses a role name a session tag cannot carry (a comma)', () => {
+    expect(() =>
+      workloadRoleTemplate({ tenantId: 't_acme', issuer: ISSUER, roleName: 'ml,readers' }),
+    ).toThrow(expect.objectContaining({ code: 'INVALID_INPUT' }));
   });
 
   it('refuses a tenant id that would widen the subject pattern', () => {
@@ -199,6 +222,77 @@ describe('aws workload-role', () => {
     expect(() =>
       workloadRoleTemplate({ tenantId: 't', issuer: ISSUER, policyArns: ['arn:aws:s3:::b'] }),
     ).toThrow(expect.objectContaining({ code: 'INVALID_INPUT' }));
+  });
+});
+
+/** CloudFormation's Fn::Sub over the pseudo parameters a workload role trust uses. */
+function resolveSub(value: unknown, account: string): any {
+  if (Array.isArray(value)) return value.map((item) => resolveSub(item, account));
+  if (typeof value !== 'object' || value === null) return value;
+  const sub = (value as { 'Fn::Sub'?: unknown })['Fn::Sub'];
+  if (typeof sub === 'string')
+    return sub.replaceAll('${AWS::Partition}', 'aws').replaceAll('${AWS::AccountId}', account);
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key, resolveSub(item, account)]),
+  );
+}
+
+describe('workload roles bound to their tag (A7, against the STS emulator)', () => {
+  it('a token the broker minted for one workload role never assumes another', async () => {
+    const emu = new AwsEmulator();
+    const issuer = createWorkloadIssuer({
+      issuer: ISSUER,
+      defaultAudience: 'sts.amazonaws.com',
+      clock: emu.clock,
+    });
+    const account = '222222222222';
+    const R1 = `arn:aws:iam::${account}:role/ml-readers`;
+    const R2 = `arn:aws:iam::${account}:role/admins`;
+    for (const arn of [R1, R2]) {
+      const template = workloadRoleTemplate({
+        tenantId: 't_acme',
+        issuer: ISSUER,
+        roleName: arn.split('/').pop()!,
+      });
+      const statement = resolveSub(
+        (template.Resources.Role as any).Properties.AssumeRolePolicyDocument.Statement[0],
+        account,
+      );
+      emu.sts.webRoles.set(arn, {
+        issuer: ISSUER,
+        jwks: async () => issuer.jwks(),
+        actions: statement.Action,
+        condition: statement.Condition,
+      });
+    }
+    const assume = async (roleArn: string, token: string) =>
+      (
+        await emu.fetch('https://sts.us-east-1.amazonaws.com/', {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            Action: 'AssumeRoleWithWebIdentity',
+            Version: '2011-06-15',
+            RoleArn: roleArn,
+            RoleSessionName: 'bc',
+            WebIdentityToken: token,
+          }).toString(),
+        })
+      ).status;
+    const mint = (arn?: string) =>
+      issuer.issue({
+        tenantId: 't_acme',
+        instanceId: 'inst_1',
+        ...(arn ? { claims: awsRoleSessionTagClaims(arn)! } : {}),
+      }).token;
+    expect(await assume(R1, mint(R1))).toBe(200);
+    expect(await assume(R2, mint(R2))).toBe(200);
+    // R1's token on R2 (another workload role of the same tenant) and an untagged token: refused.
+    expect(await assume(R2, mint(R1))).toBe(403);
+    expect(await assume(R1, mint())).toBe(403);
+    // IAM refuses a tagged token when the trust does not allow sts:TagSession.
+    emu.sts.webRoles.get(R1)!.actions = 'sts:AssumeRoleWithWebIdentity';
+    expect(await assume(R1, mint(R1))).toBe(403);
   });
 });
 

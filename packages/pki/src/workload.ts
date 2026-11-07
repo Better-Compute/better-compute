@@ -41,15 +41,28 @@ interface IssuerKey {
   demotedAt?: number;
 }
 
+/**
+ * An extra claim's value: a JSON value. Objects serve namespaced claims such as AWS STS's
+ * `https://aws.amazon.com/tags` session tags (AWS A7).
+ */
+export type WorkloadClaimValue =
+  | string
+  | number
+  | boolean
+  | readonly WorkloadClaimValue[]
+  | { readonly [key: string]: WorkloadClaimValue };
+
 export interface WorkloadIssuer {
   readonly issuer: string;
+  /** The audience a token carries when `issue` names none. */
+  readonly defaultAudience: string;
   /** Mints a workload token (≤ 15 min). Extra claims must not shadow the registered ones. */
   issue(input: {
     tenantId: string;
     instanceId: string;
     audience?: string;
     ttlSeconds?: number;
-    claims?: Record<string, string | number | boolean>;
+    claims?: Record<string, WorkloadClaimValue>;
   }): { token: string; jti: string; expiresAt: number };
   /** Every key a verifier should accept: the signing key, keys waiting to sign, and retiring keys. */
   jwks(): { keys: JsonWebKey[] };
@@ -134,6 +147,7 @@ export function createWorkloadIssuer(options: {
 
   return {
     issuer,
+    defaultAudience: options.defaultAudience,
     issue(input) {
       if (!idPart.test(input.tenantId) || !idPart.test(input.instanceId))
         throw new ComputeError(

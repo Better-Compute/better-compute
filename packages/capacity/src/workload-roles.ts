@@ -68,6 +68,42 @@ export function awsRoleAllowed(list: unknown, arn: string): boolean {
 }
 
 /**
+ * The AWS session tag that binds a workload token for STS to one role. Every role `aws workload-role`
+ * renders trusts the whole tenant's instances (`sub` `t:<tenantId>:instance:*`), so the trust also
+ * requires `aws:RequestTag/bc-role` to be the role itself (and allows `sts:TagSession`); the
+ * workload broker tags each STS token with the role the instance's pool allows. A token minted for
+ * one role therefore assumes no other role of the tenant, whoever presents it.
+ */
+export const awsRoleSessionTagKey = 'bc-role';
+/** The JWT claim AWS STS reads session tags from (AssumeRoleWithWebIdentity). */
+export const awsSessionTagsClaim = 'https://aws.amazon.com/tags';
+/** A role name a session tag value can carry: IAM's role-name characters without `,`. */
+const taggableRoleName = /^[\w+=.@-]{1,64}$/;
+
+/**
+ * The `bc-role` tag value of a role: its ARN without the path (`arn:<partition>:iam::<account>:
+ * role/<name>`), which a CloudFormation trust can spell with `Fn::Sub` and which stays unique
+ * (IAM role names are unique per account, whatever the path). Undefined for anything but a role ARN,
+ * or a name a tag value cannot carry (a comma): no tag, no STS token (fail closed).
+ */
+export function awsRoleSessionTag(arn: string): string | undefined {
+  if (typeof arn !== 'string' || !awsRoleArnPattern.test(arn)) return undefined;
+  const name = arn.slice(arn.lastIndexOf('/') + 1);
+  if (!taggableRoleName.test(name)) return undefined;
+  const [, partition, , , account] = arn.split(':');
+  return `arn:${partition}:iam::${account}:role/${name}`;
+}
+
+/** The claims that tag an STS workload token with `arn` (undefined when it cannot be tagged). */
+export function awsRoleSessionTagClaims(
+  arn: string,
+): { [awsSessionTagsClaim]: { principal_tags: { [awsRoleSessionTagKey]: string[] } } } | undefined {
+  const tag = awsRoleSessionTag(arn);
+  if (tag === undefined) return undefined;
+  return { [awsSessionTagsClaim]: { principal_tags: { [awsRoleSessionTagKey]: [tag] } } };
+}
+
+/**
  * The hosts running a pool's role-bearing instances (vps `instances.aws_role_arn`), whose desired
  * spec carries an AWS role. Empty without the vps module (no `instances` table, or no role column).
  */

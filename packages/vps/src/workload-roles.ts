@@ -14,6 +14,10 @@ export {
   awsRoleArnPattern,
   awsRoleGlobMatches,
   awsRoleGlobPattern,
+  awsRoleSessionTag,
+  awsRoleSessionTagClaims,
+  awsRoleSessionTagKey,
+  awsSessionTagsClaim,
   isAwsRoleGlob,
   maxAwsRoleGlobs,
   maxAwsRoleGlobStars,
@@ -24,12 +28,14 @@ export {
 // workloads assume (`instances.create` `workloadIdentity.awsRoleArn`). The pool must have turned
 // workload identity on (`policy.workloadIdentity: true`, the broker's own gate) and list the role in
 // `policy.workloadRoles.aws` (ARN globs). vps passes it to the host as `InstanceSpec.awsRole`, and
-// checks the pool again whenever it builds the spec, so a role the pool stops allowing leaves the
-// spec at once (fail closed). bcd exchanges the instance's workload token for the role's
-// credentials. The role's trust pins only the tenant (`t:<tenantId>:instance:*`), so the workload
-// broker enforces the same allow-list: it mints a token for `sts.amazonaws.com` only for an instance
-// whose pool still allows its role. Until bcd's guest endpoint refuses that audience (the Go half),
-// a guest of a role-bearing instance can still assume any workload role of its own tenant.
+// checks the pool again whenever it builds the spec (fail closed); pools.update invalidates the
+// desired spec of every host running a role-bearing instance of the pool when its workload settings
+// change, so the host converges on that invalidation rather than at the level-triggered resync.
+// Credentials bcd already obtained stay valid until they expire. bcd exchanges the instance's
+// workload token for the role's credentials. The role's trust pins the tenant
+// (`t:<tenantId>:instance:*`) and its own `bc-role` session tag; the workload broker mints a token
+// for `sts.amazonaws.com` only for an instance whose pool still allows its role, tagged with that
+// role, so the token assumes no other workload role of the tenant even if a guest obtains it.
 
 /** `instances.create`'s `workloadIdentity`. */
 export interface InstanceWorkloadIdentity {

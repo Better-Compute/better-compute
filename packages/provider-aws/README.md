@@ -103,16 +103,22 @@ globs); an instance names one as `instances.create` `workloadIdentity.awsRoleArn
 `InstanceSpec.awsRole` while the pool allows it; bcd exchanges the instance's workload token (audience
 `sts.amazonaws.com`, subject `t:<tenantId>:instance:<id>`, from the gateway's workload broker, which must list
 that audience) for the role's credentials and serves them on the guest's AWS-compatible metadata paths.
-`better-compute aws workload-role --tenant <tenantId> --issuer <issuer URL> [--policy-arn <arn>]` renders the OIDC
-provider and the role, trusting `aud` `sts.amazonaws.com` and `sub` like `t:<tenantId>:instance:*`.
+`better-compute aws workload-role --tenant <tenantId> --issuer <issuer URL> [--role-name <name>] [--policy-arn <arn>]`
+renders the OIDC provider and the role, trusting `aud` `sts.amazonaws.com`, `sub` like `t:<tenantId>:instance:*`
+and the session tag `bc-role` equal to the role itself (`aws:RequestTag/bc-role` = its ARN without a path, with
+`sts:TagSession` allowed; the `RoleTag` output shows the value).
 
-That trust pins the tenant, not the pool or the instance. The workload broker therefore mints a token for
-`sts.amazonaws.com` only for an instance that names a role its pool still allows (refusal `audience`, reason
-`aws-role-not-allowed`), so an instance without an allowed role cannot get one at all. Until bcd's guest-facing
-`/latest/identity-token` also refuses that audience (the Go half of A7), a guest of an instance that *does* have
-an allowed role can fetch its own STS token and assume any other workload role of its tenant: treat every role
-`aws workload-role` renders for a tenant as reachable by that tenant's role-bearing instances, and keep roles
-that must stay apart in separate tenants.
+The workload broker mints a token for `sts.amazonaws.com` (requested, or the issuer's default audience) only for
+an instance that names a role its pool still allows (refusal `audience`, reason `aws-role-not-allowed`), decided
+before anything is signed, and tags it with that role (`https://aws.amazon.com/tags` `principal_tags.bc-role`).
+So a token minted for one workload role assumes no other role of the tenant, even when the guest fetches it
+itself from `/latest/identity-token`. A role you write by hand needs the same trust: without the tag condition it
+accepts any of the tenant's STS tokens. A role name with a comma cannot be a tag value; the broker refuses such a
+role (`aws-role-untaggable`) and `aws workload-role` refuses the name.
+
+When a pool's workload settings change, `pools.update` recomputes the specs of the hosts running its role-bearing
+instances at once. Credentials bcd already obtained stay valid until they expire (at most an hour; bcd's cache
+renews 5 minutes before expiry).
 
 IAM Roles Anywhere for bcd nodes outside AWS (plan question AQ9) is deferred, as the plan's default: workloads get
 AWS credentials only through this web identity exchange.

@@ -1,7 +1,7 @@
 import { writeFile } from 'node:fs/promises';
 import { ComputeError } from '@better-compute/core';
 import { parseArn, type AwsPartition } from '@better-compute/aws-core';
-import { accountSubject } from '@better-compute/vps';
+import { accountSubject, awsRoleSessionTagKey } from '@better-compute/vps';
 import {
   iamPolicy,
   trustPolicy,
@@ -219,17 +219,32 @@ export interface WorkloadRoleOptions {
   oidcProviderArn?: string;
 }
 
+/** A workload role's name: IAM's role-name characters without `,`, which a tag value cannot carry. */
+const workloadRoleNamePattern = /^[\w+=.@-]{1,64}$/;
+
+/**
+ * A workload role's own `bc-role` session tag value as CloudFormation spells it: its ARN without a
+ * path (capacity's `awsRoleSessionTag`, which the workload broker tags STS tokens with).
+ */
+export function workloadRoleTag(roleName: string): { 'Fn::Sub': string } {
+  if (!workloadRoleNamePattern.test(roleName))
+    throw usage('--role-name of a workload role is 1 to 64 characters of [\\w+=.@-] (no comma)');
+  return { 'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/' + roleName };
+}
+
 /**
  * The trust statement of a role a tenant's instances assume (A7): the issuer's OIDC provider, `aud`
- * sts.amazonaws.com, `sub` like `t:<tenantId>:instance:*`. The trust pins the tenant, not a pool:
- * the workload broker mints that audience only for an instance whose pool allows its role
- * (`workloadRoles.aws`), but such an instance's guest can, until bcd refuses the audience on its
- * guest endpoint, present its token to any of the tenant's workload roles.
+ * sts.amazonaws.com, `sub` like `t:<tenantId>:instance:*`, and the session tag `bc-role` equal to
+ * this role (`sts:TagSession` allowed). The workload broker mints that audience only for an
+ * instance whose pool allows its role (`workloadRoles.aws`) and tags the token with that role, so a
+ * token minted for one workload role never assumes another, even when a guest obtains it.
  */
 export function workloadTrustStatement(options: {
   tenantId: string;
   issuer: string;
   federated: unknown;
+  /** The role's name (no path): the `bc-role` tag value the trust requires. */
+  roleName: string;
 }): IamStatement {
   if (!idPattern.test(options.tenantId)) throw usage('--tenant is a tenant id ([A-Za-z0-9._-])');
   const key = issuerKey(options.issuer);
@@ -237,9 +252,12 @@ export function workloadTrustStatement(options: {
     Sid: 'BetterComputeWorkloads',
     Effect: 'Allow',
     Principal: { Federated: options.federated },
-    Action: 'sts:AssumeRoleWithWebIdentity',
+    Action: ['sts:AssumeRoleWithWebIdentity', 'sts:TagSession'],
     Condition: {
-      StringEquals: { [`${key}:aud`]: webIdentityAudience },
+      StringEquals: {
+        [`${key}:aud`]: webIdentityAudience,
+        [`aws:RequestTag/${awsRoleSessionTagKey}`]: workloadRoleTag(options.roleName),
+      },
       StringLike: { [`${key}:sub`]: `t:${options.tenantId}:instance:*` },
     },
   };
@@ -260,19 +278,26 @@ export function workloadRoleTemplate(options: WorkloadRoleOptions): CloudFormati
     if (!parsed || parsed.service !== 'iam' || !parsed.resource.startsWith('policy/'))
       throw usage('--policy-arn is an IAM managed policy ARN (arn:…:iam::<account|aws>:policy/<name>)');
   }
+  const name = roleName(options.roleName, 'bc-workload');
+  const tag = workloadRoleTag(name);
   const resources: CloudFormationTemplate['Resources'] = {};
   const federated = oidcProvider(options.issuer, key, options.oidcProviderArn, resources);
   const subject = `t:${options.tenantId}:instance:*`;
   resources.Role = {
     Type: 'AWS::IAM::Role',
     Properties: {
-      RoleName: roleName(options.roleName, 'bc-workload'),
+      RoleName: name,
       Description: `better-compute workloads of tenant ${options.tenantId}`,
       MaxSessionDuration: 3600,
       AssumeRolePolicyDocument: {
         Version: '2012-10-17',
         Statement: [
-          workloadTrustStatement({ tenantId: options.tenantId, issuer: options.issuer, federated }),
+          workloadTrustStatement({
+            tenantId: options.tenantId,
+            issuer: options.issuer,
+            federated,
+            roleName: name,
+          }),
         ],
       },
       ...(options.policyArns?.length ? { ManagedPolicyArns: [...options.policyArns] } : {}),
@@ -288,6 +313,10 @@ export function workloadRoleTemplate(options: WorkloadRoleOptions): CloudFormati
       RoleArn: { Description: 'The workload role ARN', Value: { 'Fn::GetAtt': ['Role', 'Arn'] } },
       Subject: { Description: 'The subjects the role trusts', Value: subject },
       Audience: { Description: 'The audience workload tokens carry', Value: webIdentityAudience },
+      RoleTag: {
+        Description: `The ${awsRoleSessionTagKey} session tag a workload token must carry (this role)`,
+        Value: tag,
+      },
     },
   };
 }
