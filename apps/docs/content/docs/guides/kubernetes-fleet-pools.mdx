@@ -203,6 +203,10 @@ privileged DaemonSet or a cluster-admin identity behind unannounced. For the sam
 refuses an adopted cluster (`INVALID_STATE`): a kubeconfig's service account and binding would outlive the substrate
 on a cluster better-compute no longer manages. Reach your own cluster with the provider's credentials.
 
+One cluster backs one pool, checked per provider account. Adopt a cluster through one account only: two accounts
+that reach the same cluster could each adopt it, and both substrates would use the same `bc-substrate` identity, so
+one pool's teardown revokes it under the other until that substrate mints it again on its next run.
+
 | Provider | Adopt id                    | What the cluster needs                                                                                                                                  |
 | -------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | GKE      | `<location>/<cluster name>` | Nothing more: the account's Google identity reaches the cluster API.                                                                                    |
