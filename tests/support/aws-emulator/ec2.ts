@@ -1,9 +1,11 @@
 import type { AwsEmulator, EmulatorRequest } from './index.js';
+import { SsmEmulator } from './ssm.js';
 import { ec2Error, ec2Response, el, items } from './xml.js';
 
 // EC2 as provider-aws uses it: instance types, offerings and AZs; RunInstances with ClientToken
 // dedupe; DescribeInstances with ids, filters and paging; terminate, start/stop/reboot, diagnostic
-// interrupts, replace-root-volume tasks, tags and images. Knobs: newInstanceNotFound (eventual
+// interrupts, replace-root-volume tasks (AMI ids only; completed by tick), tags and images (with
+// owner and visibility; resolve:ssm: images resolve through `ssm`). Knobs: newInstanceNotFound (eventual
 // consistency), staleTagReads and serveStaleTags (tag writes EC2 does not show yet), asyncFailure,
 // tick, settleOnRead, disableApiTermination and addInstance (foreign instances). Like EC2, StartInstances refuses a stopping instance, StopInstances a pending one and
 // RebootInstances anything not running (IncorrectInstanceState).
@@ -17,6 +19,14 @@ export interface EmuType {
   bareMetal?: boolean;
   instanceStorageGB?: number;
   efa?: number;
+}
+
+export interface EmuImage {
+  rootDevice: string;
+  arch: string;
+  ownerId: string;
+  ownerAlias?: string;
+  public: boolean;
 }
 
 export interface EmuInstance {
@@ -43,6 +53,8 @@ export interface EmuInstance {
   notFoundById: number;
   notFoundByToken: number;
   rootDevice: string;
+  /** The EBS volume attached at `rootDevice`. */
+  rootVolumeId: string;
   userData?: string;
   /** Tags by-id reads show instead of `tags`, for `reads` more reads (eventually consistent tags). */
   staleTags?: { tags: Map<string, string>; reads: number };
@@ -109,15 +121,29 @@ export class Ec2Emulator {
   /** zone → offered types. p5 only in us-east-1a. */
   readonly offerings = new Map<string, Set<string>>();
   readonly instances = new Map<string, EmuInstance>();
-  readonly images = new Map<string, { rootDevice: string; arch: string }>([
-    ['ami-0123456789abcdef0', { rootDevice: '/dev/xvda', arch: 'x86_64' }],
+  /** AMIs the account can see. The default one is a public Amazon image. */
+  readonly images = new Map<string, EmuImage>([
+    [
+      'ami-0123456789abcdef0',
+      {
+        rootDevice: '/dev/xvda',
+        arch: 'x86_64',
+        ownerId: '137112412989',
+        ownerAlias: 'amazon',
+        public: true,
+      },
+    ],
   ]);
+  /** Root volume replacements; a pending task completes (a new root volume) on `tick`. */
   readonly replaceRootTasks: {
     id: string;
     instanceId: string;
     imageId: string;
     clientToken?: string;
+    state: 'pending' | 'succeeded';
   }[] = [];
+  /** The SSM parameter store EC2 resolves `resolve:ssm:` images from. */
+  readonly ssm: SsmEmulator;
   readonly diagnosticInterrupts: string[] = [];
   /** Page size cap for paged reads (small, so tests page). */
   pageSize = 2;
@@ -134,6 +160,7 @@ export class Ec2Emulator {
   #next = 0;
 
   constructor(private readonly emu: AwsEmulator) {
+    this.ssm = new SsmEmulator(emu);
     for (const zone of this.zones.keys())
       this.offerings.set(
         zone,
@@ -181,6 +208,7 @@ export class Ec2Emulator {
       notFoundById: 0,
       notFoundByToken: 0,
       rootDevice: '/dev/xvda',
+      rootVolumeId: this.#id('vol'),
     };
     this.instances.set(id, instance);
     return instance;
@@ -200,6 +228,15 @@ export class Ec2Emulator {
       else if (instance.state === 'stopping') instance.state = 'stopped';
       else if (instance.state === 'shutting-down') instance.state = 'terminated';
     }
+    for (const task of this.replaceRootTasks)
+      if (task.state === 'pending') {
+        task.state = 'succeeded';
+        const instance = this.instances.get(task.instanceId);
+        if (instance) {
+          instance.rootVolumeId = this.#id('vol');
+          instance.imageId = task.imageId;
+        }
+      }
   }
 
   /** The next `reads` by-id reads of `id` show `tags` (a stale replica). */
@@ -247,7 +284,10 @@ export class Ec2Emulator {
       el('instanceLifecycle', instance.lifecycle),
       el('architecture', this.types.get(instance.type)?.arch[0] ?? 'x86_64'),
       el('rootDeviceName', instance.rootDevice),
-      items('blockDeviceMapping', this.blockDevices(instance)),
+      items('blockDeviceMapping', [
+        `${el('deviceName', instance.rootDevice)}<ebs>${el('volumeId', instance.rootVolumeId)}${el('status', 'attached')}${el('deleteOnTermination', true)}</ebs>`,
+        ...this.blockDevices(instance),
+      ]),
       el('subnetId', instance.subnetId),
       el('vpcId', instance.vpcId),
       tagSet,
@@ -339,10 +379,10 @@ export class Ec2Emulator {
           action,
           items(
             'imagesSet',
-            found.map(
-              (id) =>
-                `${el('imageId', id)}${el('rootDeviceName', this.images.get(id)!.rootDevice)}${el('architecture', this.images.get(id)!.arch)}`,
-            ),
+            found.map((id) => {
+              const image = this.images.get(id)!;
+              return `${el('imageId', id)}${el('imageOwnerId', image.ownerId)}${el('imageOwnerAlias', image.ownerAlias)}${el('isPublic', image.public)}${el('rootDeviceName', image.rootDevice)}${el('architecture', image.arch)}`;
+            }),
           ),
         );
       }
@@ -467,20 +507,25 @@ export class Ec2Emulator {
         const instanceId = p.get('InstanceId') ?? '';
         if (!this.instances.has(instanceId))
           return ec2Error('InvalidInstanceID.NotFound', 'no such instance');
+        // CreateReplaceRootVolumeTask takes an AMI id; EC2 resolves resolve:ssm: only at launch.
+        const imageId = p.get('ImageId');
+        if (imageId !== null && !/^ami-[0-9a-f]{8,17}$/.test(imageId))
+          return ec2Error('InvalidAMIID.Malformed', `Invalid id: "${imageId}"`);
         const clientToken = p.get('ClientToken') ?? undefined;
         let task = this.replaceRootTasks.find((t) => clientToken && t.clientToken === clientToken);
         if (!task) {
           task = {
             id: this.#id('replacevol'),
             instanceId,
-            imageId: p.get('ImageId') ?? '',
+            imageId: imageId ?? this.instances.get(instanceId)!.imageId,
             ...(clientToken ? { clientToken } : {}),
+            state: 'pending' as const,
           };
           this.replaceRootTasks.push(task);
         }
         return ec2Response(
           action,
-          `<replaceRootVolumeTask>${el('replaceRootVolumeTaskId', task.id)}${el('instanceId', instanceId)}${el('taskState', 'pending')}</replaceRootVolumeTask>`,
+          `<replaceRootVolumeTask>${el('replaceRootVolumeTaskId', task.id)}${el('instanceId', instanceId)}${el('taskState', task.state)}</replaceRootVolumeTask>`,
         );
       }
       case 'CreateTags':
@@ -548,11 +593,16 @@ export class Ec2Emulator {
     const imageId = p.get('ImageId') ?? '';
     if (!/^ami-[0-9a-f]{8,17}$/.test(imageId) && !imageId.startsWith('resolve:ssm:'))
       return ec2Error('InvalidAMIID.Malformed', 'Invalid id');
+    const resolved = imageId.startsWith('resolve:ssm:')
+      ? this.ssm.value(imageId.slice('resolve:ssm:'.length))
+      : imageId;
+    if (resolved === undefined)
+      return ec2Error('InvalidParameterValue', 'The SSM parameter of the image does not exist');
     const userData = p.get('UserData') ?? undefined;
     if (userData && Buffer.from(userData, 'base64').length > 16_384)
       return ec2Error('InvalidParameterValue', 'User data is limited to 16384 bytes');
     const instance = this.addInstance({ type, zone, state: 'pending' });
-    instance.imageId = imageId.startsWith('resolve:ssm:') ? 'ami-0fedcba9876543210' : imageId;
+    instance.imageId = resolved;
     instance.publicIp =
       p.get('NetworkInterface.1.AssociatePublicIpAddress') === 'false'
         ? undefined

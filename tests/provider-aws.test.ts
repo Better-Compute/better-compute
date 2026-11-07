@@ -460,6 +460,7 @@ describe('compute', () => {
     ).toBe('image');
 
     const allowed = await providerWorld({}, { ssmImagePrefixes: ['/my/team/'] });
+    allowed.ec2emu.ssm.parameters.set('/my/team/ami', 'ami-0aaaaaaaaaaaaaaa1');
     await allowed.create('ins_team', { image: 'resolve:ssm:/my/team/ami' });
     await allowed.create('ins_team2', { image: 'resolve:ssm:/aws/service/custom/ami' });
     expect(
@@ -469,6 +470,63 @@ describe('compute', () => {
     for (const ssmImagePrefixes of [['/my/team'], ['my/team/'], ['/a/../b/'], ['']])
       await expect(providerWorld({}, { ssmImagePrefixes })).rejects.toMatchObject({
         code: 'INVALID_CONFIG',
+      });
+  });
+
+  it('raw AMIs launch only when public, Amazon or Marketplace owned, or owned by an allowed account', async () => {
+    const { emu, ec2emu, create, impl, call } = await providerWorld();
+    const image = (ownerId: string, isPublic: boolean, ownerAlias?: string) => ({
+      rootDevice: '/dev/xvda',
+      arch: 'x86_64',
+      ownerId,
+      public: isPublic,
+      ...(ownerAlias ? { ownerAlias } : {}),
+    });
+    // A private golden image of the platform account itself, and one shared with it.
+    ec2emu.images.set('ami-0000000000000aaa1', image('111111111111', false));
+    ec2emu.images.set('ami-0000000000000aaa2', image('333333333333', false));
+    ec2emu.images.set('ami-0000000000000aaa3', image('679593333241', false, 'aws-marketplace'));
+    ec2emu.images.set('ami-0000000000000aaa4', image('444444444444', true));
+    for (const ami of ['ami-0000000000000aaa1', 'ami-0000000000000aaa2'])
+      expect(await rejection(() => create(`ins_${ami.slice(-4)}`, { image: ami }))).toMatchObject({
+        code: 'INVALID_INPUT',
+        details: { reason: 'image' },
+      });
+    expect(emu.calls('RunInstances')).toHaveLength(0);
+    // The verdict is cached with the root device: no second DescribeImages.
+    await rejection(() => create('ins_again', { image: 'ami-0000000000000aaa1' }));
+    expect(
+      emu
+        .calls('DescribeImages')
+        .filter((request) => request.params.get('ImageId.1') === 'ami-0000000000000aaa1'),
+    ).toHaveLength(1);
+    await create('ins_market', { image: 'ami-0000000000000aaa3' });
+    const machine = await create('ins_public', { image: 'ami-0000000000000aaa4' });
+    expect(emu.calls('RunInstances')).toHaveLength(2);
+    // reinstall takes the same check.
+    expect(
+      (
+        await rejection(() =>
+          impl.reinstall(machine.id, 'ami-0000000000000aaa1', call('ins_public')),
+        )
+      ).details?.reason,
+    ).toBe('image');
+    expect(emu.calls('CreateReplaceRootVolumeTask')).toHaveLength(0);
+
+    const allowed = await providerWorld({}, { imageOwners: ['111111111111'] });
+    allowed.ec2emu.images.set('ami-0000000000000aaa1', image('111111111111', false));
+    allowed.ec2emu.images.set('ami-0000000000000aaa2', image('333333333333', false));
+    const own = await allowed.create('ins_own', { image: 'ami-0000000000000aaa1' });
+    await allowed.impl.reinstall(own.id, 'ami-0000000000000aaa1', allowed.call('ins_own'));
+    expect(allowed.emu.calls('CreateReplaceRootVolumeTask')).toHaveLength(1);
+    expect(
+      (await rejection(() => allowed.create('ins_shared', { image: 'ami-0000000000000aaa2' })))
+        .code,
+    ).toBe('INVALID_INPUT');
+    for (const imageOwners of [['1111'], ['amazon'], [''], ['111111111111 ']])
+      await expect(providerWorld({}, { imageOwners })).rejects.toMatchObject({
+        code: 'INVALID_CONFIG',
+        details: { reason: 'imageOwners' },
       });
   });
 
@@ -845,20 +903,67 @@ describe('power & reinstall', () => {
     expect(ec2emu.diagnosticInterrupts).toEqual([machine.id]);
   });
 
-  it('reinstall replaces the root volume with the resolved image', async () => {
+  it('reinstall replaces the root volume with the AMI the alias resolves to', async () => {
     const { emu, ec2emu, create, impl, call } = await providerWorld();
     const machine = await create('ins_re', { offerId: 'us-east-1a/m7g.large' });
+    const parameter =
+      '/aws/service/canonical/ubuntu/server/22.04/stable/current/arm64/hvm/ebs-gp2/ami-id';
+    ec2emu.ssm.parameters.set(parameter, 'ami-0123456789abcd222');
+    const rootVolume = ec2emu.instances.get(machine.id)!.rootVolumeId;
     await impl.reinstall(machine.id, 'ubuntu-22.04', call('ins_re'));
     await impl.reinstall(machine.id, 'ubuntu-22.04', call('ins_re'));
+    const [lookup] = emu.calls('GetParameters');
+    expect(JSON.parse(lookup!.body)).toEqual({ Names: [parameter] });
     const [request] = emu.calls('CreateReplaceRootVolumeTask');
     expect(request!.params.get('InstanceId')).toBe(machine.id);
     expect(request!.params.get('DeleteReplacedRootVolume')).toBe('true');
-    expect(request!.params.get('ImageId')).toBe(
-      'resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/arm64/hvm/ebs-gp2/ami-id',
+    // CreateReplaceRootVolumeTask takes an AMI id, never resolve:ssm:.
+    expect(request!.params.get('ImageId')).toBe('ami-0123456789abcd222');
+    expect(request!.params.get('ClientToken')).toBe(
+      clientToken(`ins_re:reinstall:ubuntu-22.04:${rootVolume}`),
     );
-    expect(request!.params.get('ClientToken')).toBe(clientToken('ins_re:reinstall:ubuntu-22.04'));
-    // A retried reinstall is the same task.
+    // A retried reinstall (the task still pending, the same root volume) is the same task.
     expect(ec2emu.replaceRootTasks).toHaveLength(1);
+    // Once the task replaced the root volume, the same reinstall again is a new task.
+    ec2emu.tick();
+    await impl.reinstall(machine.id, 'ubuntu-22.04', call('ins_re'));
+    expect(ec2emu.replaceRootTasks).toHaveLength(2);
+    expect(ec2emu.replaceRootTasks[1]!.imageId).toBe('ami-0123456789abcd222');
+  });
+
+  it('reinstall refuses SSM parameters that do not exist or do not name an AMI', async () => {
+    const { emu, ec2emu, create, impl, call } = await providerWorld(
+      {},
+      { ssmImagePrefixes: ['/my/team/'] },
+    );
+    const machine = await create('ins_rs');
+    ec2emu.ssm.parameters.set('/my/team/not-an-ami', 'hello');
+    ec2emu.ssm.parameters.set('/my/team/golden', 'ami-0aaaaaaaaaaaaaaa1');
+    for (const image of ['resolve:ssm:/my/team/missing', 'resolve:ssm:/my/team/not-an-ami'])
+      expect(
+        await rejection(() => impl.reinstall(machine.id, image, call('ins_rs'))),
+      ).toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'image' } });
+    expect(emu.calls('CreateReplaceRootVolumeTask')).toHaveLength(0);
+    await impl.reinstall(machine.id, 'resolve:ssm:/my/team/golden:3', call('ins_rs'));
+    expect(JSON.parse(emu.calls('GetParameters').at(-1)!.body)).toEqual({
+      Names: ['/my/team/golden:3'],
+    });
+    expect(emu.calls('CreateReplaceRootVolumeTask')[0]!.params.get('ImageId')).toBe(
+      'ami-0aaaaaaaaaaaaaaa1',
+    );
+  });
+
+  it('the emulator refuses resolve:ssm: on CreateReplaceRootVolumeTask, like EC2', async () => {
+    const { ec2, ec2emu } = directWorld();
+    const instance = ec2emu.addInstance();
+    await expect(
+      ec2.call(
+        'CreateReplaceRootVolumeTask',
+        { InstanceId: instance.id, ImageId: 'resolve:ssm:/aws/service/x/ami-id' },
+        { signal },
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(ec2emu.replaceRootTasks).toHaveLength(0);
   });
 
   it('list pages managed instances only', async () => {

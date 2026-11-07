@@ -1,4 +1,4 @@
-import { ec2Client } from '@better-compute/aws-core';
+import { ec2Client, jsonClient } from '@better-compute/aws-core';
 import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 import { accountCredentials } from './account.js';
 import { AwsCompute } from './compute.js';
@@ -29,8 +29,22 @@ export function awsProvider(options: AwsProviderOptions = {}): ProviderDefinitio
         ...(options.endpoints?.ec2 !== undefined ? { endpoint: options.endpoints.ec2 } : {}),
         ...(options.rateLimit ? { rateLimit: options.rateLimit } : {}),
       });
+      // SSM Parameter Store: reinstall resolves resolve:ssm: images to an AMI id with it.
+      const ssm = jsonClient({
+        service: 'ssm',
+        jsonVersion: '1.1',
+        targetPrefix: 'AmazonSSM',
+        region: config.region,
+        credentials: account.source,
+        fetch: options.fetch,
+        clock: context.clock,
+        log: context.log,
+        ...(options.endpoints?.ssm !== undefined ? { endpoint: options.endpoints.ssm } : {}),
+        ...(options.rateLimit ? { rateLimit: options.rateLimit } : {}),
+      });
       return new AwsCompute(config, context, options, {
         ec2,
+        ssm,
         account,
         types: instanceTypeCache(ec2, { clock: context.clock }),
         zones: zoneCache(ec2, { clock: context.clock }),
