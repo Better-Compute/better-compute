@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   isComputeError,
+  type ComputeError,
   type CallContext,
   type KubernetesClusterSpec,
   type KubernetesNodePoolSpec,
@@ -479,6 +480,14 @@ describe('eks node groups', () => {
     c.emu.failNext('DescribeInstanceTypes', 'UnauthorizedOperation', 403);
     await settle(() => c.k8s.ensureNodePool(cid, { ...pool, name: 'cpu' }, c.ctx()), 'ready');
     expect(bodyOf(c, 'CreateNodegroup').amiType).toBe('AL2023_x86_64_STANDARD');
+    // A GPU family without accelerators and without the read: not a CPU AMI without drivers either.
+    for (const machineType of ['g5.xlarge', 'p5.48xlarge', 'g4dn.xlarge', 'gr6.4xlarge']) {
+      c.emu.failNext('DescribeInstanceTypes', 'UnauthorizedOperation', 403);
+      const unknown = await rejection(c.k8s.ensureNodePool(cid, { ...pool, name: 'gpu-bare', machineType }, c.ctx()));
+      expect(isComputeError(unknown, 'INVALID_STATE'), `${machineType}: ${String(unknown)}`).toBe(true);
+      expect((unknown as ComputeError).details).toMatchObject({ reason: 'instanceTypeUnknown' });
+    }
+    expect(c.eks.calls('CreateNodegroup')).toHaveLength(1);
   });
 
   it('resizes and re-bounds in place; anything else is INVALID_STATE', async () => {

@@ -94,6 +94,16 @@ export function checkNodePoolSpec(spec: KubernetesNodePoolSpec): void {
 }
 
 const neuronPattern = /^(inf|trn)\d/;
+/** Instance families that carry GPUs (p, g and gr): their AMI cannot be chosen without the type's info. */
+const gpuFamilyPattern = /^(p\d|g\d|gr\d)/;
+
+function typeUnknown(message: string): ComputeError {
+  return new ComputeError('INVALID_STATE', message, undefined, {
+    provider: 'aws',
+    service: 'eks',
+    reason: 'instanceTypeUnknown',
+  });
+}
 
 /** Whether the type is a GPU type (NVIDIA): from DescribeInstanceTypes when known. */
 export const isGpuType = (info: InstanceTypeInfo | undefined): boolean => (info?.gpus?.count ?? 0) > 0;
@@ -113,6 +123,12 @@ export function amiTypeOf(machineType: string, info: InstanceTypeInfo | undefine
  */
 export function checkAccelerators(spec: KubernetesNodePoolSpec, info: InstanceTypeInfo | undefined): void {
   const wanted = spec.accelerators;
+  // A GPU family read as nothing would get the CPU AMI (no NVIDIA drivers) and no GPU taint, and
+  // nothing would say so: refused with or without accelerators.
+  if (!info && gpuFamilyPattern.test(spec.machineType))
+    throw typeUnknown(
+      `Cannot tell which AMI ${spec.machineType} needs (it is a GPU family): grant ec2:DescribeInstanceTypes (and check the instance type)`,
+    );
   if (!wanted) return;
   if (neuronPattern.test(spec.machineType)) {
     if (wanted.type !== 'aws-neuron')
@@ -122,11 +138,8 @@ export function checkAccelerators(spec: KubernetesNodePoolSpec, info: InstanceTy
   // Unread (no ec2:DescribeInstanceTypes, or a type EC2 does not know): the AMI and the GPU taint
   // would silently be the CPU ones, so a GPU pool is refused rather than made unusable.
   if (!info)
-    throw new ComputeError(
-      'INVALID_STATE',
+    throw typeUnknown(
       `Cannot verify that ${spec.machineType} has ${wanted.count} ${wanted.type}: grant ec2:DescribeInstanceTypes (and check the instance type)`,
-      undefined,
-      { provider: 'aws', service: 'eks', reason: 'instanceTypeUnknown' },
     );
   if (!info.gpus || info.gpus.count === 0)
     throw invalid(`${spec.machineType} has no GPUs: pick a GPU instance type for accelerators`);
