@@ -804,14 +804,17 @@ describe('eks IAM policy', () => {
       StringEquals: { 'aws:ResourceTag/better-compute:managed': 'true' },
     });
     expect(by('EksManageOwned').Action).toContain('eks:UpdateNodegroupVersion');
-    expect(by('EksManageOwned').Resource).toContain('arn:aws:eks:us-east-1:111111111111:cluster/*');
+    expect(by('EksManageOwned').Resource).toEqual([
+      'arn:aws:eks:us-east-1:111111111111:cluster/bc-k-*',
+      'arn:aws:eks:us-east-1:111111111111:nodegroup/bc-k-*/*/*',
+    ]);
     // Its own principal, and only on clusters (and entries) better-compute manages: never
     // cluster-admin on every cluster of a BYO account.
     expect(by('EksOwnAccessEntry')).toMatchObject({
       Action: ['eks:CreateAccessEntry', 'eks:AssociateAccessPolicy'],
       Resource: [
-        'arn:aws:eks:us-east-1:111111111111:cluster/*',
-        'arn:aws:eks:us-east-1:111111111111:access-entry/*/*/*/*/*',
+        'arn:aws:eks:us-east-1:111111111111:cluster/bc-k-*',
+        'arn:aws:eks:us-east-1:111111111111:access-entry/bc-k-*/*/*/*/*',
       ],
       Condition: {
         StringEquals: {
@@ -820,12 +823,59 @@ describe('eks IAM policy', () => {
         },
       },
     });
-    expect(by('EksCreateTagged').Resource).toContain('arn:aws:eks:us-east-1:111111111111:access-entry/*/*/*/*/*');
+    expect(by('EksCreateTagged').Resource).toEqual([
+      'arn:aws:eks:us-east-1:111111111111:cluster/bc-k-*',
+      'arn:aws:eks:us-east-1:111111111111:nodegroup/bc-k-*/*/*',
+      'arn:aws:eks:us-east-1:111111111111:access-entry/bc-k-*/*/*/*/*',
+    ]);
     // Adopting clusters better-compute did not create is an explicit opt-in.
     const adopt = iamPolicy({ region, account: '111111111111', eksClusterRoleArn: clusterRoleArn, eksAdoptClusters: true });
-    expect(adopt.Statement.find((statement) => statement.Sid === 'EksOwnAccessEntry')!.Condition).toEqual({
-      StringEquals: { 'eks:principalArn': '${aws:PrincipalArn}' },
+    const adopted = (sid: string) => adopt.Statement.find((statement) => statement.Sid === sid)!;
+    expect(adopted('EksOwnAccessEntry')).toMatchObject({
+      Resource: [
+        'arn:aws:eks:us-east-1:111111111111:cluster/*',
+        'arn:aws:eks:us-east-1:111111111111:access-entry/*/*/*/*/*',
+      ],
+      Condition: { StringEquals: { 'eks:principalArn': '${aws:PrincipalArn}' } },
     });
+    // Adopting reaches access entries (tag-on-create of its own entry), never another cluster's
+    // config, version or deletion.
+    expect(adopted('EksManageOwned').Resource).toEqual(by('EksManageOwned').Resource);
+    expect(adopted('EksCreateTagged').Resource).toEqual([
+      'arn:aws:eks:us-east-1:111111111111:cluster/bc-k-*',
+      'arn:aws:eks:us-east-1:111111111111:nodegroup/bc-k-*/*/*',
+      'arn:aws:eks:us-east-1:111111111111:access-entry/*/*/*/*/*',
+    ]);
+    // eks:TagResource is the way a managed tag would reach a cluster better-compute did not make
+    // (and then EksManageOwned would let the role delete it): never allowed on an unprefixed
+    // cluster or node group, adopting or not.
+    for (const document of [policy, adopt]) {
+      for (const statement of document.Statement) {
+        if (statement.Effect !== 'Allow') continue;
+        const actions = ([] as string[]).concat(statement.Action);
+        const resources = ([] as string[]).concat(statement.Resource);
+        if (!actions.some((action) => action === 'eks:TagResource' || action === 'eks:*' || action === '*')) continue;
+        for (const resource of resources)
+          expect(
+            [':cluster/bc-k-*', ':nodegroup/bc-k-*/*/*'].some((tail) => resource.endsWith(tail)) ||
+              resource.includes(':access-entry/'),
+            `${statement.Sid} tags ${resource}`,
+          ).toBe(true);
+      }
+      // No write statement reaches an unprefixed cluster or node group; only the adopt opt-in
+      // reaches unprefixed access entries (and their clusters, for CreateAccessEntry).
+      for (const statement of document.Statement) {
+        if (statement.Effect !== 'Allow' || ['EksRead', 'EksServiceLinkedRoles'].includes(statement.Sid)) continue;
+        if (!statement.Sid.startsWith('Eks')) continue;
+        for (const resource of ([] as string[]).concat(statement.Resource)) {
+          expect(resource.endsWith(':nodegroup/*/*/*'), `${statement.Sid}: ${resource}`).toBe(false);
+          if (document === policy || statement.Sid !== 'EksOwnAccessEntry')
+            expect(resource.endsWith(':cluster/*'), `${statement.Sid}: ${resource}`).toBe(false);
+          if (document === policy)
+            expect(resource.includes(':access-entry/*/'), `${statement.Sid}: ${resource}`).toBe(false);
+        }
+      }
+    }
     expect(by('EksAdminPolicyOnly')).toMatchObject({ Effect: 'Deny', Action: 'eks:AssociateAccessPolicy' });
     expect(by('EksClusterScopeOnly')).toMatchObject({ Effect: 'Deny' });
     expect(by('PassEksRoles')).toEqual({
