@@ -305,6 +305,11 @@ export function dedicatedInferenceKind(): DoKind {
       return { ...state(updated.dedicated_inference), state: 'updating' };
     },
 
+    // A create whose answer was lost: the endpoint carrying the request's key tag, as ensure finds it. Read-only.
+    async find(env, _request, context) {
+      return (await byKey(env, context))?.id;
+    },
+
     async get(env, id, context) {
       const endpoint = await read(env, id, context.signal);
       if (!endpoint) return undefined;

@@ -395,6 +395,11 @@ export function knowledgeBaseKind(): DoKind {
       return { ...current, state: 'updating', spec: specOf(kb, [...sources.keys()].map(fromKey)) };
     },
 
+    // A create whose answer was lost: the knowledge base carrying the request's key tag, as ensure finds it.
+    async find(env, _request, context) {
+      return (await byKey(env, context))?.uuid;
+    },
+
     async get(env, id, context) {
       const current = await read(env, id, context.signal);
       if (!current) return undefined;

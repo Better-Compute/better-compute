@@ -193,9 +193,11 @@ bodies follow the API reference and are not yet checked against recorded respons
 is accepted only on the tenant's own account and cannot change in place. A cluster's `network` (a tenant network,
 `net_…`) is accepted on any account: only the tenant's own networks, checked at the API and again before every
 ensure; `vpc` and `network` together are refused (`vpcAndNetwork`), and a change is `replaceRequired`. Every kind
-serves `find` (read-only), as its `ensure` finds its resource: the key tag (clusters), the key env (apps), the label
-(namespaces), the name suffix (add-ons, attachments) or the child of an owned cluster or namespace, so a create
-whose answer was lost is deleted rather than forgotten. Not modelled yet: Standard and Advanced editions and Vector
+serves `find` (read-only), as its `ensure` finds its resource: the key tag (clusters, inference endpoints, knowledge
+bases), the key env (apps), the label (namespaces), the name suffix (add-ons, attachments, guardrails, Managed
+Agents objects), the base name whatever rotation it carries (model access keys) or the child of an owned cluster or
+namespace, so a create whose answer was lost is deleted rather than forgotten (a preview kind is found even after
+the account turns previews off). Not modelled yet: Standard and Advanced editions and Vector
 Databases. The 1-Click body follows the API reference too.
 
 ## AI platform

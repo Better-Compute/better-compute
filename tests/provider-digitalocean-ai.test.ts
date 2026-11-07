@@ -380,6 +380,20 @@ describe('do.inference-key (a model access key)', () => {
     expect(retried.secretOutputs?.key).not.toBe(unseen);
   });
 
+  it('find answers the key whatever rotation its name carries, never one of another deployment, and sends nothing', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    // Another deployment's key under the same base name, made first: never this deployment's.
+    seedModelKey(emu.state, { name: 'bc-r-key-r0-bc0123456789ab' });
+    const created = await resources.ensure(request(), call());
+    await resources.ensure(request({ id: created.id, spec: { rotation: 2 } }), call());
+    const before = emu.requests.length;
+    // A teardown whose spec is the stored one (rotation 0) still finds the key renamed to r2.
+    expect(await resources.find!(request(), call())).toBe(created.id);
+    expect(await resources.find!(request({ name: 'bc-r-none' }), call('crs_none'))).toBe(undefined);
+    expect(emu.requests.slice(before).filter((r) => r.method !== 'GET')).toEqual([]);
+  });
+
   it('a rotation regenerates the secret and records the rotation in the name', async () => {
     const emu = emulator();
     const { resources } = await build(emu);

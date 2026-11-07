@@ -161,6 +161,11 @@ export function guardrailKind(): DoKind {
       return state(created.guardrail);
     },
 
+    // A create whose answer was lost: the guardrail with this deployment's name suffix, as ensure finds it.
+    async find(env, request, context) {
+      return (await byName(env, ownedName(env, request.name), context.signal))?.uuid;
+    },
+
     async get(env, id, context) {
       const guardrail = await byId(env, id, context.signal);
       if (!guardrail) return undefined;

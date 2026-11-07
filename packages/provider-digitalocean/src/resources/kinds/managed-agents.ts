@@ -167,6 +167,12 @@ function namedKind<Spec, Object extends DoObject>(shape: Shape<Spec, Object>): D
       return { ...state(updated), state: 'updating' };
     },
 
+    // A create whose answer was lost: the object with this deployment's name suffix, as ensure finds it. The
+    // registry looks a preview kind up even with previews off, since find serves a teardown.
+    async find(env, request, context) {
+      return (await byName(env, ownedName(env, request.name), context.signal))?.uuid;
+    },
+
     async get(env, id, context) {
       const current = await read(env, id, context.signal);
       if (!current) return undefined;

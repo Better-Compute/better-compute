@@ -19,7 +19,18 @@ type Api = any;
 async function world(gpuQuota = 2, config: Record<string, unknown> = {}) {
   const emu = new DoEmulator();
   emu.validTokens = new Set(['root-do-token', 'acme-do-token']);
-  const provider = digitaloceanProvider({ fetch: emu.fetch });
+  // A path whose next POST DigitalOcean carries out but whose answer never comes back (a timeout after it accepted).
+  const loseAnswer = { path: undefined as RegExp | undefined };
+  const fetch: typeof emu.fetch = async (input, init) => {
+    const answer = await emu.fetch(input, init);
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (loseAnswer.path?.test(url.pathname) && (init?.method ?? 'GET') === 'POST') {
+      loseAnswer.path = undefined;
+      throw new TypeError('fetch failed: the connection was reset');
+    }
+    return answer;
+  };
+  const provider = digitaloceanProvider({ fetch });
   const logs: string[] = [];
   const line = (message: string, fields?: unknown) =>
     void logs.push(JSON.stringify({ message, fields }));
@@ -127,6 +138,7 @@ async function world(gpuQuota = 2, config: Record<string, unknown> = {}) {
     get,
     until,
     gpusUsed,
+    loseAnswer,
   };
 }
 
@@ -201,6 +213,31 @@ describe('DigitalOcean Dedicated Inference through cloudResources', () => {
     expect(w.emu.state.dedicatedInferences.has(ready.providerId)).toBe(false);
     expect(await w.gpusUsed()).toBe(0);
     expect(JSON.stringify(w.logs)).not.toContain('root-do-token');
+  });
+
+  it('an endpoint whose create answer was lost is found on delete, torn down, and its GPUs returned', async () => {
+    const w = await world(2);
+    w.loseAnswer.path = /\/v2\/dedicated-inferences$/;
+    const endpoint = await w.api.cloudResources.create(w.acme, {
+      tenantId: w.acmeTenant,
+      poolId: w.poolId,
+      kind: 'do.dedicated-inference',
+      name: 'lost',
+      spec: { region: 'nyc3', model: 'llama3.3-70b-instruct', gpuSize: 'gpu-h100x1-80gb' },
+      idempotencyKey: 'lost',
+    });
+    await w.fixture.advance(10_000);
+    await w.fixture.compute.jobs['cloud.resources']!.tick();
+    // DigitalOcean made it, but the row never learned its id.
+    expect(w.emu.state.dedicatedInferences.size).toBe(1);
+    expect((await w.get(endpoint.id)).providerId ?? null).toBeNull();
+    expect(await w.gpusUsed()).toBe(1);
+
+    await w.api.cloudResources.delete(w.acme, { tenantId: w.acmeTenant, resourceId: endpoint.id });
+    await w.until(endpoint.id, 'deleted');
+    expect(w.emu.state.dedicatedInferences.size).toBe(0);
+    expect(w.emu.requests.filter((r) => r.method === 'DELETE')).toHaveLength(1);
+    expect(await w.gpusUsed()).toBe(0);
   });
 
   it('a model access key is refused on a shared pool, with no row and nothing sent', async () => {

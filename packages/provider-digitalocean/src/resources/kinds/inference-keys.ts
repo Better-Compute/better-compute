@@ -189,6 +189,13 @@ export function inferenceKeyKind(endpoint: string = defaultInferenceEndpoint): D
       return state(created.api_key_info, endpoint, created.api_key_info.secret_key);
     },
 
+    // A create whose answer was lost: this deployment's key under the base name, whatever rotation it carries (the
+    // stored spec may trail a rotation DigitalOcean applied), as ensure finds it. Read-only, on any account: a
+    // teardown never refuses.
+    async find(env, request, context) {
+      return (await byName(env, request.name, context.signal))?.uuid;
+    },
+
     async get(env, id, context) {
       const key = await byId(env, id, context.signal);
       if (!key) return undefined;

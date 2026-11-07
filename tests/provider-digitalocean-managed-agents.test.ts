@@ -123,6 +123,23 @@ describe('Managed Agents are previews', () => {
     expect(emu.state.actionGateways.size).toBe(0);
   });
 
+  it('one whose create answer was lost is still found, read-only, after the account turns previews off', async () => {
+    const emu = emulator();
+    const on = await build(emu, previewAccount);
+    const harnessReq = { kind: 'do.agent-harness', name: 'bc-r-a', spec: harnessSpec, labels };
+    const gatewayReq = { kind: 'do.action-gateway', name: 'bc-r-g', spec: gatewaySpec, labels };
+    const harness = await on.resources.ensure(harnessReq, ctx('crs_a'));
+    const gateway = await on.resources.ensure(gatewayReq, ctx('crs_g'));
+    const off = await build(emu, { ...previewAccount, previews: false });
+    const before = emu.requests.length;
+    expect(await off.resources.find!(harnessReq, ctx('crs_a'))).toBe(harness.id);
+    expect(await off.resources.find!(gatewayReq, ctx('crs_g'))).toBe(gateway.id);
+    expect(await off.resources.find!({ ...harnessReq, name: 'bc-r-none' }, ctx('crs_n'))).toBe(
+      undefined,
+    );
+    expect(emu.requests.slice(before).filter((r) => r.method !== 'GET')).toEqual([]);
+  });
+
   it('a harness or gateway DigitalOcean is already deleting is not sent another DELETE', async () => {
     const emu = emulator();
     const { resources } = await build(emu, previewAccount);
