@@ -459,6 +459,44 @@ describe('networks: subnets', () => {
     expect(order.indexOf('DeleteVpcEndpoints')).toBeLessThan(order.indexOf('DeleteVpc'));
   });
 
+  it('an adopted VPC gets no gateway endpoint and no new range, only subnets inside its ranges', async () => {
+    const { networks, vpc, emu, call } = await withNetwork();
+    const { vpc: foreign } = vpc.addForeignVpc();
+    const access = await networks.ensureSubnet(
+      subnet({ network: foreign.id, cidr: '172.31.32.0/24', privateGoogleAccess: true }),
+      call(),
+    );
+    expect(access).toMatchObject({
+      state: 'error',
+      message: expect.stringMatching(/private service access.*adopted/),
+    });
+    const outside = await networks.ensureSubnet(
+      subnet({ network: foreign.id, name: 'bc-sub-2', cidr: '10.90.0.0/24' }),
+      call(),
+    );
+    expect(outside).toMatchObject({
+      state: 'error',
+      message: expect.stringMatching(/outside the ranges of adopted VPC/),
+    });
+    expect(emu.calls('CreateVpcEndpoint')).toHaveLength(0);
+    expect(emu.calls('AssociateVpcCidrBlock')).toHaveLength(0);
+    expect(emu.calls('CreateSubnet')).toHaveLength(0);
+    expect(vpc.endpoints.size).toBe(0);
+    expect(foreign.cidrs).toHaveLength(1);
+    // A plain subnet inside the adopted VPC's range is still made, and its route table and ACL
+    // stay the VPC's own.
+    const plain = await networks.ensureSubnet(
+      subnet({ network: foreign.id, name: 'bc-sub-3', cidr: '172.31.32.0/24' }),
+      call(),
+    );
+    expect(plain.state).toBe('ready');
+    expect(vpc.subnets.get(plain.id)!.routeTableId).toBeUndefined();
+    expect(vpc.subnets.get(plain.id)!.aclId).toBeUndefined();
+    expect(emu.calls('CreateRouteTable').every((r) => r.params.get('VpcId') !== foreign.id)).toBe(
+      true,
+    );
+  });
+
   it('deleteSubnet waits while an instance uses it, then deletes it', async () => {
     const { networks, vpc, ec2, call } = await withNetwork();
     const ready = await networks.ensureSubnet(subnet(), call());

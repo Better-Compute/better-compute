@@ -773,6 +773,15 @@ export class AwsNetworks implements ProviderNetworks {
     const vpc = await this.#vpc(spec.network, signal);
     if (!vpc) return state(id, 'pending', `Waiting for network ${spec.network}`);
     if (vpc.state !== 'available') return state(id, 'pending', `Waiting for VPC ${vpc.id}`);
+    // An adopted VPC stays as it is: gateway endpoints would reroute S3 and DynamoDB for every
+    // subnet of it (they go on a route table every subnet shares), so they need a network
+    // better-compute made.
+    if (!vpc.ours && spec.privateGoogleAccess === true)
+      return state(
+        id,
+        'error',
+        `private service access needs a network better-compute made; ${vpc.id} is adopted`,
+      );
 
     const [existing] = await this.#subnetsBy(
       [
@@ -817,6 +826,13 @@ export class AwsNetworks implements ProviderNetworks {
     if (!covering) {
       if (blocks.some((block) => block.range && overlap(block.range, range)))
         return state(id, 'error', `Range ${spec.cidr} straddles a range of VPC ${vpc.id}`);
+      // Only a network better-compute made gets a new range: an adopted VPC is never changed.
+      if (!vpc.ours)
+        return state(
+          id,
+          'error',
+          `Range ${spec.cidr} is outside the ranges of adopted VPC ${vpc.id} (${vpc.blocks.map((block) => block.cidr).join(', ')}), which better-compute does not change`,
+        );
       return this.#associateBlock(id, vpc, range, signal);
     }
     if (covering.state !== 'associated')
@@ -918,7 +934,7 @@ export class AwsNetworks implements ProviderNetworks {
         { SubnetId: subnet.id, MapPublicIpOnLaunch: { Value: this.#config.associatePublicIp } },
         signal,
       );
-    if (spec.privateGoogleAccess === true)
+    if (spec.privateGoogleAccess === true && vpc.ours)
       await this.#ensureServiceAccess(spec.network, vpc.id, signal);
     return state(subnet.id, 'ready');
   }
