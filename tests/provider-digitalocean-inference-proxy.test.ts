@@ -250,6 +250,89 @@ describe('inferenceProxy', () => {
     expect(JSON.stringify(logs)).not.toContain(key);
   });
 
+  it('refuses a stream that is not a boolean, and stream_options that are not an object, before any call', async () => {
+    const up = upstream(() => completion('m'));
+    const proxy = inferenceProxy({ fetch: up.fetch, record: () => {} });
+    for (const extra of [
+      { stream: 'true' },
+      { stream: 1 },
+      { stream: null },
+      { stream: true, stream_options: 'include_usage' },
+      { stream: true, stream_options: [] },
+    ]) {
+      const refused = await failure(
+        proxy({ path: '/v1/chat/completions', body: { model: 'm', ...extra }, key }),
+      );
+      expect(refused.code).toBe('INVALID_INPUT');
+      expect(refused.details?.reason).toBe('stream');
+    }
+    expect(up.seen).toEqual([]);
+  });
+
+  it('an event stream answered to a request that did not ask for one is still counted from its events', async () => {
+    const body =
+      'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n' +
+      'data: {"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":6,"total_tokens":10}}\n\n' +
+      'data: [DONE]\n\n';
+    const up = upstream(
+      () =>
+        new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+        }),
+    );
+    const usage: InferenceUsage[] = [];
+    const proxy = inferenceProxy({ fetch: up.fetch, record: (entry) => void usage.push(entry) });
+    const response = await proxy({ path: '/v1/chat/completions', body: { model: 'm' }, key });
+    expect(await response.text()).toBe(body);
+    expect(usage).toEqual([
+      { route: 'chat.completions', model: 'm', inputTokens: 4, outputTokens: 6, totalTokens: 10 },
+    ]);
+  });
+
+  it('counting fails closed: a whole answer without usage is withheld, a stream without it reported uncounted', async () => {
+    const logs: string[] = [];
+    const log = (message: string, fields?: unknown) =>
+      void logs.push(JSON.stringify({ message, fields }));
+    const usage: InferenceUsage[] = [];
+    const whole = upstream(
+      () =>
+        new Response(JSON.stringify({ choices: [{ message: { content: 'free tokens' } }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+    const proxy = inferenceProxy({
+      fetch: whole.fetch,
+      record: (entry) => void usage.push(entry),
+      log: { debug: log, info: log, warn: log, error: log },
+    });
+    const withheld = await proxy({ path: '/v1/chat/completions', body: { model: 'm' }, key });
+    expect(withheld.status).toBe(502);
+    expect(await withheld.text()).not.toContain('free tokens');
+    const stream = upstream(
+      () =>
+        new Response('data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n', {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    );
+    const streamed = inferenceProxy({ fetch: stream.fetch, record: (e) => void usage.push(e) });
+    await (
+      await streamed({ path: '/v1/chat/completions', body: { model: 'm', stream: true }, key })
+    ).text();
+    const uncounted = {
+      route: 'chat.completions',
+      model: 'm',
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      uncounted: true,
+    };
+    expect(usage).toEqual([uncounted, uncounted]);
+    expect(JSON.stringify(logs)).not.toContain(key);
+  });
+
   it('a failing usage recorder never fails the call, and is logged without the key', async () => {
     const up = upstream(() => completion('m'));
     const logs: string[] = [];

@@ -7,6 +7,11 @@ import { ComputeError, type Logger } from '@better-compute/core';
 //
 // - Only the inference routes pass, and only JSON bodies that name a model.
 // - The upstream origin is a code-level option (https only), never tenant input, and a redirect is never followed.
+// - `stream` must be a boolean and `stream_options` an object when present (a `"true"` an upstream would coerce is
+//   refused), so every streamed call asks for its usage chunk. How an answer is counted follows what upstream sent
+//   (`text/event-stream` is scanned as events), never what the request said.
+// - Counting fails closed: a whole (non-streamed) answer with no readable usage is withheld (502) and reported
+//   `uncounted`; a stream with no usage chunk (its bytes already went) is reported `uncounted` too.
 // - A streamed answer passes through byte for byte; the proxy asks for its final usage chunk
 //   (`stream_options.include_usage`) and counts from it. A client that cancels its stream before that chunk is still
 //   counted: the proxy reads the rest of the answer itself (bounded by `maxDrainBytes`). An abort of the request's
@@ -23,6 +28,11 @@ export interface InferenceUsage {
   outputTokens: number;
   totalTokens: number;
   meta?: Readonly<Record<string, string>>;
+  /**
+   * The answer reported no usage, so the counts are zero: the host decides what an uncounted call costs (DigitalOcean
+   * billing still has it). A whole answer is withheld then; a stream had already passed.
+   */
+  uncounted?: true;
 }
 
 export interface InferenceProxyOptions {
@@ -109,6 +119,16 @@ export function inferenceProxy(
       );
     if (typeof request.key !== 'string' || request.key.length === 0)
       throw new ComputeError('INVALID_INPUT', 'An inference request needs a model access key');
+    if (
+      (body.stream !== undefined && typeof body.stream !== 'boolean') ||
+      (body.stream_options !== undefined && !isObject(body.stream_options))
+    )
+      throw new ComputeError(
+        'INVALID_INPUT',
+        'An inference request’s stream is true or false, and its stream_options an object',
+        undefined,
+        { reason: 'stream' },
+      );
     const model = body.model;
     const streamed = body.stream === true;
     const forwarded = streamed
@@ -123,11 +143,10 @@ export function inferenceProxy(
     const mask = (text: string) => text.split(request.key).join('********');
 
     const record = (usage: Omit<InferenceUsage, 'route' | 'model' | 'meta'> | undefined) => {
-      if (!usage) return;
       const entry: InferenceUsage = {
         route,
         model,
-        ...usage,
+        ...(usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0, uncounted: true }),
         ...(request.meta !== undefined ? { meta: request.meta } : {}),
       };
       const failed = (error: unknown) =>
@@ -187,15 +206,26 @@ export function inferenceProxy(
         headers: { 'content-type': contentType },
       });
     }
-    if (!streamed || upstream.body === null) {
+    // The answer's own type decides how it is counted: a request that did not ask to stream can still get events.
+    const events = contentType.split(';')[0]!.trim().toLowerCase() === 'text/event-stream';
+    if (!events || upstream.body === null) {
       const text = await upstream.text();
+      let usage: Omit<InferenceUsage, 'route' | 'model' | 'meta'> | undefined;
       try {
-        record(usageOf(JSON.parse(text)));
+        usage = usageOf(JSON.parse(text));
       } catch {
-        log.warn('inference proxy: an answer without readable usage was not counted', {
-          model,
-          route,
-        });
+        usage = undefined;
+      }
+      record(usage);
+      if (usage === undefined) {
+        // Fail closed: an answer the proxy cannot count is not handed on.
+        log.warn('inference proxy: an answer without readable usage was withheld', { model, route });
+        return new Response(
+          JSON.stringify({
+            error: { message: 'The inference answer reported no usage, so it was not passed on' },
+          }),
+          { status: 502, headers: { 'content-type': 'application/json' } },
+        );
       }
       return new Response(text, {
         status: upstream.status,
@@ -231,7 +261,7 @@ export function inferenceProxy(
       if (pending) scan(pending);
       pending = '';
       if (usage === undefined)
-        log.warn('inference proxy: a streamed answer without a usage chunk was not counted', {
+        log.warn('inference proxy: a streamed answer without a usage chunk is reported uncounted', {
           model,
           route,
         });

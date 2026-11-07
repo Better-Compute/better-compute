@@ -107,8 +107,11 @@ Tokens are counted in one of two ways:
 - **Through the operator's proxy.** `inferenceProxy` from `@better-compute/provider-digitalocean` forwards
   `/v1/chat/completions`, `/v1/completions` and `/v1/embeddings` to DigitalOcean and hands each answer's token counts
   to a `record` callback, which the host writes as `ai.inference.tokens` usage. A streamed answer is counted from its
-  final usage chunk, even when the client stops reading first: the proxy reads the rest itself. Wiring it to a route
-  is the host's job: the server does not import providers.
+  final usage chunk, even when the client stops reading first: the proxy reads the rest itself. `stream` must be
+  `true` or `false` (a `"true"` an upstream would coerce is refused, `reason` `stream`), and an answer is counted
+  by what DigitalOcean sent (an event stream is scanned as events), not by what the request asked. Counting fails
+  closed: a whole answer with no usage is withheld (502) and recorded with `uncounted: true`, and so is a stream
+  that ended with no usage chunk. Wiring it to a route is the host's job: the server does not import providers.
 - **Directly.** A tenant may call DigitalOcean with its own key; the usage then comes from DigitalOcean billing.
 
 ```ts title="inference-route.ts"

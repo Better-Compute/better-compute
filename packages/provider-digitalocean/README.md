@@ -220,7 +220,9 @@ keys, guardrails, the Managed Agents objects; `resources/kinds/named.ts`).
   `/v1/completions` and `/v1/embeddings` to `https://inference.do-ai.run` with the tenant's resolved key and hands each
   answer's token counts (and the caller's `meta`) to `record`, which the host writes as `ai.inference.tokens`.
   A streamed answer is counted even when the client cancels before its final usage chunk: the proxy reads the rest
-  (at most 16 MiB). Wiring it to a route is the host's: the server does not import providers.
+  (at most 16 MiB). A `stream` that is not a boolean is refused (`reason 'stream'`); the counting path follows the
+  upstream content type; a whole answer without usage is withheld (502) and recorded `uncounted`, as is a stream
+  without a usage chunk. Wiring it to a route is the host's: the server does not import providers.
 - **Knowledge bases:** `do.knowledge-base`, an embedding model (uuid) over `webSources` and `spacesSources`,
   indexed into an OpenSearch database DigitalOcean makes (or `database`). Sources change in place (added and removed,
   then one indexing job, owed until it starts: a failed start is retried); Spaces sources, `database` and `vpc`
