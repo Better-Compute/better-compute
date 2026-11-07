@@ -7,7 +7,12 @@ import {
   type ProviderResourceState,
   type ProviderVolumeSpec,
 } from '@better-compute/core';
-import { awsProvider, clientToken, type AwsConfig } from '@better-compute/provider-aws';
+import {
+  awsProvider,
+  clientToken,
+  type AwsConfig,
+  type AwsVolumes,
+} from '@better-compute/provider-aws';
 import { AwsEmulator } from './support/aws-emulator/index.js';
 import { Ec2Emulator } from './support/aws-emulator/ec2.js';
 import { EbsEmulator } from './support/aws-emulator/ebs.js';
@@ -126,7 +131,8 @@ describe('provider-aws volumes: ensure, get, delete', () => {
       id: first.id,
       state: 'ready',
       outputs: {
-        region: 'us-east-1',
+        // A volume's region is its zone (vps keeps an AWS volume per zone).
+        region: 'us-east-1a',
         zone: 'us-east-1a',
         sizeGiB: '10',
         type: 'gp3',
@@ -310,8 +316,13 @@ describe('provider-aws volumes: ensure, get, delete', () => {
     expect((await volumes.ensureVolume(spec(), call())).state).toBe('deleted');
   });
 
-  it('getVolume: undefined for a missing or malformed id, pending while a new one is not visible', async () => {
-    const { volumes, call, spec, ebs } = world();
+  it('getVolume: undefined for a malformed id or one missing for the whole window, pending while a new one is not visible', async () => {
+    const { volumes, call, spec, ebs, emu } = world();
+    // A miss may be EBS lag (a volume another process just made): pending until the window passes.
+    expect(await volumes.getVolume('vol-0000000000000dead', call())).toMatchObject({
+      state: 'pending',
+    });
+    emu.clock.advance(120_000);
     expect(await volumes.getVolume('vol-0000000000000dead', call())).toBeUndefined();
     expect(await volumes.getVolume('i-0123456789abcdef0', call())).toBeUndefined();
     ebs.newVolumeNotFound = 1;
@@ -326,6 +337,84 @@ describe('provider-aws volumes: ensure, get, delete', () => {
     });
     ebs.tick();
     expect(await volumes.getVolume(made.id, call())).toMatchObject({ state: 'ready' });
+  });
+
+  it('a by-id miss never ends a volume another process just made (a restart, another replica)', async () => {
+    const { volumes, fresh, call, spec, ebs, emu } = world();
+    // Three by-id reads miss the new volume (EBS eventual consistency right after CreateVolume).
+    ebs.newVolumeNotFound = 3;
+    const made = await volumes.ensureVolume(spec(), call());
+    const other = fresh();
+    expect(await other.getVolume(made.id, call())).toMatchObject({ id: made.id, state: 'pending' });
+    expect(await other.deleteVolume(made.id, call())).toMatchObject({
+      id: made.id,
+      state: 'deleting',
+    });
+    await rejects(other.resizeVolume(made.id, 20, call()), 'UNAVAILABLE', 'volume-not-visible');
+    expect(emu.calls('DeleteVolume')).toHaveLength(0);
+    // Visible now: read as it is, and the delete really deletes it.
+    ebs.tick();
+    expect(await other.getVolume(made.id, call())).toMatchObject({ state: 'ready' });
+    expect((await other.deleteVolume(made.id, call())).state).toBe('deleting');
+    expect(emu.calls('DeleteVolume')).toHaveLength(1);
+    expect(ebs.volumes.get(made.id)!.state).toBe('deleting');
+  });
+
+  it('a volume no by-id read shows for the whole consistency window is gone', async () => {
+    const { fresh, call, emu, ec2 } = world();
+    const other = fresh();
+    const instance = ec2.addInstance({ tags: { 'better-compute:instance': 'ins_1' } });
+    const id = 'vol-0000000000000dead';
+    expect(await other.getVolume(id, call())).toMatchObject({ id, state: 'pending' });
+    expect((await other.deleteVolume(id, call())).state).toBe('deleting');
+    await rejects(
+      other.attachVolume(id, instance.id, call()),
+      'UNAVAILABLE',
+      'volume-not-visible',
+    );
+    emu.clock.advance(60_000);
+    expect(await other.getVolume(id, call())).toMatchObject({ state: 'pending' });
+    emu.clock.advance(60_000);
+    expect(await other.getVolume(id, call())).toBeUndefined();
+    expect((await other.deleteVolume(id, call())).state).toBe('deleted');
+    await rejects(other.resizeVolume(id, 20, call()), 'NOT_FOUND', 'volume');
+    expect(emu.calls('DeleteVolume')).toHaveLength(0);
+  });
+
+  it("findVolume: this deployment's volume of a name, never created (a delete whose create answer was lost)", async () => {
+    const { volumes, call, ebs, emu, managed } = world();
+    const find = (name: string, region: string) =>
+      (volumes as AwsVolumes).findVolume(name, region, call());
+    expect(await find('bc-v-made', 'us-east-1')).toBeUndefined();
+    // Another's volume of the name (no managed tag) is none.
+    ebs.addVolume({ tags: { 'better-compute:volume': 'bc-v-made' } });
+    expect(await find('bc-v-made', 'us-east-1')).toBeUndefined();
+    const mine = ebs.addVolume({ zone: 'us-east-1a', tags: managed });
+    expect(await find('bc-v-made', 'us-east-1')).toMatchObject({ id: mine.id, state: 'ready' });
+    // vps keeps an AWS volume's region as its zone: the same zone finds it, another zone does not.
+    expect(await find('bc-v-made', 'us-east-1a')).toMatchObject({ id: mine.id });
+    expect(await find('bc-v-made', 'us-east-1b')).toBeUndefined();
+    expect(await find('bc-v-made', 'eu-west-1')).toBeUndefined();
+    expect(await find('', 'us-east-1')).toBeUndefined();
+    // A volume that is gone has nothing left to delete.
+    mine.state = 'deleted';
+    expect(await find('bc-v-made', 'us-east-1')).toBeUndefined();
+    expect(emu.calls('CreateVolume')).toHaveLength(0);
+  });
+
+  it('findVolume: a volume this client just made, not visible to any read yet, is pending', async () => {
+    const { volumes, fresh, call, spec, ebs, emu } = world();
+    ebs.newVolumeNotFound = 2;
+    const made = await volumes.ensureVolume(spec(), call());
+    ebs.hideFromFilters.add(made.id);
+    expect(
+      await (volumes as AwsVolumes).findVolume('bc-v-0001', 'us-east-1a', call()),
+    ).toMatchObject({ id: made.id, state: 'pending' });
+    // Another process (none of this one's memos) does not see it yet: none, and nothing created.
+    expect(
+      await (fresh() as AwsVolumes).findVolume('bc-v-0001', 'us-east-1a', call()),
+    ).toBeUndefined();
+    expect(emu.calls('CreateVolume')).toHaveLength(1);
   });
 
   it('refuses mutating an untagged volume', async () => {
@@ -501,7 +590,12 @@ describe('provider-aws volumes: attach, detach', () => {
       'INVALID_STATE',
       'instance-state',
     );
-    await rejects(volumes.attachVolume(volume.id, 'i-0000000000000dead', call()), 'NOT_FOUND');
+    // EC2 may not show a just-launched instance yet: retried, not a final NOT_FOUND (see below).
+    await rejects(
+      volumes.attachVolume(volume.id, 'i-0000000000000dead', call()),
+      'UNAVAILABLE',
+      'instance-not-visible',
+    );
     await rejects(volumes.attachVolume(volume.id, 'srv-1', call()), 'INVALID_INPUT');
     const theirs = ebs.addVolume({ tags: { Name: 'x' } });
     await rejects(
@@ -510,6 +604,33 @@ describe('provider-aws volumes: attach, detach', () => {
       'not-managed',
     );
     expect(emu.calls('AttachVolume')).toHaveLength(0);
+  });
+
+  it('an instance EC2 does not show yet (just launched) is retried, then attached; one missing for the window is NOT_FOUND', async () => {
+    const { volumes, call, ebs, ec2, emu, managed } = world();
+    const volume = ebs.addVolume({ tags: managed });
+    // vps attaches as soon as RunInstances answered; the by-id read lags the launch.
+    const instance = owned(ec2);
+    instance.notFoundById = 1;
+    await rejects(
+      volumes.attachVolume(volume.id, instance.id, call(), 'ins_1'),
+      'UNAVAILABLE',
+      'instance-not-visible',
+    );
+    expect(emu.calls('AttachVolume')).toHaveLength(0);
+    expect((await volumes.attachVolume(volume.id, instance.id, call(), 'ins_1')).state).toBe(
+      'pending',
+    );
+    expect(emu.calls('AttachVolume')).toHaveLength(1);
+    // An instance no read shows for the whole consistency window does not exist.
+    const other = ebs.addVolume({ tags: { ...managed, 'better-compute:volume': 'bc-v-two' } });
+    const dead = 'i-0000000000000dead';
+    await rejects(volumes.attachVolume(other.id, dead, call()), 'UNAVAILABLE', 'instance-not-visible');
+    emu.clock.advance(60_000);
+    await rejects(volumes.attachVolume(other.id, dead, call()), 'UNAVAILABLE', 'instance-not-visible');
+    emu.clock.advance(60_000);
+    await rejects(volumes.attachVolume(other.id, dead, call()), 'NOT_FOUND', 'machine');
+    expect(emu.calls('AttachVolume')).toHaveLength(1);
   });
 
   it('a volume attached to another machine is CONFLICT; a pending instance or volume waits', async () => {
@@ -639,6 +760,31 @@ describe('provider-aws volumes: attach, detach', () => {
       attachedTo: { instanceId: a.id, device: '/dev/sdg' },
     });
     await rejects(volumes.detachVolume(theirs.id, a.id, call()), 'INVALID_STATE', 'not-managed');
+  });
+
+  it('a detach right after its own attach, before by-id reads show it, waits instead of reading detached', async () => {
+    const { volumes, call, ebs, ec2, emu, managed } = world();
+    const instance = owned(ec2);
+    const volume = ebs.addVolume({ tags: managed });
+    expect((await volumes.attachVolume(volume.id, instance.id, call(), 'ins_1')).state).toBe(
+      'pending',
+    );
+    ebs.hideAttachmentById.add(volume.id);
+    expect((await volumes.detachVolume(volume.id, instance.id, call())).state).toBe('deleting');
+    expect(emu.calls('DetachVolume')).toHaveLength(0);
+    // The read shows it now: detached for real.
+    ebs.hideAttachmentById.clear();
+    ebs.tick();
+    expect((await volumes.detachVolume(volume.id, instance.id, call())).state).toBe('deleting');
+    expect(emu.calls('DetachVolume')).toHaveLength(1);
+    // An attach no read shows for the whole window (EC2 dropped it) is detached.
+    const lost = ebs.addVolume({ tags: { ...managed, 'better-compute:volume': 'bc-v-two' } });
+    await volumes.attachVolume(lost.id, instance.id, call(), 'ins_1');
+    ebs.hideAttachmentById.add(lost.id);
+    expect((await volumes.detachVolume(lost.id, instance.id, call())).state).toBe('deleting');
+    emu.clock.advance(120_000);
+    expect((await volumes.detachVolume(lost.id, instance.id, call())).state).toBe('deleted');
+    expect(emu.calls('DetachVolume')).toHaveLength(1);
   });
 
   it('a volume attached to an instance that terminates reads detached, not deleted', async () => {
@@ -843,7 +989,16 @@ describe('provider-aws volumes: snapshots and restores', () => {
     });
     expect(emu.calls('CreateSnapshot')).toHaveLength(1);
     expect(await volumes.getSnapshot(first.id, call())).toMatchObject({ state: 'ready' });
+    // A miss may be lag (a snapshot another process just took): pending for the window, then none.
+    expect(await volumes.getSnapshot('snap-0000000000000dead', call())).toMatchObject({
+      state: 'pending',
+    });
+    expect((await volumes.deleteSnapshot('snap-0000000000000dead', call())).state).toBe(
+      'deleting',
+    );
+    emu.clock.advance(120_000);
     expect(await volumes.getSnapshot('snap-0000000000000dead', call())).toBeUndefined();
+    expect((await volumes.deleteSnapshot('snap-0000000000000dead', call())).state).toBe('deleted');
     expect(await volumes.getSnapshot('vol-0000000000000dead', call())).toBeUndefined();
     // The snapshot names one volume: the same name on another volume is a conflict.
     const other = ebs.addVolume({ tags: managed });
@@ -919,6 +1074,9 @@ describe('provider-aws volumes: snapshots and restores', () => {
       'INVALID_INPUT',
       'snapshot',
     );
+    // It reads as missing (Owner=self): pending for the lag window, then none.
+    expect((await volumes.getSnapshot(publicOne.id, call()))?.state).toBe('pending');
+    emu.clock.advance(120_000);
     expect(await volumes.getSnapshot(publicOne.id, call())).toBeUndefined();
     expect((await volumes.deleteSnapshot(publicOne.id, call())).state).toBe('deleted');
     expect(emu.calls('CreateVolume')).toHaveLength(0);
@@ -958,7 +1116,11 @@ describe('provider-aws volumes: snapshots and restores', () => {
     );
     expect(emu.calls('CreateVolume')).toHaveLength(0);
     ours.state = 'completed';
-    const restored = await volumes.ensureVolume(spec({ snapshotId: ours.id, sizeGiB: 20 }), call());
+    // A restore keeps the snapshot's filesystem: a filesystem in the spec is ignored, not refused.
+    const restored = await volumes.ensureVolume(
+      spec({ snapshotId: ours.id, sizeGiB: 20, filesystem: 'ext4' }),
+      call(),
+    );
     expect(emu.calls('CreateVolume')[0]!.params.get('SnapshotId')).toBe(ours.id);
     expect(ebs.volumes.get(restored.id)!.snapshotId).toBe(ours.id);
   });

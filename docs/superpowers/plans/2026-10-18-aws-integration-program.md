@@ -522,6 +522,12 @@ export interface ProviderImpl { /* existing */ volumes?: ProviderVolumes }
 
 **Follow-up card:** GCP `ProviderVolumes` (persistent disks).
 
+**As built (aws-ebs lane, 2026-11-06):** the generic `ProviderVolumes` contract (do-volumes' `providerVolumes` /
+`providerSnapshots` groups) stands in for `disks`, with additive `zone`, `type`, `iops`, `throughputMiBps`,
+`detachVolume(…, { force })` and `types`. Encryption is always on, with the account-level `kmsKeyId` (or the
+account's default EBS key): a spec cannot name a key, so there is no per-spec `encrypted` or `kmsKeyId`. A bare
+region on a multi-zone account is refused (`zone-required`); vps names an AWS volume by its zone.
+
 ### A6 — EC2 and EC2 bare metal as bcd hosts
 
 **Go (`daemon/`), lane L3, can start immediately:**

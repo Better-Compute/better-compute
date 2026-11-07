@@ -60,8 +60,10 @@ describe('provider-aws CLI policies', () => {
 
   it('tag edits are limited to better-compute keys', () => {
     const policy = iamPolicy();
-    const tagging = policy.Statement.filter((s) =>
-      actionsOf(s).some((a) => a === 'ec2:CreateTags' || a === 'ec2:DeleteTags'),
+    const tagging = policy.Statement.filter(
+      (s) =>
+        s.Effect === 'Allow' &&
+        actionsOf(s).some((a) => a === 'ec2:CreateTags' || a === 'ec2:DeleteTags'),
     );
     expect(tagging.length).toBe(3);
     for (const statement of tagging) {
@@ -246,6 +248,31 @@ describe('provider-aws CLI policies', () => {
     const bare = iamPolicy({ volumes: false }).Statement.flatMap(actionsOf);
     expect(bare.filter((action) => ebs.includes(action))).toEqual([]);
     expect(iamPolicy().Statement.flatMap(actionsOf)).toEqual(expect.arrayContaining(ebs));
+  });
+
+  it('a volume RunInstances creates never carries the data volume or snapshot name tags (A5)', () => {
+    // RunTagged and TagOnCreate let RunInstances tag the root volumes it makes; a root volume
+    // tagged better-compute:volume would pass EbsManageOwned (detach, delete, modify, snapshot).
+    const policy = iamPolicy({ region: 'us-east-1', account: '222222222222' });
+    const volumes = 'arn:aws:ec2:us-east-1:222222222222:volume/*';
+    const named = {
+      'ForAnyValue:StringEquals': {
+        'aws:TagKeys': ['better-compute:volume', 'better-compute:snapshot'],
+      },
+    };
+    const deny = policy.Statement.filter((s) => s.Effect === 'Deny');
+    expect(deny.map((s) => [actionsOf(s), s.Resource, s.Condition])).toEqual([
+      [['ec2:RunInstances'], volumes, named],
+      [
+        ['ec2:CreateTags'],
+        volumes,
+        { ...named, StringEquals: { 'ec2:CreateAction': 'RunInstances' } },
+      ],
+    ]);
+    // CreateVolume still names its volume: the CreateTags deny is only for RunInstances' tags.
+    const tagOnCreate = policy.Statement.find((s) => s.Sid === 'EbsTagOnCreate')!;
+    expect(tagOnCreate.Condition?.StringEquals?.['ec2:CreateAction']).toContain('CreateVolume');
+    expect(iamPolicy({ volumes: false }).Statement.filter((s) => s.Effect === 'Deny')).toEqual([]);
   });
 
   it('--ssm-prefix adds GetParameters on the host ssmImagePrefixes', async () => {

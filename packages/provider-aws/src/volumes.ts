@@ -38,6 +38,8 @@ const throughputTypes: ReadonlySet<string> = new Set(['gp3']);
 
 /** EBS allows 50 tags per resource; ours take 3, the rest is for tenant labels. */
 const maxLabels = 40;
+/** How long this process remembers a volume or snapshot it knows is gone (never lagging, so never pending). */
+const goneMemoMs = 24 * 3_600_000;
 /** After a modification starts, EBS refuses the next one on that volume for six hours. */
 export const ebsModificationCooldownMs = 6 * 3_600_000;
 
@@ -164,10 +166,14 @@ function parseVolume(item: XmlElement): EbsVolume | undefined {
   };
 }
 
-/** What an AWS volume and its snapshots look like to vps. */
+/**
+ * What an AWS volume looks like to vps. Its `region` is its zone: an EBS volume is zonal and vps keeps
+ * an AWS volume's region as its AZ (the place it attaches in); the account region falls back only
+ * when EBS names no zone.
+ */
 function volumeOutputs(volume: EbsVolume, region: string): Record<string, string> {
   const outputs: Record<string, string> = {
-    region,
+    region: volume.zone || region,
     zone: volume.zone,
     sizeGiB: String(volume.sizeGiB),
     type: volume.type,
@@ -305,6 +311,15 @@ export class AwsVolumes implements ProviderVolumes {
    * one pass never pick one device.
    */
   readonly #devices = new Map<string, Map<string, { volumeId: string; at: number }>>();
+  /**
+   * id (volume, snapshot or instance) → when a by-id read in this process first missed it. EC2 reads
+   * are eventually consistent: a resource another process (a restart, another replica) just made can
+   * read NotFound by id for a while, so one miss never ends its life. A miss that lasts the whole
+   * consistency window is gone.
+   */
+  readonly #missing = new Map<string, number>();
+  /** id → when this process learned the resource is gone (it deleted it, saw it deleted, or missed it for the window). */
+  readonly #gone = new Map<string, number>();
 
   constructor(
     readonly config: AwsConfig,
@@ -337,6 +352,39 @@ export class AwsVolumes implements ProviderVolumes {
       if (entry.id === id) this.#createdSnapshots.delete(name);
   }
 
+  /** A volume or snapshot known to be gone: a later by-id miss is final at once. */
+  #markGone(id: string): void {
+    const now = this.context.clock.now();
+    for (const [key, at] of this.#gone) if (now - at >= goneMemoMs) this.#gone.delete(key);
+    this.#gone.set(id, now);
+    this.#missing.delete(id);
+  }
+
+  /** A by-id read found `id`: a later miss starts a new window. */
+  #seen(id: string): void {
+    this.#missing.delete(id);
+  }
+
+  /**
+   * Whether a by-id NotFound of `id` may still be EC2's eventual consistency rather than gone:
+   * made by this client recently, or first missed by this process less than the window ago. Known
+   * gone, or missed for the whole window: gone (and remembered so).
+   */
+  #mayLag(id: string, made?: number): boolean {
+    if (this.#recent(made)) return true;
+    if (this.#gone.has(id)) return false;
+    const now = this.context.clock.now();
+    for (const [key, at] of this.#missing) if (now - at >= goneMemoMs) this.#missing.delete(key);
+    const first = this.#missing.get(id);
+    if (first === undefined) {
+      this.#missing.set(id, now);
+      return true;
+    }
+    if (now - first < this.consistencyWindowMs) return true;
+    this.#markGone(id);
+    return false;
+  }
+
   #rememberSnapshot(name: string, id: string): void {
     const now = this.context.clock.now();
     for (const [key, entry] of this.#createdSnapshots)
@@ -359,6 +407,13 @@ export class AwsVolumes implements ProviderVolumes {
     letters.set(letter, { volumeId, at: now });
   }
 
+  /** Whether this client attached `volumeId` to `instanceId` within the consistency window. */
+  #attachedHere(instanceId: string, volumeId: string): boolean {
+    for (const entry of this.#devices.get(instanceId)?.values() ?? [])
+      if (entry.volumeId === volumeId && this.#recent(entry.at)) return true;
+    return false;
+  }
+
   /** Lets go of the devices this client gave a volume on an instance (it is being detached). */
   #releaseDevices(instanceId: string, volumeId: string): void {
     const letters = this.#devices.get(instanceId);
@@ -373,10 +428,12 @@ export class AwsVolumes implements ProviderVolumes {
   protected async volume(id: string, signal: AbortSignal): Promise<EbsVolume | undefined> {
     try {
       const doc = await this.deps.call('DescribeVolumes', { VolumeId: [id] }, signal);
-      return doc
+      const found = doc
         .items('volumeSet')
         .map(parseVolume)
         .find((volume) => volume?.id === id);
+      if (found) this.#seen(id);
+      return found;
     } catch (error) {
       if (isComputeError(error, 'NOT_FOUND')) return undefined;
       throw error;
@@ -421,6 +478,13 @@ export class AwsVolumes implements ProviderVolumes {
   protected async owned(volumeId: string, signal: AbortSignal): Promise<EbsVolume> {
     const id = parseVolume_(volumeId);
     const volume = await this.volume(id, signal);
+    // Not visible yet (another process may have just made it): retried, never a final NOT_FOUND.
+    if (!volume && this.#mayLag(id, this.#createdIds.get(id)))
+      throw fail(
+        'UNAVAILABLE',
+        `volume ${id} is not visible to EBS reads yet; it is retried`,
+        'volume-not-visible',
+      );
     if (!volume || volume.status === 'deleted')
       throw fail('NOT_FOUND', `volume ${id} does not exist`, 'volume');
     this.refuseForeign(volume);
@@ -478,7 +542,8 @@ export class AwsVolumes implements ProviderVolumes {
         'EBS volumes are block volumes; shared filesystems (EFS) arrive with AWS phase A10',
         'shared',
       );
-    if (spec.filesystem !== undefined && spec.filesystem !== 'none')
+    // A restore keeps its snapshot's filesystem: the contract ignores `filesystem` with `snapshotId`.
+    if (spec.snapshotId === undefined && spec.filesystem !== undefined && spec.filesystem !== 'none')
       throw fail(
         'UNSUPPORTED',
         'EBS does not format volumes; the guest formats a raw volume',
@@ -541,8 +606,10 @@ export class AwsVolumes implements ProviderVolumes {
       if (!existing) return state(known.id, 'pending');
     }
     if (existing) {
-      if (gone(existing) && !this.#recent(this.#deleted.get(existing.id)))
+      if (gone(existing) && !this.#recent(this.#deleted.get(existing.id))) {
+        this.#markGone(existing.id);
         return deletedOutside(existing.id);
+      }
       return volumeState(existing, this.config.region);
     }
     if (spec.snapshotId !== undefined) {
@@ -586,7 +653,10 @@ export class AwsVolumes implements ProviderVolumes {
     if (!made) throw fail('PROVIDER_ERROR', 'CreateVolume returned no volume', 'create');
     // EC2 answered the name's ClientToken with the volume it made before, deleted since: never
     // remembered as one being made (it would read pending for good), and never silently replaced.
-    if (gone(made)) return deletedOutside(made.id);
+    if (gone(made)) {
+      this.#markGone(made.id);
+      return deletedOutside(made.id);
+    }
     this.#remember(name, made.id);
     return volumeState(made, this.config.region);
   }
@@ -618,14 +688,46 @@ export class AwsVolumes implements ProviderVolumes {
       );
   }
 
+  /**
+   * The live volume of this deployment named `name` in `region` (the account region, or one of its
+   * zones: then only a volume in that zone), without creating one; undefined when there is none, also
+   * for a volume that is being or has been deleted (nothing is left to delete). A volume this client
+   * made that no read shows yet is pending. vps asks this for a delete whose create answer was lost.
+   */
+  async findVolume(
+    name: string,
+    region: string,
+    context: CallContext,
+  ): Promise<ProviderResourceState | undefined> {
+    if (typeof name !== 'string' || name === '' || name.length > 255 || tagValue(name) !== name)
+      return undefined;
+    const zone = this.config.zones.includes(region) ? region : undefined;
+    if (zone === undefined && region !== this.config.region) return undefined;
+    const { signal } = context;
+    const found = await this.#byName(name, signal);
+    if (found) {
+      if (gone(found) || (zone !== undefined && found.zone !== zone)) return undefined;
+      return volumeState(found, this.config.region);
+    }
+    const known = this.#created.get(name);
+    if (!known || !this.#recent(known.at)) return undefined;
+    const made = await this.volume(known.id, signal);
+    if (!made) return state(known.id, 'pending');
+    if (gone(made) || (zone !== undefined && made.zone !== zone)) return undefined;
+    return volumeState(made, this.config.region);
+  }
+
   async getVolume(
     volumeId: string,
     context: CallContext,
   ): Promise<ProviderResourceState | undefined> {
     if (typeof volumeId !== 'string' || !volumePattern.test(volumeId)) return undefined;
     const volume = await this.volume(volumeId, context.signal);
+    // A miss is pending while it may be EBS lag (also a volume another process just made).
     if (!volume)
-      return this.#recent(this.#createdIds.get(volumeId)) ? state(volumeId, 'pending') : undefined;
+      return this.#mayLag(volumeId, this.#createdIds.get(volumeId))
+        ? state(volumeId, 'pending')
+        : undefined;
     return volumeState(volume, this.config.region);
   }
 
@@ -634,11 +736,15 @@ export class AwsVolumes implements ProviderVolumes {
     const { signal } = context;
     const volume = await this.volume(id, signal);
     if (!volume) {
-      // Just made by this client and not visible yet: deleting it later, never reporting it gone.
-      if (this.#recent(this.#createdIds.get(id))) return state(id, 'deleting');
+      // Maybe just made (by this or another process) and not visible yet: deleting it later, never
+      // reporting it gone while it may still exist and bill.
+      if (this.#mayLag(id, this.#createdIds.get(id))) return state(id, 'deleting');
       return state(id, 'deleted');
     }
-    if (volume.status === 'deleted') return state(id, 'deleted');
+    if (volume.status === 'deleted') {
+      this.#markGone(id);
+      return state(id, 'deleted');
+    }
     this.refuseForeign(volume);
     if (volume.status === 'deleting') return volumeState(volume, this.config.region);
     if (volume.attachment)
@@ -653,12 +759,17 @@ export class AwsVolumes implements ProviderVolumes {
     try {
       await this.deps.call('DeleteVolume', { VolumeId: id }, signal);
       this.#forget(id);
+      this.#markGone(id);
       const at = this.context.clock.now();
       for (const [key, sent] of this.#deleted)
         if (at - sent >= this.consistencyWindowMs) this.#deleted.delete(key);
       this.#deleted.set(id, at);
     } catch (error) {
-      if (isComputeError(error, 'NOT_FOUND')) return state(id, 'deleted');
+      // EBS read the volume a moment ago: this NotFound is a delete that already went through.
+      if (isComputeError(error, 'NOT_FOUND')) {
+        this.#markGone(id);
+        return state(id, 'deleted');
+      }
       if (error instanceof ComputeError && error.details?.code === 'VolumeInUse')
         throw fail(
           'INVALID_STATE',
@@ -686,7 +797,19 @@ export class AwsVolumes implements ProviderVolumes {
     } catch (error) {
       if (!isComputeError(error, 'NOT_FOUND')) throw error;
     }
-    if (!item) throw fail('NOT_FOUND', `instance ${machineId} does not exist`, 'machine');
+    if (!item) {
+      // vps attaches as soon as RunInstances answered, and EC2 often does not show a new instance
+      // yet: retried (UNAVAILABLE) until it shows, or it has been missing for the whole window. A
+      // terminated instance still reads terminated for a while (instance-state below).
+      if (this.#mayLag(machineId))
+        throw fail(
+          'UNAVAILABLE',
+          `instance ${machineId} is not visible to EC2 reads yet; it is retried`,
+          'instance-not-visible',
+        );
+      throw fail('NOT_FOUND', `instance ${machineId} does not exist`, 'machine');
+    }
+    this.#seen(machineId);
     const devices = item
       .items('blockDeviceMapping')
       .map((mapping) => mapping.textOf('deviceName') ?? '')
@@ -849,6 +972,10 @@ export class AwsVolumes implements ProviderVolumes {
     // Not attached to that machine (or gone): nothing to detach; another machine's is never touched.
     const key = `${id}:${machineId}`;
     if (!volume || volume.attachment?.instanceId !== machineId) {
+      // This client attached it there moments ago and the by-id read does not show any attachment
+      // yet: wait for it (then detach it), never report it detached while it attaches.
+      if (volume && !volume.attachment && this.#attachedHere(machineId, id))
+        return state(id, 'deleting', volumeOutputs(volume, this.config.region));
       this.#forced.delete(key);
       return state(id, 'deleted');
     }
@@ -1000,10 +1127,12 @@ export class AwsVolumes implements ProviderVolumes {
         { SnapshotId: [id], Owner: ['self'] },
         signal,
       );
-      return doc
+      const found = doc
         .items('snapshotSet')
         .map(parseSnapshot)
         .find((snapshot) => snapshot?.id === id);
+      if (found) this.#seen(id);
+      return found;
     } catch (error) {
       if (isComputeError(error, 'NOT_FOUND')) return undefined;
       throw error;
@@ -1054,8 +1183,12 @@ export class AwsVolumes implements ProviderVolumes {
         this.#refuseForeignSnapshot(snapshot);
         await this.deps.call('DeleteSnapshot', { SnapshotId: snapshot.id }, signal);
         this.#forget(snapshot.id);
+        this.#markGone(snapshot.id);
       } catch (error) {
-        if (isComputeError(error, 'NOT_FOUND')) continue;
+        if (isComputeError(error, 'NOT_FOUND')) {
+          this.#markGone(snapshot.id);
+          continue;
+        }
         this.context.log.warn('aws: an extra EBS snapshot of one name was not deleted yet', {
           snapshot: snapshot.id,
           code: error instanceof ComputeError ? error.code : 'unknown',
@@ -1139,8 +1272,9 @@ export class AwsVolumes implements ProviderVolumes {
   ): Promise<ProviderResourceState | undefined> {
     if (typeof snapshotId !== 'string' || !snapshotPattern.test(snapshotId)) return undefined;
     const snapshot = await this.snapshot(snapshotId, context.signal);
+    // A miss is pending while it may be EBS lag (also a snapshot another process just took).
     if (!snapshot)
-      return this.#recent(this.#createdSnapshotIds.get(snapshotId))
+      return this.#mayLag(snapshotId, this.#createdSnapshotIds.get(snapshotId))
         ? state(snapshotId, 'pending')
         : undefined;
     return snapshotState(snapshot, this.config.region);
@@ -1152,7 +1286,7 @@ export class AwsVolumes implements ProviderVolumes {
     const { signal } = context;
     const snapshot = await this.snapshot(snapshotId, signal);
     if (!snapshot) {
-      if (this.#recent(this.#createdSnapshotIds.get(snapshotId)))
+      if (this.#mayLag(snapshotId, this.#createdSnapshotIds.get(snapshotId)))
         return state(snapshotId, 'deleting');
       return state(snapshotId, 'deleted');
     }
@@ -1160,8 +1294,10 @@ export class AwsVolumes implements ProviderVolumes {
     try {
       await this.deps.call('DeleteSnapshot', { SnapshotId: snapshotId }, signal);
       this.#forget(snapshotId);
+      this.#markGone(snapshotId);
     } catch (error) {
       if (isComputeError(error, 'NOT_FOUND')) {
+        this.#markGone(snapshotId);
         await this.#deleteSiblings(snapshot, signal);
         return state(snapshotId, 'deleted');
       }

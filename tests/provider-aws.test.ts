@@ -378,7 +378,17 @@ describe('compute', () => {
   it('create sends a hardened RunInstances', async () => {
     const { emu, create } = await providerWorld();
     const machine = await create('ins_test1', {
-      labels: { team: 'ml', managed: 'false', tenant: 't_forged', pool: 'p_forged', instance: 'x' },
+      labels: {
+        team: 'ml',
+        managed: 'false',
+        tenant: 't_forged',
+        pool: 'p_forged',
+        instance: 'x',
+        // (A5) A root volume never carries a data volume's or snapshot's name tag: EBS calls and
+        // the iam-policy statements would then manage it as a data volume.
+        volume: 'x',
+        snapshot: 'y',
+      },
     });
     expect(machine.id).toMatch(/^i-[0-9a-f]{17}$/);
     expect(machine.state).toBe('pending');
@@ -987,13 +997,23 @@ describe('conformance', () => {
       // EC2 refuses a stop while pending; time passes between the contract's calls on real EC2.
       ec2emu.settleOnRead = true;
       // (A5) The volume cases: EBS settles as the contract reads it again.
-      new EbsEmulator(emu, ec2emu).settleOnRead = true;
+      const ebsemu = new EbsEmulator(emu, ec2emu);
+      ebsemu.settleOnRead = true;
       const attachable = ec2emu.addInstance({ tags: { Name: 'legacy' } });
+      // (do-volumes conformance) The account owner's own volume and snapshot, which the ownership
+      // case checks a delete refuses and leaves. A runner without that case ignores the field.
+      const ownership = {
+        foreign: {
+          volumeId: ebsemu.addVolume({ zone: 'us-east-1a', tags: { Name: 'theirs' } }).id,
+          snapshotId: ebsemu.addSnapshot({ tags: { Name: 'theirs' } }).id,
+        },
+      };
       return {
         provider: awsProvider({ fetch: emu.fetch, credentials: emu.ambient }),
-        // One zone: the contract's volume cases name a bare region, which on an account with
-        // several zones names no zone (INVALID_INPUT, reason zone-required, in provider-aws-volumes).
-        config: { region: 'us-east-1', zones: ['us-east-1a'] },
+        config: { region: 'us-east-1', zones: ['us-east-1a', 'us-east-1b'] },
+        // (A5) The volume cases name a zone as their region, as vps does (it keeps an AWS volume per
+        // zone): a bare region on an account with several zones names no zone (zone-required).
+        region: 'us-east-1a',
         offerId: 'us-east-1a/t3.micro',
         image: 'ubuntu-24.04',
         context: {
@@ -1003,6 +1023,7 @@ describe('conformance', () => {
         },
         attachable: attachable.id,
         prefix: 'aws-conf',
+        ...ownership,
       };
     });
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);

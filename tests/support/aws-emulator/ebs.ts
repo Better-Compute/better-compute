@@ -10,7 +10,8 @@ import { ec2Error, ec2Response, el, items } from './xml.js';
 // instance, a device name is used once per instance, an attached volume is not deleted, and a
 // volume only grows. Knobs: settleOnRead (every Describe* moves transitional states one step),
 // A terminating instance detaches its volumes (DeleteOnTermination is false for AttachVolume).
-// newVolumeNotFound (eventual consistency right after CreateVolume), cooldownCode, stuckDetach (a
+// newVolumeNotFound (eventual consistency right after CreateVolume), hideAttachmentById (a by-id
+// read that lags AttachVolume), cooldownCode, stuckDetach (a
 // guest that never releases the volume: only DetachVolume Force=true lets it go), addVolume and
 // addSnapshot (foreign resources), and tick.
 
@@ -140,6 +141,8 @@ export class EbsEmulator {
   attachmentReadLag = false;
   /** Volumes whose attachment DescribeVolumes on attachment.instance-id and the instance's block device mappings leave out. */
   laggingAttachments = new Set<string>();
+  /** Volumes by-id DescribeVolumes shows without their attachment (a by-id read that lags AttachVolume). */
+  hideAttachmentById = new Set<string>();
   /** token → the deleted volume it made (with retainClientTokens). */
   readonly #retired = new Map<string, EmuVolume>();
   #next = 0;
@@ -268,15 +271,16 @@ export class EbsEmulator {
       : '';
   }
 
-  #volumeXml(volume: EmuVolume): string {
+  #volumeXml(volume: EmuVolume, hideAttachment = false): string {
+    const attachment = hideAttachment ? undefined : volume.attachment;
     return [
       el('volumeId', volume.id),
       el('size', volume.sizeGiB),
       el('snapshotId', volume.snapshotId ?? ''),
       el('availabilityZone', volume.zone),
-      el('status', volume.state),
+      el('status', hideAttachment && volume.state === 'in-use' ? 'available' : volume.state),
       el('createTime', new Date(volume.createTime).toISOString()),
-      items('attachmentSet', volume.attachment ? [this.#attachmentXml(volume)] : []),
+      items('attachmentSet', attachment ? [this.#attachmentXml(volume)] : []),
       el('volumeType', volume.type),
       el('iops', volume.iops),
       el('throughput', volume.throughput),
@@ -355,7 +359,9 @@ export class EbsEmulator {
           action,
           items(
             'volumeSet',
-            page.map((volume) => this.#volumeXml(volume)),
+            page.map((volume) =>
+              this.#volumeXml(volume, ids.length > 0 && this.hideAttachmentById.has(volume.id)),
+            ),
           ) + el('nextToken', next),
         );
       }
