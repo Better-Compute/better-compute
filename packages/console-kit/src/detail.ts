@@ -167,13 +167,14 @@ export function createDetail(
         return { status: 'done', result };
       } catch (error) {
         const failure = error as { code?: unknown; details?: { confirmationId?: unknown } };
-        if (failure?.code === 'CONFIRMATION_REQUIRED')
-          return {
-            status: 'confirmation-required',
-            ...(typeof failure.details?.confirmationId === 'string'
-              ? { confirmationId: failure.details.confirmationId }
-              : {}),
-          };
+        // Without a confirmationId nobody can approve it (e.g. `confirm-spend`: resend with
+        // confirm: true): an ordinary error.
+        if (
+          failure?.code === 'CONFIRMATION_REQUIRED' &&
+          typeof failure.details?.confirmationId === 'string' &&
+          failure.details.confirmationId !== ''
+        )
+          return { status: 'confirmation-required', confirmationId: failure.details.confirmationId };
         throw error;
       }
     },

@@ -169,6 +169,9 @@ async function withConfirmation(
     if (!(error instanceof ComputeClientError) || error.code !== 'CONFIRMATION_REQUIRED')
       throw error;
     const confirmationId = String(error.details?.confirmationId ?? '');
+    // No confirmation to approve (e.g. `confirm-spend`: the request itself must say confirm: true):
+    // no person can resolve it, so the model reads the error and resends.
+    if (!confirmationId) throw error;
     const pending = {
       status: 'confirmation-required',
       confirmationId,
