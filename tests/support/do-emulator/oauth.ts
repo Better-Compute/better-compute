@@ -18,6 +18,8 @@ export class OAuthEmulator {
   expiresIn = 2_592_000;
   clientId = 'client-1';
   clientSecret = 'client-secret-1';
+  /** Answers the token endpoint gives next, before anything else (rate limits, odd refusals), one per request. */
+  readonly scripted: { status: number; body: unknown; headers?: Record<string, string> }[] = [];
   #n = 0;
 
   constructor(readonly api: DoEmulator) {}
@@ -35,6 +37,8 @@ export class OAuthEmulator {
     this.requests.push({ url, method, params: q, body });
     if (url.pathname !== '/v1/oauth/token' || method !== 'POST')
       return json(404, { error: 'not_found' });
+    const scripted = this.scripted.shift();
+    if (scripted) return json(scripted.status, scripted.body, scripted.headers);
     if (q.get('client_id') !== this.clientId || q.get('client_secret') !== this.clientSecret)
       return json(401, { error: 'invalid_client', error_description: 'bad client' });
     if (q.get('grant_type') === 'refresh_token') {
@@ -74,9 +78,9 @@ export class OAuthEmulator {
   }
 }
 
-function json(status: number, body: unknown): Response {
+function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...headers },
   });
 }

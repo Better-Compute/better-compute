@@ -24,6 +24,10 @@ import {
 //   retryable) the first time: another process may still be writing the rotated token back. The same token refused
 //   on a later exchange is a dead grant, `INVALID_CONFIG` (`reason 'oauthGrant'`): the account must be connected
 //   again. So is a grant refused for the token the store changed to.
+// - Only an `invalid_grant` answer (400 or 401) refuses the grant. A 429 is `RATE_LIMITED` (its `retry-after`, else
+//   a minute), a 408 `UNAVAILABLE`, `invalid_client` `INVALID_CONFIG` (the platform's app), and any other 4xx
+//   (`invalid_request`, an unparsable body) `PROVIDER_ERROR`: retryable, and never counted towards a dead grant, so
+//   a rate-limited token endpoint can never fail an account or its instances.
 // The token endpoint's parameters go in an `application/x-www-form-urlencoded` body (RFC 6749 §4.1.3, §6), never in
 // the URL, which proxies and fetch wrappers log; `tokenParams: 'query'` is the fallback for DigitalOcean's documented
 // query form, should the live suite find the body form refused (unverified).
@@ -80,16 +84,32 @@ const writeBackoffMs = [100, 300];
 const exchangeTimeoutMs = 30_000;
 
 function oauthError(
-  code: 'INVALID_CONFIG' | 'INVALID_INPUT' | 'UNAVAILABLE' | 'PROVIDER_ERROR',
+  code: 'INVALID_CONFIG' | 'INVALID_INPUT' | 'UNAVAILABLE' | 'PROVIDER_ERROR' | 'RATE_LIMITED',
   message: string,
   reason: string,
   status?: number,
+  extra: Record<string, unknown> = {},
 ): ComputeError {
   return new ComputeError(code, message, undefined, {
     provider: 'digitalocean',
     reason,
     ...(status !== undefined ? { status } : {}),
+    ...extra,
   });
+}
+
+const defaultRetryAfterMs = 60_000;
+const maxRetryAfterMs = 3_600_000;
+
+/** How long a 429 of the token endpoint says to wait: `retry-after` (seconds or a date), else a minute. */
+function retryAfterOf(response: Response, now: number): number {
+  const raw = response.headers.get('retry-after')?.trim();
+  if (raw) {
+    const seconds = Number(raw);
+    const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(raw) - now;
+    if (Number.isFinite(ms)) return Math.min(maxRetryAfterMs, Math.max(0, Math.round(ms)));
+  }
+  return defaultRetryAfterMs;
 }
 
 /** The endpoint as a URL, refused unless https. */
@@ -146,7 +166,8 @@ async function tokenRequest(
   let body: Record<string, unknown> = {};
   try {
     const text = await response.text();
-    body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+    const parsed: unknown = text ? JSON.parse(text) : {};
+    body = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
   } catch {
     body = {};
   }
@@ -157,6 +178,16 @@ async function tokenRequest(
       'oauthServer',
       response.status,
     );
+  if (response.status === 429)
+    throw oauthError(
+      'RATE_LIMITED',
+      'DigitalOcean OAuth is rate limiting the token request: try again later',
+      'oauthRateLimit',
+      429,
+      { retryAfterMs: retryAfterOf(response, options.clock.now()) },
+    );
+  if (response.status === 408)
+    throw oauthError('UNAVAILABLE', 'DigitalOcean OAuth timed out', 'oauthTimeout', 408);
   if (!response.ok) {
     const error = typeof body.error === 'string' ? body.error : '';
     if (error === 'invalid_client')
@@ -164,6 +195,14 @@ async function tokenRequest(
         'INVALID_CONFIG',
         'DigitalOcean refused the OAuth client id or secret',
         'oauthClient',
+        response.status,
+      );
+    // Anything but an invalid grant is not the token's fault: retryable, never a dead grant.
+    if (error !== 'invalid_grant' || (response.status !== 400 && response.status !== 401))
+      throw oauthError(
+        'PROVIDER_ERROR',
+        'DigitalOcean OAuth refused the token request',
+        'oauthRequest',
         response.status,
       );
     throw oauthError(

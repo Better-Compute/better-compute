@@ -281,6 +281,83 @@ describe('a rotation another process has not written back yet', () => {
   });
 });
 
+describe('token endpoint answers that are not a dead grant', () => {
+  it('a 429 twice in a row is RATE_LIMITED with its wait, never INVALID_CONFIG, and marks no token suspect', async () => {
+    const w = world();
+    const oauth = { ...w.hooks, raceWaitMs: [1, 1] };
+    for (let round = 0; round < 2; round++) {
+      w.oauth.scripted.push({ status: 429, body: { error: 'too_many_requests' }, headers: { 'retry-after': '7' } });
+      const error = await (await w.build({ oauth })).listOffers({}).catch((e: unknown) => e);
+      expect(error).toMatchObject({
+        code: 'RATE_LIMITED',
+        details: expect.objectContaining({ reason: 'oauthRateLimit', status: 429, retryAfterMs: 7_000 }),
+      });
+    }
+    // No token was taken as refused: the next answer is honoured and the account works.
+    await (await w.build({ oauth })).listOffers({});
+    expect(w.store.get(REF)).toBe('refresh-1');
+  });
+
+  it('a refusal right after a 429 is the first refusal, retryable, not a dead grant', async () => {
+    const w = world();
+    const oauth = { ...w.hooks, raceWaitMs: [1, 1] };
+    w.oauth.scripted.push({ status: 429, body: {} });
+    await (await w.build({ oauth })).listOffers({}).catch(() => undefined);
+    w.oauth.refreshTokens.clear();
+    const error = await (await w.build({ oauth })).listOffers({}).catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: 'UNAVAILABLE', details: expect.objectContaining({ reason: 'oauthRace' }) });
+  });
+
+  it('400 invalid_request, 408 and an unknown 4xx are retryable, never a dead grant', async () => {
+    const w = world();
+    const oauth = { ...w.hooks, raceWaitMs: [1, 1] };
+    const answers = [
+      { status: 400, body: { error: 'invalid_request' }, code: 'PROVIDER_ERROR', reason: 'oauthRequest' },
+      { status: 400, body: { error: 'invalid_request' }, code: 'PROVIDER_ERROR', reason: 'oauthRequest' },
+      { status: 408, body: {}, code: 'UNAVAILABLE', reason: 'oauthTimeout' },
+      { status: 403, body: 'nope', code: 'PROVIDER_ERROR', reason: 'oauthRequest' },
+    ];
+    for (const { status, body, code, reason } of answers) {
+      w.oauth.scripted.push({ status, body });
+      const error = await (await w.build({ oauth })).listOffers({}).catch((e: unknown) => e);
+      expect(error).toMatchObject({ code, details: expect.objectContaining({ reason, status }) });
+      expect((error as { message: string }).message).not.toMatch(/connect the account again/);
+    }
+    await (await w.build({ oauth })).listOffers({});
+  });
+
+  it('only invalid_grant (400 or 401) refuses the grant', async () => {
+    const w = world();
+    const oauth = { ...w.hooks, raceWaitMs: [1, 1] };
+    w.oauth.scripted.push({ status: 400, body: { error: 'invalid_grant' } }, { status: 400, body: { error: 'invalid_grant' } });
+    const first = await (await w.build({ oauth })).listOffers({}).catch((e: unknown) => e);
+    expect(first).toMatchObject({ code: 'UNAVAILABLE', details: expect.objectContaining({ reason: 'oauthRace' }) });
+    const second = await (await w.build({ oauth })).listOffers({}).catch((e: unknown) => e);
+    expect(second).toMatchObject({ code: 'INVALID_CONFIG', details: expect.objectContaining({ reason: 'oauthGrant' }) });
+  });
+
+  it('a code exchange that is rate limited is RATE_LIMITED, not a refused code', async () => {
+    const w = world();
+    w.oauth.codes.set('code-1', 'https://x/cb');
+    w.oauth.scripted.push({ status: 429, body: {} });
+    const input = {
+      code: 'code-1',
+      redirectUri: 'https://x/cb',
+      clientId: 'client-1',
+      clientSecret: 'client-secret-1',
+      fetch: w.oauth.fetch,
+      clock: w.clock,
+      signal: new AbortController().signal,
+    };
+    await expect(exchangeAuthorizationCode(input)).rejects.toMatchObject({
+      code: 'RATE_LIMITED',
+      details: expect.objectContaining({ retryAfterMs: 60_000 }),
+    });
+    // The code was not spent: the retry trades it.
+    await expect(exchangeAuthorizationCode(input)).resolves.toMatchObject({ refreshToken: 'refresh-1' });
+  });
+});
+
 describe('the token endpoint request', () => {
   it('never puts the client secret, a refresh token or a code in the URL', async () => {
     const w = world();
