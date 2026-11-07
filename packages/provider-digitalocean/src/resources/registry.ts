@@ -6,6 +6,7 @@ import {
   type ProviderResourceKind,
   type ProviderResourceRequest,
   type ProviderResources,
+  type ProviderResourceSignal,
   type ProviderResourceState,
 } from '@better-compute/core';
 import type { DoClient } from '../client/http.js';
@@ -15,17 +16,36 @@ import { addonKind } from './kinds/addons.js';
 import { appKind } from './kinds/apps.js';
 import { databaseKinds } from './kinds/databases.js';
 import { functionsKinds } from './kinds/functions.js';
+import { guardrailKind } from './kinds/guardrails.js';
+import { dedicatedInferenceKind } from './kinds/inference.js';
+import { inferenceKeyKind } from './kinds/inference-keys.js';
+import { knowledgeBaseKind } from './kinds/knowledge-bases.js';
+import { actionGatewayKind, agentHarnessKind } from './kinds/managed-agents.js';
 import { partnerKind } from './kinds/partner.js';
 import { oneClickCatalog } from './one-clicks.js';
+import { doSignals } from './signals.js';
 import type { DoKind, DoKindEnv } from './kind.js';
 
 // The `ProviderResources` dispatcher: every long-tail DigitalOcean kind, by name. The cloud-resources module
 // validates a spec with the kind's manifest before it calls; the dispatcher refuses an unknown kind and a preview
-// kind the account does not enable, and passes everything else to the kind.
+// kind the account does not enable (a rejected promise, before anything is sent), and passes everything else to
+// the kind.
 
 /** Every kind this provider serves, in catalog order. */
 export function doResourceKinds(): DoKind[] {
-  return [...databaseKinds(), appKind(), ...functionsKinds(), addonKind(), partnerKind()];
+  return [
+    ...databaseKinds(),
+    appKind(),
+    ...functionsKinds(),
+    addonKind(),
+    partnerKind(),
+    dedicatedInferenceKind(),
+    inferenceKeyKind(),
+    knowledgeBaseKind(),
+    guardrailKind(),
+    agentHarnessKind(),
+    actionGatewayKind(),
+  ];
 }
 
 export class DoResources implements ProviderResources {
@@ -50,14 +70,19 @@ export class DoResources implements ProviderResources {
     return [...this.#kinds.values()].map((kind) => kind.definition);
   }
 
-  #kind(kind: string): DoKind {
+  /**
+   * The kind, for `use`. A preview kind is refused on an account without previews for making or finding one
+   * (`ensure`, `adopt`, `discover`, `release`), never for reading or deleting one (`keep`): a resource made while
+   * previews were on (billed by the hour) can always be torn down, by its tenant or by a tenant teardown.
+   */
+  #kind(kind: string, use: 'make' | 'keep' = 'make'): DoKind {
     const found = this.#kinds.get(kind);
     if (!found)
       throw new ComputeError('UNSUPPORTED', `DigitalOcean serves no ${kind}`, undefined, {
         provider: 'digitalocean',
         reason: 'kind',
       });
-    if (found.definition.preview === true && !this.#env.previews)
+    if (use === 'make' && found.definition.preview === true && !this.#env.previews)
       throw new ComputeError(
         'UNSUPPORTED',
         `${kind} is a DigitalOcean preview; the account must enable previews`,
@@ -70,17 +95,27 @@ export class DoResources implements ProviderResources {
     return found;
   }
 
-  ensure(request: ProviderResourceRequest, context: CallContext): Promise<ProviderResourceState> {
+  async ensure(
+    request: ProviderResourceRequest,
+    context: CallContext,
+  ): Promise<ProviderResourceState> {
     return this.#kind(request.kind).ensure(this.#env, request, context);
   }
 
-  get(kind: string, id: string, context: CallContext): Promise<ProviderResourceState | undefined> {
-    return this.#kind(kind).get(this.#env, id, context);
+  async get(
+    kind: string,
+    id: string,
+    context: CallContext,
+  ): Promise<ProviderResourceState | undefined> {
+    return this.#kind(kind, 'keep').get(this.#env, id, context);
   }
 
-  /** What an earlier ensure of the request made, when the answer was lost; every kind can tell. */
+  /**
+   * What an earlier ensure of the request made, when the answer was lost; every kind can tell. Read-only and part of a
+   * teardown (the row is being forgotten), so a preview kind is still looked up on an account without previews.
+   */
   async find(request: ProviderResourceRequest, context: CallContext): Promise<string | undefined> {
-    const found = this.#kind(request.kind);
+    const found = this.#kind(request.kind, 'keep');
     if (!found.find)
       throw new ComputeError('UNSUPPORTED', `${request.kind} cannot be looked up`, undefined, {
         provider: 'digitalocean',
@@ -89,8 +124,8 @@ export class DoResources implements ProviderResources {
     return found.find(this.#env, request, context);
   }
 
-  delete(kind: string, id: string, context: CallContext): Promise<ProviderResourceState> {
-    return this.#kind(kind).delete(this.#env, id, context);
+  async delete(kind: string, id: string, context: CallContext): Promise<ProviderResourceState> {
+    return this.#kind(kind, 'keep').delete(this.#env, id, context);
   }
 
   discover(kind: string, context: CallContext): AsyncIterable<ProviderDiscoveredResource> {
@@ -126,6 +161,18 @@ export class DoResources implements ProviderResources {
         reason: 'release',
       });
     await found.release(this.#env, id, context);
+  }
+
+  /** Managed Agents signals (a preview): read-only, refused with nothing sent unless the account enables previews. */
+  async signals(context: CallContext): Promise<ProviderResourceSignal[]> {
+    if (!this.#env.previews)
+      throw new ComputeError(
+        'UNSUPPORTED',
+        'Managed Agents signals are a DigitalOcean preview; the account must enable previews',
+        undefined,
+        { provider: 'digitalocean', reason: 'preview' },
+      );
+    return doSignals(this.#env.client, context);
   }
 
   /** The 1-Click applications: Droplet images and DOKS add-ons, installed through those surfaces. */

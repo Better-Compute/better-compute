@@ -1,0 +1,183 @@
+---
+title: AI platform
+description: DigitalOcean's AI platform as cloud resources. Dedicated Inference endpoints booked against the GPU quota, sealed model access keys and a token-counting inference proxy, knowledge bases and guardrails, the Managed Agents previews (harness agents on containers or MicroVMs, action gateways), and their read-only signals for an attention list.
+metaTitle: DigitalOcean AI platform as cloud resources
+icon: Cloud
+status: experimental
+packages: ['@better-compute/cloud-resources', '@better-compute/provider-digitalocean']
+sources:
+  [
+    'packages/cloud-resources/src/resources.ts',
+    'packages/cloud-resources/src/signals.ts',
+    'packages/cloud-resources/src/adopt.ts',
+    'packages/vps/src/quota-bookings.ts',
+    'packages/core/src/extension.ts',
+    'packages/provider-digitalocean/src/resources/kinds/inference.ts',
+    'packages/provider-digitalocean/src/resources/kinds/inference-keys.ts',
+    'packages/provider-digitalocean/src/resources/kinds/knowledge-bases.ts',
+    'packages/provider-digitalocean/src/resources/kinds/guardrails.ts',
+    'packages/provider-digitalocean/src/resources/kinds/managed-agents.ts',
+    'packages/provider-digitalocean/src/resources/signals.ts',
+    'packages/provider-digitalocean/src/inference/proxy.ts',
+    'tests/provider-digitalocean-ai.test.ts',
+    'tests/provider-digitalocean-agents.test.ts',
+    'tests/provider-digitalocean-managed-agents.test.ts',
+    'tests/provider-digitalocean-inference-proxy.test.ts',
+    'tests/cloud-resources-signals.test.ts',
+    'tests/do-ai-end-to-end.test.ts',
+  ]
+---
+
+DigitalOcean's AI platform reaches tenants through the same `cloudResources` calls as its managed databases and
+apps: a kind per product, created on a provider pool, converged by the `cloud.resources` reconciler. This page covers
+what is particular to the AI kinds: GPUs booked against a quota without a node to place them on, keys that are only
+ever sealed, and products DigitalOcean still marks as previews. Set up the account and the pool first, as in
+[DigitalOcean](/docs/guides/vps/providers#digitalocean).
+
+| Kind                     | What it is                                                              | Changes in place                                                         |
+| ------------------------ | ----------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `do.dedicated-inference` | A model served on dedicated GPUs, between `replicas` and `maxReplicas`  | `replicas`, `maxReplicas`                                                |
+| `do.inference-key`       | A model access key for serverless and dedicated inference (sealed)      | `rotation` (regenerates the key)                                         |
+| `do.knowledge-base`      | An embedding model over web and Spaces sources, indexed into OpenSearch | `webSources`, `spacesSources` (then reindexes)                           |
+| `do.guardrail`           | A jailbreak, sensitive-data or content-moderation check                 | `defaultResponse`, `description`                                         |
+| `do.agent-harness`       | A Managed Agents harness agent, on a container or a MicroVM (preview)   | `model`, `instructions`, `knowledgeBases`, `guardrails`, `actionGateway` |
+| `do.action-gateway`      | The tools a harness agent may call, as https upstreams (preview)        | `upstreams`, `description`                                               |
+
+Every other spec change is refused with `replaceRequired`: create a new resource. No agents are deployed through
+DigitalOcean's ADK, which is deprecated; the Managed Agents harness is the supported way to run one.
+
+<Callout type="warn">
+  The request and response shapes of these products follow DigitalOcean's API reference, and some
+  paths are assumed (guardrails, the Managed Agents and Signals endpoints). The provider's emulator
+  tests pin those shapes, but the live suite has not yet recorded real bodies, so treat the kinds as
+  experimental until it has.
+</Callout>
+
+## Dedicated Inference and the GPU quota
+
+A Dedicated Inference endpoint runs on GPUs that no better-compute node owns, so there is nothing to place. It still
+counts against the tenant's GPU quota on the pool: the kind declares what its spec books (GPUs per replica of
+`gpuSize`, times the larger of `replicas` and `maxReplicas`), and the module books it in the same transaction that
+records the resource.
+
+```ts
+await compute.api.cloudResources.create(acme, {
+  tenantId: 'acme',
+  poolId,
+  kind: 'do.dedicated-inference',
+  name: 'chat',
+  spec: {
+    region: 'nyc3',
+    model: 'llama3.3-70b-instruct',
+    gpuSize: 'gpu-h100x1-80gb',
+    maxReplicas: 2,
+  },
+  idempotencyKey: 'chat',
+});
+// Books 2 GPUs against acme's quota on the pool, or fails with QUOTA_EXCEEDED and records nothing.
+```
+
+- **Over the quota**, `create` is `QUOTA_EXCEEDED` and nothing is recorded. The quota is the pool offer's `gpu`
+  figure (see [quotas](/docs/guides/capacity/quotas-and-usage#quotas)).
+- **Scaling** books the difference: growth is charged when `update` is called (`QUOTA_EXCEEDED` refuses the update),
+  a shrink is returned once DigitalOcean has scaled the endpoint down (it is `ready` again).
+- **Deleting** returns the GPUs once DigitalOcean has let the endpoint go, and only once.
+- **Adopting** an endpoint made outside better-compute is refused (`UNSUPPORTED`, `quotaBooked`): it would run on
+  GPUs nothing was charged for.
+
+**Reaching it.** An endpoint takes a model access key of its account. On the tenant's own pool that is a
+`do.inference-key` of its own. On a shared pool the tenant may not hold one (a key reaches the whole platform
+account, see below), so it calls its endpoint through the operator's proxy: `inferenceProxy` with `endpoint` set to
+the resource's `outputs.endpoint`, which the proxy accepts only as `https://<id>.inference.do-ai.run`. The host
+checks the endpoint is one of the caller's tenant's resources and passes an operator key; the call's tokens are
+recorded with the endpoint.
+
+The endpoint reports GPU hours on the GPU model's meter (`gpu.h100.hours` and so on). Those bill only if the host
+lists them in `cloudResources({ kindMeters })` and defines them in IAM billing; `cloud.resource.hours` bills either way.
+
+## Model access keys and the inference proxy
+
+`do.inference-key` is a model access key: the bearer that serverless inference (chat, completions, embeddings,
+batch) and dedicated endpoints take. DigitalOcean answers the secret only on create and on a regenerate, and the
+module seals it in the reconciler run that received it: the resource's `secretOutputs.key` is a `SecretRef`, and the
+value never reaches a row, an event or a log. Raising `rotation` regenerates the key; the old one stops working. A
+create whose answer was lost is found by its name and regenerated, so a secret no one sealed is never live.
+
+A model access key reaches the whole DigitalOcean account: every model, and every Dedicated Inference endpoint on it.
+So only a pool on the tenant's own account may have one. On a shared pool (the platform's account, offered to the
+tenant) the create is refused with `INVALID_INPUT` and `details.reason` `accountWide`, before anything is recorded
+or sent. Otherwise a tenant that read its key could call DigitalOcean directly, past the proxy, on the operator's bill,
+and could reach other tenants' endpoints.
+
+Tokens are counted in one of two ways:
+
+- **Through the operator's proxy.** `inferenceProxy` from `@better-compute/provider-digitalocean` forwards
+  `/v1/chat/completions`, `/v1/completions` and `/v1/embeddings` to DigitalOcean and hands each answer's token counts
+  to a `record` callback, which the host writes as `ai.inference.tokens` usage (the key kind declares no kind meter:
+  those bill an hourly rate, and tokens are not one). A streamed answer is counted from its
+  final usage chunk, even when the client stops reading first: the proxy reads the rest itself. `stream` must be
+  `true` or `false` (a `"true"` an upstream would coerce is refused, `reason` `stream`), and an answer is counted
+  by what DigitalOcean sent (an event stream is scanned as events), not by what the request asked. Counting fails
+  closed: a whole answer with no usage is withheld (502) and recorded with `uncounted: true`, and so is a stream
+  that ended with no usage chunk. Wiring it to a route is the host's job: the server does not import providers.
+- **Directly.** A tenant may call DigitalOcean with its own key; the usage then comes from DigitalOcean billing.
+
+```ts title="inference-route.ts"
+import { inferenceProxy } from '@better-compute/provider-digitalocean';
+
+const proxy = inferenceProxy({
+  // Your usage writer: `meta` is what the route passed with the call.
+  record: (usage) => recordTokens(usage.meta?.tenantId, usage.model, usage.totalTokens),
+});
+// In your route: resolve the tenant's sealed key (secretOutputs.key), then
+const response = await proxy({ path: '/v1/chat/completions', body, key, meta: { tenantId } });
+```
+
+## Knowledge bases and guardrails
+
+A **knowledge base** indexes web pages and Spaces objects with an embedding model into an OpenSearch database
+DigitalOcean makes for it (or one the tenant names). Its sources change in place: they are added and removed one by
+one, then one indexing job runs, and the resource is `updating` until it finishes. The knowledge base is marked at
+DigitalOcean before its sources change, so a job whose start failed is started by the next reconcile. Spaces sources, a named database and
+a VPC are account-wide objects, so only a knowledge base on the tenant's own account may name them; on a shared
+account they are refused with `accountWide`. Deleting a knowledge base also deletes the OpenSearch database
+DigitalOcean made for it, once the knowledge base is gone. A database the spec named is left alone. So is one that a
+cloud resource or another deployment manages, or that another knowledge base uses.
+
+A **guardrail** checks for jailbreaks, sensitive data or harmful content, and answers `defaultResponse` when it
+trips. Guardrails carry no tags, so ownership lives in the name: `<name>-bc<deployment hash>`. One made by hand or by
+another deployment is never changed or deleted (`notManaged`).
+
+## Managed Agents (preview)
+
+Harness agents and action gateways are DigitalOcean previews. Both kinds are listed with `preview: true` and
+`available: false` until the account sets `previews: true`; before that, `create` is `UNSUPPORTED` (`preview`) and
+nothing reaches DigitalOcean. Turning previews off later does not strand what was made: those resources can still be
+read and deleted, by the tenant or by a tenant teardown.
+
+- **`do.agent-harness`** runs a model with `instructions`, optionally with knowledge bases, guardrails and an action
+  gateway. `runtime: 'microvm'` isolates each session in a MicroVM (the default is `container`); the runtime and the
+  region cannot change in place. Knowledge bases, guardrails and gateways are named by their DigitalOcean id, so,
+  like a knowledge base's Spaces sources, only a harness on the tenant's own account may name them.
+- **`do.action-gateway`** lists the https endpoints (`upstreams`) an agent may call as tools.
+
+Both report an hours meter (`do.agent-harness.hours`, `do.action-gateway.hours`) and use name-based ownership, as
+guardrails do.
+
+## Signals into attention
+
+DigitalOcean raises signals about harness agents and gateways: a run that failed, an agent asking a human to approve
+something. `cloudResources.signals` reads them for an attention list; it is read-only, and the provider is only asked
+to list. DigitalOcean lists signals oldest first, so every page is read and the newest 500 are kept. One answer per
+account is reused for 30 seconds, whichever tenant asks.
+
+```ts
+const { items } = await compute.api.cloudResources.signals(acme, { tenantId: 'acme', poolId });
+// [{ id, severity: 'warning', title: 'Human input requested', detail, at, kind: 'do.agent-harness',
+//    providerId, resourceId }]
+```
+
+A tenant on a shared pool sees only the signals about its own resources. The pool's owner (the root tenant for the
+platform's pool) sees every signal, including ones about agents no cloud resource records. Titles and details are
+one line without control characters, at most 120 and 500 characters. Signals are a preview too: on an account
+without `previews: true` the call is `UNSUPPORTED` and nothing is sent.

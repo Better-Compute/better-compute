@@ -22,7 +22,7 @@ An account is data, validated by the provider's manifest:
 | `ipv6`              | Give new Droplets an IPv6 address (default `false`).                                                                                                                                 |
 | `allowSpot`         | Offer and create Spot GPU capacity where DigitalOcean reports a Spot price (default `false`; see [Spot](#spot)).                                                                     |
 | `discoverTag`       | A tag: discovery yields only Droplets that carry it. Lower-case `[a-z0-9:_-]`, at most 255 characters (else `INVALID_CONFIG`, `discoverTag`).                                        |
-| `previews`          | Default `false`. `true` offers what DigitalOcean still marks as previews: BYOIP addresses and VPC routes.                                     |
+| `previews`          | Default `false`. `true` offers what DigitalOcean still marks as previews: BYOIP addresses, VPC routes, and the Managed Agents kinds and Signals (see [AI platform](#ai-platform)). |
 | `spacesAccessKey`   | A secret reference to a Spaces access key id. With `spacesSecretKey`, it is the S3 key pair that manages tenant buckets (see [Storage](#storage-spaces-cdn-and-container-registry)). |
 | `spacesSecretKey`   | A secret reference to the Spaces secret key that goes with `spacesAccessKey`. Set both or neither.                                                                                   |
 | `networkModel`      | Default `vpc-per-subnet` (a VPC per subnet). `vpc-subnets` is reserved for DO's VPC Subnets preview and refused (`INVALID_CONFIG`) for now.   |
@@ -299,9 +299,11 @@ bodies follow the API reference and are not yet checked against recorded respons
 is accepted only on the tenant's own account and cannot change in place. A cluster's `network` (a tenant network,
 `net_…`) is accepted on any account: only the tenant's own networks, checked at the API and again before every
 ensure; `vpc` and `network` together are refused (`vpcAndNetwork`), and a change is `replaceRequired`. Every kind
-serves `find` (read-only), as its `ensure` finds its resource: the key tag (clusters), the key env (apps), the label
-(namespaces), the name suffix (add-ons, attachments) or the child of an owned cluster or namespace, so a create
-whose answer was lost is deleted rather than forgotten. Not modelled yet: Standard and Advanced editions and Vector
+serves `find` (read-only), as its `ensure` finds its resource: the key tag (clusters, inference endpoints, knowledge
+bases), the key env (apps), the label (namespaces), the name suffix (add-ons, attachments, guardrails, Managed
+Agents objects), the base name whatever rotation it carries (model access keys) or the child of an owned cluster or
+namespace, so a create whose answer was lost is deleted rather than forgotten (a preview kind is found even after
+the account turns previews off). Not modelled yet: Standard and Advanced editions and Vector
 Databases. The 1-Click body follows the API reference too.
 
 ## Storage: Spaces, CDN and Container Registry
@@ -447,6 +449,54 @@ These are optional members of `impl.networks`. A subnet is a VPC, so each serves
 - **Routes** (`ensureRoute`, preview: offered only with `previews: true`) add a static route to a subnet's VPC. The next hop is a NAT gateway of ours that serves the VPC, a Droplet of this deployment in it, or an address in its range, all checked before any write. A route never changes in place (`INVALID_STATE`, `replace`). The VPC Routes request shapes are unverified.
 - **Ordered teardown.** `deleteSubnet` first deletes the subnet's NAT gateways, peerings and routes of ours and stays `pending` while any is left; one that is not ours keeps the subnet and is never touched.
 - **Network model.** `networkModel: 'vpc-subnets'` (subnets inside one VPC per network and region, DigitalOcean's VPC Subnets preview) is reserved and refused for now. When it lands, moving an account to it will be an operator step, not automatic: the account's existing VPCs stay as they are.
+
+## AI platform
+
+The AI kinds (family `ai`) ride the same `resources` dispatcher. Ownership is by tags where DigitalOcean has them
+(dedicated inference, knowledge bases) and by the name suffix `-bc<deployment hash>` where it does not (model access
+keys, guardrails, the Managed Agents objects; `resources/kinds/named.ts`).
+
+- **Dedicated Inference:** `do.dedicated-inference` serves a model slug on one GPU size, between `replicas` (always
+  running) and `maxReplicas`; only those two change in place. The kind declares `quota`: GPUs per replica times
+  `max(replicas, maxReplicas)`, which the cloud-resources module books against the tenant's GPU quota on the pool
+  (`QUOTA_EXCEEDED` refuses a create or a scale-up; delete returns it; adopt is refused with `quotaBooked`). It
+  reports `gpu.<model>.hours` (`gpu.h100.hours`, …), which bill once the host names them in
+  `cloudResources({ kindMeters })`. A `vpc` is account-wide. On a shared pool the tenant reaches its endpoint through
+  the inference proxy (`endpoint`, with an operator key), since it may hold no model access key there.
+- **Model access keys:** `do.inference-key`, the bearer for serverless and dedicated inference. The key is a secret
+  output only (sealed by the module); raising `rotation` regenerates it, and a create whose answer was lost
+  regenerates the key it finds, so an unsealed secret is never live. Name: `<name>-r<rotation>-bc<hash>`. A key
+  reaches the whole account, so it is accepted only on the tenant's own account (`accountWide` on a shared one).
+- **Inference proxy:** `inferenceProxy({ record, endpoint?, fetch?, log? })` forwards `/v1/chat/completions`,
+  `/v1/completions` and `/v1/embeddings` to `https://inference.do-ai.run` with the tenant's resolved key and hands each
+  answer's token counts (and the caller's `meta`) to `record`, which the host writes as `ai.inference.tokens`.
+  A streamed answer is counted even when the client cancels before its final usage chunk: the proxy reads the rest
+  (at most 16 MiB). A `stream` that is not a boolean is refused (`reason 'stream'`); the counting path follows the
+  upstream content type; a whole answer without usage is withheld (502) and recorded `uncounted`, as is a stream
+  without a usage chunk. `endpoint` (a Dedicated Inference `outputs.endpoint`, only `https://<one label>.<dedicatedDomain>`)
+  sends the call to that endpoint instead, and its usage carries `endpoint`. Wiring it to a route is the host's: the
+  server does not import providers.
+- **Knowledge bases:** `do.knowledge-base`, an embedding model (uuid) over `webSources` and `spacesSources`,
+  indexed into an OpenSearch database DigitalOcean makes (or `database`). Sources change in place (added and removed,
+  then one indexing job, owed until it starts: a failed start is retried); Spaces sources, `database` and `vpc`
+  are account-wide. Delete also removes the OpenSearch database DigitalOcean made for it (never a named one, one
+  another resource manages, or one another knowledge base uses).
+- **Guardrails:** `do.guardrail` (`type` jailbreak, sensitive-data or content-moderation; `defaultResponse` and
+  `description` change in place). No agents are deployed through the deprecated ADK (DO-D21).
+- **Managed Agents (previews):** `do.agent-harness` (a model, `instructions`, knowledge bases, guardrails and an
+  action gateway, on `runtime` `container` or `microvm`; the attachments are account-wide) and `do.action-gateway`
+  (https `upstreams`). Both are `preview: true`: without `previews: true` on the account, `ensure`, `adopt`,
+  `discover` and `release` are `UNSUPPORTED` (`preview`) and nothing is sent; `get` and `delete` still work, so one made
+  while previews were on can be torn down. A delete of one DigitalOcean is already deleting sends nothing. Meters `do.agent-harness.hours` and `do.action-gateway.hours`.
+- **Signals (preview):** `resources.signals` reads `GET /v2/managed-agents/signals` (read-only, the `sweep` budget)
+  into provider-neutral `ProviderResourceSignal`s for harness agents and gateways: every page (at most 10 000
+  signals) and the newest 500 kept; anything else, or a
+  signal without a valid id or time, is dropped. `cloudResources.signals` shows them per tenant.
+
+Token scopes: read, create, update and delete on the GenAI (Agent Platform) and Dedicated Inference resources, and on
+the Managed Agents ones for the previews; the exact scope names are not confirmed yet. The bodies follow the API reference; the guardrail,
+Managed Agents and Signals paths are assumed. None of them is checked against recorded responses yet: the live suite
+must capture them before release.
 
 ## Rate budget
 

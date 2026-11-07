@@ -9,6 +9,7 @@ import {
   type ProviderResourceKind,
   type ProviderResourceRequest,
   type ProviderResources,
+  type ProviderResourceSignal,
   type ProviderResourceState,
   type SecretRef,
 } from '@better-compute/core';
@@ -59,8 +60,12 @@ export interface FakeResourcesCloud {
   scopes: Map<string, string | undefined>;
   /** The `networks` of the last ensure, by provider-side name. */
   networks: Map<string, Readonly<Record<string, string>> | undefined>;
+  /** The `secretOutputs` (names held sealed) of the last ensure, by provider-side name. */
+  sealedNames: Map<string, readonly string[] | undefined>;
   /** Extra entries the catalog answers (to check the module drops malformed ones). */
   catalogExtra?: ProviderCatalogEntry[];
+  /** What `signals` answers (read-only; the module filters them by tenant). */
+  signals?: ProviderResourceSignal[];
   /** Extra `usage` entries every fake.database reports (to check the module drops what it should). */
   usageExtra?: Record<string, number>;
   reset(): void;
@@ -85,6 +90,7 @@ export function fakeResourcesCloud(): FakeResourcesCloud {
     passwords: [],
     scopes: new Map(),
     networks: new Map(),
+    sealedNames: new Map(),
     resolved: new Map(),
     reset() {
       this.resources.clear();
@@ -98,9 +104,11 @@ export function fakeResourcesCloud(): FakeResourcesCloud {
       this.passwords.length = 0;
       this.scopes.clear();
       this.networks.clear();
+      this.sealedNames.clear();
       this.resolved.clear();
       delete this.usageExtra;
       delete this.catalogExtra;
+      delete this.signals;
     },
     seed(resource) {
       const id = `f-${++next}`;
@@ -281,10 +289,15 @@ export function fakeProviderResources(
         ...(cloud.catalogExtra ?? []),
       ];
     },
+    async signals() {
+      call('signals');
+      return structuredClone(cloud.signals ?? []);
+    },
     async ensure(request: ProviderResourceRequest, context: CallContext) {
       call(`ensure ${request.kind} ${request.name}`);
       cloud.scopes.set(request.name, request.accountScope);
       cloud.networks.set(request.name, request.networks);
+      cloud.sealedNames.set(request.name, request.secretOutputs);
       const secretRef = (request.spec as { secret?: SecretRef }).secret;
       if (secretRef !== undefined)
         cloud.resolved.set(request.name, await context.secrets.resolve(secretRef));
@@ -388,7 +401,8 @@ export function fakeProviderResources(
       if (!resource) return undefined;
       // A database says who manages it (as discover does); the other kinds cannot tell on get.
       if (kind !== 'fake.database') return outputs(resource, cloud);
-      const managed = resource.owner !== 'none' && resource.labels['better-compute-managed'] === 'true';
+      const managed =
+        resource.owner !== 'none' && resource.labels['better-compute-managed'] === 'true';
       return {
         ...outputs(resource, cloud),
         managedBy: managed ? (resource.owner === 'this' ? 'this' : 'other') : 'none',

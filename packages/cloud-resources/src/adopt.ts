@@ -146,6 +146,15 @@ async function admitAdopt(deps: CloudResourcesDeps, tx: SqlTx, input: AdoptResou
       'UNSUPPORTED',
       `Provider ${provider.account.provider} cannot adopt ${kind.kind}`,
     );
+  if (typeof kind.quota === 'function')
+    // What it books against the quota depends on a spec that is only read back at the takeover: it would run on
+    // capacity nothing was charged for.
+    throw new ComputeError(
+      'UNSUPPORTED',
+      `${kind.kind} books quota; create it through better-compute instead of adopting it`,
+      undefined,
+      { reason: 'quotaBooked', kind: kind.kind },
+    );
   if ((kind.secretOutputs ?? []).length > 0 && typeof deps.secrets?.put !== 'function')
     throw new ComputeError(
       'UNSUPPORTED',

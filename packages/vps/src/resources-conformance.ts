@@ -279,6 +279,18 @@ export function providerResourcesConformanceCases(): ConformanceCase<ProviderRes
             `${own.kind}: accountWide answers a list of field names`,
           );
         }
+        if (own.quota !== undefined) {
+          check(typeof own.quota === 'function', `${own.kind}: quota is a function`);
+          const booked: unknown = own.quota(await validSpec(own, subject.spec));
+          check(
+            typeof booked === 'object' &&
+              booked !== null &&
+              Object.values(booked).every(
+                (amount) => Number.isSafeInteger(amount) && (amount as number) >= 0,
+              ),
+            `${own.kind}: quota answers whole, non-negative counts by quota resource`,
+          );
+        }
       },
     },
     {
@@ -402,6 +414,101 @@ export function providerResourcesConformanceCases(): ConformanceCase<ProviderRes
           'notManaged',
           'the refusal names notManaged',
         );
+      },
+    },
+  ];
+}
+
+/** What the signals cases run against: a provider whose `ProviderResources` lists signals. */
+export interface ProviderResourcesSignalsConformanceSubject {
+  provider: ProviderDefinition;
+  /** Account config under which `signals` answers. */
+  config: unknown;
+  /** For a provider that holds signals behind previews: a config without them, under which `signals` is refused. */
+  withoutPreviews?: unknown;
+  context?: Partial<ProviderContext>;
+  /** The requests the provider sent so far (an emulator's log): the cases check none of them changes anything. */
+  requests?: () => readonly { method: string }[];
+}
+
+const severities: ReadonlySet<string> = new Set(['critical', 'warning', 'info']);
+const reads: ReadonlySet<string> = new Set(['GET', 'HEAD']);
+
+/**
+ * `ProviderResources.signals` as conformance cases: it is read-only (no request it sends changes anything), every
+ * signal is well formed and about a kind the provider lists, and a provider that holds signals behind previews refuses
+ * (`UNSUPPORTED`, `reason 'preview'`) with nothing sent on an account without them. A provider without `signals`
+ * passes them all (there is nothing to check).
+ */
+export function providerResourcesSignalsConformanceCases(): ConformanceCase<ProviderResourcesSignalsConformanceSubject>[] {
+  const sent = (subject: ProviderResourcesSignalsConformanceSubject) =>
+    subject.requests?.().length ?? 0;
+  const resourcesOf = (subject: ProviderResourcesSignalsConformanceSubject, config: unknown) =>
+    client({
+      provider: subject.provider,
+      config,
+      ...(subject.context ? { context: subject.context } : {}),
+      kind: 'conformance.signals',
+      spec: {},
+    });
+  return [
+    {
+      name: 'signals are read-only and well formed, each about a kind the provider lists',
+      async run(subject) {
+        const { resources, call } = await resourcesOf(subject, subject.config);
+        if (typeof resources.signals !== 'function') return;
+        const before = sent(subject);
+        const signals = await resources.signals(call('conformance-signals'));
+        check(Array.isArray(signals), 'signals answers a list');
+        const kinds = new Set(resources.kinds().map((kind) => kind.kind));
+        const ids = new Set<string>();
+        for (const signal of signals) {
+          const what = `signal ${JSON.stringify(signal?.id)}`;
+          check(typeof signal.id === 'string' && signal.id.length > 0, `${what}: id is a string`);
+          check(!ids.has(signal.id), `${what}: ids are unique`);
+          ids.add(signal.id);
+          check(kinds.has(signal.kind), `${what}: kind ${signal.kind} is one the provider lists`);
+          check(
+            typeof signal.resourceId === 'string' && signal.resourceId.length > 0,
+            `${what}: resourceId is a string`,
+          );
+          check(severities.has(signal.severity), `${what}: severity is in the contract`);
+          check(
+            typeof signal.title === 'string' &&
+              signal.title.trim().length > 0 &&
+              !/[\u0000-\u001f\u007f]/.test(signal.title),
+            `${what}: title is one non-empty line`,
+          );
+          check(
+            signal.detail === undefined ||
+              (typeof signal.detail === 'string' && !/[\u0000-\u001f\u007f]/.test(signal.detail)),
+            `${what}: detail is one line`,
+          );
+          check(typeof signal.at === 'number' && Number.isFinite(signal.at), `${what}: at is a time`);
+        }
+        if (subject.requests) {
+          const mutations = subject
+            .requests()
+            .slice(before)
+            .filter((request) => !reads.has(request.method.toUpperCase()));
+          checkEqual(mutations.length, 0, 'listing signals sends no mutation');
+        }
+      },
+    },
+    {
+      name: 'signals behind previews are refused with UNSUPPORTED (preview), and nothing is sent',
+      async run(subject) {
+        if (subject.withoutPreviews === undefined) return;
+        const { resources, call } = await resourcesOf(subject, subject.withoutPreviews);
+        if (typeof resources.signals !== 'function') return;
+        const before = sent(subject);
+        const error = await checkRejects(
+          () => resources.signals!(call('conformance-signals-off')),
+          'UNSUPPORTED',
+          'signals without previews',
+        );
+        checkEqual((error as ComputeError).details?.reason, 'preview', 'the refusal names preview');
+        checkEqual(sent(subject) - before, 0, 'a refused signals call sends nothing');
       },
     },
   ];

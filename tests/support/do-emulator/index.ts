@@ -12,8 +12,13 @@ import { registerDns } from './dns.js';
 import { registerDroplets } from './droplets.js';
 import { registerFirewalls } from './firewalls.js';
 import { registerFunctions } from './functions.js';
+import { registerGenai } from './genai.js';
+import { registerGuardrails } from './guardrails.js';
 import { registerImages } from './images.js';
+import { registerInference } from './inference.js';
+import { registerKnowledgeBases } from './knowledge-bases.js';
 import { registerKeys } from './keys.js';
+import { registerManagedAgents } from './managed-agents.js';
 import { registerNfs } from './nfs.js';
 import { registerPartner } from './partner.js';
 import { registerLoadBalancers } from './load-balancers.js';
@@ -150,6 +155,14 @@ export class DoEmulator {
   peeringReads = 1;
   /** How many route list reads a new VPC route answers `PENDING` to before it is `ACTIVE`. */
   routeReads = 1;
+  /** How many reads a dedicated inference endpoint stays `PROVISIONING` (or `UPDATING`, `DELETING`). */
+  inferenceReads = 1;
+  /** GPU sizes a dedicated inference create is refused for (insufficient capacity). */
+  inferenceSoldOut = new Set<string>();
+  /** How many reads a knowledge base stays `CREATING` (and an indexing job running). */
+  knowledgeBaseReads = 1;
+  /** How many reads a Managed Agents harness or action gateway stays DEPLOYING, PROVISIONING or UPDATING. */
+  managedAgentReads = 1;
 
   readonly #routes: { method: string; pattern: RegExp; handler: RouteHandler }[] = [];
   readonly #failures: Failure[] = [];
@@ -350,5 +363,10 @@ export class DoEmulator {
     registerNatGateways(this);
     registerVpcPeerings(this);
     registerVpcRoutes(this);
+    registerInference(this);
+    registerGenai(this);
+    registerKnowledgeBases(this);
+    registerGuardrails(this);
+    registerManagedAgents(this);
   }
 }

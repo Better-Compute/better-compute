@@ -125,6 +125,73 @@ describe('cloud.resources: convergence', () => {
     expect(await everythingStored()).not.toContain('pw-rotated-0123456789');
   });
 
+  it('a secret sealed while the row changed meanwhile is kept: the version-guarded write missed, the secret is not lost', async () => {
+    const created = await create({ name: 'race-seal-db' });
+    await settled(created.id, 'ready');
+    const ready = await get(created.id);
+    const old = ready.secretOutputs.password!;
+    world.cloud.resources.get(ready.providerId!)!.password = 'pw-minted-once-0123456789';
+    // A description-only update lands between the provider's answer and the run's write (as the secret is sealed).
+    const put = secrets.put;
+    const made: string[] = [];
+    secrets.put = async (tenantId, value) => {
+      const ref = await put.call(secrets, tenantId, value);
+      made.push(ref);
+      if (made.length === 1)
+        await world.api.cloudResources.update(world.acme, {
+          tenantId: world.acmeTenant,
+          resourceId: created.id,
+          description: 'renamed meanwhile',
+        });
+      return ref;
+    };
+    try {
+      await world.tick('cloud.resources', 1, 300_000);
+      await world.tick('cloud.resources', 2);
+    } finally {
+      secrets.put = put;
+    }
+    const after = await get(created.id);
+    // Sealed once, kept although the guarded write missed; only the superseded ref is destroyed.
+    expect(made).toHaveLength(1);
+    expect(after.secretOutputs.password).toBe(made[0]);
+    expect(secrets.deleted).not.toContain(made[0]);
+    expect(secrets.deleted).toContain(old);
+    expect(await secrets.resolve(made[0]!)).toBe('pw-minted-once-0123456789');
+    expect(after.description).toBe('renamed meanwhile');
+  });
+
+  it('a secret that could not be sealed drops the outdated ref, and ensure is told it is missing', async () => {
+    const created = await create({ name: 'seal-fails-db' });
+    await settled(created.id, 'ready');
+    const ready = await get(created.id);
+    const old = ready.secretOutputs.password!;
+    world.cloud.resources.get(ready.providerId!)!.password = 'pw-unsealed-0123456789';
+    const put = secrets.put;
+    secrets.put = async () => {
+      throw new ComputeError('UNAVAILABLE', 'the secret store is down');
+    };
+    try {
+      await world.tick('cloud.resources', 1, 300_000);
+      await world.tick('cloud.resources', 2);
+    } finally {
+      secrets.put = put;
+    }
+    const failed = await get(created.id);
+    expect(failed.state).toBe('error');
+    // The stored ref no longer matched the provider's secret: it is gone, never left pointing at a dead secret.
+    expect(failed.secretOutputs.password).toBeUndefined();
+    expect(secrets.deleted).toContain(old);
+    expect(await everythingStored()).not.toContain('pw-unsealed-0123456789');
+    // The next run says nothing is sealed (a key kind mints again), and seals what the provider answers.
+    await world.tick('cloud.resources', 1, 300_000);
+    await world.tick('cloud.resources', 2);
+    expect(world.cloud.sealedNames.get(created.providerName)).toEqual([]);
+    const healed = await get(created.id);
+    expect(healed.state).toBe('ready');
+    expect(await secrets.resolve(healed.secretOutputs.password!)).toBe('pw-unsealed-0123456789');
+  });
+
   it('an updatable change converges in place and publishes updated', async () => {
     const created = await create({ name: 'grow-db' });
     await settled(created.id, 'ready');

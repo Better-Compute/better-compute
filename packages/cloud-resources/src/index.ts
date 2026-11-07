@@ -27,3 +27,4 @@ export {
   resourceHoursMeter,
 } from './usage.js';
 export { maxCatalogEntries } from './catalog.js';
+export { maxSignalItems } from './signals.js';

@@ -21,6 +21,7 @@ export * from './edge/dns.js';
 export * from './edge/load-balancers.js';
 export * from './ids.js';
 export * from './metal/bare-metal.js';
+export * from './inference/proxy.js';
 export * from './networks/index.js';
 export * from './probe.js';
 export * from './provider.js';
@@ -39,3 +40,28 @@ export * from './spaces/blob-store.js';
 export * from './resources/storage/index.js';
 export * from './registry/credentials.js';
 export * from './registry/image-source.js';
+export {
+  dedicatedInferenceKindName,
+  inferenceGpuSizes,
+  type DedicatedInferenceSpec,
+} from './resources/kinds/inference.js';
+export {
+  defaultInferenceEndpoint,
+  inferenceKeyKindName,
+  inferenceTokensMeter,
+} from './resources/kinds/inference-keys.js';
+export {
+  knowledgeBaseHoursMeter,
+  knowledgeBaseKindName,
+  type KnowledgeBaseSpec,
+} from './resources/kinds/knowledge-bases.js';
+export { guardrailKindName, type GuardrailSpec } from './resources/kinds/guardrails.js';
+export {
+  actionGatewayHoursMeter,
+  actionGatewayKindName,
+  agentHarnessHoursMeter,
+  agentHarnessKindName,
+  type ActionGatewaySpec,
+  type AgentHarnessSpec,
+} from './resources/kinds/managed-agents.js';
+export { maxSignals } from './resources/signals.js';

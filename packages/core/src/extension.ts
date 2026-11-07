@@ -1118,6 +1118,14 @@ export interface ProviderResourceKind {
    */
   instances?(spec: unknown): readonly string[];
   /**
+   * (Pure, no I/O.) What the spec books against the tenant's capacity quota on the resource's pool, by quota resource
+   * (`{ gpu: 2 }` for an inference endpoint on two dedicated GPUs): an external booking, quota held without a node.
+   * The caller books it when it records the resource (`QUOTA_EXCEEDED` refuses the create), books the difference when
+   * the spec changes, and returns it once the resource is deleted or released. A kind that books quota cannot be
+   * adopted (its spec is unknown until the takeover). Absent or empty: the kind books nothing.
+   */
+  quota?(spec: unknown): Readonly<Record<string, number>>;
+  /**
    * (Pure, no I/O.) The better-compute network ids the spec names (a database joining a tenant network). The caller
    * refuses an id that is not a live network of the resource's tenant on the same provider account, or one shared
    * with machines of other tenants on an account that is not the tenant's own (`INVALID_INPUT`, `reason 'network'`),
@@ -1152,6 +1160,12 @@ export interface ProviderResourceRequest {
    * a spec network missing here: a bare id is never trusted.
    */
   networks?: Readonly<Record<string, string>>;
+  /**
+   * With `id`: the names of the secret outputs the caller holds sealed for the resource. A kind whose secret the
+   * provider answers only once (on create or a regenerate) mints it again when its name is missing here (a seal that
+   * failed), so no resource is left with no usable secret. Absent: the caller does not say, and nothing is minted.
+   */
+  secretOutputs?: readonly string[];
 }
 
 /** (cloud-resources) A resource the account can see, managed by better-compute or not. */
@@ -1209,6 +1223,28 @@ export interface ProviderResources {
    * `kubernetes` one as an add-on of a managed cluster.
    */
   catalog?(context: CallContext): Promise<readonly ProviderCatalogEntry[]>;
+  /**
+   * Read-only signals the provider raises about the account's resources (a managed agent asking for a human, a run
+   * that failed): what an operator's attention list shows. Listing them sends no mutation. A provider that holds them
+   * behind previews refuses (`UNSUPPORTED`, `reason 'preview'`) on an account that does not enable previews.
+   */
+  signals?(context: CallContext): Promise<readonly ProviderResourceSignal[]>;
+}
+
+/** (cloud-resources) One read-only signal about a provider resource (`ProviderResources.signals`). */
+export interface ProviderResourceSignal {
+  /** The provider's id of the signal. */
+  id: string;
+  /** The kind of the resource it is about (`do.agent-harness`). */
+  kind: string;
+  /** The provider's id of that resource. */
+  resourceId: string;
+  severity: 'critical' | 'warning' | 'info';
+  /** One line. */
+  title: string;
+  detail?: string;
+  /** When it was raised (epoch ms). */
+  at: number;
 }
 
 /** (cloud-resources) One installable application of a provider's catalog (`ProviderResources.catalog`). */

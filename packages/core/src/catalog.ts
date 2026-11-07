@@ -859,6 +859,7 @@ group('kubernetesNodePools', 'kubernetes', [
 group('cloudResources', 'cloud-resources', [
   ['kinds', 'read', 'cloud-resources:read', 'tenant', 'v1.0'],
   ['catalog', 'read', 'cloud-resources:read', 'tenant', 'v1.0'],
+  ['signals', 'read', 'cloud-resources:read', 'tenant', 'v1.0'],
   ['create', 'mutation', 'cloud-resources:create', 'cloud-resource', 'v1.0'],
   ['list', 'read', 'cloud-resources:read', 'tenant', 'v1.0', list],
   ['get', 'read', 'cloud-resources:read', 'cloud-resource', 'v1.0'],

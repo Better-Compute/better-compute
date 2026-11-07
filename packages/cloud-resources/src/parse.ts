@@ -8,6 +8,7 @@ import type {
   KindsInput,
   ListResourcesInput,
   ResourceRef,
+  SignalsInput,
   UpdateResourceInput,
 } from './types.js';
 
@@ -177,6 +178,17 @@ export function parseDiscover(raw: unknown): DiscoverInput {
   };
 }
 
+export function parseSignals(raw: unknown): SignalsInput {
+  const input = object(raw, ['tenantId', 'poolId', 'resourceId']);
+  return {
+    tenantId: tenant(input.tenantId),
+    poolId: id(input.poolId, 'pool', 'poolId'),
+    ...(input.resourceId !== undefined
+      ? { resourceId: id(input.resourceId, 'crs', 'resourceId') }
+      : {}),
+  };
+}
+
 export function parseAdopt(raw: unknown): AdoptResourceInput {
   const input = object(raw, [
     'tenantId',
@@ -320,6 +332,14 @@ export const cloudResourcesSchemas = {
       kind: kindSchema('The kind to look for'),
     },
     ['tenantId', 'poolId', 'kind'],
+  ),
+  signals: strictObject(
+    {
+      tenantId: tenantIdSchema,
+      poolId: poolSchema,
+      resourceId: idOf('crs', 'Only the signals about this cloud resource'),
+    },
+    ['tenantId', 'poolId'],
   ),
   adopt: strictObject(
     {

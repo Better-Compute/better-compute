@@ -143,3 +143,27 @@ export interface AdoptResourceInput {
   description?: string;
   idempotencyKey: string;
 }
+
+export interface SignalsInput {
+  tenantId: string;
+  poolId: string;
+  /** Only the signals about this cloud resource. */
+  resourceId?: string;
+}
+
+/** A read-only signal the pool's provider raises about a resource (a managed agent asking for a human). */
+export interface ResourceSignalView {
+  /** The provider's id of the signal. */
+  id: string;
+  severity: 'critical' | 'warning' | 'info';
+  title: string;
+  detail?: string;
+  /** When the provider raised it (epoch ms). */
+  at: number;
+  /** The kind of the resource it is about. */
+  kind: string;
+  /** The provider's id of that resource. */
+  providerId: string;
+  /** The cloud resource that records it, if any. */
+  resourceId?: string;
+}
