@@ -2207,6 +2207,7 @@ describe('definition', () => {
         provider: digitaloceanProvider({ fetch: emu.fetch }),
         config: { ...doAccount, sshKeyFingerprint: key.fingerprint },
         attachable: String(hand.id),
+        reinstallable: true,
         offerId: 'nyc3/s-1vcpu-1gb',
         image: 'ubuntu-24-04-x64',
         context: { secrets, account: platformAccount },

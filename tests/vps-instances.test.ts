@@ -70,8 +70,10 @@ interface FakeCloud {
   getError?: ComputeError;
   /** Every provider call (create, get, delete, power), in order. */
   calls: string[];
+  /** The `catalogImage` of every create, in order (undefined when it carried none). */
+  catalogImages: unknown[];
 }
-const cloud: FakeCloud = { machines: new Map(), creates: 0, calls: [] };
+const cloud: FakeCloud = { machines: new Map(), creates: 0, calls: [], catalogImages: [] };
 
 const fakeCloud = defineProvider({
   id: 'fake-cloud',
@@ -99,6 +101,7 @@ const fakeCloud = defineProvider({
       },
       async create(request, call) {
         cloud.calls.push(`create ${call.idempotencyKey}`);
+        cloud.catalogImages.push(request.catalogImage);
         await context.secrets.resolve('env://FAKE_TOKEN');
         if (cloud.createError) throw cloud.createError;
         if (cloud.fail) throw new ComputeError('PROVIDER_ERROR', cloud.fail);
@@ -162,6 +165,14 @@ const root: Caller = { ...alice, identityId: 'usr_root', tenantId: 'root' };
 
 const images = {
   async resolve(_tx: SqlTx, tenantId: string, imageId: string) {
+    // A catalog ref (name@version) acme's catalog holds.
+    if (imageId === 'ubuntu@24.04' && tenantId === 'acme')
+      return {
+        url: 'https://images.example/ubuntu@24.04.qcow2',
+        sha256: 'cd'.repeat(32),
+        format: 'qcow2' as const,
+        verified: true,
+      };
     if (imageId !== 'ubuntu-24.04' || tenantId === 'nobody') return undefined;
     return {
       url: 'https://images.example/ubuntu-24.04.qcow2',
@@ -341,6 +352,7 @@ beforeEach(async () => {
   cloud.machines.clear();
   cloud.creates = 0;
   cloud.calls = [];
+  cloud.catalogImages = [];
   delete cloud.fail;
   delete cloud.createError;
   delete cloud.getError;
@@ -1408,6 +1420,30 @@ describe('provider instances', () => {
     expect(cloud.machines.size).toBe(0);
     expect((await get(created.id)).state).toBe('deleted');
     expect((await readQuotas(db, 'acme', providerPool)).every((row) => row.used === 0)).toBe(true);
+  });
+
+  it('a provider create carries catalogImage only for a catalog ref resolved for the tenant', async () => {
+    // The core contract (DO P3): { tenantId, sha256 } for a resolved name@version, never otherwise.
+    for (const [n, imageId] of ['ubuntu-24.04', 'ubuntu-24-04-x64', '12345', 'ubuntu@24.04'].entries()) {
+      const created = (await call(
+        'instances',
+        'create',
+        createProvider({ imageId, idempotencyKey: `img-${n}` }),
+      )) as View;
+      await reconcile(created.id);
+    }
+    expect(cloud.calls.filter((c) => c.startsWith('create '))).toHaveLength(4);
+    expect(cloud.catalogImages).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      { tenantId: 'acme', sha256: 'cd'.repeat(32) },
+    ]);
+    // A catalog ref the tenant can't resolve never reaches the provider.
+    await expect(
+      call('instances', 'create', createProvider({ imageId: 'private@1', idempotencyKey: 'img-p' })),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(cloud.catalogImages).toHaveLength(4);
   });
 
   it('records provider errors and retries; a vanished machine is lost', async () => {
