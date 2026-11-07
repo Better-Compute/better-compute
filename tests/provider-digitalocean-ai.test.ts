@@ -463,6 +463,28 @@ describe('do.inference-key (a model access key)', () => {
     expect(mutations(emu, 'PUT', /api_keys/)).toHaveLength(puts);
   });
 
+  it('two racing creates converge on the key the caller recorded; the other bearer is deleted', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    // Two runs (a claim that expired mid-call) both found nothing and both created.
+    const kept = await resources.ensure(request(), call());
+    const racing = seedModelKey(emu.state, { name: `bc-r-key-r0-bc${hash}` });
+    const foreign = seedModelKey(emu.state, { name: 'bc-r-key-r0-bc0123456789ab' });
+    const other = seedModelKey(emu.state, { name: `bc-r-other-r0-bc${hash}` });
+    const again = await resources.ensure(
+      request({ id: kept.id, secretOutputs: ['key'] }),
+      call(),
+    );
+    expect(again).toMatchObject({ id: kept.id, state: 'ready' });
+    expect(emu.state.modelKeys.has(racing.uuid)).toBe(false);
+    expect(mutations(emu, 'DELETE', /api_keys/).map((r) => r.url.pathname)).toEqual([
+      `/v2/gen-ai/models/api_keys/${racing.uuid}`,
+    ]);
+    // Another deployment's key and another resource's key are never touched.
+    expect(emu.state.modelKeys.has(foreign.uuid)).toBe(true);
+    expect(emu.state.modelKeys.has(other.uuid)).toBe(true);
+  });
+
   it('delete and discover leave a key made by hand or by another deployment alone', async () => {
     const emu = emulator();
     const { resources } = await build(emu);

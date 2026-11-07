@@ -84,6 +84,23 @@ async function byId(env: DoKindEnv, uuid: string, signal: AbortSignal) {
   return undefined;
 }
 
+/**
+ * The key with this id, and the other keys of this deployment under the same base name: duplicates two racing creates
+ * left (model key names are not unique at DigitalOcean), each a live bearer no one sealed. One listing.
+ */
+async function withDuplicates(env: DoKindEnv, uuid: string, name: string, signal: AbortSignal) {
+  let key: DoModelKey | undefined;
+  const duplicates: DoModelKey[] = [];
+  for await (const entry of all(env, signal, 'observe')) {
+    if (entry.uuid === uuid) key = entry;
+    else {
+      const parsed = parse(entry.name);
+      if (parsed?.base === name && parsed.deployment === deploymentHash(env)) duplicates.push(entry);
+    }
+  }
+  return { key, duplicates };
+}
+
 /** The oldest key of this deployment under the base name, whatever rotation it carries. */
 async function byName(env: DoKindEnv, name: string, signal: AbortSignal) {
   const keys: DoModelKey[] = [];
@@ -180,7 +197,15 @@ export function inferenceKeyKind(endpoint: string = defaultInferenceEndpoint): D
       const wanted = request.spec as InferenceKeySpec;
       const name = nameFor(env, request.name, wanted.rotation);
       if (request.id !== undefined) {
-        const key = await byId(env, request.id, context.signal);
+        const { key, duplicates } = await withDuplicates(env, request.id, request.name, context.signal);
+        // The key the caller recorded is the one kept: any other of this resource's name is a racing create's.
+        for (const duplicate of duplicates)
+          await found(() =>
+            env.client.request('DELETE', path(duplicate.uuid), {
+              signal: context.signal,
+              budget: 'mutate',
+            }),
+          );
         if (!key)
           return {
             id: request.id,
