@@ -149,9 +149,24 @@ UPDATE cloud_resources SET ensure_sent_at = created_at WHERE state NOT IN ('dele
 `,
 };
 
+/**
+ * `network_ids`: the better-compute networks the spec names (`ProviderResourceKind.networks`), kept on the row so vps
+ * can refuse to delete a network a resource joined (`liveCloudResources`) without knowing the kind. Written on
+ * create, on a spec change and when an adopted resource's spec is read back.
+ */
+export const cloudResourcesNetworksMigration: Migration = {
+  name: 'cloud-resources/0005_network_ids',
+  sql: `
+ALTER TABLE cloud_resources ADD COLUMN network_ids text[] NOT NULL DEFAULT '{}';
+CREATE INDEX cloud_resources_network_ids ON cloud_resources USING gin (network_ids)
+  WHERE state NOT IN ('deleted', 'released');
+`,
+};
+
 export const cloudResourcesMigrations: readonly Migration[] = Object.freeze([
   cloudResourcesMigration,
   cloudResourcesMeteringMigration,
   cloudResourcesIdentityMigration,
   cloudResourcesEnsureSentMigration,
+  cloudResourcesNetworksMigration,
 ]);

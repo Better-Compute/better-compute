@@ -88,6 +88,14 @@ interface Admitted {
   parent?: ResourceRow;
   /** The kind's identity of the spec within the parent (`ProviderResourceKind.identity`). */
   identity?: string;
+  /** The networks the spec names (`ProviderResourceKind.networks`), as the row keeps them. */
+  networkIds: string[];
+}
+
+/** The networks a spec names, sorted and once each: what `network_ids` keeps (vps reads it on a network delete). */
+export function networkIdsOf(kind: ProviderResourceKind, spec: unknown): string[] {
+  if (typeof kind.networks !== 'function') return [];
+  return [...new Set(kind.networks(spec))].filter((id) => typeof id === 'string').sort();
 }
 
 /** A child's identity within its parent, when its kind declares one: a non-empty string, else none. */
@@ -388,6 +396,7 @@ async function admit(
     ...(region !== undefined ? { region } : {}),
     ...(parent ? { parent } : {}),
     ...(identity !== undefined ? { identity } : {}),
+    networkIds: networkIdsOf(kind, spec),
   };
 }
 
@@ -531,9 +540,9 @@ export async function createResource(
     await tx.query(
       `INSERT INTO cloud_resources (id, tenant_id, project_id, pool_id, provider_account_id, provider, kind, family,
                                     name, description, region, parent_id, spec, provider_name, state, desired_state,
-                                    created_by, idempotency_key, request_hash, version, identity)
+                                    created_by, idempotency_key, request_hash, version, identity, network_ids)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, 'pending', 'present', $15, $16,
-               decode($17, 'hex'), 1, $18)`,
+               decode($17, 'hex'), 1, $18, $19::text[])`,
       [
         resourceId,
         input.tenantId,
@@ -553,6 +562,7 @@ export async function createResource(
         input.idempotencyKey,
         hash,
         admitted.identity ?? null,
+        admitted.networkIds,
       ],
     );
   } catch (error) {
@@ -645,6 +655,7 @@ export async function updateResource(
   const stored = json(row.spec);
   let spec = stored;
   let identity = row.identity;
+  let networkIds: string[] | null = null;
   if (input.spec !== undefined && row.adopted && row.ready_at === null)
     // Its spec is the provider's until the takeover reads it back: a change before that has nothing to apply to.
     throw new ComputeError(
@@ -669,6 +680,7 @@ export async function updateResource(
     assertAccountScope(provider, row.tenant_id, kind, spec);
     await assertInstances(tx, row.tenant_id, row.provider_account_id, kind, spec, stored);
     await assertNetworks(tx, row.tenant_id, provider, kind, spec, stored);
+    networkIds = networkIdsOf(kind, spec);
     const changed = [...new Set([...Object.keys(stored), ...Object.keys(spec)])].filter(
       (field) => !same(stored[field], spec[field]),
     );
@@ -692,7 +704,8 @@ export async function updateResource(
         SET spec = $2::jsonb, description = $3, version = version + 1, updated_at = compute_now(),
             state = CASE WHEN $4 AND state IN ('ready', 'error') THEN 'updating' ELSE state END,
             message = CASE WHEN $4 AND state IN ('ready', 'error') THEN NULL ELSE message END,
-            spec_changed = spec_changed OR $4, identity = $5
+            spec_changed = spec_changed OR $4, identity = $5,
+            network_ids = coalesce($6::text[], network_ids)
       WHERE id = $1`,
     [
       row.id,
@@ -700,6 +713,7 @@ export async function updateResource(
       input.description !== undefined ? input.description : row.description,
       providerChange,
       identity,
+      networkIds,
     ],
   );
   if (providerChange) {

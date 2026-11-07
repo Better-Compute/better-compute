@@ -25,7 +25,7 @@ import {
   type ResourceRow,
   type ResourcesProvider,
 } from './store.js';
-import { markDeleted, networkNames } from './resources.js';
+import { markDeleted, networkIdsOf, networkNames } from './resources.js';
 import type { CloudResourceState } from './types.js';
 import { meterRates } from './usage.js';
 
@@ -385,6 +385,8 @@ class ResourceWorker {
     secretRefs?: Record<string, SecretRef>;
     /** An adopted resource's spec, as the provider reports it. */
     spec?: Readonly<Record<string, unknown>>;
+    /** The networks that spec names (written with it). */
+    networkIds?: readonly string[];
     /** The rate of each of the kind's meters, when the provider reported its usage. */
     rates?: Readonly<Record<string, number>>;
   }): Promise<boolean> {
@@ -397,6 +399,7 @@ class ResourceWorker {
                 secret_outputs = coalesce($6::jsonb, secret_outputs),
                 spec = coalesce($7::jsonb, spec),
                 meter_rates = coalesce($8::jsonb, meter_rates),
+                network_ids = coalesce($9::text[], network_ids),
                 updated_at = compute_now(),
                 ready_at = CASE WHEN $3 = 'ready' THEN coalesce(ready_at, compute_now()) ELSE ready_at END
           WHERE id = $1 AND version = $2
@@ -410,6 +413,7 @@ class ResourceWorker {
           update.secretRefs ? JSON.stringify(update.secretRefs) : null,
           update.spec ? JSON.stringify(update.spec) : null,
           update.rates ? JSON.stringify(update.rates) : null,
+          update.networkIds ? [...update.networkIds] : null,
         ],
       );
       if (rows.length === 0) return false;
@@ -564,7 +568,7 @@ class ResourceWorker {
       state: ready ? 'ready' : this.#converging(),
       ...(Object.keys(outputs).length > 0 ? { outputs } : {}),
       ...(sealed.created.length > 0 ? { secretRefs: sealed.refs } : {}),
-      ...(adoptedSpec ? { spec: adoptedSpec } : {}),
+      ...(adoptedSpec ? { spec: adoptedSpec, networkIds: networkIdsOf(kind, adoptedSpec) } : {}),
       // What it bills per hour from here (usage.ts); undeclared meters and bad rates are dropped.
       ...(result.usage !== undefined ? { rates: meterRates(kind.meters, result.usage) } : {}),
     });
