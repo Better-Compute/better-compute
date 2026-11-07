@@ -26,7 +26,7 @@ import { connectStageMs } from './connect.js';
 // never both win. A ref any provider account still names (one stored by hand with the same ref) is never deleted.
 
 export const connectSecretsMigration: Migration = {
-  name: 'vps/0076_provider_connect_secrets',
+  name: 'vps/0123_provider_connect_secrets',
   sql: `
 -- (P9) Credentials providerAccounts.connect sealed, owned by vps until revoked and deleted (vps.connect-secrets).
 CREATE TABLE provider_connect_secrets (

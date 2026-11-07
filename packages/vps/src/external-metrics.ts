@@ -38,7 +38,7 @@ export interface ExternalMetricsOptions {
 }
 
 export const externalMetricsMigration: Migration = {
-  name: 'vps/0075_instance_external_metrics',
+  name: 'vps/0122_instance_external_metrics',
   sql: `
 -- (P9) The newest provider-measured host metric of an instance that runs no bcd, per metric.
 CREATE TABLE instance_external_metrics (
