@@ -38,6 +38,8 @@ const throughputTypes: ReadonlySet<string> = new Set(['gp3']);
 
 /** EBS allows 50 tags per resource; ours take 3, the rest is for tenant labels. */
 const maxLabels = 40;
+/** How long this process remembers a volume or snapshot it knows is gone (never lagging, so never pending). */
+const goneMemoMs = 24 * 3_600_000;
 /** After a modification starts, EBS refuses the next one on that volume for six hours. */
 export const ebsModificationCooldownMs = 6 * 3_600_000;
 
@@ -305,6 +307,15 @@ export class AwsVolumes implements ProviderVolumes {
    * one pass never pick one device.
    */
   readonly #devices = new Map<string, Map<string, { volumeId: string; at: number }>>();
+  /**
+   * id (volume, snapshot or instance) → when a by-id read in this process first missed it. EC2 reads
+   * are eventually consistent: a resource another process (a restart, another replica) just made can
+   * read NotFound by id for a while, so one miss never ends its life. A miss that lasts the whole
+   * consistency window is gone.
+   */
+  readonly #missing = new Map<string, number>();
+  /** id → when this process learned the volume or snapshot is gone (it deleted it, or saw it deleted). */
+  readonly #gone = new Map<string, number>();
 
   constructor(
     readonly config: AwsConfig,
@@ -335,6 +346,39 @@ export class AwsVolumes implements ProviderVolumes {
     for (const [name, entry] of this.#created) if (entry.id === id) this.#created.delete(name);
     for (const [name, entry] of this.#createdSnapshots)
       if (entry.id === id) this.#createdSnapshots.delete(name);
+  }
+
+  /** A volume or snapshot known to be gone: a later by-id miss is final at once. */
+  #markGone(id: string): void {
+    const now = this.context.clock.now();
+    for (const [key, at] of this.#gone) if (now - at >= goneMemoMs) this.#gone.delete(key);
+    this.#gone.set(id, now);
+    this.#missing.delete(id);
+  }
+
+  /** A by-id read found `id`: a later miss starts a new window. */
+  #seen(id: string): void {
+    this.#missing.delete(id);
+  }
+
+  /**
+   * Whether a by-id NotFound of `id` may still be EC2's eventual consistency rather than gone:
+   * made by this client recently, or first missed by this process less than the window ago. Known
+   * gone, or missed for the whole window: gone (and remembered so).
+   */
+  #mayLag(id: string, made?: number): boolean {
+    if (this.#recent(made)) return true;
+    if (this.#gone.has(id)) return false;
+    const now = this.context.clock.now();
+    for (const [key, at] of this.#missing) if (now - at >= goneMemoMs) this.#missing.delete(key);
+    const first = this.#missing.get(id);
+    if (first === undefined) {
+      this.#missing.set(id, now);
+      return true;
+    }
+    if (now - first < this.consistencyWindowMs) return true;
+    this.#markGone(id);
+    return false;
   }
 
   #rememberSnapshot(name: string, id: string): void {
@@ -373,10 +417,12 @@ export class AwsVolumes implements ProviderVolumes {
   protected async volume(id: string, signal: AbortSignal): Promise<EbsVolume | undefined> {
     try {
       const doc = await this.deps.call('DescribeVolumes', { VolumeId: [id] }, signal);
-      return doc
+      const found = doc
         .items('volumeSet')
         .map(parseVolume)
         .find((volume) => volume?.id === id);
+      if (found) this.#seen(id);
+      return found;
     } catch (error) {
       if (isComputeError(error, 'NOT_FOUND')) return undefined;
       throw error;
@@ -421,6 +467,13 @@ export class AwsVolumes implements ProviderVolumes {
   protected async owned(volumeId: string, signal: AbortSignal): Promise<EbsVolume> {
     const id = parseVolume_(volumeId);
     const volume = await this.volume(id, signal);
+    // Not visible yet (another process may have just made it): retried, never a final NOT_FOUND.
+    if (!volume && this.#mayLag(id, this.#createdIds.get(id)))
+      throw fail(
+        'UNAVAILABLE',
+        `volume ${id} is not visible to EBS reads yet; it is retried`,
+        'volume-not-visible',
+      );
     if (!volume || volume.status === 'deleted')
       throw fail('NOT_FOUND', `volume ${id} does not exist`, 'volume');
     this.refuseForeign(volume);
@@ -542,8 +595,10 @@ export class AwsVolumes implements ProviderVolumes {
       if (!existing) return state(known.id, 'pending');
     }
     if (existing) {
-      if (gone(existing) && !this.#recent(this.#deleted.get(existing.id)))
+      if (gone(existing) && !this.#recent(this.#deleted.get(existing.id))) {
+        this.#markGone(existing.id);
         return deletedOutside(existing.id);
+      }
       return volumeState(existing, this.config.region);
     }
     if (spec.snapshotId !== undefined) {
@@ -587,7 +642,10 @@ export class AwsVolumes implements ProviderVolumes {
     if (!made) throw fail('PROVIDER_ERROR', 'CreateVolume returned no volume', 'create');
     // EC2 answered the name's ClientToken with the volume it made before, deleted since: never
     // remembered as one being made (it would read pending for good), and never silently replaced.
-    if (gone(made)) return deletedOutside(made.id);
+    if (gone(made)) {
+      this.#markGone(made.id);
+      return deletedOutside(made.id);
+    }
     this.#remember(name, made.id);
     return volumeState(made, this.config.region);
   }
@@ -654,8 +712,11 @@ export class AwsVolumes implements ProviderVolumes {
   ): Promise<ProviderResourceState | undefined> {
     if (typeof volumeId !== 'string' || !volumePattern.test(volumeId)) return undefined;
     const volume = await this.volume(volumeId, context.signal);
+    // A miss is pending while it may be EBS lag (also a volume another process just made).
     if (!volume)
-      return this.#recent(this.#createdIds.get(volumeId)) ? state(volumeId, 'pending') : undefined;
+      return this.#mayLag(volumeId, this.#createdIds.get(volumeId))
+        ? state(volumeId, 'pending')
+        : undefined;
     return volumeState(volume, this.config.region);
   }
 
@@ -664,11 +725,15 @@ export class AwsVolumes implements ProviderVolumes {
     const { signal } = context;
     const volume = await this.volume(id, signal);
     if (!volume) {
-      // Just made by this client and not visible yet: deleting it later, never reporting it gone.
-      if (this.#recent(this.#createdIds.get(id))) return state(id, 'deleting');
+      // Maybe just made (by this or another process) and not visible yet: deleting it later, never
+      // reporting it gone while it may still exist and bill.
+      if (this.#mayLag(id, this.#createdIds.get(id))) return state(id, 'deleting');
       return state(id, 'deleted');
     }
-    if (volume.status === 'deleted') return state(id, 'deleted');
+    if (volume.status === 'deleted') {
+      this.#markGone(id);
+      return state(id, 'deleted');
+    }
     this.refuseForeign(volume);
     if (volume.status === 'deleting') return volumeState(volume, this.config.region);
     if (volume.attachment)
@@ -683,12 +748,17 @@ export class AwsVolumes implements ProviderVolumes {
     try {
       await this.deps.call('DeleteVolume', { VolumeId: id }, signal);
       this.#forget(id);
+      this.#markGone(id);
       const at = this.context.clock.now();
       for (const [key, sent] of this.#deleted)
         if (at - sent >= this.consistencyWindowMs) this.#deleted.delete(key);
       this.#deleted.set(id, at);
     } catch (error) {
-      if (isComputeError(error, 'NOT_FOUND')) return state(id, 'deleted');
+      // EBS read the volume a moment ago: this NotFound is a delete that already went through.
+      if (isComputeError(error, 'NOT_FOUND')) {
+        this.#markGone(id);
+        return state(id, 'deleted');
+      }
       if (error instanceof ComputeError && error.details?.code === 'VolumeInUse')
         throw fail(
           'INVALID_STATE',
@@ -1030,10 +1100,12 @@ export class AwsVolumes implements ProviderVolumes {
         { SnapshotId: [id], Owner: ['self'] },
         signal,
       );
-      return doc
+      const found = doc
         .items('snapshotSet')
         .map(parseSnapshot)
         .find((snapshot) => snapshot?.id === id);
+      if (found) this.#seen(id);
+      return found;
     } catch (error) {
       if (isComputeError(error, 'NOT_FOUND')) return undefined;
       throw error;
@@ -1084,8 +1156,12 @@ export class AwsVolumes implements ProviderVolumes {
         this.#refuseForeignSnapshot(snapshot);
         await this.deps.call('DeleteSnapshot', { SnapshotId: snapshot.id }, signal);
         this.#forget(snapshot.id);
+        this.#markGone(snapshot.id);
       } catch (error) {
-        if (isComputeError(error, 'NOT_FOUND')) continue;
+        if (isComputeError(error, 'NOT_FOUND')) {
+          this.#markGone(snapshot.id);
+          continue;
+        }
         this.context.log.warn('aws: an extra EBS snapshot of one name was not deleted yet', {
           snapshot: snapshot.id,
           code: error instanceof ComputeError ? error.code : 'unknown',
@@ -1169,8 +1245,9 @@ export class AwsVolumes implements ProviderVolumes {
   ): Promise<ProviderResourceState | undefined> {
     if (typeof snapshotId !== 'string' || !snapshotPattern.test(snapshotId)) return undefined;
     const snapshot = await this.snapshot(snapshotId, context.signal);
+    // A miss is pending while it may be EBS lag (also a snapshot another process just took).
     if (!snapshot)
-      return this.#recent(this.#createdSnapshotIds.get(snapshotId))
+      return this.#mayLag(snapshotId, this.#createdSnapshotIds.get(snapshotId))
         ? state(snapshotId, 'pending')
         : undefined;
     return snapshotState(snapshot, this.config.region);
@@ -1182,7 +1259,7 @@ export class AwsVolumes implements ProviderVolumes {
     const { signal } = context;
     const snapshot = await this.snapshot(snapshotId, signal);
     if (!snapshot) {
-      if (this.#recent(this.#createdSnapshotIds.get(snapshotId)))
+      if (this.#mayLag(snapshotId, this.#createdSnapshotIds.get(snapshotId)))
         return state(snapshotId, 'deleting');
       return state(snapshotId, 'deleted');
     }
@@ -1190,8 +1267,10 @@ export class AwsVolumes implements ProviderVolumes {
     try {
       await this.deps.call('DeleteSnapshot', { SnapshotId: snapshotId }, signal);
       this.#forget(snapshotId);
+      this.#markGone(snapshotId);
     } catch (error) {
       if (isComputeError(error, 'NOT_FOUND')) {
+        this.#markGone(snapshotId);
         await this.#deleteSiblings(snapshot, signal);
         return state(snapshotId, 'deleted');
       }
