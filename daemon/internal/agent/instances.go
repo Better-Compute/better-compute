@@ -300,7 +300,7 @@ func (c *instancesConverger) collectVolumes(section *agentv1.InstancesSection, s
 // that failed to load (fail closed). Egress instances run without the rules, but the metadata
 // service stays off; a failed load is retried on the next pass.
 func (c *instancesConverger) enforceNetworkPolicies(ctx context.Context, specs []*agentv1.InstanceSpec) map[string]string {
-	ruleset, failed, guarded := firewallRuleset(specs, bridgeAddrs(specs))
+	ruleset, failed, guarded := firewallRuleset(specs, bridgeAddrs(specs), c.a.o.CloudMetadata)
 	if ruleset == c.firewall && !c.stale.Swap(false) {
 		return failed
 	}

@@ -22,6 +22,7 @@ sources:
   - daemon/cmd/bcd/wellknown.go
   - daemon/cmd/bcd/plugins.go
   - daemon/cmd/bcd/websocket.go
+  - daemon/cmd/bcd/cloud.go
   - daemon/cmd/bcd/doctor.go
   - daemon/cmd/bcd/doctor_gpu.go
   - daemon/cmd/bcd/doctor_host.go
@@ -128,12 +129,27 @@ separation](/docs/daemon#privilege-separation). A host build running as an ordin
 starts anyway, but claims no GPU binding capability and fails every GPU hold at once as `node-unprivileged`
 (da60bbd).
 
+On an EC2 instance (a `*.metal` VPS host included), `169.254.169.254` and `fd00:ec2::254` belong to AWS's
+instance metadata service, which answers for the host: its identity document and its instance-profile
+credentials. `bcd node` then:
+
+- refuses to start with `[imds] listen` on either address (`[imds] listen "169.254.169.254:80" is EC2's own
+  instance metadata service on this EC2 host`). Bound there, bcd's own service would make the address local, so
+  the host's `cloud` section, spot interruption notices and `cloud-iid` join would read bcd's service instead of
+  AWS's. Serve the instances' metadata on another address, such as the host's address on the instances' bridge.
+- drops every instance tap's packets to both addresses, whatever the instance's network policy, before any policy
+  rule accepts them.
+
+Also launch the instance with `HttpTokens=required` and an `HttpPutResponseHopLimit` of 1 (2 when bcd runs in a
+container without host networking): IMDSv1 answers any packet the host forwards, and IMDSv2 answers a token
+request only within the hop limit.
+
 It logs JSON lines to standard error (`[log]`), and runs until SIGINT or SIGTERM. Exits:
 
 - `0` on a signal, or after a [self-update](/docs/daemon/install#self-update) swapped the binary slots, in which
   case `main` execs the entrypoint (the new binary) with the same arguments.
 - `1` when it cannot start (`bcd node: agent: this node has not joined (run bcd join)`, a journal of another node,
-  an invalid `[kubernetes]` value) or when the certificate is revoked (`agent: this node's certificate was
+  an invalid `[kubernetes]` value, `[imds] listen` on AWS's metadata address on EC2) or when the certificate is revoked (`agent: this node's certificate was
   revoked`).
 
 ```bash
@@ -239,7 +255,7 @@ Joins this machine to the fleet and writes `node.key` and `identity.json` under 
 | `--token-file` | | Read the token from this file: a regular file, mode 0600 or 0400 (others may not read it), at most 4 KiB. Removed once the join succeeds or the machine had already joined; a read-only mount only logs a warning |
 | `--node-id` | | The node an installed OS must join as; implies `--attestor provisioned`. A different identity exits 1 |
 | `--server` | | The control plane URL (`https://`): its `/.well-known/better-compute` supplies the join key when `join-encryption.jwk` is absent, and the gateway when `config.toml` is |
-| `--attestor` | `join-token` | `tpm` joins with the host's TPM (`/dev/tpmrm0`) and no token; `provisioned` with `--node-id`. `tpm` with `--token-file` exits 2 |
+| `--attestor` | `join-token` | `tpm` joins with the host's TPM (`/dev/tpmrm0`) and no token; `cloud-iid` with an EC2 instance's signed identity document and no token (exits 1 off EC2, before any metadata request; EC2 is the DMI `sys_vendor` `Amazon EC2`, or `Xen` with EC2's BIOS version or UUID on previous-generation types such as t2 and m4); `provisioned` with `--node-id`. `tpm` or `cloud-iid` with `--token-file` exits 2 |
 | `--serving-ca-pin` | | `sha256/<base64>`; required with `--server` and no `config.toml` (host builds). With a `config.toml` it must equal `serving_ca_spki_pin` |
 | `--join-signing-pin` | | Same, for `join_signing_key_pin` |
 | `--join-encryption-pin` | | Same, for `join_encryption_key_pin` |
@@ -260,7 +276,13 @@ What it does, in order:
 4. Otherwise reads the credential, seals the token to the pinned JoinService key, and calls `Join` with the hardware
    claims. Retryable failures (`UNAVAILABLE`, `RESOURCE_EXHAUSTED`, deadlines) retry with jittered back-off up to 20
    attempts, or exactly when the gateway's `grpc-retry-pushback-ms` says; a pending approval waits and asks again;
-   a `tpm` join answers up to 3 challenge rounds.
+   a `tpm` join answers up to 3 challenge rounds. A `cloud-iid` join reads the identity document and its signature from
+   IMDSv2 once and sends them as the attestation, with no token. The control plane admits each instance once, so a
+   `Join refused` after a retried attempt says the evidence is spent: the lost attempt may have admitted the instance
+   (check for the node, or re-join with `--reset` and a join token).
+   In a container on EC2 (an EKS DaemonSet without host networking), IMDSv2 answers the token request only when the
+   instance's metadata hop limit (`HttpPutResponseHopLimit`) is at least 2; otherwise the read times out with that
+   hint, and `bcd node` keeps retrying the cloud section with back-off (5 s doubling to 5 min).
 5. Verifies the signed `JoinResponse`, stores the key and identity, writes a bootstrapped `config.toml` (0600) and
    `join-encryption.jwk` (0644), removes the token file, and prints
    `joined as <node> (site <site>, role <role>); certificate valid until <time>`.
@@ -268,8 +290,8 @@ What it does, in order:
 | Exit | When |
 | --- | --- |
 | `0` | Joined, or already joined |
-| `1` | Configuration or key errors, a refused join (`Join refused`), a rejected `JoinResponse`, a pin flag that does not match `config.toml`, a joined node other than `--node-id`, `--reset` not as root |
-| `2` | A positional argument, a bad `--role`, no token (`no join token: set BCD_JOIN_TOKEN or pass the token on standard input`), something that is not a token (`that is not a join token (bcjt_...)`), `--attestor tpm` with `--token-file`, `--reset` without `--yes` |
+| `1` | `--attestor cloud-iid` on a host whose DMI is not EC2's, configuration or key errors, a refused join (`Join refused`), a rejected `JoinResponse`, a pin flag that does not match `config.toml`, a joined node other than `--node-id`, `--reset` not as root |
+| `2` | A positional argument, a bad `--role`, no token (`no join token: set BCD_JOIN_TOKEN or pass the token on standard input`), something that is not a token (`that is not a join token (bcjt_...)`), `--attestor tpm` or `cloud-iid` with `--token-file`, `--reset` without `--yes` |
 
 ```bash
 # the token on standard input, as the install script does it
@@ -278,6 +300,8 @@ printf '%s\n' "$TOKEN" | sudo bcd join --config /etc/bcd/config.toml
 sudo BCD_JOIN_TOKEN=bcjt_... bcd join --role site
 # with the TPM, no token
 sudo bcd join --attestor tpm < /dev/null
+# an EC2 instance the control plane created or attached into a bcd pool, no token
+sudo bcd join --attestor cloud-iid < /dev/null
 # an OS a deploy installed, with no config.toml yet
 sudo bcd join --server https://compute.example.com --token-file /etc/bcd/join-token --node-id node_01k5w... \
   --serving-ca-pin sha256/... --join-signing-pin sha256/... --join-encryption-pin sha256/...

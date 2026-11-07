@@ -22,6 +22,7 @@ import (
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
 	"github.com/better-compute/better-compute/daemon/internal/agent"
+	"github.com/better-compute/better-compute/daemon/internal/cloud/aws"
 	"github.com/better-compute/better-compute/daemon/internal/config"
 	"github.com/better-compute/better-compute/daemon/internal/helper"
 	"github.com/better-compute/better-compute/daemon/internal/journal"
@@ -233,6 +234,20 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 		}
 		defer a.Close()
 		attest = a
+	case attestor == aws.AttestorID:
+		// The instance identity is the credential (AWS program A6): no token is read, and none is
+		// sent. Only EC2 (aws.OnEC2: the DMI) is supported; nothing probes the metadata service elsewhere.
+		if tokenFile != "" {
+			fmt.Fprintln(stderr, "bcd join: --attestor cloud-iid joins without a token; drop --token-file")
+			return exitUsage
+		}
+		_ = os.Unsetenv("BCD_JOIN_TOKEN")
+		imds := cloudIMDS()
+		if !aws.OnEC2(imds.Root) {
+			fmt.Fprintln(stderr, "bcd join: --attestor cloud-iid needs an Amazon EC2 instance (DMI sys_vendor \"Amazon EC2\", or \"Xen\" with EC2's BIOS version or UUID); this host is not one")
+			return exitFailure
+		}
+		attest = &aws.Attestor{Client: imds}
 	case tokenFile != "":
 		raw, err := readTokenFile(tokenFile)
 		if err != nil {
@@ -424,6 +439,10 @@ func runNode(fs *flag.FlagSet, _, stderr io.Writer) int {
 		return exitFailure
 	}
 	log := newLogger(cfg, stderr)
+	if err := guestIMDSConflict(cfg.IMDSListen); err != nil {
+		fmt.Fprintf(stderr, "bcd node: %v\n", err)
+		return exitFailure
+	}
 	var imds func(ctx context.Context, a *agent.Agent)
 	if cfg.IMDSListen != "" {
 		imds = func(ctx context.Context, a *agent.Agent) {
@@ -555,6 +574,14 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		ExternalHost: cfg.ExternalHost,
 		// A fakehw build writes under its fake root and needs no privilege.
 		Unprivileged: !devBuild && mode == "node" && os.Geteuid() != 0 && !underHelper,
+	}
+	if mode == "node" {
+		// On EC2 (DMI): the "cloud" inventory section and, on spot, the interruption notice.
+		if c := cloudHost(); c != nil {
+			opts.Cloud = c
+			// No instance reaches the host's own metadata service (its IID and role credentials).
+			opts.CloudMetadata = cloudMetadata()
+		}
 	}
 	if d, err := time.ParseDuration(os.Getenv("BCD_RENEW_AFTER")); devBuild && err == nil {
 		opts.RenewAfter = d // fakehw builds only: renew soon after start (e2e)

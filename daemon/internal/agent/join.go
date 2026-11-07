@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"connectrpc.com/connect"
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
@@ -67,6 +68,18 @@ type ChallengeAttestor interface {
 	Evidence() ([]byte, error)
 	Answer(challenge, csrSha256 []byte) ([]byte, error)
 }
+
+// SingleUseEvidence is an attestor whose evidence the control plane admits once (cloud-iid: one use
+// per instance), so a refusal after a lost answer may mean the lost attempt was admitted.
+type SingleUseEvidence interface {
+	SingleUseEvidence() bool
+}
+
+// ErrEvidenceSpent reports a refused join with single-use evidence after an earlier attempt failed
+// in a way that may have reached the control plane (its answer lost): that attempt may have
+// admitted this machine, and the evidence cannot be used again.
+var ErrEvidenceSpent = errors.New("agent: the join was refused after an earlier attempt's answer was lost; " +
+	"that attempt may have admitted this machine, and its single-use evidence is spent")
 
 // ErrChallenge reports a join deferral this daemon cannot answer (a challenge for another attestor).
 var ErrChallenge = errors.New("agent: the join needs an attestor challenge this daemon does not answer")
@@ -153,6 +166,10 @@ func Join(ctx context.Context, o JoinOptions) (*State, error) {
 				return nil, ctx.Err()
 			}
 			if !transport.Retryable(err) || failures+1 >= o.Attempts {
+				if failures > 0 && singleUse(o.Attest) && connect.CodeOf(err) == connect.CodePermissionDenied {
+					return nil, fmt.Errorf("%w (ask an operator whether the node exists, or re-join with "+
+						"bcd join --reset and a join token): %w", ErrEvidenceSpent, err)
+				}
 				return nil, fmt.Errorf("agent: join: %w", err)
 			}
 			delay := o.Backoff.Delay(failures, rng)
@@ -218,6 +235,11 @@ func Join(ctx context.Context, o JoinOptions) (*State, error) {
 		}
 		return persistJoin(o, record, out.Body)
 	}
+}
+
+func singleUse(a ChallengeAttestor) bool {
+	s, ok := a.(SingleUseEvidence)
+	return ok && s.SingleUseEvidence()
 }
 
 // persistJoin stores the node key's record and the identity.

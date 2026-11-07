@@ -321,6 +321,7 @@ puts its type into `noScheduleReasons`, in the same transaction.
 | `KubernetesTaintsDrift` (v1.1) | bcd's `k8s-join` unit: the Node's taints differ from the pool's, which the kubelet may not change; the message is the `kubectl taint` command a cluster admin runs (6ef198b) | Informational |
 | `KubernetesReleaseStuck` (v1.1) | bcd: a released Kubernetes allocation still held after 5 minutes (by a pod, a prepared DRA claim or a pod process, or with the kubelet unreachable), so its release is not reported yet (cd5fc82, 8bcbe92) | NoSchedule while `true` (ebd9806) |
 | `KubernetesReleasesUnreadable` (v1.1) | bcd: its pending Kubernetes releases file (`releasing.json`) could not be read, so every GPU of the node stays claimed until no pod may hold a bcd GPU of an allocation the node does not know, or an operator removes the marker `<data_dir>/releasing.unreadable` (a18f423, b01130f; see [an unreadable releases file](/docs/guides/capacity/kubernetes#an-unreadable-releases-file)); reason `ReleasesFileUnreadable` | NoSchedule while `true` (4884a65) |
+| `SpotInterruption` (v1.1, AWS) | bcd on a spot EC2 instance: AWS posted a spot instance-action (polled every 5 s from IMDSv2); the reason is `<action>:<deadline>`, e.g. `terminate:2026-11-05T10:02:00Z` | NoSchedule only while `true` (a changed action or deadline is recorded and published again); false once AWS withdraws the notice. Draining the node's work is the EC2 interruption-warning event path, not this condition |
 
 The gateway's `daemonNodeConditions` (b91dcff, 88219ea) lists the Kubernetes conditions, so they are written as node
 conditions. Since ebd9806 (security review 2) three of them, and since 4884a65 a fourth, are NoSchedule while true on
@@ -345,8 +346,9 @@ the node cannot hand out GPUs safely:
 `KubernetesReleased` and `KubernetesTaintsDrift` stay informational. See
 [Kubernetes workers](/docs/guides/capacity/kubernetes#gpu-isolation).
 
-`FabricManagerDown`, `MPSDown`, `RebootRequired`, `HostManagedExternally` and the Kubernetes conditions above come
-from bcd's [host configuration](/docs/daemon/host-config#status-and-failures) and its Kubernetes side. The gateway's
+`FabricManagerDown`, `MPSDown`, `RebootRequired`, `HostManagedExternally`, `SpotInterruption` and the Kubernetes
+conditions above come from bcd's [host configuration](/docs/daemon/host-config#status-and-failures), its cloud
+metadata watch and its Kubernetes side. The gateway's
 `xidStatusHandler` makes each the node's condition exactly as the last status report says, `true` while reported and
 `false` once it is not, and writes and publishes `node.condition.changed` only on a change. On a `tenant-controlled`
 node they are advisory: recorded, never a NoSchedule reason.

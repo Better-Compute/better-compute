@@ -40,6 +40,33 @@ message NodeInventory {
 }
 
 // ---------------------------------------------------------------------------------------------
+// "cloud" (v1.1, AWS program A6): the cloud instance the node is (an EC2 instance, virtual or
+// *.metal), from the instance metadata service. Only a node on a cloud sends it. Inventory derives
+// the cloud.* labels from it; the join identity is the cloud-iid attestation, never this section.
+// The control plane takes it once it registers the section (INVENTORY_SECTIONS, the
+// node_inventory_sections CHECK) and adds NodeInventory field 19 for it; until then it drops the
+// hash and does not store a pushed section.
+
+message CloudSection {
+  // "aws".
+  string provider = 1;
+  // e.g. "i-0123456789abcdef0".
+  string instance_id = 2;
+  // e.g. "p5.48xlarge", "c7i.metal-48xl".
+  string instance_type = 3;
+  // e.g. "us-east-1".
+  string region = 4;
+  // The zone name, e.g. "us-east-1a" (names map to physical zones per account).
+  string zone = 5;
+  // The zone id, e.g. "use1-az4" (the same physical zone in every account).
+  string zone_id = 6;
+  // "on-demand", "spot" or "capacity-block"; empty when the metadata names something else.
+  string lifecycle = 7;
+  // Elastic Fabric Adapter devices (/sys/class/infiniband/* bound to the efa driver).
+  uint32 efa_devices = 8;
+}
+
+// ---------------------------------------------------------------------------------------------
 // "images" (v0.3): what the node's runtime holds in its local image cache (vps hosts, deploy
 // caches); the placer's image-cached scorer ranks by it (PLAN.md §10.3).
 

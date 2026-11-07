@@ -35,7 +35,7 @@ func TestFirewallRuleset(t *testing.T) {
 	macless.Nics[0].Mac = ""
 	host := []string{"10.0.0.1", "fe80::1"}
 
-	ruleset, failed, guarded := firewallRuleset([]*agentv1.InstanceSpec{none, egress, private, unaddressed, gone, macless}, host)
+	ruleset, failed, guarded := firewallRuleset([]*agentv1.InstanceSpec{none, egress, private, unaddressed, gone, macless}, host, nil)
 	if len(failed) != 2 || !strings.Contains(failed["inst_noipam"], "needs IPAM addresses") || !strings.Contains(failed["inst_nomac"], "needs the MAC") {
 		t.Fatalf("failed = %v", failed)
 	}
@@ -116,17 +116,17 @@ func TestFirewallRuleset(t *testing.T) {
 	// A malformed MAC never reaches the ruleset.
 	odd := vm("inst_odd", running)
 	odd.Nics[0].Mac = `52:54:00:00:00:01" accept; drop "`
-	if rs, _, g := firewallRuleset([]*agentv1.InstanceSpec{odd}, nil); strings.Contains(rs, `accept; drop`) || strings.Contains(rs, "52:54:00:00:00:01") || len(g) != 0 {
+	if rs, _, g := firewallRuleset([]*agentv1.InstanceSpec{odd}, nil, nil); strings.Contains(rs, `accept; drop`) || strings.Contains(rs, "52:54:00:00:00:01") || len(g) != 0 {
 		t.Fatalf("the MAC was injected:\n%s", rs)
 	}
 	// An unguarded NIC (no IPAM addresses) still gets the rules every tap has; no instance: the table
 	// is only removed.
 	bare := vm("inst_bare", running)
 	bare.Nics[0].Addresses = nil
-	if rs, _, _ := firewallRuleset([]*agentv1.InstanceSpec{bare}, host); !strings.Contains(rs, `iifname "bc*" udp sport { 67, 547 } drop`) || strings.Contains(rs, tap("inst_bare")) {
+	if rs, _, _ := firewallRuleset([]*agentv1.InstanceSpec{bare}, host, nil); !strings.Contains(rs, `iifname "bc*" udp sport { 67, 547 } drop`) || strings.Contains(rs, tap("inst_bare")) {
 		t.Fatalf("unguarded ruleset = %q", rs)
 	}
-	if empty, _, _ := firewallRuleset(nil, host); empty != "table bridge bcd_instances\ndelete table bridge bcd_instances\ntable inet bcd_taps\ndelete table inet bcd_taps\ntable arp bcd_taps\ndelete table arp bcd_taps\n" {
+	if empty, _, _ := firewallRuleset(nil, host, nil); empty != "table bridge bcd_instances\ndelete table bridge bcd_instances\ntable inet bcd_taps\ndelete table inet bcd_taps\ntable arp bcd_taps\ndelete table arp bcd_taps\n" {
 		t.Fatalf("empty ruleset = %q", empty)
 	}
 	// Security review 12 H1: a tap off its bridge reaches neither the host nor, forwarded, anything.
@@ -143,7 +143,7 @@ func TestFirewallRuleset(t *testing.T) {
 	// A bridge named like the taps fails its instance.
 	odd2 := vm("inst_bcbridge", running)
 	odd2.Nics[0].Network = "bcbr0"
-	if rs, failed, _ := firewallRuleset([]*agentv1.InstanceSpec{odd2}, host); failed["inst_bcbridge"] == "" || strings.Contains(rs, tap("inst_bcbridge")) {
+	if rs, failed, _ := firewallRuleset([]*agentv1.InstanceSpec{odd2}, host, nil); failed["inst_bcbridge"] == "" || strings.Contains(rs, tap("inst_bcbridge")) {
 		t.Fatalf("a bc* bridge: %v", failed)
 	}
 	if ll := eui64(net.HardwareAddr{0x52, 0x54, 0x00, 0x00, 0x00, 0x01}); ll != "fe80::5054:ff:fe00:1" {
@@ -163,7 +163,7 @@ func TestSSHFromHostOnly(t *testing.T) {
 	sbx := vm("inst_sbx", running) // EGRESS
 	sbx.SshFromHostOnly = true
 	plain := vm("inst_vps", running)
-	ruleset, failed, _ := firewallRuleset([]*agentv1.InstanceSpec{sbx, plain}, []string{"10.0.0.1", "fe80::1"})
+	ruleset, failed, _ := firewallRuleset([]*agentv1.InstanceSpec{sbx, plain}, []string{"10.0.0.1", "fe80::1"}, nil)
 	if len(failed) != 0 {
 		t.Fatal(failed)
 	}
@@ -186,8 +186,54 @@ func TestSSHFromHostOnly(t *testing.T) {
 		t.Fatal("an ordinary instance's ssh was restricted")
 	}
 	// Without a host address of a family, that family's ssh into the sandbox is dropped outright.
-	if rs, _, _ := firewallRuleset([]*agentv1.InstanceSpec{sbx}, nil); !strings.Contains(rs, out+" ether type ip tcp dport 22 drop") {
+	if rs, _, _ := firewallRuleset([]*agentv1.InstanceSpec{sbx}, nil, nil); !strings.Contains(rs, out+" ether type ip tcp dport 22 drop") {
 		t.Fatalf("no host address:\n%s", rs)
+	}
+	nftSyntax(t, ruleset)
+}
+
+// AWS A6: on an EC2 host (a *.metal VPS host) no instance tap may reach the cloud's own metadata
+// service (the host's identity document and instance-profile credentials), whatever its policy, and
+// before any rule accepts (PRIVATE's metadata accept included).
+func TestCloudMetadataUnreachableFromTaps(t *testing.T) {
+	running := agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING
+	tap := func(id string) string { return `"` + runtime.TapName(id, 0) + `"` }
+	egress := vm("inst_egress", running)
+	private := withPolicy(vm("inst_private", running), agentv1.InstanceNetworkPolicy_INSTANCE_NETWORK_POLICY_PRIVATE)
+	specs := []*agentv1.InstanceSpec{egress, private}
+	ruleset, failed, _ := firewallRuleset(specs, []string{"10.0.0.1"}, []string{"169.254.169.254", "fd00:ec2::254", "not-an-ip"})
+	if len(failed) != 0 {
+		t.Fatal(failed)
+	}
+	v4, v6 := `iifname "bc*" ip daddr 169.254.169.254 drop`, `iifname "bc*" ip6 daddr fd00:ec2::254 drop`
+	for _, chain := range []string{"input", "forward"} {
+		body := ruleset[strings.Index(ruleset, "chain "+chain):]
+		body = body[:strings.Index(body, "\t}\n")]
+		body = body[strings.Index(body, "policy accept;")+len("policy accept;"):]
+		for _, want := range []string{v4, v6} {
+			at := strings.Index(body, want)
+			if at < 0 {
+				t.Fatalf("chain %s lacks %q:\n%s", chain, want, ruleset)
+			}
+			if strings.Contains(body[:at], " accept") {
+				t.Fatalf("an accept precedes %q in chain %s:\n%s", want, chain, body)
+			}
+		}
+	}
+	if strings.Contains(ruleset, "not-an-ip") {
+		t.Fatal("a malformed address reached the ruleset")
+	}
+	// The egress instance (no policy rules) is covered too: the drop names every tap.
+	if !strings.Contains(ruleset, "iifname "+tap("inst_private")+" ip daddr 169.254.169.254 accept") {
+		t.Fatal("PRIVATE's metadata accept is gone (off EC2 it serves bcd's own metadata service)")
+	}
+	// Off a cloud nothing changes.
+	if rs, _, _ := firewallRuleset(specs, []string{"10.0.0.1"}, nil); strings.Contains(rs, "169.254.169.254 drop") || strings.Contains(rs, "fd00:ec2::254") {
+		t.Fatalf("a metadata drop off a cloud:\n%s", rs)
+	}
+	// No instance NIC, no table: nothing to guard.
+	if rs, _, _ := firewallRuleset(nil, nil, []string{"169.254.169.254"}); strings.Contains(rs, "169.254.169.254") {
+		t.Fatalf("rules without instances:\n%s", rs)
 	}
 	nftSyntax(t, ruleset)
 }
@@ -226,6 +272,27 @@ func nftSyntax(t *testing.T, ruleset string) {
 		}
 	}
 	t.Logf("nft parsed the ruleset; this kernel refused to load it (%v)", err)
+}
+
+// Options.CloudMetadata (bcd node on EC2) reaches the ruleset the instances converger loads.
+func TestCloudMetadataOptionIsLoaded(t *testing.T) {
+	h := newHarness(t, func(o *Options) {
+		o.Runtimes = []runtime.Runtime{&runtime.Fake{RuntimeName: "libvirt-kvm", Path: filepath.Join(t.TempDir(), "runtime.json"), BootID: "boot-1"}}
+		o.CloudMetadata = []string{"169.254.169.254", "fd00:ec2::254"}
+	})
+	s, _ := h.open()
+	running := agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING
+	s.push(desired(1, &agentv1.NodeSpec{Instances: &agentv1.InstancesSection{Instances: []*agentv1.InstanceSpec{vm("inst_vps", running)}}}))
+	s.next(t, "status with the instance", func(f *agentv1.AgentFrame) bool {
+		return f.GetStatus().GetAppliedGeneration() == 1
+	})
+	h.host.mu.Lock()
+	loaded := append([]string(nil), h.host.firewalls...)
+	h.host.mu.Unlock()
+	if len(loaded) == 0 || !strings.Contains(loaded[len(loaded)-1], `iifname "bc*" ip daddr 169.254.169.254 drop`) ||
+		!strings.Contains(loaded[len(loaded)-1], `iifname "bc*" ip6 daddr fd00:ec2::254 drop`) {
+		t.Fatalf("rulesets loaded = %q", loaded)
+	}
 }
 
 func TestNetworkPoliciesAreEnforcedBeforeInstancesRun(t *testing.T) {

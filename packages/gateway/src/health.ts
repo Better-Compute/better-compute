@@ -11,9 +11,12 @@ const xidType = /^Xid(\d{1,5})$/;
  * reported and false once it is not, and NoSchedule while true when `noSchedule`. On a
  * tenant-controlled node they are advisory (its lessee has root) and change no NoSchedule reason.
  * `wakesReservations`: a change wakes the started reservations on the node, so their conditions
- * (Degraded) follow it at once.
+ * (Degraded) follow it at once. `reasonCarriesData`: the reason is data (a deadline), so a new reason
+ * while the condition stays true is a change too: stored and published.
  */
-export const daemonNodeConditions: Readonly<Record<string, { noSchedule: boolean; wakesReservations?: boolean }>> = Object.freeze({
+export const daemonNodeConditions: Readonly<
+  Record<string, { noSchedule: boolean; wakesReservations?: boolean; reasonCarriesData?: boolean }>
+> = Object.freeze({
   // An NVSwitch system without Fabric Manager: NVLink is down and multi-GPU jobs fail.
   FabricManagerDown: { noSchedule: true },
   // An mps pool's MPS control daemon is down: every client fails.
@@ -45,6 +48,11 @@ export const daemonNodeConditions: Readonly<Record<string, { noSchedule: boolean
   // Not a fault: the host section is observed only ([host] units = false; the GPU operator owns
   // the host). Operators see it on the node; capacity books from the inventory alone.
   HostManagedExternally: { noSchedule: false },
+  // (AWS A6) The cloud takes the instance back (an EC2 spot instance-action; reason "<action>:<deadline>"): no new
+  // work while the notice stands; it clears when the notice is withdrawn. NoSchedule only: draining the node's
+  // reservations is A4's interruption-warning path (taint aws.spot/interruption, capacity spot preemption). A changed
+  // notice (stop -> terminate, a new deadline) is a change.
+  SpotInterruption: { noSchedule: true, reasonCarriesData: true },
 });
 
 /** Conditions a section's state stands for (the section reports it, not a Condition). */
@@ -68,15 +76,18 @@ async function recordDaemonConditions(
     const state = report.sections.find((s) => s.section === section);
     if (state?.reason === reason) reported.set(type, state.message.slice(0, 512) || reason);
   }
-  const { rows } = await tx.query<{ type: string; status: string }>(
-    `SELECT type, status FROM node_conditions WHERE node_id = $1 AND type = ANY($2)`,
+  const { rows } = await tx.query<{ type: string; status: string; reason: string | null }>(
+    `SELECT type, status, reason FROM node_conditions WHERE node_id = $1 AND type = ANY($2)`,
     [nodeId, types],
   );
-  const current = new Map(rows.map((row) => [row.type, row.status]));
+  const current = new Map(rows.map((row) => [row.type, row]));
   // Absent and false are the same until a condition was first reported.
-  const changed = types.filter((type) =>
-    reported.has(type) ? current.get(type) !== 'true' : current.get(type) === 'true',
-  );
+  const changed = types.filter((type) => {
+    const stored = current.get(type);
+    if (!reported.has(type)) return stored?.status === 'true';
+    if (stored?.status !== 'true') return true;
+    return daemonNodeConditions[type]!.reasonCarriesData === true && stored.reason !== reported.get(type);
+  });
   if (!changed.length) return [];
   const node = await tx.query<{ no_schedule_reasons: string[]; trust: string; owner_tenant_id: string }>(
     'SELECT no_schedule_reasons, trust, owner_tenant_id FROM nodes WHERE id = $1 FOR UPDATE',
