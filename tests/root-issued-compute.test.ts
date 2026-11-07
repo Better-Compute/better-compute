@@ -1143,6 +1143,42 @@ describe('isolation between tenants, and between tenants and the root tenant', (
               config: { projectId: 'p', zones: [ZONE] },
             }),
         },
+        // AWS A3/A10 buying capacity, root-only on the platform's accounts: allowed, then refused by
+        // what the provider sells (Compute Engine sells nothing ahead of time here) or by confirmation.
+        {
+          path: 'providerAccounts.reservationOfferings',
+          tenant: R,
+          call: () =>
+            api.providerAccounts.reservationOfferings(root, {
+              tenantId: R,
+              accountId: w.accountId,
+              query: { instanceType: 'a2-highgpu-1g', count: 1, durationHours: 24 },
+            }),
+          expect: 'UNSUPPORTED',
+        },
+        {
+          path: 'providerAccounts.purchaseReservation',
+          tenant: R,
+          call: () =>
+            api.providerAccounts.purchaseReservation(root, {
+              tenantId: R,
+              accountId: w.accountId,
+              offeringId: 'cb-0123456789abcdef0',
+              idempotencyKey: 'buy-1',
+            }),
+          expect: 'CONFIRMATION_REQUIRED',
+        },
+        {
+          path: 'providerAccounts.purchases',
+          tenant: R,
+          call: () => api.providerAccounts.purchases(root, { tenantId: R, accountId: w.accountId }),
+        },
+        {
+          path: 'providerAccounts.purchaseProposals',
+          tenant: R,
+          call: () =>
+            api.providerAccounts.purchaseProposals(root, { tenantId: R, accountId: w.accountId }),
+        },
         // The root pool and the fleet.
         {
           path: 'pools.update',
