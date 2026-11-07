@@ -21,6 +21,7 @@ import {
 } from './provider-purchases.js';
 import { providerEventsMigration, providerInterruptionsMigration } from './provider-events.js';
 import { vpsFilesystemsMigration } from './filesystems.js';
+import { purchaseProposalsMigration } from './purchase-proposals.js';
 import {
   vpsIdentityRebindMigration,
   vpsSandboxExpiringMigration,
@@ -233,4 +234,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   providerInterruptionsMigration,
   vpsInstancePlacementMigration,
   vpsFilesystemsMigration,
+  purchaseProposalsMigration,
 ]);

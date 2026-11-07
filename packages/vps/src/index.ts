@@ -25,6 +25,7 @@ export * from './hosts.js';
 export * from './bootstraps.js';
 export * from './provider-reservations.js';
 export * from './provider-purchases.js';
+export * from './purchase-proposals.js';
 export * from './reservation-grants.js';
 export * from './discovery.js';
 export * from './provider-events.js';

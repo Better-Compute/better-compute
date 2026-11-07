@@ -615,6 +615,8 @@ group('providerAccounts', 'vps', [
   ['reservationOfferings', 'read', 'providers:read', 'provider-account', 'v1.0'],
   ['purchaseReservation', 'mutation', 'providers:purchase', 'provider-account', 'v1.0'],
   ['purchases', 'read', 'providers:read', 'provider-account', 'v1.0'],
+  // (AWS A10) Capacity Blocks proposed ahead of pending calendar reservations; root-only.
+  ['purchaseProposals', 'read', 'providers:read', 'provider-account', 'v1.0'],
 ]);
 group('reservationGrants', 'vps', [
   ['create', 'mutation', 'providers:manage', 'provider-account', 'v1.0'],

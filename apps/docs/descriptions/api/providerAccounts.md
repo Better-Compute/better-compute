@@ -126,3 +126,12 @@ Buys one offering; returns the purchase `{ id, accountId, offeringId, state, att
 ## purchases
 
 Returns the account's purchases, newest first (at most 500), as `items`; root (platform) tenant only, decided as `compute:providers:read` on the provider account.
+
+## purchaseProposals
+
+Returns the account's purchase proposals, newest first (at most 500), as `items`, each `{ id, accountId, reservationId, poolId, tenantId, state, reason?, startsAt, endsAt, query?, offering?, description?, error?, attempts, purchase?, createdAt, updatedAt }`. Nothing is bought: a proposal is capacity a person may decide to buy with `purchaseReservation`.
+
+- **Who.** Root (platform) tenant only, decided as `compute:providers:read` on the provider account; anyone else is `ACCESS_DENIED`. Proposals name other tenants' reservations and what the platform could spend.
+- **Where they come from.** The `vps.purchase-proposals` worker (every 15 minutes, `vps({ purchaseProposals: { every } })`) looks at capacity reservations that are `pending` on a provider pool of one of the platform's own provider accounts and start within the next 48 hours. It asks the provider (`reservationOfferings`, a read) for whole machines of the pool's GPU flavor that wastes the fewest GPUs (a plain offer: not a reservation's or a Spot one), starting in the day before the reservation (not before now) and lasting until it ends, in whole days up to 14 days and whole weeks up to 182 days. It proposes the covering offering (it starts after now, no later than the reservation, and ends no earlier) that starts latest, then the cheapest. Each reservation gets one proposal; `provider.purchase.proposed` is published when an offering is proposed.
+- **States.** `proposed` (`offering`, its `description`, and `purchase { id, state }` once root bought it), `none` (`reason`: `no-flavor` when the pool has no GPU flavor to buy, `no-offering` when nothing covers the reservation, `unsupported` when the provider sells nothing ahead of time), or `error` (`error { code, message }`: the provider read failed; tried again every 15 minutes, at most 5 attempts in all).
+- **AWS.** The proposed offering is a Capacity Block for ML (`cb:…`); an ODCR, which starts at once, is never proposed. Buy it with `purchaseReservation` and `confirm: true` (the account must set `allowPurchases`); bind the bought reservation to the pool with `bindReservation` once the reservations worker lists it.

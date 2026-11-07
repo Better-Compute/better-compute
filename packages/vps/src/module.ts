@@ -85,6 +85,15 @@ import {
   type ReservationOfferingsInput,
 } from './provider-purchases.js';
 import {
+  listPurchaseProposals,
+  parseListPurchaseProposals,
+  purchaseProposalSchemas,
+  purchaseProposalsReconciler,
+  type ListPurchaseProposalsInput,
+  type PurchaseProposalsOptions,
+  type PurchaseProposalView,
+} from './purchase-proposals.js';
+import {
   billingApi,
   defaultCurrency,
   flavorMeterSpec,
@@ -400,6 +409,11 @@ export interface VpsOptions {
    */
   reservations?: ReservationsOptions;
   /**
+   * (AWS A10) The `vps.purchase-proposals` worker: how often pending calendar reservations of provider
+   * pools are looked at for capacity to propose 48 hours ahead (default `15m`).
+   */
+  purchaseProposals?: PurchaseProposalsOptions;
+  /**
    * The `vps.discovery` worker (R5): how often provider accounts whose provider can `discover` are
    * listed into `provider_machines` (default `5m`), and opt-in label-driven auto-attach.
    */
@@ -501,6 +515,11 @@ export type VpsApi = {
     purchaseReservation: MethodDefinition<PurchaseReservationInput, ProviderPurchaseView>;
     /** (AWS A3) The account's purchases (root-only). */
     purchases: MethodDefinition<ListPurchasesInput, { items: ProviderPurchaseView[] }>;
+    /** (AWS A10) Capacity proposed ahead of pending calendar reservations (root-only). */
+    purchaseProposals: MethodDefinition<
+      ListPurchaseProposalsInput,
+      { items: PurchaseProposalView[] }
+    >;
   };
   /** Discovered provider machines bound to provider pools (discovery.ts); the rest of the group is capacity's. */
   pools: {
@@ -1630,6 +1649,23 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         handler: (context, input) =>
           listPurchases(rootOf(context), context.sql, input, context.caller),
       }),
+      purchaseProposals: defineMethod({
+        action: 'compute:providers:read',
+        kind: 'read',
+        resource: accountResource,
+        validate: describedBy(
+          purchaseProposalSchemas.purchaseProposals,
+          parseListPurchaseProposals,
+        ),
+        handler: (context, input) =>
+          listPurchaseProposals(
+            rootOf(context),
+            context.sql,
+            input,
+            context.caller,
+            providers.values(),
+          ),
+      }),
     },
     // Pool membership: the platform or the account's tenant binds discovered machines to a provider
     // pool; tenants the pool is offered to list them (pools.machines) and attach them.
@@ -2064,6 +2100,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       providerReservationsReconciler(options.reservations ?? {}, reservationDeps),
       // AWS A3: provider capacity purchases, bought outside any transaction, exactly once.
       providerPurchasesReconciler(purchaseDeps),
+      // (AWS A10) Capacity proposed 48 h ahead of pending calendar reservations of provider pools.
+      purchaseProposalsReconciler(options.purchaseProposals ?? {}, purchaseDeps),
       // R5: provider_machines, listed per provider account (key `all` periodic, then per account).
       discoveryReconciler(options.discovery ?? {}, depsOf),
       // A4: provider event intake (EventBridge → SQS for EC2): early wakes, interruptions, maintenance.
