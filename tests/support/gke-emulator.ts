@@ -359,6 +359,12 @@ export class GkeEmulator {
     cluster.status = 'STOPPING';
     const op = this.#operation(key.split('/')[0]!, key, 'DELETE_CLUSTER', {
       complete: () => {
+        // Its node pools' instance groups go with it, as GKE deletes them.
+        for (const pool of (cluster.nodePools as Json[] | undefined) ?? [])
+          for (const url of (pool.instanceGroupUrls as string[] | undefined) ?? []) {
+            const [, zone, name] = /\/zones\/([^/]+)\/instanceGroupManagers\/([^/]+)$/.exec(url)!;
+            this.instanceGroupSizes.delete(`${zone}/${name}`);
+          }
         this.clusters.delete(key);
       },
     });

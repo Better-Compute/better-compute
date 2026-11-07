@@ -220,6 +220,7 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
       expect(ready).toMatchObject({ mode: 'create' });
       expect(profile.clusters()).toContain(providerId);
       expect(profile.nodePools(providerId)).toContain('h100');
+      expect(profile.machines(providerId).length).toBeGreaterThan(0);
       // The flavor's Nodes carry the pool label; bcd's DaemonSet selects exactly them.
       const selected = kube.nodeList(server).filter((node) => node.labels[substratePoolLabel] === poolId);
       expect(selected).toHaveLength(2 * z);
@@ -339,9 +340,11 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
         await kick(poolId);
         return (await substrate(poolId))?.state === 'deleted';
       }, 90_000);
-      // At the provider: no cluster, so no node pool.
+      // At the provider: no cluster, no node pool, and no machine left in the account (instance groups, node
+      // groups, worker Droplets).
       expect(profile.clusters()).not.toContain(providerId);
       expect(profile.nodePools(providerId)).toEqual([]);
+      expect(profile.machines(providerId)).toEqual([]);
       // In compute: no live booking, every node retired, no live hosted token.
       expect(await liveAllocations(poolId)).toEqual([]);
       const { rows: nodes } = await dev.database.query<{ provision_state: string }>(
@@ -370,10 +373,12 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
     let adopted: string;
     let server: string;
     let ownPools: string[];
+    let ownMachines: string[];
 
     it('adopts a running cluster: adds the flavor node pool beside its own, and bcd joins its Nodes', async () => {
       adopted = profile.seedCluster();
       ownPools = profile.nodePools(adopted);
+      ownMachines = profile.machines(adopted).sort();
       await apply([{ name: 'gpu-adopted', nodes: 1, adopt: adopted }]);
       poolId = await poolIdOf('gpu-adopted');
       await until('the substrate to apply bcd', async () => {
@@ -415,6 +420,7 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
       }, 90_000);
       expect(profile.clusters()).toContain(adopted);
       expect(profile.nodePools(adopted)).toEqual(ownPools);
+      expect(profile.machines(adopted).sort()).toEqual(ownMachines);
       expect(kube.kinds(server)).toEqual([]);
       // Nor the substrate's own cluster-admin identity: no service account, binding or bc-access namespace stays.
       expect(profile.accessObjects(server)).toEqual([]);

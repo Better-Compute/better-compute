@@ -44,6 +44,11 @@ export interface ManagedKubernetesProfile {
   clusters(): string[];
   /** Node pool names of a cluster, by provider id. */
   nodePools(cluster: string): string[];
+  /**
+   * The provider-side machines behind a cluster's nodes, read from the account, not from the cluster object (so they
+   * are seen after the cluster is gone): GKE instance groups, EKS node groups, DOKS worker Droplets.
+   */
+  machines(cluster: string): string[];
   /** A running cluster the tenant made itself (one node pool of its own); returns its provider id. */
   seedCluster(): string;
   /** Secrets the provider side holds (account tokens): never in a row, an event or a log line. */
@@ -92,6 +97,8 @@ export function gkeProfile(): ManagedKubernetesProfile {
     accepts: (token) => api.issued.includes(token),
     clusters: () => [...gke.clusters.keys()],
     nodePools: (cluster) => ((gke.clusters.get(cluster)?.nodePools ?? []) as Json[]).map((pool) => pool.name as string),
+    machines: (cluster) =>
+      [...gke.instanceGroupSizes.keys()].filter((key) => key.split('/')[1]!.startsWith(`gke-${cluster.split('/').pop()}-`)),
     seedCluster() {
       gke.clusters.set('us-central1/tenant-own', {
         name: 'tenant-own',
@@ -162,6 +169,10 @@ export function eksProfile(): ManagedKubernetesProfile {
       [...eks.nodegroups.values()]
         .filter((group) => providerId(group.cluster) === cluster)
         .map((group) => group.nodegroupName),
+    machines: (cluster) =>
+      [...eks.nodegroups.values()]
+        .filter((group) => providerId(group.cluster) === cluster)
+        .map((group) => `${group.nodegroupName}/${group.status}`),
     seedCluster() {
       eks.clusters.set('tenant-own', {
         name: 'tenant-own',
@@ -231,6 +242,10 @@ export function doksProfile(): ManagedKubernetesProfile {
     accepts: (token) => doks.kube.issued.includes(token),
     clusters: () => [...doks.clusters.keys()],
     nodePools: (cluster) => ((doks.clusters.get(cluster)?.node_pools ?? []) as Json[]).map((pool) => pool.name as string),
+    machines: (cluster) =>
+      [...doks.do.state.droplets.values()]
+        .filter((droplet: Json) => (droplet.tags as string[]).includes(`k8s:${cluster}`))
+        .map((droplet: Json) => String(droplet.name)),
     // The tenant turned DigitalOcean's own GPU device plugins off (DO-D18), as adopting for a GPU pool needs.
     seedCluster: () =>
       doks.seedCluster({
