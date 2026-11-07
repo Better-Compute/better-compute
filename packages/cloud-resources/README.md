@@ -72,6 +72,11 @@ betterCompute({
   instances), through the kind's pure `instances(spec)`: each must be a live instance of the tenant on the same
   provider account (`INVALID_INPUT`, `reason 'instance'`), and the provider maps it to its own handle (DigitalOcean:
   the Droplet's instance tag), so it is safe on a hosted pool.
+  Likewise a spec may name tenant networks (a database joining a private network) through the kind's pure
+  `networks(spec)`: each must be a live network of the tenant on the same provider account, and not an adopted VPC
+  shared with other tenants' machines unless the account is the tenant's own (`INVALID_INPUT`, `reason 'network'`).
+  The reconciler checks them again before every `ensure` and hands the provider each one's provider-side name
+  (`networks` on the request); a provider never trusts a bare network id.
 - **Secrets in a spec** are SecretRefs, resolved only within the resource's tenant, just before the provider call.
 - **Quota** per tenant and kind: `maxPerKind` (default 20) and `quotas: { 'do.database.pg': 5 }`.
 - **Events** `cloud.resource.*` (`created`, `ready`, `updating`, `updated`, `failed`, `deleting`, `deleted`,

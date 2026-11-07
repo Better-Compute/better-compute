@@ -24,7 +24,7 @@ import {
   type ResourceRow,
   type ResourcesProvider,
 } from './store.js';
-import { markDeleted } from './resources.js';
+import { markDeleted, networkNames } from './resources.js';
 import type { CloudResourceState } from './types.js';
 import { meterRates } from './usage.js';
 
@@ -368,6 +368,34 @@ class ResourceWorker {
     // An adopted resource is taken over first, whatever its version (a description change does not count), and then
     // observed, not ensured, until the tenant changes its spec: until then its spec is the provider's.
     const observe = row.adopted && (row.ready_at === null || !row.spec_changed);
+    // The tenant networks the spec names, by their provider-side names: only the tenant's own on this account (the
+    // API checked them; this keeps a provider from ever being handed a network that is not).
+    let networks: Record<string, string> | undefined;
+    if (!observe && typeof kind.networks === 'function') {
+      const named = [...kind.networks(json(row.spec))];
+      if (named.length > 0) {
+        networks = await this.sql.transaction((tx) =>
+          networkNames(
+            tx,
+            {
+              tenantId: row.tenant_id,
+              accountId: provider.account.id,
+              tenantAccount: provider.account.tenantId === row.tenant_id,
+              live: false,
+            },
+            named,
+          ),
+        );
+        const missing = named.find((id) => networks![id] === undefined);
+        if (missing !== undefined) {
+          await this.#set({
+            state: 'error',
+            message: `Network ${missing} is not a network of this tenant on the provider account`,
+          });
+          return this.#next();
+        }
+      }
+    }
     const ensured = await this.#attempt(() =>
       observe
         ? this.#observe(provider)
@@ -380,6 +408,7 @@ class ResourceWorker {
               ...(parent?.provider_id ? { parent: parent.provider_id } : {}),
               labels: this.#labels(),
               accountScope: provider.account.tenantId === row.tenant_id ? 'tenant' : 'shared',
+              ...(networks ? { networks } : {}),
             },
             this.#call(),
           ),

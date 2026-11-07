@@ -153,6 +153,56 @@ describe('cloud.resources: convergence', () => {
     expect(world.cloud.scopes.get(own.providerName)).toBe('tenant');
   });
 
+  it('ensure is handed the tenant networks the spec names by provider-side name, re-checked at run time', async () => {
+    const network = async (id: string, tenantId: string) => {
+      await world.fixture.database.query(`SET session_replication_role = replica`);
+      try {
+        await world.fixture.database.query(
+          `INSERT INTO networks (id, tenant_id, pool_id, provider_account_id, name, state, desired_state,
+                                 created_by, idempotency_key, request_hash, version)
+           VALUES ($1, $2, $3, $4, $1, 'ready', 'present', 'idn_x', $1, '\\x00'::bytea, 1)`,
+          [id, tenantId, world.poolId, world.accountId],
+        );
+      } finally {
+        await world.fixture.database.query(`SET session_replication_role = DEFAULT`);
+      }
+      return id;
+    };
+    const ours = await network('net_aaaaaaaaaaaaaaaaaaaaaaaaaa', world.acmeTenant);
+    const created = await create({
+      name: 'on-net',
+      spec: { region: 'nyc3', engine: 'pg', version: '16', size: 'small', tenantNetwork: ours },
+    });
+    await settled(created.id, 'ready');
+    expect(world.cloud.networks.get(created.providerName)).toEqual({
+      [ours]: 'bc-net-aaaaaaaaaaaaaaaaaaaaaaaaaa',
+    });
+    // A network that is no longer the tenant's by the time the reconciler runs: error, nothing sent.
+    const moving = await network('net_bbbbbbbbbbbbbbbbbbbbbbbbbb', world.acmeTenant);
+    const late = await create({
+      name: 'late-net',
+      spec: { region: 'nyc3', engine: 'pg', version: '16', size: 'small', tenantNetwork: moving },
+    });
+    await world.fixture.database.query(`UPDATE networks SET tenant_id = 'other' WHERE id = $1`, [
+      moving,
+    ]);
+    await settled(late.id, 'error');
+    expect((await get(late.id)).message).toContain(moving);
+    expect(world.cloud.calls).not.toContain(`ensure fake.database ${late.providerName}`);
+    // An adopted VPC shared with other tenants' machines (a project's default) is refused on a hosted pool.
+    const shared = await network('net_cccccccccccccccccccccccccc', world.acmeTenant);
+    await world.fixture.database.query(
+      `UPDATE networks SET shared_tag_scoped = true, external_name = 'default-nyc3' WHERE id = $1`,
+      [shared],
+    );
+    await expect(
+      create({
+        name: 'shared-net',
+        spec: { region: 'nyc3', engine: 'pg', version: '16', size: 'small', tenantNetwork: shared },
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT', details: { reason: 'network' } });
+  });
+
   it('a spec SecretRef resolves only as the tenant’s own secret://<tenant>/… ref, whatever the store would serve', async () => {
     // A store that would hand these to acme: the module must not rely on the store's own scoping.
     const store = secrets.values as Map<string, { tenantId: string; value: string }>;

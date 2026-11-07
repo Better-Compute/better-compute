@@ -8,6 +8,7 @@ import {
   type ProviderResourceKind,
   type SqlTx,
 } from '@better-compute/core';
+import { providerResourceName as providerNetworkName } from '@better-compute/vps';
 import { canonical, sha256Hex } from './input.js';
 import {
   kindOf,
@@ -248,6 +249,69 @@ export async function assertInstances(
     );
 }
 
+/**
+ * The provider-side names of the networks a spec names (`ProviderResourceKind.networks`), for the networks of the
+ * tenant on the provider account; one shared with machines of other tenants (an adopted, tag-scoped VPC such as a
+ * project's default) only when the account is the tenant's own. `live`: only networks still wanted and not
+ * deleted (a create or a change naming one); otherwise any such network still recorded (a resource converging on
+ * the network it was created in). An id that is not found is left out of the map.
+ */
+export async function networkNames(
+  tx: SqlTx,
+  scope: { tenantId: string; accountId: string; tenantAccount: boolean; live: boolean },
+  ids: readonly string[],
+): Promise<Record<string, string>> {
+  if (ids.length === 0) return {};
+  const { rows } = await tx.query<{ id: string; external_name: string | null }>(
+    `SELECT id, external_name FROM networks
+      WHERE id = ANY($1::text[]) AND tenant_id = $2 AND provider_account_id = $3
+        AND (NOT shared_tag_scoped OR $4::bool)
+        AND (NOT $5::bool OR (desired_state = 'present' AND state <> 'deleted'))`,
+    [[...new Set(ids)], scope.tenantId, scope.accountId, scope.tenantAccount, scope.live],
+  );
+  return Object.fromEntries(
+    rows.map((row) => [row.id, providerNetworkName(row.id, row.external_name)]),
+  );
+}
+
+/**
+ * The networks a spec names must be live networks of the tenant on the same provider account, and not shared with
+ * other tenants' machines unless the account is the tenant's own: INVALID_INPUT otherwise (one that does not exist
+ * and one of another tenant alike).
+ */
+export async function assertNetworks(
+  tx: SqlTx,
+  tenantId: string,
+  provider: ResourcesProvider,
+  kind: ProviderResourceKind,
+  spec: unknown,
+  /** On an update, the stored spec: the networks it already named are not checked again (one may be going). */
+  before?: unknown,
+): Promise<void> {
+  if (typeof kind.networks !== 'function') return;
+  const kept = new Set(before === undefined ? [] : kind.networks(before));
+  const named = [...new Set(kind.networks(spec))].filter((id) => !kept.has(id));
+  if (named.length === 0) return;
+  const found = await networkNames(
+    tx,
+    {
+      tenantId,
+      accountId: provider.account.id,
+      tenantAccount: provider.account.tenantId === tenantId,
+      live: true,
+    },
+    named,
+  );
+  const missing = named.filter((id) => found[id] === undefined);
+  if (missing.length > 0)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${kind.kind}: network ${missing[0]} is not a network of this tenant on the pool's provider account`,
+      undefined,
+      { reason: 'network', field: 'spec', networks: missing, kind: kind.kind },
+    );
+}
+
 async function parentOf(
   tx: SqlTx,
   input: { tenantId: string; parentId?: string },
@@ -312,6 +376,7 @@ async function admit(
   const spec = await validSpec(kind, input.spec);
   assertAccountScope(provider, input.tenantId, kind, spec);
   await assertInstances(tx, input.tenantId, provider.account.id, kind, spec);
+  await assertNetworks(tx, input.tenantId, provider, kind, spec);
   const region = regionOf(provider, kind, spec);
   const parent = await parentOf(tx, input, kind, provider.account.id);
   const identity = parent ? identityOf(kind, spec) : undefined;
@@ -603,6 +668,7 @@ export async function updateResource(
     spec = await validSpec(kind, { ...stored, ...input.spec });
     assertAccountScope(provider, row.tenant_id, kind, spec);
     await assertInstances(tx, row.tenant_id, row.provider_account_id, kind, spec, stored);
+    await assertNetworks(tx, row.tenant_id, provider, kind, spec, stored);
     const changed = [...new Set([...Object.keys(stored), ...Object.keys(spec)])].filter(
       (field) => !same(stored[field], spec[field]),
     );

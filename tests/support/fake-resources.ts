@@ -51,6 +51,8 @@ export interface FakeResourcesCloud {
   resolved: Map<string, string>;
   /** The `accountScope` of the last ensure, by provider-side name. */
   scopes: Map<string, string | undefined>;
+  /** The `networks` of the last ensure, by provider-side name. */
+  networks: Map<string, Readonly<Record<string, string>> | undefined>;
   /** Extra entries the catalog answers (to check the module drops malformed ones). */
   catalogExtra?: ProviderCatalogEntry[];
   /** Extra `usage` entries every fake.database reports (to check the module drops what it should). */
@@ -73,6 +75,7 @@ export function fakeResourcesCloud(): FakeResourcesCloud {
     refuse: new Set(),
     passwords: [],
     scopes: new Map(),
+    networks: new Map(),
     resolved: new Map(),
     reset() {
       this.resources.clear();
@@ -82,6 +85,7 @@ export function fakeResourcesCloud(): FakeResourcesCloud {
       delete this.failNext;
       this.passwords.length = 0;
       this.scopes.clear();
+      this.networks.clear();
       this.resolved.clear();
       delete this.usageExtra;
       delete this.catalogExtra;
@@ -113,6 +117,10 @@ export const fakeDatabaseSpec = manifest({
     .string()
     .optional()
     .describe("A network of the provider account (account-wide: the tenant's own account only)"),
+  tenantNetwork: field
+    .string({ pattern: /^net_[0-9a-z]{26,52}$/ })
+    .optional()
+    .describe('A better-compute network of the tenant'),
 });
 
 export const fakeKinds: readonly ProviderResourceKind[] = Object.freeze([
@@ -128,6 +136,10 @@ export const fakeKinds: readonly ProviderResourceKind[] = Object.freeze([
     meters: [{ meter: 'fake.database.hours', unit: 'hour' }],
     accountWide: (spec) =>
       (spec as { network?: string }).network !== undefined ? ['network'] : [],
+    networks: (spec) => {
+      const network = (spec as { tenantNetwork?: string }).tenantNetwork;
+      return network !== undefined ? [network] : [];
+    },
   },
   {
     kind: 'fake.database-user',
@@ -260,6 +272,7 @@ export function fakeProviderResources(
     async ensure(request: ProviderResourceRequest, context: CallContext) {
       call(`ensure ${request.kind} ${request.name}`);
       cloud.scopes.set(request.name, request.accountScope);
+      cloud.networks.set(request.name, request.networks);
       const secretRef = (request.spec as { secret?: SecretRef }).secret;
       if (secretRef !== undefined)
         cloud.resolved.set(request.name, await context.secrets.resolve(secretRef));
