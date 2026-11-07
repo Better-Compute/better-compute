@@ -478,7 +478,8 @@ export class AwsVolumes implements ProviderVolumes {
         'EBS volumes are block volumes; shared filesystems (EFS) arrive with AWS phase A10',
         'shared',
       );
-    if (spec.filesystem !== undefined && spec.filesystem !== 'none')
+    // A restore keeps its snapshot's filesystem: the contract ignores `filesystem` with `snapshotId`.
+    if (spec.snapshotId === undefined && spec.filesystem !== undefined && spec.filesystem !== 'none')
       throw fail(
         'UNSUPPORTED',
         'EBS does not format volumes; the guest formats a raw volume',
@@ -616,6 +617,35 @@ export class AwsVolumes implements ProviderVolumes {
         `a volume restored from snapshot ${snapshotId} is at least ${snapshot.volumeSize} GiB`,
         'size',
       );
+  }
+
+  /**
+   * The live volume of this deployment named `name` in `region` (the account region, or one of its
+   * zones: then only a volume in that zone), without creating one; undefined when there is none, also
+   * for a volume that is being or has been deleted (nothing is left to delete). A volume this client
+   * made that no read shows yet is pending. vps asks this for a delete whose create answer was lost.
+   */
+  async findVolume(
+    name: string,
+    region: string,
+    context: CallContext,
+  ): Promise<ProviderResourceState | undefined> {
+    if (typeof name !== 'string' || name === '' || name.length > 255 || tagValue(name) !== name)
+      return undefined;
+    const zone = this.config.zones.includes(region) ? region : undefined;
+    if (zone === undefined && region !== this.config.region) return undefined;
+    const { signal } = context;
+    const found = await this.#byName(name, signal);
+    if (found) {
+      if (gone(found) || (zone !== undefined && found.zone !== zone)) return undefined;
+      return volumeState(found, this.config.region);
+    }
+    const known = this.#created.get(name);
+    if (!known || !this.#recent(known.at)) return undefined;
+    const made = await this.volume(known.id, signal);
+    if (!made) return state(known.id, 'pending');
+    if (gone(made) || (zone !== undefined && made.zone !== zone)) return undefined;
+    return volumeState(made, this.config.region);
   }
 
   async getVolume(

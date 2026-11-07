@@ -7,7 +7,12 @@ import {
   type ProviderResourceState,
   type ProviderVolumeSpec,
 } from '@better-compute/core';
-import { awsProvider, clientToken, type AwsConfig } from '@better-compute/provider-aws';
+import {
+  awsProvider,
+  clientToken,
+  type AwsConfig,
+  type AwsVolumes,
+} from '@better-compute/provider-aws';
 import { AwsEmulator } from './support/aws-emulator/index.js';
 import { Ec2Emulator } from './support/aws-emulator/ec2.js';
 import { EbsEmulator } from './support/aws-emulator/ebs.js';
@@ -326,6 +331,42 @@ describe('provider-aws volumes: ensure, get, delete', () => {
     });
     ebs.tick();
     expect(await volumes.getVolume(made.id, call())).toMatchObject({ state: 'ready' });
+  });
+
+  it("findVolume: this deployment's volume of a name, never created (a delete whose create answer was lost)", async () => {
+    const { volumes, call, ebs, emu, managed } = world();
+    const find = (name: string, region: string) =>
+      (volumes as AwsVolumes).findVolume(name, region, call());
+    expect(await find('bc-v-made', 'us-east-1')).toBeUndefined();
+    // Another's volume of the name (no managed tag) is none.
+    ebs.addVolume({ tags: { 'better-compute:volume': 'bc-v-made' } });
+    expect(await find('bc-v-made', 'us-east-1')).toBeUndefined();
+    const mine = ebs.addVolume({ zone: 'us-east-1a', tags: managed });
+    expect(await find('bc-v-made', 'us-east-1')).toMatchObject({ id: mine.id, state: 'ready' });
+    // vps keeps an AWS volume's region as its zone: the same zone finds it, another zone does not.
+    expect(await find('bc-v-made', 'us-east-1a')).toMatchObject({ id: mine.id });
+    expect(await find('bc-v-made', 'us-east-1b')).toBeUndefined();
+    expect(await find('bc-v-made', 'eu-west-1')).toBeUndefined();
+    expect(await find('', 'us-east-1')).toBeUndefined();
+    // A volume that is gone has nothing left to delete.
+    mine.state = 'deleted';
+    expect(await find('bc-v-made', 'us-east-1')).toBeUndefined();
+    expect(emu.calls('CreateVolume')).toHaveLength(0);
+  });
+
+  it('findVolume: a volume this client just made, not visible to any read yet, is pending', async () => {
+    const { volumes, fresh, call, spec, ebs, emu } = world();
+    ebs.newVolumeNotFound = 2;
+    const made = await volumes.ensureVolume(spec(), call());
+    ebs.hideFromFilters.add(made.id);
+    expect(
+      await (volumes as AwsVolumes).findVolume('bc-v-0001', 'us-east-1a', call()),
+    ).toMatchObject({ id: made.id, state: 'pending' });
+    // Another process (none of this one's memos) does not see it yet: none, and nothing created.
+    expect(
+      await (fresh() as AwsVolumes).findVolume('bc-v-0001', 'us-east-1a', call()),
+    ).toBeUndefined();
+    expect(emu.calls('CreateVolume')).toHaveLength(1);
   });
 
   it('refuses mutating an untagged volume', async () => {
@@ -958,7 +999,11 @@ describe('provider-aws volumes: snapshots and restores', () => {
     );
     expect(emu.calls('CreateVolume')).toHaveLength(0);
     ours.state = 'completed';
-    const restored = await volumes.ensureVolume(spec({ snapshotId: ours.id, sizeGiB: 20 }), call());
+    // A restore keeps the snapshot's filesystem: a filesystem in the spec is ignored, not refused.
+    const restored = await volumes.ensureVolume(
+      spec({ snapshotId: ours.id, sizeGiB: 20, filesystem: 'ext4' }),
+      call(),
+    );
     expect(emu.calls('CreateVolume')[0]!.params.get('SnapshotId')).toBe(ours.id);
     expect(ebs.volumes.get(restored.id)!.snapshotId).toBe(ours.id);
   });
