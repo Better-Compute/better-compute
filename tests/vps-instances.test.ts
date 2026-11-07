@@ -1493,6 +1493,13 @@ describe('provider instances', () => {
     expect(again.state).toBe('scheduling');
     expect(again.externalId).toBeUndefined();
     expect(recorded.events.slice(-3)).toEqual(['instance.lost', 'instance.preempted', 'instance.recreating']);
+    // It is no longer lost: Preempted (set with `lost`) says it was replaced.
+    expect(again.conditions).toContainEqual(
+      expect.objectContaining({ type: 'Preempted', status: 'false', reason: 'Replaced' }),
+    );
+    expect(again.conditions).not.toContainEqual(
+      expect.objectContaining({ type: 'Preempted', status: 'true' }),
+    );
     cloud.machines.clear();
     await reconcile(created.id);
     expect(cloud.creates).toBe(2);
@@ -1561,6 +1568,54 @@ describe('provider instances', () => {
     expect((await get(created.id)).state).toBe('lost');
     expect(cloud.creates).toBe(4);
     expect(recorded.events.filter((e) => e === 'instance.recreating')).toHaveLength(3);
+  });
+
+  it('an attached machine on an @spot offer that vanishes is lost, never preempted or recreated', async () => {
+    await spotFlavor();
+    await db.query(`UPDATE pools SET policy = '{"replacePreempted": true}' WHERE id = $1`, [providerPool]);
+    const created = (await call('instances', 'create', createProvider({ flavor: 'cx22-spot' }))) as View;
+    await reconcile(created.id);
+    expect((await get(created.id)).externalId).toBe('srv-1');
+    // As if attached (and claimed): capacity better-compute never created.
+    await db.query(
+      `UPDATE instances SET origin = 'attached', on_delete = 'detach', provider_claimed_at = now() WHERE id = $1`,
+      [created.id],
+    );
+    cloud.machines.clear();
+    await reconcile(created.id);
+    const lost = await get(created.id);
+    expect(lost.state).toBe('lost');
+    expect(lost.conditions.map((c) => c.type)).not.toContain('Preempted');
+    expect(recorded.events).not.toContain('instance.preempted');
+    expect(recorded.events).not.toContain('instance.recreating');
+    await reconcile(created.id);
+    expect((await get(created.id)).state).toBe('lost');
+    expect(cloud.creates).toBe(1);
+  });
+
+  it("an @spot loss on a provider that doesn't declare spot-offers is not a preemption", async () => {
+    // The same provider id without the capability: there `@spot` could name a reservation.
+    const plainCloud = { ...fakeCloud, capabilities: [] as typeof fakeCloud.capabilities };
+    const plain = vps({ runtimes: ['libvirt-kvm'], providers: [plainCloud], images });
+    const reconcilePlain = (instanceId: string) =>
+      plain
+        .reconcilers!.find((entry) => entry.name === instanceWork)!
+        .run({ ...moduleContext(db), signal: new AbortController().signal }, instanceId);
+    await spotFlavor();
+    await db.query(`UPDATE pools SET policy = '{"replacePreempted": true}' WHERE id = $1`, [providerPool]);
+    const created = (await call('instances', 'create', createProvider({ flavor: 'cx22-spot' }))) as View;
+    await reconcilePlain(created.id);
+    expect((await get(created.id)).externalId).toBe('srv-1');
+    cloud.machines.clear();
+    await reconcilePlain(created.id);
+    const lost = await get(created.id);
+    expect(lost.state).toBe('lost');
+    expect(lost.conditions.map((c) => c.type)).not.toContain('Preempted');
+    expect(recorded.events).toContain('instance.lost');
+    expect(recorded.events).not.toContain('instance.preempted');
+    await reconcilePlain(created.id);
+    expect((await get(created.id)).state).toBe('lost');
+    expect(cloud.creates).toBe(1);
   });
 
   it('replacePreempted changes nothing for an on-demand machine that vanishes', async () => {

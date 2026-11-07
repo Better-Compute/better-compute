@@ -851,8 +851,10 @@ export const provisionFailedCondition = 'ProvisionFailed';
 
 /**
  * (P3) A provider-pool instance on Spot (preemptible) capacity whose machine vanished: the provider
- * reclaimed it. Set with the `lost` state and the `instance.preempted` event; a pool whose policy
- * says `replacePreempted: true` recreates the instance in place (a new machine, the same id).
+ * reclaimed it. Set (`status: 'true'`, reason `Reclaimed`) with the `lost` state and the
+ * `instance.preempted` event; a pool whose policy says `replacePreempted: true` recreates the
+ * instance in place (a new machine, the same id), which turns it to `status: 'false'` (reason
+ * `Replaced`).
  */
 export const preemptedCondition = 'Preempted';
 

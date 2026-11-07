@@ -511,7 +511,17 @@ async function loseMachine(
     addresses: [],
     reportedState: null,
     conditions: [
-      ...lost.conditions.filter((c) => c.type !== preemptedReplacementsCondition),
+      // No longer lost: Preempted (set with `lost`) records that the machine was replaced.
+      ...withCondition(
+        lost.conditions,
+        {
+          type: preemptedCondition,
+          status: 'false',
+          reason: 'Replaced',
+          message: `Recreating on a new machine after Spot machine ${row.externalId ?? '(unknown)'} was reclaimed`,
+        },
+        now,
+      ).filter((c) => c.type !== preemptedReplacementsCondition),
       {
         type: preemptedReplacementsCondition,
         status: 'true',
