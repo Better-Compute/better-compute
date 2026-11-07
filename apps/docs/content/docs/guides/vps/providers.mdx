@@ -1128,7 +1128,8 @@ in one region: a fleet in several regions is several accounts.
   `better-compute aws trust-policy --platform-principal <arn> --external-id better-compute:<providerAccountId>` its
   trust policy; `better-compute aws onboarding-template --account <providerAccountId> --platform-principal <arn>`
   renders both as one CloudFormation template. `providerAccounts.get` shows the account's `onboarding`: its `mode`,
-  and for a role the `externalId` and (with `awsProvider({ platformPrincipalArn })`) the principal to trust. The
+  and for a role the `externalId` and (with `awsProvider({ platformPrincipalArn })`) the principal to trust; a keyless
+  account shows its `subject`, `audience` and the host's workload `issuer` URL. The
   commands ship with the provider; add `awsIamPolicyCommand()`, `awsTrustPolicyCommand()`,
   `awsOnboardingTemplateCommand()` and `awsWorkloadRoleCommand()` to your configuration's `commands`.
 - **Keyless accounts.** As with GCP's `federationAudience`, `webIdentityRoleArn` signs the account in with no key:

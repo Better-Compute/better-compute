@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { awsProvider } from '@better-compute/provider-aws';
 import { generateP256KeyPair, workloadIssuer } from '@better-compute/pki';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
-import { defineProvider, vps } from '@better-compute/vps';
+import { defineProvider, describedAccount, vps } from '@better-compute/vps';
 import { field, manifest } from '@better-compute/core';
 import { AwsEmulator } from './support/aws-emulator/index.js';
 
@@ -124,6 +124,36 @@ describe('provider account onboarding (A7)', () => {
       subject: 'compute-account:t_acme/aws/keyless',
       audience: 'sts.amazonaws.com',
     });
+  });
+
+  it("a keyless account shows the host's issuer URL, the --issuer of its onboarding template", () => {
+    const config = {
+      region: 'us-east-1',
+      zones: ['us-east-1a'],
+      webIdentityRoleArn: 'arn:aws:iam::222222222222:role/keyless',
+      rootVolumeGiB: 100,
+      rootVolumeType: 'gp3',
+      metadataHopLimit: 1,
+      associatePublicIp: true,
+    };
+    const account = {
+      id: 'pa_1',
+      tenantId: 't_acme',
+      provider: 'aws',
+      name: 'keyless',
+      config,
+      version: 1,
+    } as never;
+    const providers = new Map([['aws', awsProvider() as never]]);
+    expect(describedAccount(providers, account, 'root', ISSUER).onboarding).toEqual({
+      mode: 'web-identity',
+      roleArn: 'arn:aws:iam::222222222222:role/keyless',
+      subject: 'compute-account:t_acme/aws/keyless',
+      audience: 'sts.amazonaws.com',
+      issuer: ISSUER,
+    });
+    // Without a host issuer, nothing is invented.
+    expect(describedAccount(providers, account, 'root').onboarding).not.toHaveProperty('issuer');
   });
 
   it('a platform account on ambient credentials says so, and a key account names no secret', async () => {

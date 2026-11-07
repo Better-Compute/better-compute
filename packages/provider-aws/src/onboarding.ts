@@ -325,11 +325,12 @@ export function workloadRoleTemplate(options: WorkloadRoleOptions): CloudFormati
  * `ProviderInput.describeAccount` for AWS (`providerAccounts.get` `onboarding`): how the account
  * signs in, and what its role must trust. A role the control plane assumes shows the
  * platform-assigned ExternalId (and the platform principal when the host names it); a keyless one
- * the subject and audience. Never a secret: a key account shows only that it uses a key.
+ * the subject and audience, and the host's issuer URL (`aws onboarding-template --issuer`) when the
+ * host has one. Never a secret: a key account shows only that it uses a key.
  */
 export function describeAwsAccount(
   config: AwsConfig,
-  account: { id: string; tenantId: string; name: string; platform: boolean },
+  account: { id: string; tenantId: string; name: string; platform: boolean; issuer?: string },
   options: Pick<AwsProviderOptions, 'externalIdPrefix' | 'platformPrincipalArn'> = {},
 ): Record<string, string> {
   if (config.webIdentityRoleArn !== undefined)
@@ -338,6 +339,7 @@ export function describeAwsAccount(
       roleArn: config.webIdentityRoleArn,
       subject: accountSubject(account.tenantId, 'aws', account.name),
       audience: webIdentityAudience,
+      ...(account.issuer !== undefined ? { issuer: account.issuer } : {}),
     };
   if (config.assumeRoleArn !== undefined)
     return {

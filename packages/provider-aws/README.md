@@ -69,7 +69,9 @@ To onboard a tenant's AWS account:
 passes `awsProvider({ platformPrincipalArn })`, the principal to trust. That option is display only and never
 derived (reading the host's identity would be a network call on every read); a value that is not an IAM role or
 user ARN fails `awsProvider` (`INVALID_CONFIG`, `platformPrincipalArn`), and without it tenants see the ExternalId
-only and must get the principal from the operator. `better-compute aws onboarding-template
+only and must get the principal from the operator. A keyless (`web-identity`) account shows the `subject` and
+`audience` its role trusts and, when the host configures `pki.workloadIssuer`, the `issuer` URL that
+`aws onboarding-template --issuer` takes. `better-compute aws onboarding-template
 --account <pa_…> --platform-principal <arn>` renders steps 2 and 3 as one CloudFormation template (the role, its
 trust and the ABAC policy; the same `--region`, `--instance-profile`, `--kms-key` and `--discover-tag` flags).
 

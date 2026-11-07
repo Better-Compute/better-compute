@@ -964,6 +964,8 @@ export function describedAccount(
   providers: ReadonlyMap<string, ProviderDefinition>,
   account: ProviderAccount,
   rootTenantId: string | undefined,
+  /** The host's workload issuer URL (`context.pki.workload.issuer`): a keyless account's onboarding shows it. */
+  issuer?: string,
 ): ProviderAccount {
   const describe = providers.get(account.provider)?.describeAccount;
   if (!describe) return account;
@@ -971,6 +973,7 @@ export function describedAccount(
     const onboarding: unknown = describe(account.config, {
       ...accountContext(account, rootTenantId),
       name: account.name,
+      ...(issuer !== undefined ? { issuer } : {}),
     });
     if (typeof onboarding !== 'object' || onboarding === null || Array.isArray(onboarding))
       return account;

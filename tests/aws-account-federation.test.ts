@@ -95,14 +95,24 @@ async function world(options: WorldOptions = {}) {
     (await api.providerAccounts.list(acme, { tenantId: tenants.acme.id })).items as {
       name: string;
     }[];
-  return { emu, ids, createAccount, accounts };
+  const get = (accountId: string) =>
+    api.providerAccounts.get(acme, { tenantId: tenants.acme.id, accountId });
+  return { emu, ids, createAccount, accounts, get };
 }
 
 describe('keyless AWS accounts (A7)', () => {
   it('a tenant account is stored once its role trusts exactly its subject', async () => {
-    const { emu, ids, createAccount, accounts } = await world();
+    const { emu, ids, createAccount, accounts, get } = await world();
     const account = await createAccount('keyless');
     expect(account.config.webIdentityRoleArn).toBe(ROLE);
+    // What a console shows the tenant, including the issuer its onboarding template takes.
+    expect((await get(account.id)).onboarding).toEqual({
+      mode: 'web-identity',
+      roleArn: ROLE,
+      subject: `compute-account:${ids.acme}/aws/keyless`,
+      audience: 'sts.amazonaws.com',
+      issuer: ISSUER,
+    });
     expect(account.config.credentials).toBeUndefined();
     const subjects = emu.sts.webExchanges.map((entry) => [entry.sub, entry.accepted]);
     expect(subjects).toHaveLength(3);
