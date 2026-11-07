@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
@@ -34,22 +35,23 @@ describe('internal SigV4', () => {
     );
   });
 
-  it('matches the S3 documentation presign example', () => {
+  it('matches the S3 documentation presign example (tests/fixtures/aws-sigv4/s3-presign-example.json)', () => {
+    const vector = JSON.parse(readFileSync(new URL('./fixtures/aws-sigv4/s3-presign-example.json', import.meta.url), 'utf8'));
     const url = presignUrl({
-      method: 'GET',
-      url: new URL('https://examplebucket.s3.amazonaws.com/test.txt'),
+      method: vector.request.method,
+      url: new URL(vector.request.url),
       headers: {},
-      service: 's3',
-      region: 'us-east-1',
-      credentials: { accessKeyId: 'AKIAIOSFODNN7EXAMPLE', secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' },
-      now: Date.UTC(2013, 4, 24),
-      expiresInSeconds: 86_400,
+      service: vector.request.service,
+      region: vector.request.region,
+      credentials: vector.credentials,
+      now: Date.parse(vector.request.time),
+      expiresInSeconds: vector.request.expiresInSeconds,
       unsignedPayload: true,
       normalizePath: false,
     });
-    expect(url).toContain('X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request');
-    expect(url).toContain('X-Amz-Expires=86400');
-    expect(url.endsWith('X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404')).toBe(true);
+    expect(url).toContain(`X-Amz-Credential=${vector.expected.credential}`);
+    expect(url).toContain(`X-Amz-Expires=${vector.request.expiresInSeconds}`);
+    expect(url.endsWith(`X-Amz-Signature=${vector.expected.signature}`)).toBe(true);
   });
 
   // Published vectors, independent of the emulator (which checks with this signer's own
