@@ -35,7 +35,8 @@ export interface ComputeMcpOptions {
   fleet?: boolean;
   /**
    * Build the read-only provider tools (off by default; P9): `list_provider_accounts`, `check_provider_account`,
-   * `provider_account_findings`, `provider_account_billing` and `list_billing_leaks` (platform operators).
+   * `provider_account_findings`, `provider_account_billing`, `list_billing_leaks` (platform operators) and
+   * `provider_account_connect_url` (the OAuth authorization URL; connecting itself is the browser's).
    */
   providers?: boolean;
   /**
@@ -456,6 +457,8 @@ export function gateTools(
       action: 'compute:billing:read',
       resource: () => ({ type: `${prefix}fleet`, id: 'global' }),
     };
+    // Compute decides connectSetup on the tenant (providers:read); it calls no provider and stores nothing.
+    rules.provider_account_connect_url = { public: true };
   }
   return rules;
 }

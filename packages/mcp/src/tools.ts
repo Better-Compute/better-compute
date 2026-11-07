@@ -1143,6 +1143,45 @@ export function computeTools(
           return context.api.$request('billing/leaks', { from: to - (days + 1) * day, to });
         },
       },
+      // Connecting an account by OAuth: only the authorization URL. `providerAccounts.connect` has no tool on
+      // purpose: its code comes from the provider's redirect to a registered URI, in the browser that keeps the
+      // state, and it seals a credential; a model never holds either.
+      {
+        name: 'provider_account_connect_url',
+        title: 'Get a provider account connect URL',
+        description:
+          "The provider's authorization URL for connecting an account by OAuth (DigitalOcean), for a person to open in a browser. redirectUri must be one the platform registered, and state the caller's anti-forgery value, kept by the browser session that receives the redirect. Nothing is connected or stored here: the console finishes the connect from the redirect.",
+        inputSchema: {
+          type: 'object',
+          required: ['provider', 'redirectUri', 'state'],
+          properties: {
+            provider: {
+              type: 'string',
+              pattern: '^[a-z][a-z0-9-]{0,63}$',
+              description: 'The provider id (digitalocean)',
+            },
+            redirectUri: {
+              type: 'string',
+              maxLength: 2048,
+              description: 'A redirect URI the platform registered for the provider',
+            },
+            state: {
+              type: 'string',
+              pattern: '^[A-Za-z0-9._~-]{16,256}$',
+              description: 'The anti-forgery state, 16 to 256 characters of [A-Za-z0-9._~-]',
+            },
+          },
+          additionalProperties: false,
+        },
+        annotations: { readOnlyHint: true, openWorldHint: false },
+        run: (args, context) =>
+          context.api.$request('providerAccounts/connectSetup', {
+            tenantId: context.tenantId,
+            provider: args.provider,
+            redirectUri: args.redirectUri,
+            state: args.state,
+          }),
+      },
     );
   return tools;
 }

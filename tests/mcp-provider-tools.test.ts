@@ -52,6 +52,7 @@ describe('provider account tools', () => {
       'provider_account_findings',
       'provider_account_billing',
       'list_billing_leaks',
+      'provider_account_connect_url',
     ];
     const tools = mcpWith(api, true).tools.filter((tool) => names.includes(tool.name));
     expect(tools.map((tool) => tool.name)).toEqual(names);
@@ -95,6 +96,27 @@ describe('provider account tools', () => {
     expect((await call(mcp, 'list_billing_leaks', { days: 0 })).isError).toBe(true);
     expect((await call(mcp, 'provider_account_findings', { accountId: 'x' })).isError).toBe(true);
     expect(calls).toHaveLength(3);
+  });
+
+  it('connect_url answers the authorization URL; connecting itself stays in the browser', async () => {
+    const { api, calls } = recorder();
+    const mcp = mcpWith(api, true);
+    const input = {
+      provider: 'digitalocean',
+      redirectUri: 'https://console.example.test/provider-accounts/connect/callback',
+      state: 'state-0123456789abcdef',
+    };
+    await call(mcp, 'provider_account_connect_url', input);
+    expect(calls).toEqual([
+      { path: 'providerAccounts/connectSetup', input: { tenantId: 'org_acme', ...input } },
+    ]);
+    expect(
+      (await call(mcp, 'provider_account_connect_url', { ...input, state: 'short' })).isError,
+    ).toBe(true);
+    expect(calls).toHaveLength(1);
+    // No tool trades a code: it comes from the browser's redirect, with the state the browser kept.
+    expect(mcp.tools.map((tool) => tool.name)).not.toContain('connect_provider_account');
+    expect(gateTools({ providers: true }).provider_account_connect_url).toEqual({ public: true });
   });
 
   it('the gate checks providers:read on the account a check names', () => {

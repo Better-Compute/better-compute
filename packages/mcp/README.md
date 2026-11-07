@@ -65,9 +65,11 @@ A host that runs the control plane in the same process can use `computeMcpEndpoi
 | `list_provider_accounts`, `check_provider_account`, `provider_account_findings` (only with `providers: true`) | `providerAccounts.list`, `providerAccounts.check`, `providerAccounts.findings` (read-only) | any authenticated caller; `compute:providers:read` on the account |
 | `provider_account_billing` (only with `providers: true`) | `providerAccounts.billing` (read-only) | `compute:providers:manage` on the account |
 | `list_billing_leaks` (only with `providers: true`) | `billing.leaks` (read-only) | `compute:billing:read` on the fleet (platform operators) |
+| `provider_account_connect_url` (only with `providers: true`) | `providerAccounts.connectSetup` (read-only: the OAuth authorization URL) | any authenticated caller; `compute:providers:read` on the tenant |
 
 - **Fleet tools plan but never apply.** `fleet_plan` returns the changes and a `planHash`, but not the call list. A person applies the reviewed plan with `better-compute fleet apply FILE --plan-hash HASH`. Pass the same `fleet: true` to `gateTools()`.
 - **Command batches need people.** `propose_command_batch` only proposes a batch of node reboots; nothing runs until operators approve it with their approver keys (`better-compute batch approve`). There is no approve tool. Pass the same `execCommand: true` to `gateTools()`.
+- **Connecting an account is the browser's.** `provider_account_connect_url` only answers the provider's authorization URL. `providerAccounts.connect` has no tool: its code arrives on the redirect to a registered URI, in the browser session that kept the anti-forgery state, and it seals a credential. A model holds neither.
 - **The gate checks visibility only.** Actions that must be confirmed are never gate actions, so nobody is asked twice about different resources.
 - **Arguments** are checked against each tool's JSON Schema before anything is called.
 - **Compute errors** come back as tool errors (`CODE: message`); unexpected failures are reported generically, with no internals.

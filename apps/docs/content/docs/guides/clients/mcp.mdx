@@ -137,7 +137,7 @@ caller's `tenantId`, which the tools act in.
     tenantId: { type: 'string | ((caller?) => string | undefined)', description: "The tenant tools act in. Default: the caller's tenantId. Without one, every tool answers ACCESS_DENIED." },
     execCommand: { type: 'boolean', description: 'Build exec_command. Off: running node commands through a model is a deliberate choice.', default: 'false' },
     fleet: { type: 'boolean', description: 'Build the read-only fleet_export and fleet_plan tools (platform administrators only).', default: 'false' },
-    providers: { type: 'boolean', description: 'Build the read-only list_provider_accounts, check_provider_account, provider_account_findings, provider_account_billing and list_billing_leaks tools. Pass the same option to gateTools().', default: 'false' },
+    providers: { type: 'boolean', description: 'Build the read-only list_provider_accounts, check_provider_account, provider_account_findings, provider_account_billing, list_billing_leaks and provider_account_connect_url tools. Pass the same option to gateTools().', default: 'false' },
     confirmations: {
       type: 'ConfirmationPolling | ((request, caller?) => ConfirmationPolling | undefined)',
       description: 'Wait for people to approve held-back actions inside the tool call. iamConfirmations() builds one per request.',
@@ -232,6 +232,7 @@ framework.
 | `provider_account_findings` (with `providers: true`) | `providerAccounts.findings`: what the provider says needs an operator (DigitalOcean: its security scan) | `compute:providers:read` on the account | read-only |
 | `provider_account_billing` (with `providers: true`) | `providerAccounts.billing`: the account's own bill at its provider (balance, invoices, history) | `compute:providers:manage` on the account | read-only |
 | `list_billing_leaks` (with `providers: true`) | `billing.leaks` over the last `days` days (default 31): instances the provider billed more compute hours for than compute metered | `compute:billing:read` on the fleet (platform operators) | read-only |
+| `provider_account_connect_url` (with `providers: true`) | `providerAccounts.connectSetup`: the provider's OAuth authorization URL for a person to open. No tool calls `providerAccounts.connect`: its code arrives on the redirect, in the browser that kept the state | `compute:providers:read` on the tenant | read-only |
 
 The GPU tools share one argument shape: `poolId`, `gpus` (1 to 64 whole GPUs), `duration` (such as `30m`, `8h`,
 `3d`), and optionally `gpuModel` (`H100`), `gpuProduct` (`H100-SXM5-80GB`), `nvlink` (all GPUs in one NVLink
