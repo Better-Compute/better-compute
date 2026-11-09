@@ -286,6 +286,26 @@ SO_PEERCRED and `/proc/<pid>/exe`; requests are versioned, strictly decoded JSON
 is logged. Every directory on the way to the socket, the slots and the entrypoint must be root's
 and closed to others (`bcd doctor` checks it), neither the slots nor the entrypoint may live in
 `data_dir`, and the helper adopts into a slot only a root-owned entrypoint no one else can write.
+
+`file.write` checks the content too, kind by kind (`helper/content.go`): root writes a file only
+when it is what bcd node legitimately writes there, so these files cannot be used to run something
+as root.
+
+| Kind | What is written |
+|---|---|
+| `ssh-dropin` | exactly bcd's drop-in: `TrustedUserCAKeys`, `AuthorizedPrincipalsFile` and `RevokedKeys` on bcd's own files; no other directive |
+| `ssh-ca` | OpenSSH public keys, one a line (`<type> <base64> [comment]`, the blob of that type), no options |
+| `ssh-principals` | lines `<account>@<node id>` for the account the file is named after, and this node when root's join record names it; no options |
+| `ssh-krl` | the KRL bcd builds: its header (no flags, comment `better-compute`) and one serial list per CA key |
+| `allocation-env` | `KEY=VALUE` lines without control characters, the first `BCD_ALLOCATION_ID=<the file's allocation>` |
+| `k8s-token` | one kubeadm bootstrap token |
+| `cdi` | a `bcd.dev/gpu` spec of the file's allocation with only the fields and annotations bcd writes. Its env is bcd's four keys; every other env, device node, mount, hook and additional gid must be, item for item, in root's own NVIDIA spec (`/etc/cdi` or `/var/run/cdi`, kind `nvidia.com/gpu`, root-owned, never a `bcd-*.json`) |
+
+A refused write fails the section that asked (`file.write <kind>: …`). This does not decide *whose*
+CA and principals they are: any well-formed CA key and any `<account>@<node>` principal pass, `root`
+included, so a compromised `bcd node` can still make sshd trust a CA of its own. Closing that needs
+the helper to check the signed access section, as `host.unit` checks the signed host section; it
+does not yet.
 Instance runtimes under the helper: libvirt-kvm's privileged operations (`define`, `start`,
 `shutdown`, `destroy`, `suspend`, `resume`, `undefine`, `blockresize`, the balloon's `setmem`, the rebind disk's
 `attach-disk`/`detach-disk`, memory `save`/`restore`, and the console pty) go through the helper's

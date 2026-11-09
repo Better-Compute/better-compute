@@ -28,6 +28,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/bcx"
 	"github.com/better-compute/better-compute/daemon/internal/dispatch"
 	"github.com/better-compute/better-compute/daemon/internal/fakehw"
+	"github.com/better-compute/better-compute/daemon/internal/helper"
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
 	"github.com/better-compute/better-compute/daemon/internal/journal"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
@@ -217,6 +218,14 @@ func (h *fakeHost) RunDCGM(ctx context.Context, level uint32, uuids []string, gp
 	return h.real().RunDCGM(ctx, level, uuids, gpus)
 }
 func (h *fakeHost) WriteFile(abs string, data []byte, mode os.FileMode) error {
+	// Under [helper] root writes these files only when their content is what bcd writes there
+	// (helper.CheckContent): every file any test makes the agent write goes through that check, so a
+	// rule that refused a legitimate file would fail here.
+	if kind, name, ok := helper.Classify(abs); ok {
+		if err := helper.CheckContent(kind, name, data, helper.ContentContext{Root: h.root, NodeID: testNode}); err != nil {
+			return errors.New("bcd helper would refuse " + abs + ": " + err.Error())
+		}
+	}
 	return writeFile(h.Path(abs), data, mode)
 }
 

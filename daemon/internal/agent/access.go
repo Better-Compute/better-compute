@@ -14,6 +14,7 @@ import (
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/converge"
+	"github.com/better-compute/better-compute/daemon/internal/helper"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -27,11 +28,9 @@ const (
 	sshKRLFile       = "/etc/ssh/bc_krl"
 )
 
-var sshDropInContent = []byte(`# Written by bcd from NodeSpec access (break-glass SSH certificates). Do not edit.
-TrustedUserCAKeys ` + sshCAFile + `
-AuthorizedPrincipalsFile ` + sshPrincipalsDir + `/%u
-RevokedKeys ` + sshKRLFile + `
-`)
+// sshDropInContent is the drop-in: three directives naming the files above. It is bcd helper's
+// constant, because under [helper] root writes that file only when it is exactly these bytes.
+var sshDropInContent = helper.SSHDropIn
 
 // accessConverger applies AccessSection. An empty or absent section removes everything it wrote,
 // so a node stops trusting the CA when the control plane stops sending it.
