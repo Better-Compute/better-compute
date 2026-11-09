@@ -445,6 +445,12 @@ events. It never drops a hold on its own.
   reports `ERROR` with `the state of <id> is unknown…`, keeps its volumes taken, and bcd neither
   resizes its disk offline, starts it (a start recreates its taps) nor snapshots it. A stop still
   goes through.
+- *Snapshots of a running libvirt domain.* A memory snapshot is `virsh save` (the domain stops),
+  then `virsh restore` from the saved state; a disk-only one suspends and resumes. A domain that
+  does not carry on fails `instance.snapshot` with `snapshot-failed`, whatever was already
+  written: `did not carry on from its saved memory` (the state is kept as
+  `instances/<id>/memory.state`, and the domain's next start restores from it) or
+  `stayed paused` (the next pass resumes it).
 - *Stopping.* On SIGTERM (and before a self-update's exec) the converger pass under way is cancelled
   and bcd waits up to 20 s for it to return, so a download or an instance being created undoes itself.
 - *Admission.* bcd admits a start only when the host has memory for it:

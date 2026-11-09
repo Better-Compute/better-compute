@@ -125,3 +125,68 @@ func TestLibvirtEnsureNeverRecreatesADisk(t *testing.T) {
 		t.Fatal("the unfinished instance was not defined")
 	}
 }
+
+// After a memory snapshot the domain is restored from its saved state. When that fails the guest is
+// off: Snapshot says so and keeps the state where the next start finds it, instead of removing it
+// with its work directory and reporting success.
+func TestLibvirtSnapshotKeepsTheMemoryOfADomainThatDidNotResume(t *testing.T) {
+	image := qcow2Image(2<<30, "", "", []byte("base image"))
+	sum := sha256.Sum256(image)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(image) }))
+	defer srv.Close()
+	virt := &fakeVirt{domains: map[string]*fakeDomain{}}
+	dir := t.TempDir()
+	l := &Libvirt{Dir: dir, Exec: virt.exec, HTTP: srv.Client()}
+	ctx := context.Background()
+	spec := &agentv1.InstanceSpec{InstanceId: "inst_a", Runtime: "libvirt-kvm", Vcpu: 1, MemoryBytes: 1 << 30, DiskBytes: 10 << 30,
+		Image: &agentv1.ImageRef{Url: srv.URL + "/a.qcow2", Sha256: sum[:], Format: "qcow2"}}
+	if err := l.Ensure(ctx, spec, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.SetState(ctx, "inst_a", StateRunning); err != nil {
+		t.Fatal(err)
+	}
+	inst := filepath.Join(dir, "instances", "inst_a")
+
+	// libvirt saves the guest, then cannot restore it (out of memory, a device gone).
+	virt.failVerb = "restore"
+	var snap bytes.Buffer
+	_, err := l.Snapshot(ctx, "inst_a", true, "AMD EPYC 9654", &snap)
+	if err == nil || !strings.Contains(err.Error(), "did not carry on") {
+		t.Fatalf("Snapshot of a domain that did not resume = %v", err)
+	}
+	if virt.domains["inst_a"].state != "shut off" {
+		t.Fatalf("the fake restored the domain: %s", virt.domains["inst_a"].state)
+	}
+	kept, readErr := os.ReadFile(filepath.Join(inst, "memory.state"))
+	if readErr != nil || string(kept) != "memory of inst_a" {
+		t.Fatalf("the guest's memory state was not kept: %q, %v", kept, readErr)
+	}
+	if left, _ := filepath.Glob(filepath.Join(inst, ".snapshot-*")); len(left) != 0 {
+		t.Fatalf("the snapshot's work directory stayed: %v", left)
+	}
+
+	// The next start restores the guest from it, and then the state file goes.
+	virt.failVerb = ""
+	if err := l.SetState(ctx, "inst_a", StateRunning); err != nil {
+		t.Fatal(err)
+	}
+	if virt.domains["inst_a"].state != "running" || countCalls(virt.calls, "virsh restore "+filepath.Join(inst, "memory.state")) != 1 {
+		t.Fatalf("the domain did not start from its kept memory: %s\n%s", virt.domains["inst_a"].state, strings.Join(virt.calls, "\n"))
+	}
+	if _, err := os.Stat(filepath.Join(inst, "memory.state")); err == nil {
+		t.Fatal("the memory state stayed after the restore")
+	}
+
+	// A disk-only snapshot's resume that fails is reported too (the domain stays paused).
+	virt.failVerb = "resume"
+	if _, err := l.Snapshot(ctx, "inst_a", false, "", &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "stayed paused") {
+		t.Fatalf("Snapshot of a domain that stayed paused = %v", err)
+	}
+	virt.failVerb = ""
+	// And a snapshot that goes well is still a success.
+	_ = l.SetState(ctx, "inst_a", StateRunning)
+	if _, err := l.Snapshot(ctx, "inst_a", true, "AMD EPYC 9654", &bytes.Buffer{}); err != nil || virt.domains["inst_a"].state != "running" {
+		t.Fatalf("Snapshot = %v (%s)", err, virt.domains["inst_a"].state)
+	}
+}

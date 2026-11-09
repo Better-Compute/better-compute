@@ -1104,7 +1104,12 @@ type libvirtSnapshot struct {
 // Snapshot writes a tar of meta.json, disk.qcow2 (the overlay flattened onto its base), seed.iso
 // and, with memory, memory.state (virsh save, then the domain carries on from it). A disk-only
 // snapshot of a running domain pauses it for the copy.
-func (l *Libvirt) Snapshot(ctx context.Context, id string, includeMemory bool, cpuModel string, w io.Writer) (string, error) {
+//
+// A domain that does not carry on afterwards is an error, whatever was written to w: after a memory
+// snapshot `virsh save` has stopped it, and when the restore fails its saved state is kept as the
+// instance's memory.state, which its next start restores from (SetState), instead of being removed
+// with the work directory while Snapshot reports success.
+func (l *Libvirt) Snapshot(ctx context.Context, id string, includeMemory bool, cpuModel string, w io.Writer) (cpu string, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	exists, managed, dom, err := l.managed(ctx, id)
@@ -1156,13 +1161,30 @@ func (l *Libvirt) Snapshot(ctx context.Context, id string, includeMemory bool, c
 			if state == StatePaused {
 				args = append(args, "--paused")
 			}
-			_, _ = l.virsh(context.WithoutCancel(ctx), args...)
+			_, restoreErr := l.virsh(context.WithoutCancel(ctx), args...)
+			if restoreErr == nil {
+				return
+			}
+			// The guest is off and this file is all of its memory: out of the work directory (removed
+			// next) to where the next start restores from.
+			kept := filepath.Join(dir, "memory.state")
+			failure := fmt.Errorf("domain %s did not carry on from its saved memory after the snapshot: %w", id, restoreErr)
+			if mvErr := os.Rename(memory, kept); mvErr != nil {
+				failure = fmt.Errorf("%w; keeping its memory state failed too, the guest's memory is lost: %v", failure, mvErr)
+			} else {
+				failure = fmt.Errorf("%w; it is stopped, its memory state is kept in %s and its next start restores from it", failure, kept)
+			}
+			cpu, err = "", errors.Join(failure, err)
 		}()
 	case state == StateRunning:
 		if _, err := l.virsh(ctx, "suspend", id); err != nil {
 			return "", err
 		}
-		defer func() { _, _ = l.virsh(context.WithoutCancel(ctx), "resume", id) }()
+		defer func() {
+			if _, resumeErr := l.virsh(context.WithoutCancel(ctx), "resume", id); resumeErr != nil {
+				cpu, err = "", errors.Join(fmt.Errorf("domain %s stayed paused after the snapshot: %w", id, resumeErr), err)
+			}
+		}()
 	}
 	flat := filepath.Join(work, "disk.qcow2")
 	if _, err := l.run(ctx, "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2", filepath.Join(dir, "disk.qcow2"), flat); err != nil {
