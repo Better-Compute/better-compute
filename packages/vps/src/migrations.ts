@@ -215,6 +215,29 @@ CREATE INDEX instances_placement_group ON instances (tenant_id, pool_id, (placem
   WHERE placement IS NOT NULL;`,
 };
 
+/**
+ * (U-04) What a tenant calls its instances and sandboxes: a mutable display name, metadata and (sandboxes)
+ * labels; the platform's provenance (`issued_by`); the labels a provider last wrote on the machine
+ * (`labels_applied`: the reconciler writes `labels` while they differ); and the disks the provider last
+ * reported for it. Labels an instance was created with before this went to the provider with its create.
+ */
+export const vpsInstanceIdentityMigration: Migration = {
+  name: 'vps/0046_instance_identity',
+  sql: `ALTER TABLE instances ADD COLUMN name text;
+ALTER TABLE instances ADD COLUMN metadata jsonb;
+ALTER TABLE instances ADD COLUMN issued_by text;
+ALTER TABLE instances ADD COLUMN labels_applied jsonb;
+ALTER TABLE instances ADD COLUMN disks jsonb;
+UPDATE instances i SET labels_applied = i.labels
+  FROM pools p WHERE p.id = i.pool_id AND p.class = 'provider' AND i.labels IS NOT NULL;
+ALTER TABLE sandboxes ADD COLUMN name text;
+ALTER TABLE sandboxes ADD COLUMN metadata jsonb;
+ALTER TABLE sandboxes ADD COLUMN labels jsonb;
+-- Label selectors (key=value as containment) and the platform's newest-first issued list.
+CREATE INDEX instances_labels ON instances USING gin (labels jsonb_path_ops) WHERE labels IS NOT NULL;
+CREATE INDEX instances_created ON instances (created_at DESC, id DESC) WHERE NOT draft;`,
+};
+
 /** The VPS module's migrations, in ledger order. */
 export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsBaseMigration,
@@ -251,6 +274,7 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   poolMachinesMigration,
   vpsInstanceLabelsMigration,
   vpsNetworkAdoptMigration,
+  vpsInstanceIdentityMigration,
   vpsNetworkZonesMigration,
   vpsSubnetPrivateAccessMigration,
   providerPurchasesMigration,

@@ -24,6 +24,7 @@ Every call is authenticated (except public methods), refused before any database
 | `system.whoami`    | public | public                                  | v0.1  | registered |
 | `system.version`   | public | public                                  | v0.1  | registered |
 | `system.selfCheck` | read   | `compute:fleet:admin` @ `compute-fleet` | v0.1  | registered |
+| `system.workQueue` | read   | `compute:fleet:admin` @ `compute-fleet` | v1.0  | registered |
 
 ### `projects` (server)
 
@@ -258,6 +259,8 @@ Every call is authenticated (except public methods), refused before any database
 | `instances.attach`   | mutation | `compute:instances:attach` @ `compute-instance`     | v1.0  | registered |
 | `instances.detach`   | mutation | `compute:instances:delete` @ `compute-instance`     | v1.0  | registered |
 | `instances.reboot`   | mutation | `compute:instances:update` @ `compute-instance`     | v1.0  | registered |
+| `instances.update`   | mutation | `compute:instances:update` @ `compute-instance`     | v1.0  | registered |
+| `instances.issued`   | read     | `compute:instances:read` @ `compute-fleet`          | v1.0  | registered |
 | `instances.estimate` | read     | `compute:flavors:read` @ `compute-pool`             | v1.0  | registered |
 
 ### `flavors` (vps)
@@ -329,6 +332,7 @@ Every call is authenticated (except public methods), refused before any database
 | `sandboxes.snapshot` | mutation | `compute:sandboxes:update` @ `compute-sandbox`      | v0.5  | registered |
 | `sandboxes.exec`     | mutation | `compute:sandboxes:exec` @ `compute-sandbox`        | v0.5  | registered |
 | `sandboxes.delete`   | mutation | `compute:sandboxes:delete` @ `compute-sandbox`      | v0.5  | registered |
+| `sandboxes.update`   | mutation | `compute:sandboxes:update` @ `compute-sandbox`      | v1.0  | registered |
 
 ### `sandboxTemplates` (vps)
 

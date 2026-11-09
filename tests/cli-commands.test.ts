@@ -177,7 +177,8 @@ describe('environment-only deployments on PGlite', () => {
     expect(table.stdout.split('\n')[0]).toMatch(/^METHOD\s+ACCESS\s+ACTION\s+HTTP$/);
     expect(table.stdout).toMatch(/^inventory\.get\s+token\s+compute:nodes:read\s+POST /m);
     const system = await json(['api', '--list', 'system', '--format', 'json'], { env: memoryEnv });
-    expect(system).toHaveLength(3);
+    // whoami, version, selfCheck and workQueue.
+    expect(system).toHaveLength(4);
     const none = await run(['api', '--list', 'nope'], { env: memoryEnv });
     expect(none.status).toBe(1);
     expect(none.stderr).toContain('NOT_FOUND: No API group named nope');

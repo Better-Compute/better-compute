@@ -1,4 +1,5 @@
 import { instanceStates, strictObject, type InputSchema } from '@better-compute/core';
+import { identitySchemas } from './instance-identity.js';
 
 // JSON Schema descriptions of the vps module's method inputs (`validate.jsonSchema`), for the
 // generated API reference and tool schemas. `describedBy(schemas.x, parseX)` checks the structure
@@ -243,14 +244,7 @@ export const schemas = {
         'snet',
         'A ready subnet of that network; omitted: the network’s only subnet in the offer’s region',
       ),
-      labels: {
-        type: 'object',
-        maxProperties: 62,
-        propertyNames: { pattern: '^[a-z][a-z0-9_-]{0,62}$' },
-        additionalProperties: { type: 'string', pattern: '^[a-z0-9_-]{0,63}$', maxLength: 63 },
-        description:
-          'Provider labels for the machine (provider pools): GCE label rules, at most 62; keys starting with better-compute- are reserved',
-      },
+      labels: identitySchemas.labels,
       placement: strictObject(
         {
           group: {
@@ -288,6 +282,9 @@ export const schemas = {
         description:
           '(provider pools on a network) Shared filesystems of the network the machine mounts at boot; needs networkId',
       },
+      name: identitySchemas.name,
+      metadata: identitySchemas.metadata,
+      issuedBy: identitySchemas.issuedBy,
       ownerIdentityId: {
         type: 'string',
         pattern: '^[A-Za-z0-9._:@-]{1,128}$',
@@ -343,8 +340,14 @@ export const schemas = {
     {
       tenantId,
       scope: { enum: ['mine', 'all'], default: 'mine' },
-      state: { enum: [...instanceStates] },
+      state: {
+        enum: [...instanceStates],
+        description:
+          "Only instances in this state; without it deleted instances are left out (deleted needs scope 'mine')",
+      },
       poolId,
+      projectId: idOf('prj', 'Only instances of this project'),
+      labelSelector: identitySchemas.labelSelector,
       limit: integer(1, 200),
       cursor: {
         type: 'string',
@@ -355,6 +358,52 @@ export const schemas = {
     },
     ['tenantId'],
   ),
+  updateInstance: strictObject(
+    {
+      tenantId,
+      instanceId,
+      name: { ...identitySchemas.name, type: ['string', 'null'], description: 'The new display name; null clears it' },
+      metadata: {
+        ...identitySchemas.metadata,
+        type: ['object', 'null'],
+        description: 'The new metadata, replacing the old; null or {} clears it',
+      },
+      labels: {
+        ...identitySchemas.labels,
+        type: ['object', 'null'],
+        description:
+          'The new labels, replacing the old; null or {} clears them. Provider pools write them on the machine and its boot disk',
+      },
+      issuedBy: {
+        ...identitySchemas.issuedBy,
+        type: ['string', 'null'],
+        description: 'Who issued the instance (root callers only); null clears it',
+      },
+      expectedVersion: integer(1, Number.MAX_SAFE_INTEGER, 'The version the caller read: CONFLICT when it moved on'),
+    },
+    ['tenantId', 'instanceId'],
+  ),
+  issuedInstances: strictObject({
+    tenantId: { ...tenantId, description: 'Only this tenant’s instances' },
+    poolId,
+    state: {
+      enum: [...instanceStates],
+      description: 'Only instances in this state; without it deleted instances are left out',
+    },
+    issuedBy: {
+      type: 'string',
+      maxLength: 128,
+      description: 'Only instances whose issuedBy is this; * for any recorded provenance',
+    },
+    labelSelector: identitySchemas.labelSelector,
+    limit: integer(1, 500),
+    cursor: {
+      type: 'string',
+      pattern: '^inst_[0-9a-z]{26,52}$',
+      maxLength: 57,
+      description: 'The last instance id of the previous page',
+    },
+  }),
   resizeInstance: strictObject(
     { tenantId, instanceId, flavor: { ...flavor, description: 'The new flavor' } },
     ['tenantId', 'instanceId', 'flavor'],
@@ -590,6 +639,24 @@ export const schemas = {
     ['tenantId'],
   ),
   sandbox: strictObject({ tenantId, sandboxId }, ['tenantId', 'sandboxId']),
+  updateSandbox: strictObject(
+    {
+      tenantId,
+      sandboxId,
+      name: { ...identitySchemas.name, type: ['string', 'null'], description: 'The new display name; null clears it' },
+      metadata: {
+        ...identitySchemas.metadata,
+        type: ['object', 'null'],
+        description: 'The new metadata, replacing the old; null or {} clears it',
+      },
+      labels: {
+        ...identitySchemas.labels,
+        type: ['object', 'null'],
+        description: 'The new labels, replacing the old; null or {} clears them',
+      },
+    },
+    ['tenantId', 'sandboxId'],
+  ),
   createSandbox: strictObject(
     {
       tenantId,
@@ -598,6 +665,9 @@ export const schemas = {
       fromSnapshot: {
         ...idOf('snap', 'Restore this snapshot of the tenant (taken on the same runtime)'),
       },
+      name: identitySchemas.name,
+      metadata: identitySchemas.metadata,
+      labels: { ...identitySchemas.labels, description: 'Labels for label selectors: GCE label rules, at most 62; keys starting with better-compute- or bc- are reserved' },
       idempotencyKey,
       wait: strictObject(
         {
@@ -614,6 +684,7 @@ export const schemas = {
       scope: { enum: ['mine', 'all'], default: 'mine' },
       deleted: { type: 'boolean', default: false, description: 'Include deleted sandboxes' },
       templateId,
+      labelSelector: identitySchemas.labelSelector,
       limit: integer(1, 200),
       cursor: { ...sandboxId, description: 'The last sandbox id of the previous page' },
     },

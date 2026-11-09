@@ -622,7 +622,10 @@ export interface Instance {
   networkId?: string;
   /** The subnet of that network it is in. */
   subnetId?: string;
-  /** Provider labels the tenant asked for at create (provider pools; better-compute's own are not shown). */
+  /**
+   * The tenant's labels (`instances.create`, `instances.update`): in provider pools also written on the machine and
+   * its boot disk, where better-compute's own labels win; better-compute's own are not shown.
+   */
   labels?: Record<string, string>;
   /** (AWS A7) The cloud role the instance's workloads assume through its host's metadata endpoint. */
   workloadIdentity?: { awsRoleArn: string };
@@ -630,6 +633,19 @@ export interface Instance {
   placement?: InstancePlacementGroup;
   /** (AWS A10) The shared filesystems the machine mounts at boot (provider pools on a network), as asked at create. */
   filesystems?: InstanceFilesystem[];
+  /** (U-04) A display name, mutable through `instances.update`; not unique, never sent to a provider. */
+  name?: string;
+  /** (U-04) Free-form key/value metadata kept by better-compute only (never sent to a provider). */
+  metadata?: Record<string, string>;
+  /** (U-04) Provenance the platform recorded (only root callers set it): who issued the instance. */
+  issuedBy?: string;
+  /** (U-04) When the instance was created, epoch ms. */
+  createdAt?: number;
+  /**
+   * (U-04) The disks the provider last reported for the machine (provider pools; boot disk first), as
+   * `ExternalMachine.disks`: what `disk.<type>.gib.hours` meters. Absent until a listing reported them.
+   */
+  disks?: { type?: string; sizeGiB: number; boot?: boolean }[];
   addresses: string[];
   ownerIdentityId: string;
   idempotencyKey: string;

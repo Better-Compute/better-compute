@@ -188,7 +188,8 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     type: 'instance.*',
     subject: 'instance/{id}',
     module: 'vps',
-    description: 'VPS instance lifecycle',
+    description:
+      'VPS instance lifecycle, and updated ({ changed }: the name, metadata, labels or issuedBy fields instances.update changed)',
   },
   {
     type: 'provider.machine.*',
@@ -202,7 +203,7 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     subject: 'sandbox/{id}',
     module: 'vps',
     description:
-      'Sandbox lifecycle (§3.7): created, ready (its instance first runs), extended, expiring (once, before expiry: { expiresAt }), expired (before the delete), withdrawn (its agent or delegation ended, or its owner left without a successor: { reason }), reassigned ({ from, to, reason }), deleted; data { templateId, instanceId, poolId }',
+      'Sandbox lifecycle (§3.7): created, ready (its instance first runs), extended, expiring (once, before expiry: { expiresAt }), expired (before the delete), withdrawn (its agent or delegation ended, or its owner left without a successor: { reason }), reassigned ({ from, to, reason }), updated ({ changed }: name, metadata or labels), deleted; data { templateId, instanceId, poolId }',
   },
   {
     type: 'sandbox.snapshot.*',

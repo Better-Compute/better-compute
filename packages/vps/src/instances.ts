@@ -49,6 +49,15 @@ import {
   sshKeys,
   tenant,
 } from './input.js';
+import {
+  assertPlatformProvenance,
+  displayName,
+  instanceLabels,
+  instanceMetadata,
+  issuedBy,
+  labelSelectorSql,
+  parseLabelSelector,
+} from './instance-identity.js';
 import { leaseAddress } from './ipam.js';
 import { placeOnNetwork } from './networks.js';
 import {
@@ -171,14 +180,21 @@ export interface CreateInstanceInput {
   /** (v1.0) A ready subnet of `networkId`; omitted: its only subnet in the offer's region. */
   subnetId?: string;
   /**
-   * Provider labels for the machine (provider pools; GCE label rules, see `instanceLabels`). The
-   * provider's own ownership labels are written over them.
+   * Labels (GCE label rules, see `instanceLabels`): kept on the instance for `labelSelector`s, and in
+   * provider pools also written on the machine and its boot disk, where the provider's own ownership
+   * labels are written over them.
    */
   labels?: Record<string, string>;
   /** (AWS A10) The placement group to launch into (provider pools). */
   placement?: InstancePlacementGroup;
   /** (AWS A10) Ready filesystems of the instance's network it mounts at boot. */
   filesystems?: InstanceFilesystemInput[];
+  /** (U-04) A display name (`displayName`); mutable through `instances.update`. */
+  name?: string;
+  /** (U-04) Free-form metadata (`instanceMetadata`), kept by better-compute only. */
+  metadata?: Record<string, string>;
+  /** (U-04) The platform's provenance: who issued the instance. Root callers only (ACCESS_DENIED). */
+  issuedBy?: string;
   /**
    * (v1.0) Who owns the instance in the tenant (default: the caller), so it shows in their
    * `scope: 'mine'` list and owner policies apply to them. Only the platform (a root caller
@@ -300,42 +316,6 @@ export async function assertOwnerMember(
 /** `details.reason` of `assertOwnerMember`'s refusal. */
 export const ownerNotMember = 'owner-not-member';
 
-/**
- * At most this many labels per instance: Compute Engine allows 64 per VM, and better-compute writes
- * two of its own (`better-compute-managed`, `better-compute-instance`).
- */
-export const maxInstanceLabels = 62;
-/** A GCE label key: a lower-case letter, then lower-case letters, digits, `_` and `-`; at most 63. */
-export const labelKeyPattern = /^[a-z][a-z0-9_-]{0,62}$/;
-/** A GCE label value: lower-case letters, digits, `_` and `-`; at most 63, possibly empty. */
-export const labelValuePattern = /^[a-z0-9_-]{0,63}$/;
-/** Label keys better-compute reserves (ownership, auto-attach): a tenant never sets them. */
-const reservedLabelPrefix = 'better-compute-';
-
-/** `instances.create` labels, checked against Compute Engine's label rules. */
-export function instanceLabels(value: unknown): Record<string, string> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value))
-    return fail('labels must be an object of label keys to values');
-  const entries = Object.entries(value as Record<string, unknown>);
-  if (entries.length > maxInstanceLabels)
-    return fail(`labels may hold at most ${maxInstanceLabels} labels`);
-  const labels: Record<string, string> = {};
-  for (const [labelKey, labelValue] of entries) {
-    if (!labelKeyPattern.test(labelKey))
-      return fail(
-        `labels: ${JSON.stringify(labelKey)} is not a label key (a lower-case letter, then lower-case letters, digits, _ or -; at most 63)`,
-      );
-    if (labelKey.startsWith(reservedLabelPrefix))
-      return fail(`labels: keys starting with ${reservedLabelPrefix} are better-compute's own`);
-    if (typeof labelValue !== 'string' || !labelValuePattern.test(labelValue))
-      return fail(
-        `labels.${labelKey} must be lower-case letters, digits, _ or - (at most 63 characters)`,
-      );
-    labels[labelKey] = labelValue;
-  }
-  return labels;
-}
-
 /** Whether `userData` is a `secret://` ref (sealed by vps, or brought by the tenant). */
 export const isSecretRef = (userData: string | undefined): userData is `secret://${string}` =>
   userData !== undefined && secretRefPattern.test(userData);
@@ -390,6 +370,9 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
     'labels',
     'placement',
     'filesystems',
+    'name',
+    'metadata',
+    'issuedBy',
     'ownerIdentityId',
     'workloadIdentity',
     'dns',
@@ -451,6 +434,12 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
       result.filesystems = filesystems;
     }
   }
+  if (input.name !== undefined) result.name = displayName(input.name);
+  if (input.metadata !== undefined) {
+    const metadata = instanceMetadata(input.metadata);
+    if (Object.keys(metadata).length > 0) result.metadata = metadata;
+  }
+  if (input.issuedBy !== undefined) result.issuedBy = issuedBy(input.issuedBy);
   if (input.ownerIdentityId !== undefined) {
     if (
       typeof input.ownerIdentityId !== 'string' ||
@@ -504,14 +493,31 @@ export function parseResize(raw: unknown): InstanceRef & { flavor: string } {
 export interface ListInstancesInput {
   tenantId: string;
   scope: 'mine' | 'all';
+  /**
+   * Only instances in this state. Without it, deleted instances are left out (U-04); `deleted` lists them, with
+   * `scope: 'mine'` only (their access is gone, so no per-item check could pass).
+   */
   state?: InstanceState;
   poolId?: string;
+  /** (U-04) Only instances of this project. */
+  projectId?: string;
+  /** (U-04) Only instances whose labels match (`parseLabelSelector`: `env=prod,tier!=db,gpu,!legacy`). */
+  labelSelector?: string;
   limit?: number;
   cursor?: string;
 }
 
 export function parseListInstances(raw: unknown): ListInstancesInput {
-  const input = object(raw, ['tenantId', 'scope', 'state', 'poolId', 'limit', 'cursor']);
+  const input = object(raw, [
+    'tenantId',
+    'scope',
+    'state',
+    'poolId',
+    'projectId',
+    'labelSelector',
+    'limit',
+    'cursor',
+  ]);
   if (input.scope !== undefined && input.scope !== 'mine' && input.scope !== 'all')
     fail('scope must be mine or all');
   if (
@@ -526,6 +532,15 @@ export function parseListInstances(raw: unknown): ListInstancesInput {
   if (input.state !== undefined) result.state = input.state as InstanceState;
   const poolId = optional(input.poolId, (value) => id(value, 'pool', 'poolId'));
   if (poolId !== undefined) result.poolId = poolId;
+  if (result.state === 'deleted' && result.scope === 'all')
+    fail("state 'deleted' lists the caller's own instances only (scope: 'mine')");
+  const projectId = optional(input.projectId, (value) => id(value, 'prj', 'projectId'));
+  if (projectId !== undefined) result.projectId = projectId;
+  if (input.labelSelector !== undefined) {
+    parseLabelSelector(input.labelSelector);
+    if ((input.labelSelector as string).trim() !== '')
+      result.labelSelector = input.labelSelector as string;
+  }
   const limit = optional(input.limit, (value) => int(value, 'limit', 1, 200));
   if (limit !== undefined) result.limit = limit;
   const cursor = optional(input.cursor, (value) => {
@@ -607,6 +622,20 @@ interface RawInstance {
   filesystems?: InstanceMountRow[] | string | null;
   network_external_name: string | null;
   aws_role_arn?: string | null;
+  name: string | null;
+  metadata: Record<string, string> | string | null;
+  issued_by: string | null;
+  labels_pending: boolean | null;
+  labels_applied: Record<string, string> | string | null;
+  disks: InstanceDisk[] | string | null;
+  created_ms: number | string | null;
+}
+
+/** (U-04) A disk the provider reported for an instance's machine (`ExternalMachine.disks`). */
+export interface InstanceDisk {
+  type?: string;
+  sizeGiB: number;
+  boot?: boolean;
 }
 
 /** How an instance came to be (vps/0024): created by better-compute, or an attached provider machine. */
@@ -734,7 +763,7 @@ export interface InstanceRow {
   subnetId?: string;
   /** The provider-side name of that network when it was adopted (`networks.adopt`, vps/0044). */
   networkExternalName?: string;
-  /** The tenant's provider labels (`instances.create`, vps/0043). */
+  /** The tenant's labels (`instances.create`, vps/0043; `instances.update`, vps/0046). */
   labels?: Record<string, string>;
   /** (AWS A7) The IAM role its workloads assume (`instances.create`, vps/0096). */
   awsRoleArn?: string;
@@ -742,6 +771,20 @@ export interface InstanceRow {
   placement?: InstancePlacementGroup;
   /** (AWS A10) The filesystems it mounts, with how (`instances.create`, vps/0112). */
   filesystems?: InstanceMountRow[];
+  /**
+   * (U-04) The labels the provider last wrote on the machine (`create`, `setLabels`); `labelsPending` while they
+   * differ from `labels` (provider pools), so the reconciler writes them.
+   */
+  labelsApplied?: Record<string, string>;
+  labelsPending: boolean;
+  /** (U-04) Display name, metadata and the platform's provenance (vps/0046). */
+  name?: string;
+  metadata?: Record<string, string>;
+  issuedBy?: string;
+  /** (U-04) The disks the provider last reported for the machine. */
+  disks?: InstanceDisk[];
+  /** Epoch ms. */
+  createdAt: number;
 }
 
 const json = <T>(value: T | string): T =>
@@ -777,6 +820,8 @@ function toRow(raw: RawInstance): InstanceRow {
     claimed: raw.claimed === true,
     rebootPending: raw.reboot_pending === true,
     rebootHard: raw.reboot_hard === true,
+    labelsPending: raw.labels_pending === true,
+    createdAt: Number(raw.created_ms ?? 0),
   };
   if (raw.project_id !== null) row.projectId = raw.project_id;
   if (raw.image !== null) row.image = json(raw.image);
@@ -805,6 +850,12 @@ function toRow(raw: RawInstance): InstanceRow {
   if (raw.placement !== null && raw.placement !== undefined) row.placement = json(raw.placement);
   if (raw.filesystems !== null && raw.filesystems !== undefined)
     row.filesystems = json(raw.filesystems);
+  if (raw.labels_applied !== null && raw.labels_applied !== undefined)
+    row.labelsApplied = json(raw.labels_applied);
+  if (raw.name !== null && raw.name !== undefined) row.name = raw.name;
+  if (raw.metadata !== null && raw.metadata !== undefined) row.metadata = json(raw.metadata);
+  if (raw.issued_by !== null && raw.issued_by !== undefined) row.issuedBy = raw.issued_by;
+  if (raw.disks !== null && raw.disks !== undefined) row.disks = json(raw.disks);
   return row;
 }
 
@@ -822,7 +873,10 @@ const columns = `i.id, i.tenant_id, i.pool_id, i.project_id, i.flavor_id, i.flav
                     ORDER BY x.path)
      FROM instance_filesystems x JOIN filesystems f ON f.id = x.filesystem_id
     WHERE x.instance_id = i.id) AS filesystems,
-  (SELECT n.external_name FROM networks n WHERE n.id = i.network_id) AS network_external_name`;
+  (SELECT n.external_name FROM networks n WHERE n.id = i.network_id) AS network_external_name,
+  i.name, i.metadata, i.issued_by, i.labels_applied, i.disks,
+  (p.class = 'provider' AND i.labels IS DISTINCT FROM i.labels_applied) AS labels_pending,
+  (extract(epoch FROM i.created_at) * 1000)::float8 AS created_ms`;
 
 export async function readInstance(
   tx: SqlTx,
@@ -870,6 +924,11 @@ export function instanceView(row: InstanceRow): Instance {
       filesystemId: mount.filesystemId,
       path: mount.path,
     }));
+  if (row.name !== undefined) view.name = row.name;
+  if (row.metadata !== undefined) view.metadata = { ...row.metadata };
+  if (row.issuedBy !== undefined) view.issuedBy = row.issuedBy;
+  if (row.createdAt > 0) view.createdAt = row.createdAt;
+  if (row.disks !== undefined) view.disks = row.disks.map((disk) => ({ ...disk }));
   return view;
 }
 
@@ -897,6 +956,15 @@ export async function updateInstance(
     rebooted: true;
     /** A new reboot request, `reboot_requested_at = compute_now()`. */
     rebootRequested: { hard: boolean };
+    /** (U-04) Identity: null clears. */
+    name: string | null;
+    metadata: Record<string, string> | null;
+    labels: Record<string, string> | null;
+    issuedBy: string | null;
+    /** (U-04) The labels the provider now holds (null: none written). */
+    labelsApplied: Record<string, string> | null;
+    /** (U-04) The disks the provider reported. */
+    disks: InstanceDisk[];
   }>,
 ): Promise<InstanceRow> {
   const assignments = ['version = version + 1'];
@@ -929,6 +997,14 @@ export async function updateInstance(
     assignments.push('reboot_requested_at = compute_now()');
     set('reboot_hard', sets.rebootRequested.hard);
   }
+  const jsonOrNull = (value: object | null) => (value === null ? null : JSON.stringify(value));
+  if (sets.name !== undefined) set('name', sets.name);
+  if (sets.metadata !== undefined) set('metadata', jsonOrNull(sets.metadata), '::jsonb');
+  if (sets.labels !== undefined) set('labels', jsonOrNull(sets.labels), '::jsonb');
+  if (sets.issuedBy !== undefined) set('issued_by', sets.issuedBy);
+  if (sets.labelsApplied !== undefined)
+    set('labels_applied', jsonOrNull(sets.labelsApplied), '::jsonb');
+  if (sets.disks !== undefined) set('disks', JSON.stringify(sets.disks), '::jsonb');
   const { rowCount } = await tx.query(
     `UPDATE instances SET ${assignments.join(', ')} WHERE id = $1 AND version = $2`,
     params,
@@ -962,7 +1038,35 @@ export async function updateInstance(
     next.rebootPending = true;
     next.rebootHard = sets.rebootRequested.hard;
   }
+  const assign = <K extends 'name' | 'metadata' | 'labels' | 'issuedBy' | 'labelsApplied'>(
+    field: K,
+    value: InstanceRow[K] | null | undefined,
+  ) => {
+    if (value === undefined) return;
+    if (value === null) delete next[field];
+    else next[field] = value;
+  };
+  assign('name', sets.name);
+  assign('metadata', sets.metadata);
+  assign('labels', sets.labels);
+  assign('issuedBy', sets.issuedBy);
+  assign('labelsApplied', sets.labelsApplied);
+  if (sets.disks !== undefined) next.disks = sets.disks;
+  if (sets.labels !== undefined || sets.labelsApplied !== undefined)
+    next.labelsPending =
+      next.poolClass === 'provider' &&
+      !sameLabels(next.labels, next.labelsApplied);
   return next;
+}
+
+/** Whether two label maps hold the same labels (both absent counts as the same). */
+export function sameLabels(
+  a: Readonly<Record<string, string>> | undefined,
+  b: Readonly<Record<string, string>> | undefined,
+): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((key) => b[key] === a[key]);
 }
 
 /** An attached instance whose claim was refused: its machine's label names another instance. */
@@ -1468,6 +1572,9 @@ export async function prepareCreateInstance(
   const caller = context.caller;
   if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
   const owner = instanceOwner(caller, input, deps.rootTenantId);
+  // (U-04) Provenance is the platform's to record.
+  if (input.issuedBy !== undefined)
+    assertPlatformProvenance(platformCaller(caller, input.tenantId, deps.rootTenantId));
   const { idempotencyKey: _key, wait: _wait, ...request } = input;
   const hash = await sha256Hex(canonical(request));
   const instanceId = await draftId('inst', input.tenantId, caller.identityId, input.idempotencyKey);
@@ -1494,12 +1601,6 @@ export async function prepareCreateInstance(
       `Pool ${pool.id} joins its machines to an EKS cluster: only the pool owner launches them (an instance's tenant gets root on its machine)`,
       undefined,
       { reason: 'eksNodeTenant', poolId: pool.id },
-    );
-  // Labels are the provider's: hosted machines have none to carry them.
-  if (input.labels !== undefined && pool.class !== 'provider')
-    throw new ComputeError(
-      'INVALID_INPUT',
-      `Pool ${pool.id} is not a provider pool; labels are written on provider machines only`,
     );
   if (input.placement !== undefined) {
     if (pool.class !== 'provider')
@@ -1623,9 +1724,10 @@ export async function prepareCreateInstance(
                               ssh_keys, user_data, runtime, draft, state, desired_state,
                               provider_account_id, owner_identity_id, agent_id, delegation_id,
                               idempotency_key, request_hash, version, network_id, subnet_id, labels,
-                              aws_role_arn, placement)
+                              aws_role_arn, placement, labels_applied, name, metadata, issued_by)
        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::text[], $10, $11, true, 'pending', $12,
-               $13, $14, $15, $16, $17, decode($18, 'hex'), 1, $19, $20, $21::jsonb, $22, $23::jsonb)`,
+               $13, $14, $15, $16, $17, decode($18, 'hex'), 1, $19, $20, $21::jsonb, $22, $23::jsonb,
+               $24::jsonb, $25, $26::jsonb, $27)`,
       [
         instanceId,
         input.tenantId,
@@ -1650,6 +1752,11 @@ export async function prepareCreateInstance(
         input.labels ? JSON.stringify(input.labels) : null,
         input.workloadIdentity?.awsRoleArn ?? null,
         input.placement ? JSON.stringify(input.placement) : null,
+        // A provider's create writes the labels the row holds then (a later change is reconciled).
+        input.labels && pool.class === 'provider' ? JSON.stringify(input.labels) : null,
+        input.name ?? null,
+        input.metadata ? JSON.stringify(input.metadata) : null,
+        input.issuedBy ?? null,
       ],
     );
   if (!existing && input.filesystems !== undefined)
@@ -2096,30 +2203,60 @@ async function upsertInstanceAuthz(deps: InstanceDeps, tx: SqlTx, row: InstanceR
   });
 }
 
-/** A tenant's instances, newest first; `scope: 'mine'` (the default) filters to the caller's own. */
+/**
+ * A tenant's instances, newest first; `scope: 'mine'` (the default) filters to the caller's own. Deleted
+ * instances are left out unless `state: 'deleted'` asks for them (U-04): the page the per-item checks then
+ * decide holds only instances whose access still exists. `projectId` and `labelSelector` filter in SQL too.
+ */
 export async function listInstances(
   tx: SqlTx,
   input: ListInstancesInput,
   callerIdentityId: string | undefined,
 ): Promise<{ items: Instance[]; cursor?: string }> {
-  const limit = input.limit ?? 50;
   const owner = input.scope === 'mine' ? (callerIdentityId ?? '') : null;
+  const params: unknown[] = [
+    input.tenantId,
+    owner,
+    input.state ?? null,
+    input.poolId ?? null,
+    input.cursor ?? null,
+    input.projectId ?? null,
+  ];
+  const selector = labelSelectorSql(
+    input.labelSelector !== undefined ? parseLabelSelector(input.labelSelector) : [],
+    'i.labels',
+    params,
+  );
+  return listedInstances(
+    tx,
+    `i.tenant_id = $1 AND NOT i.draft AND i.warm_template_id IS NULL
+        AND ($2::text IS NULL OR i.owner_identity_id = $2)
+        AND (CASE WHEN $3::text IS NULL THEN i.state <> 'deleted' ELSE i.state = $3 END)
+        AND ($4::text IS NULL OR i.pool_id = $4)
+        AND ($6::text IS NULL OR i.project_id = $6)
+        AND (${selector})
+        AND ($5::text IS NULL OR (i.created_at, i.id) <
+             (SELECT created_at, id FROM instances WHERE id = $5 AND tenant_id = $1))`,
+    params,
+    input.limit ?? 50,
+  );
+}
+
+/**
+ * A page of instances matching `where` (over `instances i JOIN pools p`, with `params`), newest first, and the
+ * cursor (the last one's id) when more remain.
+ */
+export async function listedInstances(
+  tx: SqlTx,
+  where: string,
+  params: readonly unknown[],
+  limit: number,
+): Promise<{ items: Instance[]; cursor?: string }> {
   const { rows } = await tx.query<RawInstance>(
     `SELECT ${columns} FROM instances i JOIN pools p ON p.id = i.pool_id
-      WHERE i.tenant_id = $1 AND NOT i.draft AND i.warm_template_id IS NULL
-        AND ($2::text IS NULL OR i.owner_identity_id = $2)
-        AND ($3::text IS NULL OR i.state = $3) AND ($4::text IS NULL OR i.pool_id = $4)
-        AND ($5::text IS NULL OR (i.created_at, i.id) <
-             (SELECT created_at, id FROM instances WHERE id = $5 AND tenant_id = $1))
-      ORDER BY i.created_at DESC, i.id DESC LIMIT $6`,
-    [
-      input.tenantId,
-      owner,
-      input.state ?? null,
-      input.poolId ?? null,
-      input.cursor ?? null,
-      limit + 1,
-    ],
+      WHERE ${where}
+      ORDER BY i.created_at DESC, i.id DESC LIMIT $${params.length + 1}`,
+    [...params, limit + 1],
   );
   const page = rows.slice(0, limit).map(toRow);
   const result: { items: Instance[]; cursor?: string } = { items: page.map(instanceView) };

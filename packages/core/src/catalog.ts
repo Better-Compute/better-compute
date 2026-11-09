@@ -82,6 +82,8 @@ const definitions = {
       ...a('billing', 'read', 'manage'),
       // Platform usage view and corrections (root only): the cross-tenant totals, dead letters, retry and void.
       ...a('usage', 'read', 'manage'),
+      // (U-04) The platform's issued instances across tenants (`instances.issued`, root only).
+      ...a('instances', 'read'),
     ],
   },
   tenant: {
@@ -489,6 +491,8 @@ group('system', 'server', [
   ['whoami', 'public', null, null, 'v0.1'],
   ['version', 'public', null, null, 'v0.1'],
   ['selfCheck', 'read', 'fleet:admin', 'fleet', 'v0.1'],
+  // (U-04) The work queue's backlog per kind (root only).
+  ['workQueue', 'read', 'fleet:admin', 'fleet', 'v1.0'],
 ]);
 group('projects', 'server', [
   ['create', 'mutation', 'projects:manage', 'tenant', 'v0.1'],
@@ -666,6 +670,9 @@ group('instances', 'vps', [
   ['attach', 'mutation', 'instances:attach', 'instance', 'v1.0'],
   ['detach', 'mutation', 'instances:delete', 'instance', 'v1.0'],
   ['reboot', 'mutation', 'instances:update', 'instance', 'v1.0'],
+  // (U-04) Name, metadata, labels (and the platform's issuedBy); the issued list across tenants (root only).
+  ['update', 'mutation', 'instances:update', 'instance', 'v1.0'],
+  ['issued', 'read', 'instances:read', 'fleet', 'v1.0'],
   // The hourly price of a flavor for the caller's tenant (billing estimates); acts on the pool, like flavors.list.
   ['estimate', 'read', 'flavors:read', 'pool', 'v1.0'],
 ]);
@@ -748,6 +755,8 @@ group('sandboxes', 'vps', [
   // The tunnels module holds the exec-ticket issuer and the sandbox SSH CA (§3.7, §7.6).
   ['exec', 'mutation', 'sandboxes:exec', 'sandbox', 'v0.5', { module: 'tunnels' }],
   ['delete', 'mutation', 'sandboxes:delete', 'sandbox', 'v0.5'],
+  // (U-04) Name, metadata and labels.
+  ['update', 'mutation', 'sandboxes:update', 'sandbox', 'v1.0'],
 ]);
 group('sandboxTemplates', 'vps', [
   ['create', 'mutation', 'sandboxes:manage', 'tenant', 'v0.5'],

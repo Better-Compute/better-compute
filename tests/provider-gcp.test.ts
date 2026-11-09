@@ -562,15 +562,17 @@ describe('compute', () => {
       labels: {
         'better-compute-managed': 'true',
         'better-compute-instance': 'ins_x',
-        'better-compute-tenant': 'ten_1',
       },
       metadata: { items: [{ key: 'user-data', value: '#cloud-config\nusers: []\n' }] },
       scheduling: { onHostMaintenance: 'TERMINATE' },
       tags: { items: ['bc-abc'] },
     });
+    // (U-04) A tenant's better-compute-* keys are dropped, and the boot disk carries the VM's labels.
+    expect(body.labels['better-compute-tenant']).toBeUndefined();
     expect(body.disks[0].initializeParams).toMatchObject({
       sourceImage: 'projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts',
       diskSizeGb: '200',
+      labels: { 'better-compute-managed': 'true', 'better-compute-instance': 'ins_x' },
     });
     expect(body.networkInterfaces[0]).toMatchObject({
       network: 'global/networks/bc-net',

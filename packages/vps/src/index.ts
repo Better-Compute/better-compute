@@ -10,6 +10,9 @@ export { vps, type VpsApi, type VpsOptions, type ProviderAccountView } from './m
 export * from './migrations.js';
 export * from './instances.js';
 export { declaresSpotOffers, isSpotOffer, spotOffersCapability } from './spot.js';
+export * from './instance-identity.js';
+export * from './instance-listing.js';
+export * from './instance-update.js';
 export * from './budget-suspend.js';
 export * from './budget-admission.js';
 export * from './pricing.js';

@@ -252,6 +252,7 @@ describe('betterCompute()', () => {
       'system/whoami',
       'system/version',
       'system/selfCheck',
+      'system/workQueue',
       ...serverPaths,
       'inventory/get',
       'inventory/history',

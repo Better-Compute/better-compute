@@ -476,6 +476,7 @@ describe('vps() API surface', () => {
       'vps/0042_pool_machines',
       'vps/0043_instance_labels',
       'vps/0044_network_adopt',
+      'vps/0046_instance_identity',
       'vps/0084_network_zones',
       'vps/0085_subnet_private_access',
       'vps/0087_provider_purchases',
@@ -1944,5 +1945,46 @@ describe('keyed providerAccounts.create (FleetConfig ids)', () => {
     await expect(
       call('providerAccounts', 'create', { ...input, idempotencyKey: undefined }, root),
     ).rejects.toMatchObject({ code: 'CONFLICT' }); // the name is taken
+  });
+});
+
+describe('hosted instances: name, metadata and labels (U-04)', () => {
+  type Identity = View & {
+    name?: string;
+    metadata?: Record<string, string>;
+    labels?: Record<string, string>;
+    version: number;
+  };
+
+  it('keeps them on a hosted instance; nothing is written to its host', async () => {
+    const created = (await call(
+      'instances',
+      'create',
+      createHosted({ name: 'web 1', labels: { app: 'web' }, metadata: { owner: 'ops' } }),
+    )) as Identity;
+    expect(created).toMatchObject({ name: 'web 1', labels: { app: 'web' }, metadata: { owner: 'ops' } });
+    recorded.work = [];
+    recorded.invalidated = [];
+    recorded.events = [];
+    const updated = (await call('instances', 'update', {
+      tenantId: 'acme',
+      instanceId: created.id,
+      labels: { app: 'api' },
+    })) as Identity;
+    expect(updated).toMatchObject({ labels: { app: 'api' }, version: created.version + 1 });
+    expect(recorded.events).toEqual(['instance.updated']);
+    // A hosted machine has no provider labels: nothing to reconcile, no host to tell.
+    expect(recorded.work).toEqual([]);
+    expect(recorded.invalidated).toEqual([]);
+    const { rows } = await db.query<{ labels_applied: unknown }>(
+      `SELECT labels_applied FROM instances WHERE id = $1`,
+      [created.id],
+    );
+    expect(rows[0]!.labels_applied).toBeNull();
+    const listed = (await call('instances', 'list', {
+      tenantId: 'acme',
+      labelSelector: 'app=api',
+    })) as { items: Identity[] };
+    expect(listed.items.map((item) => item.id)).toEqual([created.id]);
   });
 });

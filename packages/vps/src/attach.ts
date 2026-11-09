@@ -13,7 +13,15 @@ import {
 } from '@better-compute/core';
 import { chargeQuota } from '@better-compute/capacity';
 import type { StoredMachine } from './discovery.js';
-import { canonical, fail, id, key, name, object, optional, sha256Hex, tenant } from './input.js';
+import { canonical, fail, id, key, object, optional, sha256Hex, tenant } from './input.js';
+import {
+  assertPlatformProvenance,
+  displayName,
+  identitySchemas,
+  instanceLabels,
+  instanceMetadata,
+  issuedBy,
+} from './instance-identity.js';
 import { networkOfMachine, zoneRegion } from './networks.js';
 import {
   instanceAttributes,
@@ -76,7 +84,13 @@ export interface AttachInstanceInput {
   ownerIdentityId?: string;
   /** `detach` (default): deleting releases the machine and leaves it running. */
   onDelete?: InstanceOnDelete;
+  /** A display name (`displayName`), kept as the instance's `name` (U-04). */
   name?: string;
+  /** (U-04) Metadata and labels, as `instances.create` takes them; the labels are written on the machine once claimed. */
+  metadata?: Record<string, string>;
+  labels?: Record<string, string>;
+  /** (U-04) The platform's provenance: root callers only (ACCESS_DENIED). */
+  issuedBy?: string;
   /**
    * (v1.0) The tenant network the machine must already be on (`networks.create`); attach does not
    * move a running VM. Omitted: the machine is linked to the tenant network its NIC is on, if any.
@@ -134,7 +148,10 @@ export const attachSchemas = {
         description:
           'detach: deleting releases the machine, which keeps running; delete: deleting deletes it',
       },
-      name: field('A display name', '^[a-z0-9][a-z0-9._-]{0,62}$', 63),
+      name: identitySchemas.name,
+      metadata: identitySchemas.metadata,
+      labels: identitySchemas.labels,
+      issuedBy: identitySchemas.issuedBy,
       networkId: field(
         'A ready tenant network the machine is already on (attach keeps its network); omitted: the tenant network its NIC is on, if any',
         '^net_[0-9a-hjkmnp-tv-z]{26,52}$',
@@ -164,6 +181,9 @@ export function parseAttach(raw: unknown): AttachInstanceInput {
     'ownerIdentityId',
     'onDelete',
     'name',
+    'metadata',
+    'labels',
+    'issuedBy',
     'networkId',
     'billing',
     'idempotencyKey',
@@ -189,8 +209,17 @@ export function parseAttach(raw: unknown): AttachInstanceInput {
   if (projectId !== undefined) result.projectId = projectId;
   if (input.ownerIdentityId !== undefined) result.ownerIdentityId = input.ownerIdentityId as string;
   if (input.onDelete !== undefined) result.onDelete = input.onDelete as InstanceOnDelete;
-  const label = optional(input.name, (value) => name(value));
+  const label = optional(input.name, (value) => displayName(value));
   if (label !== undefined) result.name = label;
+  if (input.metadata !== undefined) {
+    const metadata = instanceMetadata(input.metadata);
+    if (Object.keys(metadata).length > 0) result.metadata = metadata;
+  }
+  if (input.labels !== undefined) {
+    const labels = instanceLabels(input.labels);
+    if (Object.keys(labels).length > 0) result.labels = labels;
+  }
+  if (input.issuedBy !== undefined) result.issuedBy = issuedBy(input.issuedBy);
   const networkId = optional(input.networkId, (value) => id(value, 'net', 'networkId'));
   if (networkId !== undefined) result.networkId = networkId;
   if (input.billing !== undefined) result.billing = input.billing as AttachBilling;
@@ -225,6 +254,9 @@ async function attachRequest(input: AttachInstanceInput, caller: Caller) {
     ownerIdentityId: input.ownerIdentityId ?? caller.identityId,
     onDelete: input.onDelete ?? 'detach',
     name: input.name,
+    metadata: input.metadata,
+    labels: input.labels,
+    issuedBy: input.issuedBy,
     networkId: input.networkId,
     billing: input.billing,
   };
@@ -324,6 +356,8 @@ export async function prepareAttach(
   // makes someone other than the caller the owner; before any decision.
   instanceOwner(caller, input, rootTenantId);
   assertBillingAllowed(caller, input, rootTenantId);
+  if (input.issuedBy !== undefined)
+    assertPlatformProvenance(platformCaller(caller, input.tenantId, rootTenantId));
   const { request, hash, instanceId } = await attachRequest(input, caller);
   const existing = await readInstance(tx, instanceId, { tenantId: input.tenantId, lock: true });
   if (existing) {
@@ -373,6 +407,8 @@ export async function attachMachine(
 ): Promise<Instance> {
   const { caller } = input;
   assertBillingAllowed(caller, input, deps.rootTenantId);
+  if (input.issuedBy !== undefined)
+    assertPlatformProvenance(platformCaller(caller, input.tenantId, deps.rootTenantId));
   const { request, hash, instanceId } = await attachRequest(input, caller);
   const existing = await readInstance(tx, instanceId, { tenantId: input.tenantId, lock: true });
   if (existing) {
@@ -488,10 +524,10 @@ export async function attachMachine(
                               provider_account_id, external_id, addresses, quota_charged,
                               owner_identity_id, agent_id, delegation_id, idempotency_key,
                               request_hash, version, origin, on_delete, attached_at,
-                              network_id, subnet_id, billing)
+                              network_id, subnet_id, billing, name, metadata, labels, issued_by)
        VALUES ($1, $2, $3, $4, NULL, $5::jsonb, NULL, NULL, '{}', NULL, $6, false, 'scheduling', $7,
                $8, $9, $10::text[], $11::jsonb, $12, $13, $14, $15, decode($16, 'hex'), 1,
-               'attached', $17, compute_now(), $18, $19, $20)`,
+               'attached', $17, compute_now(), $18, $19, $20, $21, $22::jsonb, $23::jsonb, $24)`,
       [
         instanceId,
         input.tenantId,
@@ -513,6 +549,11 @@ export async function attachMachine(
         link.networkId ?? null,
         link.subnetId ?? null,
         input.billing ?? null,
+        input.name ?? null,
+        input.metadata ? JSON.stringify(input.metadata) : null,
+        // Written on the machine by the reconciler once it is claimed (labels_applied stays NULL until then).
+        input.labels ? JSON.stringify(input.labels) : null,
+        input.issuedBy ?? null,
       ],
     );
     await tx.query('RELEASE SAVEPOINT vps_attach');

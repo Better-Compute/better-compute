@@ -44,6 +44,7 @@ import {
   requestIdFor,
 } from './ids.js';
 import { GcpImages, sourceImageOf, sshUserOf } from './images.js';
+import { changedLabels, labelBootDisk, machineLabels } from './disk-labels.js';
 import { GcpNetworks } from './networks.js';
 import type { catalogReader } from './prices.js';
 import { readReservations } from './reservations.js';
@@ -435,16 +436,8 @@ export class GcpCompute implements ProviderImpl {
     const body: Record<string, unknown> = {
       name,
       machineType: `zones/${zone}/machineTypes/${machineType}`,
-      labels: {
-        ...Object.fromEntries(
-          Object.entries(request.labels ?? {}).map(([key, value]) => [
-            labelValue(key),
-            labelValue(value),
-          ]),
-        ),
-        [labels.managed]: 'true',
-        [labels.instance]: labelValue(request.name),
-      },
+      // (U-04) The tenant's labels, with better-compute's ownership labels merged last.
+      labels: machineLabels(request.labels, request.name),
       disks: [
         {
           boot: true,
@@ -453,6 +446,8 @@ export class GcpCompute implements ProviderImpl {
             sourceImage,
             diskSizeGb: String(diskGiB),
             diskType: `zones/${zone}/diskTypes/${diskType}`,
+            // (U-04) The boot disk carries the VM's labels.
+            labels: machineLabels(request.labels, request.name),
           },
         },
       ],
@@ -824,6 +819,39 @@ export class GcpCompute implements ProviderImpl {
       return unchanged ? undefined : next;
     });
     return this.toMachine(instance, context.signal);
+  }
+
+  /** (U-04) The tenant's labels on the VM, then on its boot disk (`disk-labels.ts`). */
+  async setLabels(
+    id: string,
+    change: {
+      labels: Readonly<Record<string, string>>;
+      previous?: Readonly<Record<string, string>>;
+    },
+    context: CallContext,
+    instanceId?: string,
+  ): Promise<void> {
+    const owner = instanceId === undefined ? undefined : labelValue(instanceId);
+    const instance = await this.#changeLabels(id, context.signal, (current) => {
+      if (owner !== undefined && current[labels.instance] !== owner)
+        throw new ComputeError(
+          'INVALID_STATE',
+          `${id} is not labelled for instance ${instanceId}`,
+          undefined,
+          { provider: 'gcp', reason: 'notOwner' },
+        );
+      return changedLabels(current, change);
+    });
+    await labelBootDisk(
+      {
+        client: this.client,
+        projectId: this.config.projectId,
+        waitDone: (operation, signal, what) => this.waitDone(operation, signal, what),
+      },
+      instance,
+      change,
+      context.signal,
+    );
   }
 
   async release(id: string, instanceId: string, context: CallContext): Promise<void> {

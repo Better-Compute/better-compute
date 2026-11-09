@@ -1388,6 +1388,23 @@ describe('isolation between tenants, and between tenants and the root tenant', (
             return api.instances.detach(root, { tenantId: B, instanceId: spare.id });
           },
         },
+        // (U-04) Identity, decided on the instance in its tenant; the issued list on the fleet.
+        {
+          path: 'instances.update',
+          tenant: A,
+          call: () =>
+            api.instances.update(root, {
+              tenantId: A,
+              instanceId: w.issued,
+              name: 'issued',
+              issuedBy: 'platform',
+            }),
+        },
+        {
+          path: 'instances.issued',
+          tenant: R,
+          call: () => api.instances.issued(root, {}),
+        },
         {
           path: 'instances.delete',
           tenant: A,
@@ -1536,7 +1553,7 @@ describe('isolation between tenants, and between tenants and the root tenant', (
           ['instances', 'providerAccounts', 'networks', 'firewallRules'].includes(row.group),
       )
       .map((row) => `${row.group}.${row.method}`);
-    expect(added.length).toBeGreaterThanOrEqual(18);
+    expect(added.length).toBeGreaterThanOrEqual(20);
     expect(added.filter((path) => !steps.some((step) => step.path === path))).toEqual([]);
   });
 });

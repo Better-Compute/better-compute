@@ -28,6 +28,8 @@ export interface FakeGce {
   createId?: string;
   /** What `listReservations` reports; unset, it fails (a test that never scans reservations seeds rows itself). */
   reservations?: ExternalReservation[];
+  /** (U-04) Thrown by the next `setLabels` (the machine is left as it was). */
+  failSetLabels?: Error;
 }
 
 const copy = (machine: ExternalMachine): ExternalMachine =>
@@ -86,7 +88,12 @@ export function fakeGceProvider(cloud: FakeGce, id = 'fake-gce'): ProviderDefini
           vcpu: 12,
           memoryGiB: 85,
           gpus: { model: 'nvidia-a100-40gb', count: 1 },
-          labels: { [managedLabel]: 'true', [instanceLabel]: call.idempotencyKey },
+          // The tenant's labels, the ownership labels merged last.
+          labels: {
+            ...request.labels,
+            [managedLabel]: 'true',
+            [instanceLabel]: call.idempotencyKey,
+          },
         });
         cloud.machines.set(vmId, created);
         return copy(created);
@@ -142,6 +149,29 @@ export function fakeGceProvider(cloud: FakeGce, id = 'fake-gce'): ProviderDefini
           ...(options?.managed ? { [managedLabel]: 'true' } : {}),
         };
         return copy(found);
+      },
+      // (U-04) The tenant's labels: set, the previous ones removed, better-compute-* and bc-* never touched.
+      async setLabels(machineId, change, _call, instanceId) {
+        cloud.requests.push(`setLabels ${machineId}`);
+        const failure = cloud.failSetLabels;
+        if (failure) {
+          delete cloud.failSetLabels;
+          throw failure;
+        }
+        const found = machine(machineId);
+        if (instanceId !== undefined && found.labels?.[instanceLabel] !== instanceId)
+          throw new ComputeError(
+            'INVALID_STATE',
+            `VM ${machineId} is not claimed by ${instanceId}`,
+          );
+        const reserved = (key: string) =>
+          key.startsWith('better-compute-') || key.startsWith('bc-');
+        const next: Record<string, string> = { ...found.labels };
+        for (const key of Object.keys(change.previous ?? {}))
+          if (!reserved(key) && !(key in change.labels)) delete next[key];
+        for (const [key, value] of Object.entries(change.labels))
+          if (!reserved(key)) next[key] = value;
+        found.labels = next;
       },
       async release(machineId, instanceId) {
         cloud.requests.push(`release ${machineId} ${instanceId}`);

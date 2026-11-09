@@ -79,6 +79,12 @@ export const pollTransitionalMs = 10_000;
 /** How often steady provider instances are polled for drift. */
 export const pollSteadyMs = 60_000;
 
+/**
+ * (U-04) A provider instance whose new labels the provider refused to write: kept (with the error) until a later
+ * pass writes them.
+ */
+export const labelsNotAppliedCondition = 'LabelsNotApplied';
+
 /** Runtime states the daemon reports, plus `absent` (the runtime no longer holds the instance). */
 export type ReportedState = 'running' | 'stopped' | 'paused' | 'error' | 'absent';
 
@@ -440,6 +446,8 @@ type ProviderAction =
   | { kind: 'managed-delete' }
   /** `instances.reboot` was asked for and not done yet. */
   | { kind: 'reboot'; action: 'graceful-restart' | 'reset' }
+  /** (U-04) The tenant's labels changed (`instances.update`): write them on the machine, then read it. */
+  | { kind: 'labels' }
   /** Attached, ownership lost or never won: nothing more is asked of the provider. */
   | { kind: 'blocked' }
   /** Attached, ownership lost or never won, being deleted: finish as a detach, no provider call. */
@@ -470,6 +478,13 @@ function providerAction(row: InstanceRow): ProviderAction {
     return { kind: 'power', action: 'graceful-off' };
   if (row.state === 'stopped' && row.desiredState === 'running' && row.reportedState === 'stopped')
     return { kind: 'power', action: 'on' };
+  // (U-04) Settled with labels the machine does not hold yet; an attached machine only once claimed.
+  if (
+    row.labelsPending &&
+    (row.state === 'running' || row.state === 'stopped') &&
+    (!attached || row.claimed)
+  )
+    return { kind: 'labels' };
   return { kind: 'get' };
 }
 
@@ -644,6 +659,8 @@ async function reconcileProvider(
 
   let machine: ExternalMachine | undefined;
   let failure: unknown;
+  /** (U-04) The provider refused the label write (the machine was still read). */
+  let labelFailure: unknown;
   /** The provider writes ownership labels: every read of a claimed machine must name this instance. */
   let labelled = false;
   /** The delete path found the label gone or foreign: finish as a detach, nothing deleted. */
@@ -752,6 +769,24 @@ async function reconcileProvider(
       if (!client.power)
         throw new ComputeError('UNSUPPORTED', `Provider ${account.provider} has no power control`);
       await client.power(row.externalId!, action.action, context);
+      machine = await client.get(row.externalId!, context);
+    } else if (action.kind === 'labels') {
+      // A provider without labels has nothing to write. A failed write is kept as a condition and tried again;
+      // the machine is read either way, so the instance never stops following it.
+      if (client.setLabels)
+        try {
+          await client.setLabels(
+            row.externalId!,
+            {
+              labels: row.labels ?? {},
+              ...(row.labelsApplied !== undefined ? { previous: row.labelsApplied } : {}),
+            },
+            context,
+            row.id,
+          );
+        } catch (error) {
+          if (!isComputeError(error, 'NOT_FOUND')) labelFailure = error;
+        }
       machine = await client.get(row.externalId!, context);
     } else machine = await client.get(row.externalId!, context);
   } catch (error) {
@@ -884,6 +919,31 @@ async function reconcileProvider(
     }
     const reported = machineStates[machine.state];
     const machineKnown = current.externalId !== undefined;
+    // (U-04) The labels the provider now holds: what create or setLabels wrote (the planned row's, since the
+    // version guard above says nothing changed since); a refused write stays pending, with a condition.
+    const labelsWritten =
+      action.kind === 'create' || (action.kind === 'labels' && labelFailure === undefined);
+    const machineConditions =
+      action.kind !== 'labels'
+        ? conditions
+        : labelFailure === undefined
+          ? withoutCondition(conditions, labelsNotAppliedCondition)
+          : withCondition(
+              conditions,
+              {
+                type: labelsNotAppliedCondition,
+                status: 'true',
+                reason: isComputeError(labelFailure) ? labelFailure.code : 'PROVIDER_ERROR',
+                message: String((labelFailure as Error)?.message ?? labelFailure).slice(0, 500),
+              },
+              now,
+            );
+    // (U-04) The disks the provider reports, kept for the instance's view.
+    const disks =
+      machine.disks !== undefined &&
+      JSON.stringify(machine.disks) !== JSON.stringify(current.disks ?? null)
+        ? machine.disks.map((disk) => ({ ...disk }))
+        : undefined;
     // (A4) Polling settles the provider-event marks: a machine read running well past a pending
     // interruption's deadline loses them even when the running event never came.
     const settled = await convergeProviderMarks(
@@ -891,7 +951,7 @@ async function reconcileProvider(
       tx,
       account,
       { id: machine.id, running: reported === 'running' },
-      conditions,
+      machineConditions,
       now,
     );
     await tx.query('SAVEPOINT vps_external_id');
@@ -901,6 +961,8 @@ async function reconcileProvider(
         externalId: machine.id,
         addresses: machine.addresses,
         reportedState: reported ?? null,
+        ...(labelsWritten ? { labelsApplied: row.labels ?? null } : {}),
+        ...(disks !== undefined ? { disks } : {}),
       });
       await tx.query('RELEASE SAVEPOINT vps_external_id');
     } catch (error) {
@@ -974,7 +1036,12 @@ async function reconcileProvider(
         // a recovered instance opens a new interval at its recovery (the lost span is not billed).
         if (!unbilledStates.has(current.state))
           await openInterval(tx, current, reported, deps.clock.now(), deps, machine);
-        if (current.state === current.desiredState) return now + pollSteadyMs;
+        // (U-04) Labels still to write (an attached machine just adopted) are written on the next pass, soon; a
+        // refused write waits for the steady poll.
+        if (current.state === current.desiredState)
+          return current.labelsPending && labelFailure === undefined
+            ? now + pollTransitionalMs
+            : now + pollSteadyMs;
       }
       return now + pollTransitionalMs;
     } catch (error) {

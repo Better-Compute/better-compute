@@ -11,6 +11,7 @@ Starts a sandbox from a template after one IAM decision on the draft, claiming a
 - **Lifetime.** `ttlSeconds` defaults to the template's `defaultTtlSeconds` and may not exceed its `maxTtlSeconds` (`INVALID_INPUT`). `expiresAt` is set when the sandbox is admitted.
 - **Errors.** `NOT_FOUND` for a template missing or deleted in the tenant. `INVALID_STATE` when the template's flavor has been archived or removed. On the new-instance path the template's pool, flavor and image are checked again, with the errors of `sandboxTemplates.create`; `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota and `CAPACITY_UNAVAILABLE` when the pool has no free IP address, both keeping the draft.
 - **Waiting.** `wait.timeoutMs` (at most 30 seconds) holds the answer until the sandbox leaves `starting`; a timeout returns it still `starting`, not an error.
+- **Identity.** `name`, `metadata` and `labels` take the rules of `instances.create` (`better-compute-` and `bc-` keys reserved) and are part of the request. They stay on the sandbox, never reach its host, and `update` changes them later.
 
 Publishes `sandbox.created` with `warm` and `expiresAt`. `sandbox.ready` follows from the reconciler once the instance first runs.
 
@@ -18,7 +19,7 @@ Publishes `sandbox.created` with `warm` and `expiresAt`. `sandbox.ready` follows
 
 Returns a page of the tenant's sandboxes, newest first, with a `cursor` when more remain.
 
-`scope` defaults to `mine`, the caller's own sandboxes, which needs no per-item check. `all` lists every sandbox of the tenant, each one checked for `compute:sandboxes:read`; those the caller may not read are left out, so a page can hold fewer than `limit` items. Deleted sandboxes are left out unless `deleted` is true, and `templateId` keeps one template's sandboxes. `limit` is 1 to 200 (default 50); `cursor` is the last sandbox id of the previous page. Drafts are never listed. Each item carries `identityRebound` as `get` describes.
+`scope` defaults to `mine`, the caller's own sandboxes, which needs no per-item check. `all` lists every sandbox of the tenant, each one checked for `compute:sandboxes:read`; those the caller may not read are left out, so a page can hold fewer than `limit` items. Deleted sandboxes are left out unless `deleted` is true, `templateId` keeps one template's sandboxes, and `labelSelector` (as `instances.list` takes it) keeps those whose labels match. `limit` is 1 to 200 (default 50); `cursor` is the last sandbox id of the previous page. Drafts are never listed. Each item carries `identityRebound` as `get` describes.
 
 ## get
 
@@ -66,3 +67,9 @@ Asks for the sandbox's instance to be deleted and marks the sandbox `deleting`; 
 The instance's `desiredState` becomes `deleted` and the `vps.instances` reconciler releases its allocation, IP lease and quota as for any instance, publishing `instance.deleting` with the `sandboxId`. The call is idempotent: a sandbox already deleting is returned in its current state. Drafts and missing sandboxes are `NOT_FOUND`.
 
 When the instance is gone, the `vps.sandboxes` reconciler marks the sandbox deleted, removes it from the authorization projection and publishes `sandbox.deleted` with `expired: false`. Expiry takes the same path after publishing `sandbox.expired`, and its `sandbox.deleted` carries `expired: true`.
+
+## update
+
+Renames a sandbox and replaces its metadata and labels; returns the sandbox.
+
+At least one of `name`, `metadata` and `labels`, with the rules of `create`; `null` clears a field and `{}` clears metadata or labels, which are replaced as a whole. Decided as `compute:sandboxes:update` on the sandbox. Nothing reaches the host. An update that changes nothing returns the sandbox as it is, with no event; otherwise `sandbox.updated` is published with `changed`. A sandbox being deleted, or deleted, is `INVALID_STATE`; one of another tenant, or none, is `NOT_FOUND`.

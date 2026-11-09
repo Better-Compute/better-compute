@@ -443,7 +443,8 @@ describe('vps() sandboxes surface', () => {
           module: 'vps',
           action: definition.action,
           kind: definition.kind,
-          phase: 'v0.5',
+          // sandboxes.update came with U-04 (name, metadata and labels).
+          phase: group === 'sandboxes' && method === 'update' ? 'v1.0' : 'v0.5',
         });
     expect(module.migrations!.map((migration) => migration.name)).toContain('vps/0004_sandboxes');
     expect(module.reconcilers!.map((reconciler) => reconciler.name)).toContain(sandboxWork);
@@ -2690,6 +2691,81 @@ describe('exec trust', () => {
     expect(() => vps({ images, sandboxExec: { caPublicKey, account: 'Root!' } })).toThrow(
       /Unix account/,
     );
+  });
+});
+
+describe('sandbox name, metadata and labels (U-04)', () => {
+  type Identity = SandboxView & {
+    name?: string;
+    metadata?: Record<string, string>;
+    labels?: Record<string, string>;
+  };
+
+  it('keeps them from create, replaces them through update, and filters lists by label', async () => {
+    const template = await createTemplate();
+    const first = (await createSandbox(template.id, {
+      name: 'Agent run 1',
+      metadata: { task: 'tests' },
+      labels: { agent: 'claude', run: 'nightly' },
+    })) as Identity;
+    expect(first).toMatchObject({
+      name: 'Agent run 1',
+      metadata: { task: 'tests' },
+      labels: { agent: 'claude', run: 'nightly' },
+    });
+    await advance(1_000);
+    // Labels are part of the request: the same key with others is another one.
+    await expect(createSandbox(template.id, { labels: { agent: 'other' } })).rejects.toMatchObject({
+      code: 'CONFLICT',
+    });
+    const other = (await call('sandboxes', 'create', {
+      tenantId: 'acme',
+      templateId: template.id,
+      idempotencyKey: 'sbx-2',
+      labels: { agent: 'other' },
+    })) as Identity;
+
+    recorded.events = [];
+    const updated = (await call('sandboxes', 'update', {
+      tenantId: 'acme',
+      sandboxId: first.id,
+      name: 'Agent run 1 (kept)',
+      labels: { agent: 'claude' },
+      metadata: null,
+    })) as Identity;
+    expect(updated).toMatchObject({ name: 'Agent run 1 (kept)', labels: { agent: 'claude' } });
+    expect(updated.metadata).toBeUndefined();
+    expect(recorded.events).toEqual([
+      expect.objectContaining({
+        type: 'sandbox.updated',
+        data: expect.objectContaining({ changed: ['name', 'metadata', 'labels'] }),
+      }),
+    ]);
+    // Nothing to change: no event.
+    await call('sandboxes', 'update', { tenantId: 'acme', sandboxId: first.id, labels: { agent: 'claude' } });
+    expect(recorded.events).toHaveLength(1);
+
+    const listed = async (labelSelector: string) =>
+      ((await call('sandboxes', 'list', { tenantId: 'acme', labelSelector })) as { items: Identity[] }).items.map(
+        (item) => item.id,
+      );
+    expect(await listed('agent=claude')).toEqual([first.id]);
+    expect(await listed('agent in (claude,other)')).toEqual([other.id, first.id]);
+    expect(await listed('!run')).toEqual([other.id, first.id]);
+
+    // Reserved keys, bad names, an empty update, and a deleted sandbox are refused.
+    const update = (extra: Record<string, unknown>) =>
+      call('sandboxes', 'update', { tenantId: 'acme', sandboxId: first.id, ...extra });
+    await expect(update({ labels: { 'bc-x': 'y' } })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(update({ metadata: { 'better-compute-x': 'y' } })).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+    await expect(update({ name: '\u0000' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(update({})).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await call('sandboxes', 'delete', { tenantId: 'acme', sandboxId: other.id });
+    await expect(
+      call('sandboxes', 'update', { tenantId: 'acme', sandboxId: other.id, name: 'x' }),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE' });
   });
 });
 

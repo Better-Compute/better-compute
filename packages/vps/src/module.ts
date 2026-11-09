@@ -255,6 +255,16 @@ import {
 } from './images.js';
 import { vpsMigrations } from './migrations.js';
 import { listProviderClusters } from './provider-clusters.js';
+import {
+  listIssuedInstances,
+  parseIssuedInstances,
+  type IssuedInstancesInput,
+} from './instance-listing.js';
+import {
+  parseUpdateInstance,
+  updateInstanceIdentity,
+  type UpdateInstanceInput,
+} from './instance-update.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
 import {
   describeCreateInstance,
@@ -302,6 +312,9 @@ import {
   templatePool,
   templateSecretRefs,
   updateTemplate,
+  parseUpdateSandbox,
+  updateSandbox,
+  type UpdateSandboxInput,
   type CreateSandboxInput,
   type ExtendSandboxInput,
   type ListSandboxesInput,
@@ -663,6 +676,10 @@ export type VpsApi = {
     attach: MethodDefinition<AttachInstanceInput, Instance>;
     detach: MethodDefinition<InstanceRef, Instance>;
     reboot: MethodDefinition<RebootInstanceInput, Instance>;
+    /** (U-04) Renames an instance, replaces its metadata and labels; the platform records `issuedBy`. */
+    update: MethodDefinition<UpdateInstanceInput, Instance>;
+    /** (U-04) Root only: the instances the platform issued to other tenants, across tenants. */
+    issued: MethodDefinition<IssuedInstancesInput, { items: Instance[]; cursor?: string }>;
   };
   flavors: {
     list: MethodDefinition<PoolInput, { items: (FlavorRecord & { estimate?: FlavorEstimate })[] }>;
@@ -737,6 +754,8 @@ export type VpsApi = {
     extend: MethodDefinition<ExtendSandboxInput, Sandbox>;
     snapshot: MethodDefinition<SnapshotSandboxInput, SandboxSnapshot>;
     delete: MethodDefinition<SandboxRef, Sandbox>;
+    /** (U-04) Renames a sandbox, replaces its metadata and labels. */
+    update: MethodDefinition<UpdateSandboxInput, Sandbox>;
   };
   sandboxTemplates: {
     create: MethodDefinition<TemplateInput, SandboxTemplate>;
@@ -1721,6 +1740,25 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         validate: describedBy(rebootSchema, parseReboot),
         handler: (context, input) => rebootInstance(depsOf(context), context.sql, input),
       }),
+      // (U-04) Identity: name, metadata, labels (written on a provider machine by the reconciler) and the
+      // platform's issuedBy (root callers only, refused before any decision).
+      update: defineMethod<UpdateInstanceInput, Instance>({
+        action: 'compute:instances:update',
+        kind: 'mutation',
+        resource: instanceResource,
+        validate: describedBy(schemas.updateInstance, parseUpdateInstance),
+        handler: (context, input) =>
+          updateInstanceIdentity(depsOf(context), context, context.sql, input),
+      }),
+      // (U-04) Root only: the platform's issued instances across tenants (the fleet resolves in the root tenant).
+      issued: defineMethod<IssuedInstancesInput, { items: Instance[]; cursor?: string }>({
+        action: 'compute:instances:read',
+        kind: 'read',
+        resource: () => ({ type: 'fleet', id: fleetResourceId }),
+        validate: describedBy(schemas.issuedInstances, parseIssuedInstances),
+        handler: (context, input) =>
+          listIssuedInstances(context.sql, input, context.iam.rootTenantId),
+      }),
     },
     flavors: {
       list: defineMethod({
@@ -2418,6 +2456,14 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         resource: sandboxResource,
         validate: describedBy(schemas.sandbox, parseSandboxRef),
         handler: (context, input) => deleteSandbox(depsOf(context), context.sql, input),
+      }),
+      // (U-04) Name, metadata and labels; nothing reaches the host.
+      update: defineMethod<UpdateSandboxInput, Sandbox>({
+        action: 'compute:sandboxes:update',
+        kind: 'mutation',
+        resource: sandboxResource,
+        validate: describedBy(schemas.updateSandbox, parseUpdateSandbox),
+        handler: (context, input) => updateSandbox(depsOf(context), context.sql, input),
       }),
     },
     sandboxTemplates: {
