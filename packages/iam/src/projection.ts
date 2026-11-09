@@ -48,7 +48,7 @@ export type ResolveOutcome =
   | { status: 'unavailable' };
 
 export interface AuthzProjection {
-  /** Loaded and not stopped: until then the resolver denies. */
+  /** Loaded, not stopped, and tailed within `maxStalenessMs`: until then the resolver denies. */
   readonly ready: boolean;
   readonly size: number;
   readonly cursor: ChangeCursor | undefined;
@@ -84,6 +84,12 @@ export interface AuthzProjectionOptions {
   pollMs?: number;
   /** Changes read per tail query. Default 1000. */
   batch?: number;
+  /**
+   * How long the tail may keep failing before the projection stops answering (default 30 000 ms). Past it
+   * the projection is not ready, so the resolver denies instead of deciding on owners, parents and
+   * attributes of unknown age; the tail keeps trying, and the first pass that works reloads every row.
+   */
+  maxStalenessMs?: number;
   clock?: Clock;
   onError?(error: unknown): void;
 }
@@ -96,6 +102,12 @@ export function createAuthzProjection(options: AuthzProjectionOptions = {}): Aut
   const missTimeoutMs = options.missTimeoutMs ?? 20;
   const pollMs = options.pollMs ?? 1000;
   const batch = options.batch ?? 1000;
+  const maxStalenessMs = options.maxStalenessMs ?? 30_000;
+  const wallNow = () => options.clock?.now() ?? Date.now();
+  /** When the rows were last known to match the source (a load or a clean tail pass). */
+  let syncedAt = 0;
+  /** The tail failed for longer than `maxStalenessMs`: not ready until a full reload works. */
+  let stale = false;
   const rows = new Map<string, ProjectionRow>();
   // (type, id) → tenants holding a row, so remove() without a tenant is not a scan.
   const views = new Map<string, Set<string>>();
@@ -228,6 +240,8 @@ export function createAuthzProjection(options: AuthzProjectionOptions = {}): Aut
       for (const row of loaded.rows) put(row);
       cursor = loaded.cursor;
       ready = true;
+      stale = false;
+      syncedAt = wallNow();
     },
     sync,
     async refresh(type, id, tenantId) {
@@ -238,7 +252,16 @@ export function createAuthzProjection(options: AuthzProjectionOptions = {}): Aut
       await this.load();
       if (timer) return;
       timer = setInterval(() => {
-        sync().catch((error: unknown) => options.onError?.(error));
+        // After an outage past the bound, the rows are of unknown age and changes may have been pruned
+        // behind the cursor: only a full reload makes the projection trustworthy (and ready) again.
+        const pass = stale ? this.load() : sync().then(() => void (syncedAt = wallNow()));
+        pass.catch((error: unknown) => {
+          options.onError?.(error);
+          if (!stale && wallNow() - syncedAt > maxStalenessMs) {
+            stale = true;
+            ready = false;
+          }
+        });
       }, pollMs);
       timer.unref?.();
     },
@@ -250,6 +273,7 @@ export function createAuthzProjection(options: AuthzProjectionOptions = {}): Aut
     setSource(next) {
       source = next;
       ready = false;
+      stale = false;
       cursor = undefined;
     },
   };

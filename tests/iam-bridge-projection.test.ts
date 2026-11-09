@@ -165,6 +165,54 @@ describe('createAuthzProjection over PostgreSQL', () => {
     expect(projection.get('pool', 'q', 'ten_a')).toBeDefined();
     expect(Object.isFrozen(projection.get('pool', 'q', 'ten_a'))).toBe(true);
   });
+
+  it('stops answering once its tail has failed past the staleness bound, and reloads when it works again', async () => {
+    await write((tx) => upsert(tx, pool('pool_a', 'ten_a', { region: 'eu' })));
+    const real = sqlProjectionSource(db);
+    let down = false;
+    let now = 1_000_000;
+    const errors: unknown[] = [];
+    const flaky: ProjectionSource = {
+      load: () => (down ? Promise.reject(new Error('replica down')) : real.load()),
+      changes: (cursor, limit) => (down ? Promise.reject(new Error('replica down')) : real.changes(cursor, limit)),
+      get: (type, id, tenantId) => (down ? Promise.reject(new Error('replica down')) : real.get(type, id, tenantId)),
+    };
+    const projection = createAuthzProjection({
+      source: flaky,
+      pollMs: 5,
+      maxStalenessMs: 10_000,
+      clock: { now: () => now },
+      onError: (error) => errors.push(error),
+    });
+    const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    await projection.start();
+    try {
+      expect(await projection.resolve('pool', 'pool_a', 'ten_a')).toMatchObject({ status: 'hit' });
+      // The source goes away. Within the bound the rows it has still answer.
+      down = true;
+      now += 5_000;
+      await wait(40);
+      expect(errors.length).toBeGreaterThan(0);
+      expect(projection.ready).toBe(true);
+      expect(await projection.resolve('pool', 'pool_a', 'ten_a')).toMatchObject({ status: 'hit' });
+      // Past it, they are of unknown age: it used to stay ready and keep deciding on them indefinitely.
+      now += 6_000;
+      await wait(40);
+      expect(projection.ready).toBe(false);
+      expect(await projection.resolve('pool', 'pool_a', 'ten_a')).toEqual({ status: 'unavailable' });
+      // While it was away the row changed. When the source is back the projection reloads everything.
+      await write((tx) => upsert(tx, pool('pool_a', 'ten_a', { region: 'us' })));
+      down = false;
+      await wait(60);
+      expect(projection.ready).toBe(true);
+      expect(await projection.resolve('pool', 'pool_a', 'ten_a')).toMatchObject({
+        status: 'hit',
+        row: { attributes: { region: 'us' } },
+      });
+    } finally {
+      projection.stop();
+    }
+  });
 });
 
 describe('computeResolver', () => {
