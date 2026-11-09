@@ -157,6 +157,7 @@ import {
   parseResize,
   prepareCreateInstance,
   readInstance,
+  reapInstanceDrafts,
   resizeInstance,
   setPower,
   visibleVpsPool,
@@ -3295,6 +3296,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         periodic: [{ key: 'all', every: '1m' }],
         async run(context) {
           await context.sql.transaction((tx) => sweepSuspendedOffers(tx, depsOf(context)));
+          // Drafts a refused create left behind (they block deleting their network or account).
+          await context.sql.transaction((tx) => reapInstanceDrafts(depsOf(context), tx));
           return 'DONE';
         },
       },

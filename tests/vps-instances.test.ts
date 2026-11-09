@@ -41,6 +41,7 @@ import {
   instanceWork,
   maxPreemptedReplacements,
   preemptedBackoffMs,
+  reapInstanceDrafts,
   reportInstances,
   setIpPool,
   vps,
@@ -792,6 +793,36 @@ describe('hosted instances', () => {
     await expect(
       call('instances', 'create', createHosted({ flavor: 'gpu1.l40s', idempotencyKey: 'g3' })),
     ).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED' });
+  });
+
+  it('collects the draft a refused create leaves behind, once it is a day old', async () => {
+    await call('instances', 'create', createHosted({ flavor: 'gpu1.l40s', idempotencyKey: 'g1' }));
+    await call('instances', 'create', createHosted({ flavor: 'gpu1.l40s', idempotencyKey: 'g2' }));
+    await expect(
+      call('instances', 'create', createHosted({ flavor: 'gpu1.l40s', idempotencyKey: 'refused' })),
+    ).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED' });
+    const drafts = async () =>
+      (await db.query<{ id: string }>(`SELECT id FROM instances WHERE draft ORDER BY id`)).rows.map((row) => row.id);
+    // The refusal left its draft: invisible to reads, but a row all the same.
+    const [left] = await drafts();
+    expect(left).toBeDefined();
+    expect(((await call('instances', 'list', { tenantId: 'acme' })) as { items: View[] }).items.map((item) => item.id)).not.toContain(left);
+    const deps = { authz: moduleContext(db).authz };
+    // Young drafts are a create in progress: never touched.
+    recorded.removed = [];
+    expect(await db.transaction((tx) => reapInstanceDrafts(deps, tx))).toBe(0);
+    expect(await drafts()).toEqual([left]);
+    clock.advance(25 * 3_600_000);
+    await setSimClock(db, clock.now());
+    expect(await db.transaction((tx) => reapInstanceDrafts(deps, tx))).toBe(1);
+    expect(await drafts()).toEqual([]);
+    expect(recorded.removed).toEqual([{ type: 'instance', id: left, tenantId: 'acme' }]);
+    // The admitted instances are untouched, and the same request can be made again from nothing.
+    expect(((await call('instances', 'list', { tenantId: 'acme' })) as { items: View[] }).items).toHaveLength(2);
+    await expect(
+      call('instances', 'create', createHosted({ flavor: 'gpu1.l40s', idempotencyKey: 'refused' })),
+    ).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED' });
+    expect(await drafts()).toHaveLength(1);
   });
 
   it('marks instances on a lost host lost, and recreates them when the pool says so', async () => {

@@ -2342,6 +2342,52 @@ export async function upsertInstanceAuthz(
   });
 }
 
+/** How old an instance draft is before `reapInstanceDrafts` removes it (a day). */
+export const instanceDraftMaxAgeSeconds = 86_400;
+
+/**
+ * Removes instance drafts that were never admitted. `instances.create` writes its draft in one transaction
+ * and admits it in the next: a create refused there (quota, a flavor allowlist, the admission policy, the
+ * budget) leaves the draft behind, and nothing ever collected it. A draft is invisible to `get`, `list` and
+ * `delete`, yet it counted as a live instance of its network, subnet and provider account (which then could
+ * not be deleted) and held its placement group's strategy. A draft holds no quota, allocation or machine,
+ * so it is deleted outright with its authz row; a retry of its request starts again from nothing.
+ *
+ * At most `batch` per call, oldest first; returns how many went. A draft another row still refers to is
+ * left for the next pass.
+ */
+export async function reapInstanceDrafts(
+  deps: Pick<InstanceDeps, 'authz'>,
+  tx: SqlTx,
+  options: { olderThanSeconds?: number; batch?: number } = {},
+): Promise<number> {
+  const olderThan = options.olderThanSeconds ?? instanceDraftMaxAgeSeconds;
+  const { rows } = await tx.query<{ id: string; tenant_id: string }>(
+    `SELECT id, tenant_id FROM instances
+      WHERE draft AND state = 'pending' AND external_id IS NULL AND node_id IS NULL
+        AND allocation_id IS NULL AND quota_charged IS NULL
+        AND created_at < compute_now() - make_interval(secs => $1::int)
+      ORDER BY created_at, id LIMIT $2 FOR UPDATE SKIP LOCKED`,
+    [olderThan, options.batch ?? 200],
+  );
+  let reaped = 0;
+  for (const row of rows) {
+    await tx.query('SAVEPOINT vps_reap_draft');
+    try {
+      await tx.query(`DELETE FROM instances WHERE id = $1 AND draft`, [row.id]);
+      await tx.query('RELEASE SAVEPOINT vps_reap_draft');
+    } catch (error) {
+      await tx.query('ROLLBACK TO SAVEPOINT vps_reap_draft');
+      // Something still names it (a foreign key): not a plain refused draft after all. Leave it.
+      if ((error as { code?: unknown }).code !== '23503') throw error;
+      continue;
+    }
+    await deps.authz.remove(tx, { type: 'instance', id: row.id, tenantId: row.tenant_id });
+    reaped++;
+  }
+  return reaped;
+}
+
 /**
  * A tenant's instances, newest first; `scope: 'mine'` (the default) filters to the caller's own. Deleted
  * instances are left out unless `state: 'deleted'` asks for them (U-04): the page the per-item checks then
