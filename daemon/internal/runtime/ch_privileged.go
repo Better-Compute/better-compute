@@ -86,6 +86,9 @@ func CHRecord(p CHRootPolicy, id string) (*chRecord, error) {
 	if r.ID != id || r.Managed != chManaged {
 		return nil, fmt.Errorf("instances/%s is not bcd's", id)
 	}
+	if r.Creating {
+		return nil, fmt.Errorf("instances/%s was never finished", id)
+	}
 	if r.UID < vmmUIDBase || r.UID >= vmmUIDBase+vmmUIDs {
 		return nil, fmt.Errorf("VMM user %d is outside bcd's range", r.UID)
 	}

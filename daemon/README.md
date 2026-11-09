@@ -426,6 +426,14 @@ events. It never drops a hold on its own.
   - A directory with a `disk.qcow2`, no marker and no domain is the tenant's data: Ensure fails with
     `bcd does not create a disk over it`. Define the domain again from
     `instances/<id>/domain.xml`, or remove the directory to start the instance afresh.
+  - A cloud-hypervisor instance's directory appears with its `vm.json` already in it, marked
+    `"creating": true` until Ensure has finished. An unfinished instance is not listed and never
+    started. It is removed when bcd next starts, or made again by the next pass that still wants it.
+    A directory under `instances/` without a `vm.json` is not bcd's and stays refused (`is not
+    bcd's`): only one left by a bcd from before this rule can be in that state, and it is removed by
+    hand.
+- *Stopping.* On SIGTERM (and before a self-update's exec) the converger pass under way is cancelled
+  and bcd waits up to 20 s for it to return, so a download or an instance being created undoes itself.
 - *Admission.* bcd admits a start only when the host has memory for it:
   - MemTotal minus the hugetlb pool and 1 GiB, less what running and paused domains hold (their
     memory plus VMM overhead);

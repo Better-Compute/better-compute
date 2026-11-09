@@ -84,6 +84,10 @@ type Options struct {
 	Lanes map[dispatch.Lane]dispatch.LaneConfig
 	// ConvergeRetry re-runs a converger pass that is still progressing (default 30 s).
 	ConvergeRetry time.Duration
+	// ShutdownGrace is how long Run waits, once it is stopping, for the converger pass under way to
+	// return (default 20 s): the pass is cancelled, and what it was in the middle of (a download, an
+	// instance being created) undoes itself instead of being cut off by the process exiting.
+	ShutdownGrace time.Duration
 	// WelcomeTimeout drops a session that sends no Welcome (default 30 s).
 	WelcomeTimeout time.Duration
 	// Kinds replaces the built-in command kinds (tests).
@@ -266,6 +270,9 @@ func New(o Options) (*Agent, error) {
 	if o.ConvergeRetry == 0 {
 		o.ConvergeRetry = 30 * time.Second
 	}
+	if o.ShutdownGrace == 0 {
+		o.ShutdownGrace = 20 * time.Second
+	}
 	if o.HealthInterval == 0 {
 		o.HealthInterval = 30 * time.Second
 	}
@@ -428,7 +435,21 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.loadSpec(); err != nil {
 		a.log.Warn("the stored spec is unusable; asking for a full one", "error", err.Error())
 	}
-	go a.convergeLoop(ctx)
+	converger := make(chan struct{})
+	go func() {
+		defer close(converger)
+		a.convergeLoop(ctx)
+	}()
+	// However Run returns, the pass under way is cancelled and waited for (bounded): bcd does not
+	// exit, or exec its next version, in the middle of a step that cleans up after itself.
+	defer func() {
+		a.stop()
+		select {
+		case <-converger:
+		case <-time.After(a.o.ShutdownGrace):
+			a.log.Warn("the converger pass under way did not stop in time; exiting without it", "waited", a.o.ShutdownGrace.String())
+		}
+	}()
 	go a.sweepLoop(ctx)
 	go a.healthLoop(ctx)
 	go a.watchXids(ctx)
