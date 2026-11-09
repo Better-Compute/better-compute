@@ -116,15 +116,43 @@ async function bmc(
   const node = known ?? (await metalNode(context));
   if (!node.bmc_credentials) throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no BMC credentials`);
   assertStoredCredentialRef(node);
-  const outcome = await awaitCommand(context, {
-    nodeId: await siteAgent(context, node.node_id),
-    kind,
-    payload: bmcOperationJson(node, operation, args),
-    ...(key ? { key } : {}),
-    // Any site agent can reach the BMC: after a failover, what the old agent did stands (§8.5).
-    reroutable: true,
-  });
-  return bmcResult(outcome).result;
+  const cutsPower = kind === 'bmc.power' && operation === 'power.setPower' && endsRunningSystem(args.action);
+  try {
+    const outcome = await awaitCommand(context, {
+      nodeId: await siteAgent(context, node.node_id),
+      kind,
+      payload: bmcOperationJson(node, operation, args),
+      ...(key ? { key } : {}),
+      // Any site agent can reach the BMC: after a failover, what the old agent did stands (§8.5).
+      reroutable: true,
+    });
+    return bmcResult(outcome).result;
+  } finally {
+    // Whatever became of the command (still on its way, done, lost): from when it was sent, a session
+    // the machine had before is not proof of a running ramdisk (ramdiskConnected).
+    if (cutsPower) await recordPowerCut(context.sql, node, stepCommandKey(context, key));
+  }
+}
+
+/** BMC power actions that end whatever the machine is running. */
+export function endsRunningSystem(action: unknown): boolean {
+  return action === 'off' || action === 'graceful-off' || action === 'reset' || action === 'graceful-restart' || action === 'cycle';
+}
+
+/**
+ * Records when a power-cutting command of this key was sent to one of the site's agents
+ * (`metal_nodes.power_cut_at`): its enqueue time, or its release time if it waited for a batch
+ * approval. Nothing if no such command exists yet.
+ */
+async function recordPowerCut(sql: SqlTx, node: Pick<MetalNodeRow, 'node_id' | 'site_id'>, commandKey: string): Promise<void> {
+  await sql.query(
+    `UPDATE metal_nodes m SET power_cut_at = GREATEST(COALESCE(m.power_cut_at, sent.at), sent.at)
+       FROM (SELECT max(GREATEST(c.created_at, CASE WHEN c.not_before = 'infinity' THEN c.created_at ELSE c.not_before END)) AS at
+               FROM commands c JOIN nodes agent ON agent.id = c.node_id
+              WHERE agent.site_id = $2 AND c.idempotency_key = $3) sent
+      WHERE m.node_id = $1 AND sent.at IS NOT NULL AND (m.power_cut_at IS NULL OR m.power_cut_at < sent.at)`,
+    [node.node_id, node.site_id, commandKey],
+  );
 }
 
 // Payloads are the proto3 JSON of each kind's message (`metalPayloads`): the runtime packs them.
@@ -265,11 +293,16 @@ async function sanbootActive(context: StepContext): Promise<boolean> {
 
 const powerActions = ['on', 'off', 'graceful-off', 'reset', 'graceful-restart', 'cycle', 'nmi'] as const;
 
-/** Is the machine's ramdisk connected right now? */
+/**
+ * Is the machine's ramdisk connected right now? A session counts only if it connected since metal
+ * last cut the machine's power (`metal_nodes.power_cut_at`): after a hard power-off the gateway keeps
+ * showing the old session until its ping times out (about 20 s), and that ramdisk is gone.
+ */
 async function ramdiskConnected(context: StepContext, nodeId: string): Promise<boolean> {
   const { rows } = await context.sql.query<{ ok: boolean }>(
-    `SELECT (role = 'ramdisk' AND connected_at IS NOT NULL AND (disconnected_at IS NULL OR connected_at > disconnected_at)) AS ok
-       FROM node_sessions WHERE node_id = $1`,
+    `SELECT (s.role = 'ramdisk' AND s.connected_at IS NOT NULL AND (s.disconnected_at IS NULL OR s.connected_at > s.disconnected_at)
+             AND (m.power_cut_at IS NULL OR s.connected_at >= m.power_cut_at)) AS ok
+       FROM node_sessions s LEFT JOIN metal_nodes m ON m.node_id = s.node_id WHERE s.node_id = $1`,
     [nodeId],
   );
   return rows[0]?.ok === true;

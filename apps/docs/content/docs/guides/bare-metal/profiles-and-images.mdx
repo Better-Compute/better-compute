@@ -161,7 +161,11 @@ ships `remediate-reboot@1` and `remediate-gpu-reset@1` for health remediation.
 | `wait.agentJoined` | control plane | `role`: `node`, `ramdisk` or `site` | 15m |
 | `wait.generationObserved` | control plane | none | 10m |
 
-- `metal.ensureRamdisk` does nothing when the machine's ramdisk is already connected. Otherwise it
+- `metal.ensureRamdisk` does nothing when the machine's ramdisk is already connected. Connected means
+  since metal last cut the machine's power (`metal_nodes.power_cut_at`: the last `off`, `graceful-off`,
+  `reset`, `graceful-restart` or `cycle` a step or `metal.power` sent): a session from before a hard
+  power-off still looks connected until the gateway's ping times out, and is not taken for a running
+  ramdisk. Otherwise it
   sets one-time PXE, sends the boot entries and power-cycles the machine, then waits for the ramdisk
   to join. A machine known only by its product UUID is first power-cycled into PXE with no entry, so
   its site agent lists it; the step then waits until the MAC [PXE discovery](/docs/guides/bare-metal/sites#discovering-new-machines)

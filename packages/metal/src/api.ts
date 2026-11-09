@@ -39,7 +39,7 @@ import { stateProfile, unrescueProfile } from './profiles.js';
 import { metalWorkKind, unrescuePhase } from './reconcile.js';
 import { schemas } from './schemas.js';
 import { assertCredentialRef, assertStoredCredentialRef } from './secret-refs.js';
-import { bmcOperationJson, metalSteps } from './steps.js';
+import { bmcOperationJson, endsRunningSystem, metalSteps } from './steps.js';
 import { applyProvisionVerb, readMetalNode, resolveDriverBindings, setMetalWorkflow, type MetalNodeRow } from './store.js';
 
 // The `metal` group of PLAN.md §9.2 (v0.2 rows). Every verb checks the move against core's
@@ -659,6 +659,9 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
               notAfter: (batch?.held ? await heldBatchNotAfter(tx, batch.batchId) : undefined) ?? rows[0]!.now.getTime() + 5 * 60_000,
               ...(batch ? { batchId: batch.batchId } : {}),
             });
+            // A ramdisk session from before this is no proof of a running ramdisk any more (metal.ensureRamdisk).
+            if (endsRunningSystem(input.action))
+              await tx.query('UPDATE metal_nodes SET power_cut_at = compute_now() WHERE node_id = $1', [node.node_id]);
             return { commandId: command.id, ...(batch ? { batchId: batch.batchId, held: batch.held } : {}) };
           }),
       }),

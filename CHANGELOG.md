@@ -191,6 +191,12 @@ All notable changes to the better-compute packages are documented here. The form
   operator can settle), the step waits outside its timeout, for up to 7 days; the node keeps its state and is not
   power-cycled again, `confirmMac` wakes the workflow, and the 20 minutes count from the confirmation. New for step
   authors: `stepWaiting(until)` next to `stepNotReady(ms)`.
+- **`metal.ensureRamdisk` no longer trusts a ramdisk that was just powered off** (`@better-compute/metal`). After a
+  hard power-off the gateway shows the old session as connected until its ping times out (about 20 s); a workflow
+  that started in that window took it for a running ramdisk and sent its next command to a machine that was off.
+  Metal now records when it last cut a machine's power (migration `metal/0009_power_cut`,
+  `metal_nodes.power_cut_at`, set by `power.setPower`, the step's own power cycles and `metal.power`), and a ramdisk
+  session counts only if it connected since.
 - **BMC credential rotation no longer deletes the enrollment secret** (`@better-compute/metal`).
   `metal.rotateBmcCredential` purged every superseded credential from the secret store, including the one the
   machine was enrolled with: two machines enrolled with one rack-wide `secret://` broke each other on the first

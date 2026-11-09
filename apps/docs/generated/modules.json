@@ -83,7 +83,8 @@
         "metal/0005_batch",
         "metal/0006_bmc_driver_options",
         "metal/0007_discovered",
-        "metal/0008_mac_source"
+        "metal/0008_mac_source",
+        "metal/0009_power_cut"
       ]
     },
     {
