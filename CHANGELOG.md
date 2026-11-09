@@ -142,8 +142,101 @@ All notable changes to the better-compute packages are documented here. The form
     changing `gpuModel`. A deleted instance refunds its recorded charge before its allocation is released.
   - `@better-compute/testing`: `computeFixture({ capacity })`.
 
+- **Client: `paginate()` and `NETWORK_ERROR`** (`@better-compute/client`). `paginate(list, input, options?)` is an
+  async iterator over every item of a list method, following each page's `cursor` and fetching a page only when the
+  iteration reaches it (`for await (const node of paginate(client.nodes.list, { tenantId }))`); a page that does not
+  advance ends it with `INVALID_RESPONSE`. A transport failure (DNS, a refused connection, TLS, a redirect) is a
+  `ComputeClientError` with code `NETWORK_ERROR`, status 0, the request id and the original error as `cause`, where
+  it used to be fetch's bare `TypeError`; the caller's own abort is passed through unchanged.
+- **One address classifier for egress checks** (`@better-compute/core`, `vps`, `events`). core gains
+  `parseAddress`, `addressFamily`, `classifyAddress`, `parseCidr`, `addressInRange`, `embeddedV4`,
+  `nonPublicRanges` and `isInternalHostName` (pure, browser-safe): the classifier the provider endpoint policy had,
+  now shared with the webhook URL check. `AddressCategory` moved to core; vps re-exports it.
+- **Gateway limits and what they show** (`@better-compute/gateway`). New options `joinsPerSecond`, `helloTimeoutMs`
+  (10 s) and `maxQueuedFrames` (4 096); `GatewayStatus.pendingStreams`; the handshake outcome `timeout`.
+  `gatewayRenewHandler` takes `attemptsPerSecond` (50).
+- **`EnqueueCommand.requestHash`** (`@better-compute/core`, `server`; migration `core/0061_command_request_hash`). A
+  caller's fingerprint of its request, stored with the command: the same idempotency key with another fingerprint is
+  `CONFLICT` (`details.reason: 'idempotency-key-reused'`). Optional; without it the kind is compared as before.
+- **`ProviderResources.releasable(kind)`** (`@better-compute/core`). Optional and pure: a provider says which kinds
+  `release` works for, so a release it cannot do is refused up front.
+- **`WatchOptions.onError`** (`@better-compute/events`), **`RevocationFeedOptions.fullReloadMs`**
+  (`@better-compute/pki`), **`AuthzProjectionOptions.maxStalenessMs`** (`@better-compute/iam`) and
+  **`reapInstanceDrafts`**, **`upsertInstanceAuthz`**, **`lostMachineWindowMs`** (`@better-compute/vps`): see the
+  fixes they belong to below.
+
 ### Fixed
 
+- **Webhook URLs could reach internal addresses** (`@better-compute/events`). The SSRF check judged addresses as
+  text: `https://[::ffff:10.0.0.5]/` becomes `::ffff:a00:5` once parsed, which the dotted-only pattern missed, as it
+  did 6to4 (`2002::/16`) and NAT64 forms, so a tenant webhook could be pointed at private and metadata addresses.
+  Delivery also resolved the host again after checking it (DNS rebinding). Addresses are now judged by value (core's
+  `classifyAddress`), internal host names (single-label, `.local`, `.svc`, …) are refused when a webhook is saved,
+  and the default sender connects to the address the check resolved (`postPinned`). A sender passed as `fetch` is
+  called as before.
+- **One slow webhook endpoint stalled every tenant's deliveries** (`@better-compute/events`). A webhook's claimed
+  rows were sent one after another at up to the timeout each. Its first failure in a pass now ends its turn: the
+  rest go back with their attempt and come due within a minute. Delivery outcomes are written only while the row is
+  still that pass's claim, so a pass that outlived its lease cannot turn a delivered row back to pending.
+- **Outbox retention deleted events the webhooks had not read** (`@better-compute/postgres`). `pruneBehindCursors`
+  floored on `outbox_cursors` only; the webhook fan-out keeps its position in `event_cursors`. With a sink ahead of a
+  fan-out lagging more than `minAgeSeconds`, the rows in between were deleted unread; with no sink the outbox was
+  never pruned. The floor is the slowest cursor of both tables.
+- **The watch stream showed database errors to tenants** (`@better-compute/events`). An unexpected failure was sent
+  verbatim as the SSE error event (a connection failure names hosts and ports). The client now gets `UNAVAILABLE`
+  with a fixed message and the host hears the error through `WatchOptions.onError`. A cursor whose numbers do not fit
+  the columns is `INVALID_INPUT` before any query.
+- **A reused idempotency key answered with the first request's result** (`@better-compute/server`).
+  `commands.run` compared the kind only, so the same key with another payload or batch returned the first command;
+  it is now `CONFLICT`. `secrets.put` answered the same key with another value at the old version, silently
+  dropping a rotation; it is a retry only when the value equals what the current version holds.
+- **`commandBatches.list`, `scope` and `members` paged with `next`** (`@better-compute/server`). Every other list
+  returns `cursor`; a generic loop stopped after the first page. They return `cursor` now, with `next` kept as a
+  deprecated alias of the same value.
+- **Unauthenticated callers could lock nodes out of the gateway** (`@better-compute/gateway`). Join (no client
+  certificate) shared the handshake bucket with session opens, so a flood of joins refused every reconnect; joins
+  have their own bucket. `POST /v1/renew` charged the per-node hourly limit before verifying anything, keyed by the
+  node id of an unverified certificate: six forged requests an hour kept a node from renewing until its certificate
+  expired. Only renewals JoinService granted are counted, and one bucket bounds unverified attempts.
+- **Streams that never said Hello, and streams that outran the gateway** (`@better-compute/gateway`). A stream
+  admitted by `open()` that sent no Hello was never reaped and did not count toward `maxStreams`; it now holds a
+  place and is closed `DEADLINE_EXCEEDED` after `helloTimeoutMs`. A stream's inbound frames queued without limit
+  behind the database; past `maxQueuedFrames` it is closed `RESOURCE_EXHAUSTED`.
+- **A close frame over 125 bytes** (`@better-compute/gateway`). `WsConnection.close` sized the frame from the whole
+  reason but wrote 120 characters of it: a long reason made an illegal control frame the peer refused, losing the
+  status. The reason is cut to 123 UTF-8 bytes on a character boundary.
+- **The MCP handler buffered the whole body before checking its size** (`@better-compute/mcp`). It reads the stream
+  with a byte limit now (it compared UTF-16 length), and refuses a declared `content-length` over it unread.
+- **Deleting an instance could leave its cloud machine running** (`@better-compute/vps`; migration
+  `vps/0124_instance_create_attempted`). A provider create runs outside any transaction, and its answer can be lost
+  (a timeout after the provider accepted, a delete racing it). The row then had no machine id, and the delete
+  finished at once, refunded quota and left the machine running, unbilled. A create whose row changed meanwhile now
+  keeps the machine's id, and a delete with an unanswered create looks the machine up by its ownership label
+  (`ProviderImpl.list` or `discover`) for `lostMachineWindowMs` (3 min) before it finishes. Such a delete can
+  therefore stay `deleting` for up to three minutes where it used to finish immediately.
+- **A hosted instance that could not get an address kept its booking** (`@better-compute/vps`). Placed by the
+  reconciler and then refused (the pool's address range was full), it moved to `error` in the transaction that had
+  just booked its allocation and quota, with no allocation id on the row. Scheduling runs under a savepoint now.
+- **IAM judged instances by the labels they were created with** (`@better-compute/vps`). `instances.update` changed
+  labels without touching the authz projection, and attach never projected labels. `upsertInstanceAuthz` writes the
+  row from the instance as it is; update calls it when labels change, and attach passes its labels to the projection
+  and to the admission policy.
+- **Every provider poll bumped an instance's version** (`@better-compute/vps`). `instances.update` with
+  `expectedVersion` from a form open longer than one poll was always `CONFLICT`. A poll that reads nothing new
+  writes nothing.
+- **Smaller vps fixes.** `LabelsNotApplied` stayed forever once the tenant put the labels back; the warm-pool pass
+  read every warm instance a template ever had; drafts a refused create left behind blocked deleting their network
+  or provider account (collected after a day by `reapInstanceDrafts`); the default `zoneRegion` made a Compute
+  Engine AI zone (`us-south1-ai1b`) its own region.
+- **A node could land in two active rollouts** (`@better-compute/rollout`). Two concurrent `rollouts.create` over the
+  same pools both passed the "already in a rollout" check; creates of one tenant take turns under an advisory lock.
+- **A late row could be destroyed with its history partition** (`@better-compute/postgres`).
+  `dropEmptyHistoryPartitions` locks the partition before checking that it is empty.
+- **A revocation committed late was never learned** (`@better-compute/pki`). The revocation feed tails a 60 s window
+  by the revoking transaction's start time; a revocation committing further behind than that was missed until
+  restart. The feed reads the whole unexpired set again every `fullReloadMs` (5 min).
+- **The authz projection kept answering while its tail failed** (`@better-compute/iam`). After `maxStalenessMs`
+  (30 s) of failed passes it is not ready (the resolver denies), and the first pass that works reloads every row.
 - **Deleting a tenant no longer destroys what it adopted** (`@better-compute/cloud-resources`). The tenant teardown
   marked every live cloud resource for deletion, so a resource the tenant had adopted on its own provider account (a
   production database that existed before better-compute) was deleted at the provider. Adopted resources are now
