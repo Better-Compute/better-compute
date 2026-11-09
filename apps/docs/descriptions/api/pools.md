@@ -2,7 +2,7 @@ A pool groups the nodes of one site under one GPU model, one sharing mode and on
 
 ## list
 
-Returns the pools the tenant owns or is offered, each with `owned`, `archived` and the tenant's own quota rows.
+Returns the pools the tenant owns or is offered, each with `owned`, `archived`, the tenant's own quota rows and, when its offer lists them, the `flavors` it may use.
 
 Archived pools appear only for their owner. After the coarse decision on the tenant, each pool is checked as `compute:pools:read` on the pool, and only the allowed ones are returned.
 
@@ -40,7 +40,9 @@ The call is `NOT_FOUND` when the pool is not visible to the tenant.
 Offers a pool the tenant owns to another tenant with a quota, or updates an existing offer and its quota; returns the pool as that tenant sees it.
 
 - `quota` creates or resizes the offered tenant's quota rows. A new maximum below what is in use is raised to the amount in use.
-- `includeDescendants` and `priority` (default 0) are stored with the offer.
+- `includeDescendants` and `priority` (default 0) are stored with the offer; `offers` lists the offers a tenant inherits through them.
+- `flavors` (1 to 64 flavor names) lists the flavors the tenant may create, and attach machines of, on the pool: `instances.create`, `instances.attach` (the flavor whose offer is the machine's type), `instances.resize` and `sandboxes.create` (the template's flavor) refuse any other with `QUOTA_EXCEEDED` (`details.reason: 'flavor-not-offered'`), for every caller. Leaving it out keeps the stored list; `updateOffer({ flavors: null })` clears it, which allows every flavor again.
+- `quota` may also hold `instances` and `sandboxes`, counted one per instance and per sandbox (see `quotas`).
 - `onBudgetExceeded` (`notify`, `stop-new`, `drain` or `suspend`) and `allowedRegions` (1 to 16 region names) are stored with the offer; leaving one out keeps what the offer already has, so re-offering to change the quota does not clear them. See `updateOffer` for what the policies do. Anything else is `INVALID_INPUT`.
 - `INVALID_STATE` when the pool is archived, when a `timeslice` or `mps` pool or a pool holding `tenant-owned` nodes is offered to anyone but its owner, or when a `policy.singleTenant` pool is offered with `includeDescendants` or is already offered to another tenant.
 - The pool's IAM authz row is written for the offered tenant, with the attributes `gpuModel`, `class`, `sharing`, `region` and `owned`.
@@ -57,12 +59,21 @@ That tenant's quota rows on the pool drop to what is in use, so live reservation
 
 Changes the budget policy and regions of an existing offer, or suspends or lifts it, and returns the pool as the offered tenant sees it. It is the owner's call, decided as `compute:pools:share` on the pool like `offer`; a tenant that is only offered the pool gets `NOT_FOUND`.
 
-- **Fields.** `onBudgetExceeded`, `allowedRegions` and `suspended` are each optional, and a request naming none is `INVALID_INPUT`. `NOT_FOUND` when the pool is not offered to `toTenantId`; a pool has no offer to its owner (`INVALID_INPUT`).
+- **Fields.** `onBudgetExceeded`, `allowedRegions`, `suspended` and `flavors` are each optional, and a request naming none is `INVALID_INPUT`. `flavors` replaces the offer's flavor allowlist (see `offer`); `null` clears it. `NOT_FOUND` when the pool is not offered to `toTenantId`; a pool has no offer to its owner (`INVALID_INPUT`).
 - **Budget policies.** When a budget of the tenant is spent, better-iam's alert applies the policy of each offer to that tenant. `notify` only publishes `quota.budget-exceeded`. `stop-new` and `drain` also make admissions check the tenant's budget, and `drain` cancels the tenant's reservations on the pool that have not started. `suspend` stops spend on the pool: it marks the offer suspended, publishes `quota.budget-suspended`, sets the tenant's running instances in the pool to `desiredState: 'stopped'` with the condition `BudgetSuspended` (the reconciler then stops the machines), and refuses the tenant's new work on the pool with `SPEND_LIMIT_REACHED` (`details.reason: 'offer-suspended'`): creating or attaching an instance, creating a network or reservation, and starting an instance. The stop does not depend on host wiring: the `vps.suspension` reconciler stops, every minute, the running instances of every suspended offer (a stop that failed is retried on the next pass), and the host's budget reaction (vps's `sandboxIamReactions`, in `iamReactions`) only makes it immediate. Sandbox warm pools of a suspended offer are emptied and not refilled. Other sandbox-managed instances follow their sandbox and are not stopped directly.
 - **Suspension.** `suspended: true` suspends the offer by hand, with the same effect as a `suspend` policy: new work is refused and the `vps.suspension` reconciler stops the tenant's running instances in the pool within a minute. `suspended: false` lifts it and restarts nothing: stopped instances stay stopped until the tenant starts them, and `BudgetSuspended` clears on that start. A new alert that finds the budget still spent suspends the offer again.
 - **Regions.** With `allowedRegions`, new work on a pool whose site is in another region is `ACCESS_DENIED` (`details.reason: 'region-not-allowed'`). The site's `iamRegion` is compared, else its `region`; a site with neither match is refused. It applies to instances, reservations, networks and sandboxes created on the pool.
 
 Emits `pool.offer-updated`.
+
+## offers
+
+Returns the offers that reach the tenant, as `items`: its own, and those of its ancestors made with `includeDescendants`. Each item names the pool (`poolId`, and `pool` with its owner, site, class and GPU model), `offeredTo` (the tenant the offer was made to), `inherited` and `depth` (0 for the tenant's own offer, 1 for its parent's, and so on), `includeDescendants`, `priority`, the offer's `flavors`, `allowedRegions`, `onBudgetExceeded` and `suspended`, and the tenant's own quota rows on the pool (never an ancestor's: an inherited offer's limits and usage stay with the tenant it was made to, so an inherited item usually has none).
+
+- **Order.** By `priority`, highest first, then nearest first, then pool id. One item per pool: the tenant's own offer shadows an inherited one, and a nearer ancestor's a farther one's. Archived pools and pools the tenant owns are left out.
+- **Ancestry.** The tenant tree is IAM's: compute asks the host's `capacity({ tenantAncestors })` (`iamTenantAncestors` from `@better-compute/iam`, with a root credential), with no transaction open. Without it, only the tenant's own offers are listed.
+- **Admission.** An inherited offer is a listing only: creating on the pool needs an offer to the tenant itself (`pools.offer`), with its own quota rows.
+- Decided as `compute:pools:read` on the tenant. A read: nothing is written.
 
 ## update
 
@@ -72,6 +83,7 @@ Replaces the policy, the GPU model, or both, of a pool the tenant owns, and retu
 - `policy.billing` is root's, as on `create`: a non-root caller may resend the pool's stored `billing` but not add, change or remove it (`ACCESS_DENIED`).
 - `policy.replacePreempted` must be a boolean, as on `create` (`INVALID_INPUT`). The new value applies to the next preemption.
 - Turning `policy.singleTenant` on is `INVALID_STATE` while more than one tenant, or any tenant with `includeDescendants`, holds an offer.
+- Changing `gpuModel` is `INVALID_STATE` (`details.tenantId`) while GPUs are charged on the pool to a tenant that has a per-model tenant quota row (`gpu.<model>` on `*`), so every refund reaches the row its charge took.
 - A new `migLayout` in a `mig` pool never repartitions booked GPUs; each node takes the new layout once its GPUs are idle. A change to `prewarmImages` refreshes the desired state of the site's agents.
 - The pool's authz rows are refreshed for the owner and every offered tenant.
 

@@ -38,6 +38,8 @@ export * from './discovery.js';
 export * from './provider-events.js';
 export * from './images.js';
 export * from './attach.js';
+export * from './admission.js';
+export * from './address-policy.js';
 export * from './sandboxes.js';
 export * from './snapshots.js';
 export * from './volumes.js';

@@ -238,6 +238,40 @@ CREATE INDEX instances_labels ON instances USING gin (labels jsonb_path_ops) WHE
 CREATE INDEX instances_created ON instances (created_at DESC, id DESC) WHERE NOT draft;`,
 };
 
+/**
+ * (U-02) `instances` and `sandboxes` became counted quota resources. Rows of them that exist already (offers made
+ * with an `instances` limit) start at what is live, so the limit holds from the first create after the upgrade:
+ * every live instance on such a row (created or attached, not a sandbox's or a warm one) and every open sandbox
+ * records the count in its instance's `quota_charged`, which its deletion refunds, and the row's `used` is set to
+ * that count (its `max` raised to it if lower, as `quotas.set` does). Tenant-level (`*`) rows cannot exist yet.
+ */
+export const vpsQuotaCountsMigration: Migration = {
+  name: 'vps/0048_quota_counts',
+  sql: `
+UPDATE instances i
+   SET quota_charged = COALESCE(i.quota_charged, '{}'::jsonb) || '{"instances": 1}'::jsonb
+  FROM quota_usage q
+ WHERE q.tenant_id = i.tenant_id AND q.pool_id = i.pool_id AND q.resource = 'instances'
+   AND NOT i.draft AND i.state <> 'deleted' AND i.sandbox_id IS NULL AND i.warm_template_id IS NULL
+   AND NOT (COALESCE(i.quota_charged, '{}'::jsonb) ? 'instances');
+
+UPDATE instances i
+   SET quota_charged = COALESCE(i.quota_charged, '{}'::jsonb) || '{"sandboxes": 1}'::jsonb
+  FROM sandboxes s, quota_usage q
+ WHERE s.instance_id = i.id AND NOT s.draft AND s.deleted_at IS NULL
+   AND q.tenant_id = s.tenant_id AND q.pool_id = s.pool_id AND q.resource = 'sandboxes'
+   AND i.state <> 'deleted'
+   AND NOT (COALESCE(i.quota_charged, '{}'::jsonb) ? 'sandboxes');
+
+UPDATE quota_usage q SET used = c.n, max = GREATEST(q.max, c.n)
+  FROM (SELECT i.tenant_id, i.pool_id, r.resource, count(*) AS n
+          FROM instances i CROSS JOIN (VALUES ('instances'), ('sandboxes')) AS r(resource)
+         WHERE NOT i.draft AND i.state <> 'deleted' AND i.quota_charged ? r.resource
+         GROUP BY i.tenant_id, i.pool_id, r.resource) c
+ WHERE q.tenant_id = c.tenant_id AND q.pool_id = c.pool_id AND q.resource = c.resource;
+`,
+};
+
 /** The VPS module's migrations, in ledger order. */
 export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsBaseMigration,
@@ -275,6 +309,7 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsInstanceLabelsMigration,
   vpsNetworkAdoptMigration,
   vpsInstanceIdentityMigration,
+  vpsQuotaCountsMigration,
   vpsNetworkZonesMigration,
   vpsSubnetPrivateAccessMigration,
   providerPurchasesMigration,

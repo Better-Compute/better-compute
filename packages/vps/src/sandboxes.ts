@@ -15,7 +15,8 @@ import {
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
-import { budgetAdmissionCheck } from '@better-compute/capacity';
+import { budgetAdmissionCheck, chargeQuota } from '@better-compute/capacity';
+import { admitInstance, admissionPlacement, poolPlacement } from './admission.js';
 import {
   suspendBudgetInstances,
   type BudgetReactionDeps,
@@ -52,6 +53,7 @@ import {
   runtimeTable,
   scheduleHosted,
   sealUserData,
+  shapeFields,
   shapeOf,
   updateInstance,
   visibleVpsPool,
@@ -1525,7 +1527,13 @@ async function createManagedInstance(
     type: 'instance',
     id: row.id,
     tenantId: row.tenantId,
-    attributes: instanceAttributes(shape, template.imageId, image.verified),
+    attributes: instanceAttributes(
+      shape,
+      template.imageId,
+      image.verified,
+      undefined,
+      await admissionPlacement(tx, { poolId: row.poolId, flavor: shape.name }),
+    ),
     parentType: 'pool',
     parentId: row.poolId,
     ownerId: spec.ownerIdentityId,
@@ -1985,7 +1993,13 @@ async function claimWarm(
     type: 'instance',
     id: row.id,
     tenantId: row.tenantId,
-    attributes: instanceAttributes(row.shape, row.imageId, row.image?.verified ?? false),
+    attributes: instanceAttributes(
+      row.shape,
+      row.imageId,
+      row.image?.verified ?? false,
+      undefined,
+      await admissionPlacement(tx, { poolId: row.poolId, flavor: row.shape.name }),
+    ),
     parentType: 'pool',
     parentId: row.poolId,
     ownerId: sandbox.owner_identity_id,
@@ -2021,6 +2035,38 @@ export async function completeCreateSandbox(
           lock: true,
           agentId: raw.agent_id,
         });
+  // (U-02) The template's flavor passes the allowlists, the host's rules run, and the sandbox is counted
+  // (`sandboxes`, before any instance row: counted quota rows lock first). The count rides on its instance's
+  // recorded charge, so it comes back when that instance is deleted.
+  const flavor = await readFlavorByName(tx, template.poolId, template.flavor);
+  if (!flavor || flavor.archived)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Sandbox template ${template.name} names flavor ${template.flavor}, which is gone`,
+    );
+  const shape = shapeOf(flavor);
+  const demand: Record<string, number> = {
+    sandboxes: 1,
+    vcpu: shape.vcpu,
+    memoryGiB: shape.memoryGiB,
+    diskGiB: shape.diskGiB,
+    ...(shape.gpus > 0 ? { gpu: shape.gpus } : {}),
+  };
+  await admitInstance(tx, deps.admissionPolicy, {
+    method: 'sandboxes.create',
+    tenantId: raw.tenant_id,
+    poolId: template.poolId,
+    poolClass: 'vps-host',
+    flavor: template.flavor,
+    shape: shapeFields(shape),
+    demand,
+    ...(await poolPlacement(tx, template.poolId)),
+    imageId: template.imageId,
+    sandboxId: raw.id,
+    ownerIdentityId: raw.owner_identity_id,
+    ...(context.admission ? { admission: context.admission } : {}),
+  });
+  const counted = await chargeQuota(tx, raw.tenant_id, template.poolId, { sandboxes: 1 });
   const now = deps.clock.now();
   const until = now + raw.ttl_seconds * second;
   const claimed = source ? undefined : await claimWarm(deps, tx, template, raw, until);
@@ -2056,6 +2102,13 @@ export async function completeCreateSandbox(
           }
         : {}),
     }));
+  if (Object.keys(counted).length > 0) {
+    const holder = (await readInstance(tx, instance.id, { lock: true }))!;
+    const merged = { ...(holder.quotaCharged ?? {}) };
+    for (const [resource, amount] of Object.entries(counted))
+      merged[resource] = (merged[resource] ?? 0) + amount;
+    await updateInstance(tx, holder, { quotaCharged: merged });
+  }
   // Never past the host certificate (a claim covers the TTL; a fresh one falls a minute short at 30 days).
   const expires =
     instance.hostCertValidBefore === undefined
@@ -2343,7 +2396,13 @@ export async function reassignSandboxes(
       type: 'instance',
       id: row.id,
       tenantId: row.tenantId,
-      attributes: instanceAttributes(row.shape, row.imageId, row.image?.verified ?? false),
+      attributes: instanceAttributes(
+        row.shape,
+        row.imageId,
+        row.image?.verified ?? false,
+        undefined,
+        await admissionPlacement(tx, { poolId: row.poolId, flavor: row.shape.name }),
+      ),
       parentType: 'pool',
       parentId: row.poolId,
       ownerId: successor,

@@ -75,7 +75,10 @@ export interface ProxmoxConfig {
 }
 
 export interface ProxmoxOptions {
-  /** The fetch implementation (tests emulate; self-signed clusters pass one bound to a pinned CA). */
+  /**
+   * The fetch implementation (tests emulate; self-signed clusters pass one bound to a pinned CA). Without it the
+   * client calls through `ProviderContext.fetch` (vps's address policy: public addresses only, DNS-pinned).
+   */
   fetch?: typeof fetch;
   /**
    * Writes a cloud-init snippet and returns its volume id (`local:snippets/<name>.yaml`). The PVE API
@@ -224,7 +227,7 @@ class ProxmoxClient implements ProviderImpl {
     this.#config = config;
     this.#context = context;
     this.#options = options;
-    this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.#fetch = options.fetch ?? context.fetch ?? globalThis.fetch.bind(globalThis);
     this.#endpoint = `${config.url.replace(/\/+$/, '')}/api2/json`;
   }
 
@@ -710,6 +713,8 @@ export function proxmoxProvider(options: ProxmoxOptions = {}): ProviderDefinitio
     provides: ['vps'],
     config: proxmoxConfig as unknown as ProviderDefinition<ProxmoxConfig>['config'],
     capabilities: ['power', 'reinstall', 'list'],
+    // (U-02) The account chooses the PVE endpoint: account validation holds it to the address policy.
+    endpoints: (config) => [config.url],
     create: (config, context) => new ProxmoxClient(config, context, options),
   });
 }

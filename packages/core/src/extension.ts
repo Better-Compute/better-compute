@@ -2175,6 +2175,14 @@ export interface ProviderContext {
    */
   account?: { id: string; tenantId: string; platform: boolean };
   /**
+   * (U-02) A fetch bound to the deployment's address policy (`ProviderInput.endpoints`): every connection
+   * resolves its host, refuses private, link-local, loopback, CGNAT, metadata, multicast and cluster addresses,
+   * and connects to the address it checked, so a DNS answer cannot change between the check and the connection.
+   * Redirects are not followed. Providers whose endpoints come from account config use it unless their host
+   * passes its own fetch. Absent when the module builds no policy.
+   */
+  fetch?: typeof fetch;
+  /**
    * (GCP WS1) The account's workload identity, for workload identity federation: tokens from the
    * host's issuer (`PkiPort.workload`) for one subject the module fixes from the account row. A
    * provider never chooses the subject. Absent when the host configures no issuer.
@@ -2349,6 +2357,15 @@ export interface ProviderInput<C> {
     config: C,
     account: { id: string; tenantId: string; name: string; platform: boolean; issuer?: string },
   ): Record<string, Json> | undefined;
+  /**
+   * (U-02) The URLs an account's client calls that its config (or a host option such as an API URL override)
+   * chooses, e.g. Proxmox's `url`. Pure; no I/O. Account validation resolves each host and refuses the account
+   * (`INVALID_CONFIG`) when any address is private, link-local, loopback, CGNAT, metadata, multicast or in a
+   * cluster range the host names (`vps({ addressPolicy })`); the client then calls through
+   * `ProviderContext.fetch`, which checks the address again and connects to the one it checked (DNS pinning).
+   * Providers whose hosts are fixed (Compute Engine's universe hosts come from host options) declare none.
+   */
+  endpoints?(config: C): readonly string[];
   /**
    * (v1.0, D11/D12) How this provider's cost rows relate to what compute meters. Pure; no I/O. A record may
    * be a probe built from a pass-through rule's pattern (`sku` and `skuDescription` = the pattern, `service`
@@ -2802,6 +2819,45 @@ export interface MethodPoll<I, O> {
   done(output: O): boolean;
   refresh(context: MethodContext, input: I, output: O): Promise<O>;
 }
+
+/**
+ * (U-02) One instance or sandbox about to be admitted, as a host's admission policy sees it
+ * (`vps({ admissionPolicy })`).
+ */
+export interface AdmissionPolicyRequest {
+  /** The method admitting it. Warm-pool refills are the template's, admitted when the template was written. */
+  method: 'instances.create' | 'instances.attach' | 'instances.resize' | 'sandboxes.create';
+  tenantId: string;
+  poolId: string;
+  /** `vps-host` or `provider`. */
+  poolClass: string;
+  /** The flavor: a create's, a resize's target, an attach's (the flavor whose offer is the machine's type). */
+  flavor?: string;
+  shape: { vcpu: number; memoryGiB: number; diskGiB: number; gpus: number };
+  /** What the admission charges to quota (a resize: what it grows by). */
+  demand: Readonly<Record<string, number>>;
+  /** The pool's site region. */
+  region?: string;
+  /** The provider of the pool's account (provider pools). */
+  provider?: string;
+  labels?: Readonly<Record<string, string>>;
+  projectId?: string;
+  imageId?: string;
+  /** The instance being admitted (its draft id on create). */
+  instanceId?: string;
+  sandboxId?: string;
+  ownerIdentityId?: string;
+  /** The caller's recorded decision; absent for internal admissions (label-driven auto-attach). */
+  admission?: AdmissionContext;
+}
+
+/**
+ * (U-02) A host's own admission rules, run inside the admission transaction after compute's checks (pool,
+ * flavor allowlists) and before quota is charged, so what it reads or locks in `tx` (its own tables, compute's
+ * `quota_usage`) is consistent with the admission. Throw a `ComputeError` to refuse (`QUOTA_EXCEEDED`,
+ * `ACCESS_DENIED`, ...); the request then changes nothing. Never call IAM or the network here.
+ */
+export type AdmissionPolicy = (tx: SqlTx, request: AdmissionPolicyRequest) => Promise<void> | void;
 
 /** What `MethodAdmission.prepare` decided about the request. */
 export type AdmissionPlan<O> =

@@ -526,6 +526,7 @@ async function autoAttach(
             authz: deps.authz,
             runtime: deps.runtime,
             ...(rootTenantId !== undefined ? { rootTenantId } : {}),
+            ...(deps.admissionPolicy ? { admissionPolicy: deps.admissionPolicy } : {}),
           },
           {
             ...input,

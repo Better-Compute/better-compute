@@ -100,6 +100,47 @@ All notable changes to the better-compute packages are documented here. The form
   `fleet.apply` create clusters, node pools and substrate pools); the same document runs on GKE, EKS and DOKS.
   `kubernetesProviderConformanceCases` in `@better-compute/testing` check every provider, including what a
   credential's role allows.
+- **Admission for every caller** (U-02; `@better-compute/capacity`, `vps`, `core`, `iam`, `postgres`,
+  `provider-proxmox`, `provider-hetzner`). Entitlements and quotas are enforced inside the admission transaction
+  of `instances.create`, `instances.attach`, `instances.resize` and `sandboxes.create`, whoever calls.
+  - **Counted resources.** `instances` (one per created or attached instance, hosted or provider) and `sandboxes`
+    (one per sandbox; a sandbox's instance is not an `instances`) are quota resources. A missing row limits
+    nothing; each instance records what its admission took (`quota_charged`) and gives back exactly that.
+    `chargeQuota` now returns the charge to record; `countQuotaResources`, `tenantQuotaKey`.
+  - **Tenant-level quota.** Quota rows with `poolId: '*'` (`quotas.set`, `quotas.get`; `tenantQuotaScope`) cap
+    a tenant's total over every pool: `vcpu`, `memoryGiB`, `diskGiB`, `gpu`, `gpu.<gpuModel>` (GPUs of
+    pools of one model), `instances`, `sandboxes`. They move with every pool charge and refund; a new scalar row
+    starts at the tenant's current total. Refusals are `QUOTA_EXCEEDED` with `details.scope` (`pool` or
+    `tenant`). `pools.update` refuses a `gpuModel` change while such a tenant has GPUs charged on the pool.
+  - **Flavor allowlists.** `pools.offer({ flavors })` and `pools.updateOffer({ flavors })` (`null` clears) list
+    the flavors a tenant may use on a pool (`flavor-not-offered`); `quotas.set({ flavors })` lists the flavors
+    that may consume one row (`flavor-not-allowed`), both `QUOTA_EXCEEDED`. Attach judges a machine by the
+    pool's flavor whose offer is its type. Pools and quota rows show their `flavors`.
+    `assertFlavorEntitled`, `parseFlavorAllowlist`.
+  - **IAM attributes.** `compute-instance` gains `poolId`, `flavor`, `region` and `provider`, plus one
+    `labels.<key>` attribute per instance label (in key order while the row's 64 attributes have room, else
+    `labelsTruncated: true`), on create, attach, resize and sandbox instances.
+  - **Admission policy hook.** `vps({ admissionPolicy })` (core `AdmissionPolicy`, `AdmissionPolicyRequest`)
+    runs the host's rules in the admission transaction, after the flavor allowlists and before quota is charged.
+  - **Inherited offers.** New read `pools.offers` lists the offers that reach a tenant: its own and its
+    ancestors' made with `includeDescendants`, nearest first, by priority, each with the tenant's own
+    quota rows on the pool (never an ancestor's). The tenant tree comes from
+    `capacity({ tenantAncestors })` (`betterCompute({ capacity })`); `iamTenantAncestors` in
+    `@better-compute/iam` reads it from better-iam.
+  - **Address policy.** `ProviderInput.endpoints` declares the endpoints an account's config (or an API URL
+    override) chooses; account validation refuses non-https, internal names and private, link-local (metadata),
+    loopback, CGNAT, multicast, reserved, unique-local and cluster addresses (`INVALID_CONFIG`,
+    `endpoint-address`), and clients call through `ProviderContext.fetch`, which checks again and pins the
+    connection to the checked address. `vps({ addressPolicy })` adds cluster ranges or exemptions
+    (`createAddressPolicy`, `pinnedFetch`). Proxmox declares its `url`; Hetzner Cloud and Robot their
+    `endpoint` override. Compute Engine declares none: its hosts stay pinned by host options.
+  - **Migrations:** core `0032_admission_flavors` (`pool_offers.flavors`, `quota_usage.flavors`); vps
+    `0048_quota_counts` (existing `instances`/`sandboxes` rows start at what is live).
+  - **Lock order.** Among quota rows, counted resources lock first, then the pool's row before the tenant's
+    (`*`), so a tenant row created while a charge is in flight still counts it; a tenant's `gpu.<model>` row
+    takes the pool's model once the pool's `gpu` row is locked, and `pools.update` locks those rows before
+    changing `gpuModel`. A deleted instance refunds its recorded charge before its allocation is released.
+  - `@better-compute/testing`: `computeFixture({ capacity })`.
 
 ### Fixed
 

@@ -2841,3 +2841,53 @@ describe('tenant teardown', () => {
     );
   });
 });
+
+describe('sandbox admission (U-02)', () => {
+  const setQuota = (poolId: string, resource: string, max: number, extra: object = {}) =>
+    callCapacity('quotas', 'set', { tenantId: 'acme', poolId, resource, max, ...extra });
+
+  it('counts sandboxes where a row exists, not as instances, and returns the count when the sandbox is deleted', async () => {
+    await setQuota(pool, 'sandboxes', 1);
+    await setQuota('*', 'sandboxes', 4);
+    await setQuota(pool, 'instances', 1);
+    const template = await createTemplate();
+    const sandbox = await createSandbox(template.id);
+    expect(await used()).toMatchObject({ sandboxes: 1, instances: 0, vcpu: 2 });
+    const { rows } = await db.query<{ quota_charged: unknown }>(
+      `SELECT quota_charged FROM instances WHERE id = $1`,
+      [sandbox.instanceId],
+    );
+    expect(rows[0]!.quota_charged).toEqual({ sandboxes: 1, '*:sandboxes': 1 });
+    await expect(createSandbox(template.id, { idempotencyKey: 'sbx-2' })).rejects.toMatchObject({
+      code: 'QUOTA_EXCEEDED',
+      details: { resource: 'sandboxes', poolId: pool },
+    });
+    // The refused one left no instance behind.
+    expect((await db.query(`SELECT 1 FROM instances`)).rows).toHaveLength(1);
+
+    await call('sandboxes', 'delete', { tenantId: 'acme', sandboxId: sandbox.id });
+    await reconcileInstance(sandbox.instanceId);
+    await hostsReport('absent');
+    await reconcileSandboxes();
+    expect(await getSandbox(sandbox.id)).toMatchObject({ state: 'deleted' });
+    expect(await used()).toMatchObject({ sandboxes: 0, vcpu: 0 });
+    expect(
+      (await readQuotas(db, 'acme', '*')).find((row) => row.resource === 'sandboxes')?.used,
+    ).toBe(0);
+    await createSandbox(template.id, { idempotencyKey: 'sbx-3' });
+  });
+
+  it("holds a sandbox to its template flavor's allowlists", async () => {
+    const template = await createTemplate();
+    await db.query(`UPDATE pool_offers SET flavors = ARRAY['other'] WHERE pool_id = $1 AND tenant_id = 'acme'`, [pool]);
+    await expect(createSandbox(template.id)).rejects.toMatchObject({
+      code: 'QUOTA_EXCEEDED',
+      details: { reason: 'flavor-not-offered', flavor: 's1.small' },
+    });
+    await db.query(`UPDATE pool_offers SET flavors = NULL WHERE pool_id = $1`, [pool]);
+    await setQuota(pool, 'vcpu', 64, { flavors: ['other'] });
+    await expect(createSandbox(template.id)).rejects.toMatchObject({
+      details: { reason: 'flavor-not-allowed', resource: 'vcpu' },
+    });
+  });
+});

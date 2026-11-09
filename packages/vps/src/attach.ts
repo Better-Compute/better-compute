@@ -2,6 +2,7 @@ import {
   ComputeError,
   draftId,
   strictObject,
+  type AdmissionContext,
   type AdmissionPlan,
   type Caller,
   type Instance,
@@ -13,6 +14,7 @@ import {
 } from '@better-compute/core';
 import { chargeQuota } from '@better-compute/capacity';
 import type { StoredMachine } from './discovery.js';
+import { admitInstance, flavorForMachineType } from './admission.js';
 import { canonical, fail, id, key, object, optional, sha256Hex, tenant } from './input.js';
 import {
   assertPlatformProvenance,
@@ -27,6 +29,7 @@ import {
   instanceAttributes,
   instanceDemand,
   instanceView,
+  shapeFields,
   dropHeldMachineId,
   identityIdPattern,
   instanceOwner,
@@ -110,6 +113,8 @@ export type AttachBilling = 'metered' | 'none';
 export type AttachDeps = Pick<InstanceDeps, 'events' | 'work' | 'authz' | 'runtime'> & {
   /** The IAM root tenant (`iam.rootTenantId`): its callers may attach from any account. */
   rootTenantId?: string;
+  /** (U-02) `vps({ admissionPolicy })`. */
+  admissionPolicy?: InstanceDeps['admissionPolicy'];
 };
 
 /** A provider machine id as `provider_machines` holds it (`us-central1-a/legacy`). */
@@ -368,11 +373,17 @@ export async function prepareAttach(
   const found = pool.providerAccountId
     ? await readMachine(tx, pool.providerAccountId, input.externalId, false)
     : undefined;
+  const flavor = await flavorForMachineType(tx, pool.id, found?.machine);
   await context.authz.upsert(tx, {
     type: 'instance',
     id: instanceId,
     tenantId: input.tenantId,
-    attributes: instanceAttributes(machineShape(found?.machine ?? {}), '', false, input.projectId),
+    attributes: instanceAttributes(machineShape(found?.machine ?? {}), '', false, input.projectId, {
+      poolId: pool.id,
+      ...(flavor !== undefined ? { flavor } : {}),
+      ...(pool.region !== undefined ? { region: pool.region } : {}),
+      ...(pool.provider !== undefined ? { provider: pool.provider } : {}),
+    }),
     parentType: 'pool',
     parentId: input.poolId,
     ownerId: request.ownerIdentityId,
@@ -403,7 +414,12 @@ export async function forgetAttach(
 export async function attachMachine(
   tx: SqlTx,
   deps: AttachDeps,
-  input: AttachInstanceInput & { caller: Caller; accountId: string },
+  input: AttachInstanceInput & {
+    caller: Caller;
+    accountId: string;
+    /** The API call's recorded decision, for the host's admission policy (auto-attach has none). */
+    admission?: AdmissionContext;
+  },
 ): Promise<Instance> {
   const { caller } = input;
   assertBillingAllowed(caller, input, deps.rootTenantId);
@@ -510,10 +526,27 @@ export async function attachMachine(
     ...(input.networkId !== undefined ? { networkId: input.networkId } : {}),
   });
 
-  // 4. Quota, as a provider-pool create charges it.
+  // 4. Admission (U-02): the flavor its machine type maps to passes the allowlists, then the host's rules;
+  // then quota, as a provider-pool create charges it (the instance count included).
   const shape = machineShape(machine);
   const demand = instanceDemand(shape);
-  await chargeQuota(tx, input.tenantId, pool.id, demand);
+  const flavor = await flavorForMachineType(tx, pool.id, machine);
+  await admitInstance(tx, deps.admissionPolicy, {
+    method: 'instances.attach',
+    tenantId: input.tenantId,
+    poolId: pool.id,
+    poolClass: pool.class,
+    ...(flavor !== undefined ? { flavor } : {}),
+    shape: shapeFields(shape),
+    demand,
+    ...(pool.region !== undefined ? { region: pool.region } : {}),
+    ...(pool.provider !== undefined ? { provider: pool.provider } : {}),
+    ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+    instanceId,
+    ownerIdentityId: request.ownerIdentityId,
+    ...(input.admission ? { admission: input.admission } : {}),
+  });
+  const charged = await chargeQuota(tx, input.tenantId, pool.id, demand);
 
   // 5. The instance, in scheduling with its machine: the reconciler claims and adopts it.
   await tx.query('SAVEPOINT vps_attach');
@@ -539,7 +572,7 @@ export async function attachMachine(
         accountId,
         input.externalId,
         machine.addresses ?? [],
-        JSON.stringify(demand),
+        JSON.stringify(charged),
         request.ownerIdentityId,
         caller.agentId ?? null,
         caller.delegationId ?? null,
@@ -579,7 +612,12 @@ export async function attachMachine(
     type: 'instance',
     id: instanceId,
     tenantId: input.tenantId,
-    attributes: instanceAttributes(shape, '', false, input.projectId),
+    attributes: instanceAttributes(shape, '', false, input.projectId, {
+      poolId: pool.id,
+      ...(flavor !== undefined ? { flavor } : {}),
+      ...(pool.region !== undefined ? { region: pool.region } : {}),
+      ...(pool.provider !== undefined ? { provider: pool.provider } : {}),
+    }),
     parentType: 'pool',
     parentId: pool.id,
     ownerId: request.ownerIdentityId,

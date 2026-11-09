@@ -206,6 +206,14 @@ const definitions = {
       imageId: 'string',
       imageVerified: 'boolean',
       projectId: 'string',
+      // (U-02) Where and what: create, attach and resize decide on them. Each instance label is also an
+      // attribute, `labels.<key>` (resource.labels.<key> in policies); label keys are not declared here.
+      poolId: 'string',
+      flavor: 'string',
+      region: 'string',
+      provider: 'string',
+      // Set when an instance has more labels than its row has room for (64 attributes in all).
+      labelsTruncated: 'boolean',
     },
   },
   image: {
@@ -519,6 +527,8 @@ group('pools', 'capacity', [
   ['offer', 'mutation', 'pools:share', 'pool', 'v0.1'],
   ['unoffer', 'mutation', 'pools:share', 'pool', 'v0.1'],
   ['updateOffer', 'mutation', 'pools:share', 'pool', 'v1.0'],
+  // (U-02) The offers that reach a tenant: its own and those it inherits (includeDescendants), by priority.
+  ['offers', 'read', 'pools:read', 'tenant', 'v1.0'],
   ['update', 'mutation', 'pools:manage', 'pool', 'v0.2'],
   ['archive', 'mutation', 'pools:manage', 'pool', 'v0.2'],
   // Discovered provider machines that belong to a provider pool (vps): bound by the platform or the

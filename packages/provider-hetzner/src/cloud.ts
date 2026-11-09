@@ -35,7 +35,11 @@ export interface HetznerCloudConfig {
 export interface HetznerCloudOptions {
   /** The fetch implementation (tests pass a recording or emulating one). */
   fetch?: typeof fetch;
-  /** Default `https://api.hetzner.cloud/v1`. */
+  /**
+   * Default `https://api.hetzner.cloud/v1`. An override is held to vps's address policy (U-02): accounts are
+   * refused when it resolves to a private, link-local, loopback or cluster address, and calls go through the
+   * DNS-pinned `ProviderContext.fetch` unless `fetch` is given.
+   */
   endpoint?: string;
   /** Label key that carries the idempotency key. */
   labelKey?: string;
@@ -149,7 +153,10 @@ class HetznerCloudClient implements ProviderImpl {
   constructor(config: HetznerCloudConfig, context: ProviderContext, options: HetznerCloudOptions) {
     this.#config = config;
     this.#context = context;
-    this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.#fetch =
+      options.fetch ??
+      (options.endpoint !== undefined ? context.fetch : undefined) ??
+      globalThis.fetch.bind(globalThis);
     this.#endpoint = (options.endpoint ?? 'https://api.hetzner.cloud/v1').replace(/\/+$/, '');
     this.#keyLabel = options.labelKey ?? defaultKeyLabel;
   }
@@ -366,6 +373,7 @@ export function hetznerCloudProvider(
     provides: ['vps'],
     config: hetznerCloudConfig as unknown as ProviderDefinition<HetznerCloudConfig>['config'],
     capabilities: ['power', 'reinstall', 'list'],
+    ...(options.endpoint !== undefined ? { endpoints: () => [options.endpoint!] } : {}),
     create: (config, context) => new HetznerCloudClient(config, context, options),
   });
 }

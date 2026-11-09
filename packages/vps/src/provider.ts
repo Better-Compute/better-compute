@@ -15,6 +15,7 @@ const providerKeys = [
   'accountKey',
   'describeOffering',
   'describeAccount',
+  'endpoints',
   'billing',
 ];
 const idPattern = /^[a-z][a-z0-9-]{0,63}$/;
@@ -86,6 +87,7 @@ export function defineProvider<C>(provider: ProviderInput<C>): ProviderDefinitio
     'accountKey',
     'describeOffering',
     'describeAccount',
+    'endpoints',
   ])
     if (candidate[hook] !== undefined && typeof candidate[hook] !== 'function')
       fail(hook, 'must be a function');

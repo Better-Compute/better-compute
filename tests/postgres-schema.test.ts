@@ -91,6 +91,7 @@ describe('migrate', () => {
       'core/0029_usage_sources',
       'core/0030_offer_suspension',
       'core/0031_usage_window_claims',
+      'core/0032_admission_flavors',
       'core/0044_usage_resource_kinds',
       'core/0060_usage_load_balancer_kind',
     ]);

@@ -63,6 +63,7 @@ Every call is authenticated (except public methods), refused before any database
 | `pools.offer`          | mutation | `compute:pools:share` @ `compute-pool`                                                | v0.1  | registered |
 | `pools.unoffer`        | mutation | `compute:pools:share` @ `compute-pool`                                                | v0.1  | registered |
 | `pools.updateOffer`    | mutation | `compute:pools:share` @ `compute-pool`                                                | v1.0  | registered |
+| `pools.offers`         | read     | `compute:pools:read` @ `compute-tenant`                                               | v1.0  | registered |
 | `pools.update`         | mutation | `compute:pools:manage` @ `compute-pool`                                               | v0.2  | registered |
 | `pools.archive`        | mutation | `compute:pools:manage` @ `compute-pool`                                               | v0.2  | registered |
 | `pools.bindMachines`   | mutation | `compute:pools:manage` @ `compute-pool`                                               | v1.0  | registered |

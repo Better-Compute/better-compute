@@ -30,6 +30,7 @@ import { volumeAllocationsMigration } from './0028_volume_allocations.js';
 import { usageSourcesMigration } from './0029_usage_sources.js';
 import { offerSuspensionMigration } from './0030_offer_suspension.js';
 import { usageWindowClaimsMigration } from './0031_usage_window_claims.js';
+import { admissionFlavorsMigration } from './0032_admission_flavors.js';
 import { usageResourceKindsMigration } from './0044_usage_resource_kinds.js';
 import { usageLoadBalancerKindMigration } from './0060_usage_load_balancer_kind.js';
 
@@ -75,6 +76,7 @@ export const baseMigrations: readonly Migration[] = Object.freeze([
   usageSourcesMigration,
   offerSuspensionMigration,
   usageWindowClaimsMigration,
+  admissionFlavorsMigration,
   usageResourceKindsMigration,
   usageLoadBalancerKindMigration,
 ]);

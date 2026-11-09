@@ -477,6 +477,7 @@ describe('vps() API surface', () => {
       'vps/0043_instance_labels',
       'vps/0044_network_adopt',
       'vps/0046_instance_identity',
+      'vps/0048_quota_counts',
       'vps/0084_network_zones',
       'vps/0085_subnet_private_access',
       'vps/0087_provider_purchases',
@@ -1986,5 +1987,83 @@ describe('hosted instances: name, metadata and labels (U-04)', () => {
       labelSelector: 'app=api',
     })) as { items: Identity[] };
     expect(listed.items.map((item) => item.id)).toEqual([created.id]);
+  });
+});
+
+describe('hosted admission (U-02)', () => {
+  const setQuota = (poolId: string, resource: string, max: number, extra: object = {}) =>
+    callCapacity('quotas', 'set', { tenantId: 'acme', poolId, resource, max, ...extra });
+  const used = async (poolId: string, resource: string) =>
+    (await readQuotas(db, 'acme', poolId)).find((row) => row.resource === resource)?.used;
+
+  it('counts hosted instances where a row exists, and returns the count with the instance', async () => {
+    await setQuota(hostedPool, 'instances', 1);
+    await setQuota('*', 'instances', 5);
+    await setQuota('*', 'vcpu', 64);
+    const created = (await call('instances', 'create', createHosted())) as View;
+    expect(await used(hostedPool, 'instances')).toBe(1);
+    expect(await used('*', 'instances')).toBe(1);
+    // The tenant row moves with the scalars the CapacityPort charges.
+    expect(await used('*', 'vcpu')).toBe(2);
+    const { rows } = await db.query<{ quota_charged: unknown }>(
+      `SELECT quota_charged FROM instances WHERE id = $1`,
+      [created.id],
+    );
+    expect(rows[0]!.quota_charged).toEqual({ instances: 1, '*:instances': 1 });
+    await expect(
+      call('instances', 'create', createHosted({ idempotencyKey: 'vm-2' })),
+    ).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED', details: { resource: 'instances' } });
+    // The refusal left nothing behind: no booking for the second.
+    expect(await used(hostedPool, 'vcpu')).toBe(2);
+
+    await report(created.nodeId!, [{ id: created.id, state: 'running' }]);
+    await reconcile(created.id);
+    await call('instances', 'delete', { tenantId: 'acme', instanceId: created.id });
+    await reconcile(created.id);
+    await report(created.nodeId!, []);
+    await reconcile(created.id);
+    expect((await get(created.id)).state).toBe('deleted');
+    expect(await used(hostedPool, 'instances')).toBe(0);
+    expect(await used('*', 'instances')).toBe(0);
+    expect(await used('*', 'vcpu')).toBe(0);
+    await call('instances', 'create', createHosted({ idempotencyKey: 'vm-3' }));
+  });
+
+  it('holds a resize to the flavor allowlists of every row the instance consumes', async () => {
+    await setQuota(hostedPool, 'vcpu', 64, { flavors: ['g1.small'] });
+    const created = (await call('instances', 'create', createHosted())) as View;
+    await call('instances', 'stop', { tenantId: 'acme', instanceId: created.id });
+    await report(created.nodeId!, [{ id: created.id, state: 'stopped' }]);
+    await reconcile(created.id);
+    await expect(
+      call('instances', 'resize', { tenantId: 'acme', instanceId: created.id, flavor: 'g1.large' }),
+    ).rejects.toMatchObject({
+      code: 'QUOTA_EXCEEDED',
+      details: { reason: 'flavor-not-allowed', flavor: 'g1.large', resource: 'vcpu' },
+    });
+    await setQuota(hostedPool, 'vcpu', 64, { flavors: ['g1.small', 'g1.large'] });
+    const resized = (await call('instances', 'resize', {
+      tenantId: 'acme',
+      instanceId: created.id,
+      flavor: 'g1.large',
+    })) as { flavor: string };
+    expect(resized.flavor).toBe('g1.large');
+    // IAM sees the new flavor.
+    expect(recorded.authz.at(-1)).toMatchObject({
+      id: created.id,
+      attributes: { flavor: 'g1.large', poolId: hostedPool, region: 'eu', vcpu: 8 },
+    });
+    expect(recorded.authz.at(-1)!.attributes).not.toHaveProperty('provider');
+  });
+
+  it('refuses a hosted flavor the offer does not list', async () => {
+    await db.query(`UPDATE pool_offers SET flavors = ARRAY['g1.large'] WHERE pool_id = $1 AND tenant_id = 'acme'`, [
+      hostedPool,
+    ]);
+    await expect(call('instances', 'create', createHosted())).rejects.toMatchObject({
+      code: 'QUOTA_EXCEEDED',
+      details: { reason: 'flavor-not-offered', flavor: 'g1.small' },
+    });
+    await call('instances', 'create', createHosted({ flavor: 'g1.large', idempotencyKey: 'vm-large' }));
   });
 });
