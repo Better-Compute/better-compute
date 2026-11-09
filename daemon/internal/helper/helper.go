@@ -511,6 +511,10 @@ func (s *Server) op(ctx context.Context, req Request) error {
 		if len(req.Data) > MaxFile {
 			return fmt.Errorf("%d bytes; at most %d are written", len(req.Data), MaxFile)
 		}
+		// The kind and the name say where; the content must be what bcd writes there (content.go).
+		if err := s.checkContent(req.Kind, req.Name, req.Data); err != nil {
+			return err
+		}
 		return s.write(fk, fk.file(req.Name), req.Data)
 	case "reboot":
 		reason := req.Reason

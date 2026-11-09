@@ -35,7 +35,10 @@ import (
 //     bridged by bcd before the VMM starts; the VMM gets their fds, never their names; GPUs pass
 //     through with VFIO;
 //   - each VMM runs as its instance's own unprivileged uid, confined (unitProperties);
-//   - instances/<id>/vm.json is bcd's record: a directory without one is not bcd's;
+//   - instances/<id>/vm.json is bcd's record: a directory without one is not bcd's. A new instance's
+//     directory appears with its record already in it, marked "creating" until Ensure has finished: a
+//     bcd killed mid-Ensure leaves a directory bcd knows as its own and unfinished, which is removed
+//     (at the next start, or by the next Ensure or Destroy of that id);
 //   - the serial console is a unix socket;
 //   - a snapshot is a tar of the flattened disk, the seed and, with memory, cloud-hypervisor's own
 //     snapshot (config.json, state.json, memory-ranges), whose paths are rewritten on restore.
@@ -75,8 +78,10 @@ type CloudHypervisor struct {
 	NodeUID int
 	// rootShared: root's side of the helper's file model (CHLaunch builds the shared unit).
 	rootShared bool
-	// HTTP downloads base images (https only).
-	HTTP *http.Client
+	// HTTP downloads base images (https only); MaxImageBytes is the largest one downloaded (default
+	// DefaultMaxImageBytes).
+	HTTP          *http.Client
+	MaxImageBytes int64
 	// ShutdownTimeout bounds a graceful (ACPI) shutdown before the VM is stopped (default 60 s).
 	ShutdownTimeout time.Duration
 	// Poll is how often a starting VMM or a shutting-down VM is checked (default 200 ms).
@@ -85,12 +90,21 @@ type CloudHypervisor struct {
 	RebindTimeout time.Duration
 
 	mu sync.Mutex
+	// swept: what a killed bcd left was removed (sweep, once per process, at the first List).
+	swept sync.Once
+	// releaseEvery is how often List retries the VFIO releases that failed (default a minute; tests),
+	// and releaseTried when it last did.
+	releaseEvery time.Duration
+	releaseTried time.Time
 }
 
 // chRecord is instances/<id>/vm.json: bcd's metadata and the VM's configuration.
 type chRecord struct {
-	ID           string          `json:"id"`
-	Managed      string          `json:"managed"` // chManaged: this directory is bcd's
+	ID      string `json:"id"`
+	Managed string `json:"managed"` // chManaged: this directory is bcd's
+	// Creating: Ensure has not finished making this instance (its disk may be half there). Such an
+	// instance is not listed and never started; its directory is removed and made again.
+	Creating     bool            `json:"creating,omitempty"`
 	AllocationID string          `json:"allocationId,omitempty"`
 	Image        string          `json:"image,omitempty"`
 	Base         string          `json:"base,omitempty"` // the base image the overlay reads
@@ -150,7 +164,7 @@ func (c *CloudHypervisor) Name() string {
 
 // storage is the libvirt runtime's image and seed handling, over the same directory layout.
 func (c *CloudHypervisor) storage() *Libvirt {
-	return &Libvirt{RuntimeName: c.Name(), Dir: c.Dir, Exec: c.Exec, HTTP: c.HTTP}
+	return &Libvirt{RuntimeName: c.Name(), Dir: c.Dir, Exec: c.Exec, HTTP: c.HTTP, MaxImageBytes: c.MaxImageBytes}
 }
 
 func (c *CloudHypervisor) run(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -182,12 +196,43 @@ func (c *CloudHypervisor) apiFiles(ctx context.Context, id, method, path string,
 		return nil, err
 	}
 	if status > 299 {
-		return out, fmt.Errorf("cloud-hypervisor %s: HTTP %d: %s", path, status, strings.TrimSpace(string(out)))
+		return out, &chStatusError{Path: path, Status: status, Body: strings.TrimSpace(string(out))}
 	}
 	return out, nil
 }
 
+// chStatusError is a VMM's answer above 299: the VMM is there and said no (a failed call is any
+// other error: it says nothing about the VMM).
+type chStatusError struct {
+	Path   string
+	Status int
+	Body   string
+}
+
+func (e *chStatusError) Error() string {
+	return fmt.Sprintf("cloud-hypervisor %s: HTTP %d: %s", e.Path, e.Status, e.Body)
+}
+
+// noVM reports a VMM's answer that it has no VM ("VM is not created", VmNotCreated).
+func (e *chStatusError) noVM() bool {
+	body := strings.ToLower(strings.Join(strings.Fields(e.Body), ""))
+	return strings.Contains(body, "notcreated")
+}
+
+// record is the record of a finished instance (one still being created is no instance yet).
 func (c *CloudHypervisor) record(id string) (*chRecord, error) {
+	r, err := c.read(id)
+	if err != nil {
+		return nil, err
+	}
+	if r.Creating {
+		return nil, fmt.Errorf("instances/%s was never finished", id)
+	}
+	return r, nil
+}
+
+// read is any record bcd wrote, finished or still being created.
+func (c *CloudHypervisor) read(id string) (*chRecord, error) {
 	raw, err := os.ReadFile(filepath.Join(c.instanceDir(id), "vm.json"))
 	if err != nil {
 		return nil, err
@@ -212,36 +257,142 @@ func (c *CloudHypervisor) save(r *chRecord) error {
 	return os.Rename(tmp, file)
 }
 
-// state is the VM's state: stopped when its VMM does not answer.
-func (c *CloudHypervisor) state(ctx context.Context, id string) (string, string) {
-	out, err := c.api(ctx, id, http.MethodGet, "vm.info", nil)
+// newDirPrefix names the directories new instances are born in (instances/.new-*, never an instance
+// id), renamed to instances/<id> once they hold the record.
+const newDirPrefix = ".new-"
+
+// begin makes a new instance's directory with its record already in it: the record is written in a
+// temporary directory that is then renamed, so instances/<id> never exists without the vm.json that
+// says it is bcd's, whenever bcd is killed.
+func (c *CloudHypervisor) begin(r *chRecord) error {
+	instances := filepath.Join(c.Dir, "instances")
+	if err := os.MkdirAll(instances, 0o700); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
-		if _, perr := c.api(ctx, id, http.MethodGet, "vmm.ping", nil); perr != nil {
-			return StateStopped, ""
+		return err
+	}
+	tmp, err := os.MkdirTemp(instances, newDirPrefix)
+	if err != nil {
+		return err
+	}
+	if err = os.WriteFile(filepath.Join(tmp, "vm.json"), raw, 0o600); err == nil {
+		err = os.Rename(tmp, c.instanceDir(r.ID))
+	}
+	if err != nil {
+		_ = os.RemoveAll(tmp)
+	}
+	return err
+}
+
+// sweep removes what a killed bcd left behind: the instances an Ensure never finished (nothing ever
+// ran from them), the directories new instances are born in, half-written image downloads
+// (images/.pull-*) and snapshots' work directories (instances/<id>/.snapshot-*; a VM a killed
+// snapshot left paused is resumed by the next pass that wants it running). The caller holds the
+// lock, so none of it is in use.
+func (c *CloudHypervisor) sweep() {
+	sweepPulls(c.Dir)
+	instances := filepath.Join(c.Dir, "instances")
+	entries, _ := os.ReadDir(instances)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
 		}
-		return StateStopped, "" // a VMM without a VM yet
+		name := e.Name()
+		if strings.HasPrefix(name, newDirPrefix) {
+			_ = os.RemoveAll(filepath.Join(instances, name))
+			continue
+		}
+		if !instanceID.MatchString(name) {
+			continue
+		}
+		r, err := c.read(name)
+		if err != nil {
+			continue // not bcd's
+		}
+		if r.Creating {
+			_ = os.RemoveAll(filepath.Join(instances, name))
+			continue
+		}
+		for _, work := range snapshotWorkDirs(filepath.Join(instances, name)) {
+			_ = os.RemoveAll(work)
+		}
+	}
+}
+
+// unitState is the VMM unit's ActiveState as systemd reports it ("inactive" for a unit that is gone).
+func (c *CloudHypervisor) unitState(ctx context.Context, id string) (string, error) {
+	out, err := c.run(ctx, "systemctl", "show", "--property=ActiveState", "--value", unitName(id))
+	if err != nil {
+		return "", err
+	}
+	s := strings.TrimSpace(string(out))
+	if s == "" {
+		return "", errors.New("systemctl show answered no ActiveState")
+	}
+	return s, nil
+}
+
+// state is the VM's state. A VMM that does not answer says nothing: whether one runs at all is its
+// unit's ActiveState, systemd's to say. The VM is stopped when the unit is not running, or when the
+// VMM answers that it has no VM yet; when the unit runs and its API fails, or systemd cannot be asked,
+// the state is unknown and that is an error, never "stopped" (the disk may be open, the taps in use).
+func (c *CloudHypervisor) state(ctx context.Context, id string) (state, message string, err error) {
+	out, apiErr := c.api(ctx, id, http.MethodGet, "vm.info", nil)
+	if apiErr != nil {
+		unit, err := c.unitState(ctx, id)
+		if err != nil {
+			return "", "", fmt.Errorf("the state of %s is unknown: its VMM does not answer (%v) and its unit cannot be read: %w", id, apiErr, err)
+		}
+		if unit == "inactive" || unit == "failed" {
+			return StateStopped, "", nil
+		}
+		var status *chStatusError
+		if errors.As(apiErr, &status) && status.noVM() {
+			return StateStopped, "", nil // a VMM without a VM yet
+		}
+		return "", "", fmt.Errorf("the state of %s is unknown: its VMM's unit is %s but its API fails: %w", id, unit, apiErr)
 	}
 	var info struct {
 		State string `json:"state"`
 	}
 	if json.Unmarshal(out, &info) != nil {
-		return StateError, "unreadable vm.info"
+		return StateError, "unreadable vm.info", nil
 	}
 	switch info.State {
 	case "Running":
-		return StateRunning, ""
+		return StateRunning, "", nil
 	case "Paused":
-		return StatePaused, ""
+		return StatePaused, "", nil
 	case "Created", "Shutdown":
-		return StateStopped, ""
+		return StateStopped, "", nil
 	}
-	return StateError, "state " + info.State
+	return StateError, "state " + info.State, nil
 }
 
 // ---- List ---------------------------------------------------------------------------------------
 
 // List returns the instances bcd defined (cloud-hypervisor has no registry of its own).
 func (c *CloudHypervisor) List(ctx context.Context) ([]Domain, error) {
+	c.swept.Do(func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.sweep()
+	})
+	// The GPUs a destroyed instance left on vfio-pci are tried again, now and then; never waiting
+	// behind an operation that holds the lock (the next List tries).
+	if c.mu.TryLock() {
+		every := c.releaseEvery
+		if every <= 0 {
+			every = time.Minute
+		}
+		if time.Since(c.releaseTried) >= every {
+			c.releaseTried = time.Now()
+			c.retryReleases(ctx)
+		}
+		c.mu.Unlock()
+	}
 	entries, err := os.ReadDir(filepath.Join(c.Dir, "instances"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -267,8 +418,12 @@ func (c *CloudHypervisor) List(ctx context.Context) ([]Domain, error) {
 		if r.Placement != nil && !r.FromSnapshot {
 			d.HugepageSize = r.Placement.HugepageSize
 		}
-		d.State, d.Message = c.state(ctx, r.ID)
-		if d.State == StateRunning || d.State == StatePaused {
+		var stateErr error
+		if d.State, d.Message, stateErr = c.state(ctx, r.ID); stateErr != nil {
+			// Unknown is reported as an error, and counted as possibly running: its volumes stay taken.
+			d.State, d.Message = StateError, stateErr.Error()
+		}
+		if d.State != StateStopped {
 			d.Volumes = r.StartedVolumes
 		}
 		out = append(out, d)
@@ -383,20 +538,27 @@ func (c *CloudHypervisor) Ensure(ctx context.Context, spec *agentv1.InstanceSpec
 		return err
 	}
 	dir := c.instanceDir(id)
-	r, err := c.record(id)
-	if err != nil {
-		if _, statErr := os.Stat(dir); statErr == nil {
-			return fmt.Errorf("instances/%s exists and is not bcd's", id)
-		}
-		if err := os.MkdirAll(dir, 0o700); err != nil {
+	r, err := c.read(id)
+	if err == nil && r.Creating {
+		// What an Ensure that never finished left (bcd killed mid-download): nothing ran from it.
+		if err := os.RemoveAll(dir); err != nil {
 			return err
+		}
+		r = nil
+	}
+	if r == nil {
+		if _, statErr := os.Lstat(dir); statErr == nil {
+			return fmt.Errorf("instances/%s exists and is not bcd's", id)
 		}
 		uid, err := c.freeUID()
 		if err != nil {
-			os.RemoveAll(dir)
 			return err
 		}
-		r = &chRecord{ID: id, Managed: chManaged, AllocationID: spec.GetAllocationId(), UID: uid}
+		// The record first, marked as being created: from here on the directory is bcd's to remove.
+		r = &chRecord{ID: id, Managed: chManaged, AllocationID: spec.GetAllocationId(), UID: uid, Creating: true}
+		if err := c.begin(r); err != nil {
+			return err
+		}
 		st := c.storage()
 		switch {
 		case restore != nil:
@@ -434,7 +596,12 @@ func (c *CloudHypervisor) Ensure(ctx context.Context, spec *agentv1.InstanceSpec
 			}
 		}
 	} else if spec.GetDiskBytes() > r.DiskBytes && r.DiskBytes > 0 {
-		if state, _ := c.state(ctx, id); state == StateStopped {
+		// qemu-img only on a disk no VMM has open: an unknown state is not "stopped".
+		state, _, err := c.state(ctx, id)
+		if err != nil {
+			return err
+		}
+		if state == StateStopped {
 			if err := c.checkDisk(r); err != nil {
 				return err
 			}
@@ -452,6 +619,7 @@ func (c *CloudHypervisor) Ensure(ctx context.Context, spec *agentv1.InstanceSpec
 		return err
 	}
 	r.Config, _ = json.Marshal(cfg)
+	r.Creating = false
 	r.VCPU, r.MemoryBytes, r.DiskBytes = spec.GetVcpu(), spec.GetMemoryBytes(), spec.GetDiskBytes()
 	r.Placement = placement
 	r.GPUs = append([]string(nil), spec.GetGpuDeviceIds()...)
@@ -488,7 +656,8 @@ func (c *CloudHypervisor) freeUID() (uint32, error) {
 	used := map[uint32]bool{}
 	entries, _ := os.ReadDir(filepath.Join(c.Dir, "instances"))
 	for _, e := range entries {
-		if r, err := c.record(e.Name()); err == nil && r.UID != 0 {
+		// Unfinished instances keep their uid too.
+		if r, err := c.read(e.Name()); err == nil && r.UID != 0 {
 			used[r.UID] = true
 		}
 	}
@@ -812,6 +981,7 @@ func (c *CloudHypervisor) start(ctx context.Context, r *chRecord, paused bool) e
 				return err
 			}
 			r.BoundAddrs = union(r.BoundAddrs, c.gpuAddresses(r))
+			c.forgetReleases(r.BoundAddrs)
 		}
 		if err := c.grantFiles(r); err != nil {
 			return err
@@ -827,6 +997,7 @@ func (c *CloudHypervisor) start(ctx context.Context, r *chRecord, paused bool) e
 			}
 			r.BoundAddrs = union(r.BoundAddrs, []string{addr})
 		}
+		c.forgetReleases(r.BoundAddrs)
 		if err := c.giveFiles(r, int(r.UID)); err != nil {
 			return err
 		}
@@ -948,7 +1119,13 @@ func (c *CloudHypervisor) SetState(ctx context.Context, id, state string) error 
 	if err != nil {
 		return fmt.Errorf("no managed domain %s", id)
 	}
-	current, _ := c.state(ctx, id)
+	current, _, err := c.state(ctx, id)
+	if err != nil && state != StateStopped {
+		// Never a start over a VM that may be running (start deletes and recreates its taps). A stop
+		// goes ahead: it ends in the unit's own state.
+		return err
+	}
+	err = nil
 	switch state {
 	case StateRunning:
 		switch current {
@@ -981,11 +1158,11 @@ func (c *CloudHypervisor) stop(ctx context.Context, r *chRecord) error {
 	if timeout <= 0 {
 		timeout = time.Minute
 	}
-	if st, _ := c.state(ctx, id); st == StateRunning {
+	if st, _, _ := c.state(ctx, id); st == StateRunning {
 		_, _ = c.api(ctx, id, http.MethodPut, "vm.power-button", nil)
 		deadline := time.Now().Add(timeout)
 		for time.Now().Before(deadline) {
-			if st, _ := c.state(ctx, id); st == StateStopped {
+			if st, _, err := c.state(ctx, id); err == nil && st == StateStopped {
 				break
 			}
 			select {
@@ -1113,26 +1290,163 @@ func (c *CloudHypervisor) Destroy(ctx context.Context, id string) error {
 	if !instanceID.MatchString(id) {
 		return nil
 	}
-	r, err := c.record(id)
+	r, err := c.read(id)
 	if err != nil {
-		if _, statErr := os.Stat(c.instanceDir(id)); statErr == nil {
+		if _, statErr := os.Lstat(c.instanceDir(id)); statErr == nil {
 			return fmt.Errorf("instances/%s is not bcd's", id)
 		}
 		return nil
 	}
+	if r.Creating {
+		// Never finished, so never started: there is no VMM, tap or GPU of its to take back.
+		return os.RemoveAll(c.instanceDir(id))
+	}
 	if err := c.stop(ctx, r); err != nil {
 		return err
 	}
-	// The GPUs go back to their host driver (best effort: a GPU left on vfio-pci is only unusable
-	// to the host until the next pass or boot).
-	if addrs := union(r.BoundAddrs, c.gpuAddresses(r)); c.Privileged != nil && len(addrs) > 0 {
-		_ = c.Privileged.ReleaseVFIO(ctx, id, addrs)
-	} else {
-		for _, addr := range addrs {
-			_ = c.vfio().Release(addr)
+	// The GPUs go back to their host driver. One that does not (its release failed) would stay on
+	// vfio-pci, unusable to the host, with the record that names it gone: it is written down first
+	// (vfio-release.json, the instance's tombstone) and its release is tried again from List.
+	held := c.boundElsewhere(id)
+	failed := map[string]string{}
+	var releaseErr error
+	for _, addr := range union(r.BoundAddrs, c.gpuAddresses(r)) {
+		if held[addr] {
+			continue // another instance of bcd's has it bound: its own destroy gives it back
+		}
+		if err := c.releaseVFIO(ctx, id, addr); err != nil {
+			failed[addr] = id
+			releaseErr = errors.Join(releaseErr, err)
+		}
+	}
+	if len(failed) > 0 {
+		if err := c.rememberReleases(failed); err != nil {
+			// Without the tombstone the record is all that names the GPUs: the instance stays, and
+			// the next pass destroys it again.
+			return fmt.Errorf("instance %s is stopped but kept: its GPUs were not given back to their driver (%v) and that could not be recorded: %w", id, releaseErr, err)
 		}
 	}
 	return os.RemoveAll(c.instanceDir(id))
+}
+
+// releaseVFIO gives one PCI address back to its host driver, as root or through the helper.
+func (c *CloudHypervisor) releaseVFIO(ctx context.Context, id, addr string) error {
+	if c.Privileged != nil {
+		return c.Privileged.ReleaseVFIO(ctx, id, []string{addr})
+	}
+	return c.vfio().Release(addr)
+}
+
+// releasesFile is <Dir>/vfio-release.json: the PCI addresses destroyed instances left on vfio-pci
+// because their release failed, each with the instance that had it. It is what is left of those
+// instances' records, kept until the release succeeds.
+func (c *CloudHypervisor) releasesFile() string { return filepath.Join(c.Dir, "vfio-release.json") }
+
+func (c *CloudHypervisor) pendingReleases() (map[string]string, error) {
+	raw, err := os.ReadFile(c.releasesFile())
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	pending := map[string]string{}
+	if err := json.Unmarshal(raw, &pending); err != nil {
+		return nil, fmt.Errorf("%s: %w", c.releasesFile(), err)
+	}
+	for addr, id := range pending {
+		if !pciAddress.MatchString(addr) || !instanceID.MatchString(id) {
+			delete(pending, addr)
+		}
+	}
+	return pending, nil
+}
+
+func (c *CloudHypervisor) saveReleases(pending map[string]string) error {
+	file := c.releasesFile()
+	if len(pending) == 0 {
+		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	raw, err := json.MarshalIndent(pending, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(c.Dir, 0o700); err != nil {
+		return err
+	}
+	tmp := file + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, file)
+}
+
+// rememberReleases adds failed releases (address: instance) to the file.
+func (c *CloudHypervisor) rememberReleases(failed map[string]string) error {
+	pending, err := c.pendingReleases()
+	if err != nil {
+		return err
+	}
+	for addr, id := range failed {
+		pending[addr] = id
+	}
+	return c.saveReleases(pending)
+}
+
+// forgetReleases drops addresses an instance has bound again: they are in use, and that instance's
+// destroy gives them back.
+func (c *CloudHypervisor) forgetReleases(addrs []string) {
+	pending, err := c.pendingReleases()
+	if err != nil || len(pending) == 0 {
+		return
+	}
+	for _, addr := range addrs {
+		delete(pending, addr)
+	}
+	_ = c.saveReleases(pending)
+}
+
+// boundElsewhere are the PCI addresses the other instances' records have on vfio-pci.
+func (c *CloudHypervisor) boundElsewhere(id string) map[string]bool {
+	held := map[string]bool{}
+	entries, _ := os.ReadDir(filepath.Join(c.Dir, "instances"))
+	for _, e := range entries {
+		if e.Name() == id {
+			continue
+		}
+		if r, err := c.record(e.Name()); err == nil {
+			for _, addr := range r.BoundAddrs {
+				held[addr] = true
+			}
+		}
+	}
+	return held
+}
+
+// retryReleases tries the pending releases again. The caller holds the lock.
+func (c *CloudHypervisor) retryReleases(ctx context.Context) {
+	pending, err := c.pendingReleases()
+	if err != nil || len(pending) == 0 {
+		return
+	}
+	held := c.boundElsewhere("")
+	for addr, id := range pending {
+		if held[addr] || c.releaseVFIO(ctx, id, addr) == nil {
+			delete(pending, addr)
+		}
+	}
+	_ = c.saveReleases(pending)
+}
+
+// PendingVFIOReleases are the PCI addresses still waiting to go back to their host driver after
+// their instance was destroyed, each with that instance's id.
+func (c *CloudHypervisor) PendingVFIOReleases() (map[string]string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pendingReleases()
 }
 
 // VFIOBinder puts a PCI device's IOMMU group on vfio-pci and takes it back (SysfsVFIO).
@@ -1197,7 +1511,11 @@ func (c *CloudHypervisor) Snapshot(ctx context.Context, id string, includeMemory
 		return "", err
 	}
 	defer os.RemoveAll(work)
-	state, _ := c.state(ctx, id)
+	// A disk is copied while its VM is paused or stopped: never on a guess about which.
+	state, _, err := c.state(ctx, id)
+	if err != nil {
+		return "", err
+	}
 	if state == StateRunning {
 		if _, err := c.api(ctx, id, http.MethodPut, "vm.pause", nil); err != nil {
 			return "", err
@@ -1423,7 +1741,11 @@ func (c *CloudHypervisor) GrowVolume(ctx context.Context, id string, v AttachedV
 	if err != nil {
 		return err
 	}
-	if st, _ := c.state(ctx, id); st == StateStopped {
+	st, _, err := c.state(ctx, id)
+	if err != nil {
+		return err
+	}
+	if st == StateStopped {
 		return nil
 	}
 	i := slices.IndexFunc(r.StartedVolumes, func(s AttachedVolume) bool { return s.Path == v.Path })
@@ -1439,7 +1761,9 @@ func (c *CloudHypervisor) Console(ctx context.Context, id string) (io.ReadWriteC
 	if _, err := c.record(id); err != nil {
 		return nil, fmt.Errorf("no managed domain %s", id)
 	}
-	if st, _ := c.state(ctx, id); st != StateRunning {
+	if st, _, err := c.state(ctx, id); err != nil {
+		return nil, err
+	} else if st != StateRunning {
 		return nil, fmt.Errorf("domain %s is not running", id)
 	}
 	return (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(c.instanceDir(id), "serial.sock"))
@@ -1455,8 +1779,11 @@ func (c *CloudHypervisor) Rebind(ctx context.Context, id string, b Rebind) error
 		c.mu.Unlock()
 		return fmt.Errorf("no managed domain %s", id)
 	}
-	if st, _ := c.state(ctx, id); st != StateRunning {
+	if st, _, err := c.state(ctx, id); err != nil || st != StateRunning {
 		c.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		return fmt.Errorf("domain %s is not running", id)
 	}
 	img, nonce, err := rebindImage(b)

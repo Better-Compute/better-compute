@@ -54,6 +54,7 @@ dependencies are connect-go, bbolt and protobuf.
 | `internal/selfupdate` | the A/B binary slots, `upgrade.json`, the release floor and the crash-loop rollback units |
 | `internal/bcx` | bcx driver plugins: the sandbox shim (`bcd __bcx-exec`: no-new-privs, seccomp, per-plugin uid), cgroups |
 | `internal/runtime` | instance runtimes: `Libvirt` (virsh, qemu-img, NoCloud seeds, snapshots, serial consoles), `CloudHypervisor` (a VMM per instance in a confined `bcd-ch-<id>.service` unit, driven over its REST socket: its own uid, no capabilities, no network, only KVM and VFIO devices, only its own instance and base image visible, /run and /var hidden, bounded by its flavor; persistent taps created and bridged by bcd, handed to it as fds; every disk's qcow2 header checked in Go before use; VFIO GPUs, memory snapshots bound to the CPU model and flavor. Needs systemd ≥ 247 and a cloud-hypervisor whose API takes net fds: `vm.add-net`, `vm.restore` `net_fds`) and `Fake` |
+| `internal/transfer` | the progress watchdog and the https-only redirect rule of long transfers (snapshots, release binaries, base images) |
 | `internal/redfish` | the Redfish client of the site agent's `bmc.*` kinds (power, boot, BIOS, RAID, firmware, accounts) |
 | `internal/bootparams`, `internal/pxe` | the ramdisk's `bc.*` kernel command line; the site agent's proxyDHCP and TFTP |
 | `internal/imds` | the instance metadata service of VPS hosts |
@@ -193,6 +194,7 @@ Files the daemon owns:
 | `/etc/cdi/bcd-<allocationId>.json` | CDI spec per GPU hold |
 | `/run/bcd/allocations/<allocationId>.env` | the hold's environment (`BCD_ALLOCATION_ID`, `BCD_RESERVATION_ID`, `NVIDIA_VISIBLE_DEVICES`, …) |
 | `<data_dir>/libvirt/…` | libvirt-kvm instances and base images. QEMU runs as its own user, so bcd gives "others" search (x, never read) on the way from `<data_dir>` to each file a domain names; the files stay root's until libvirt relabels them. Under `[helper]` it's group search and group-shared files instead (see Privilege separation) |
+| `<data_dir>/cloud-hypervisor/…` | cloud-hypervisor instances (`instances/<id>/vm.json` is bcd's record of each) and base images; `vfio-release.json` lists GPUs still to be given back to their driver |
 | `<data_dir>/volumes/<id>.raw`, `<id>.json` | persistent host volumes and their serials (0600; a CH VMM's user holds a read-write one while it runs) |
 | `bcd-alloc-<allocationId>.slice` | a hold's runtime slice when it has limits (`/sys/fs/cgroup/bcd.slice/bcd-alloc.slice/…`); under a fake root, `/run/bcd/slices/<name>.json` |
 | `/etc/ssh/sshd_config.d/10-better-compute.conf`, `/etc/ssh/bc_ca.pub`, `/etc/ssh/bc_principals/<account>`, `/etc/ssh/bc_krl` | break-glass SSH, written by the access converger |
@@ -262,7 +264,10 @@ length-prefixed frames). bcd proves itself with an ES256 proof JWT (`x5c` = its 
 `jti`, the connection nonce) and accepts only a gateway whose `x-bc-gateway-proof` chains to the
 pinned serving CA; `proxy_ca_file` is trusted for TLS only. Renewals go to `POST /v1/renew` on the
 same listener. WS mode needs command-signing roots (the gateway sends it signed intent only) and has
-no tunnels.
+no tunnels. The session pings the gateway every 20 s. When it receives nothing for 60 s (no frame,
+no pong), or cannot write a frame in that time, the connection counts as dead: the session ends
+with `nothing from the gateway for 1m0s` and bcd redials. A proxy that silently drops the
+connection no longer leaves bcd looking connected.
 
 **Privilege separation** (`internal/helper`, `cmd/bcd/helper.go`). With `[helper]`, `bcd node` runs
 unprivileged and asks `bcd helper` (root) over a unix socket for: files named by kind and id
@@ -281,6 +286,26 @@ SO_PEERCRED and `/proc/<pid>/exe`; requests are versioned, strictly decoded JSON
 is logged. Every directory on the way to the socket, the slots and the entrypoint must be root's
 and closed to others (`bcd doctor` checks it), neither the slots nor the entrypoint may live in
 `data_dir`, and the helper adopts into a slot only a root-owned entrypoint no one else can write.
+
+`file.write` checks the content too, kind by kind (`helper/content.go`): root writes a file only
+when it is what bcd node legitimately writes there, so these files cannot be used to run something
+as root.
+
+| Kind | What is written |
+|---|---|
+| `ssh-dropin` | exactly bcd's drop-in: `TrustedUserCAKeys`, `AuthorizedPrincipalsFile` and `RevokedKeys` on bcd's own files; no other directive |
+| `ssh-ca` | OpenSSH public keys, one a line (`<type> <base64> [comment]`, the blob of that type), no options |
+| `ssh-principals` | lines `<account>@<node id>` for the account the file is named after, and this node when root's join record names it; no options |
+| `ssh-krl` | the KRL bcd builds: its header (no flags, comment `better-compute`) and one serial list per CA key |
+| `allocation-env` | `KEY=VALUE` lines without control characters, the first `BCD_ALLOCATION_ID=<the file's allocation>` |
+| `k8s-token` | one kubeadm bootstrap token |
+| `cdi` | a `bcd.dev/gpu` spec of the file's allocation with only the fields and annotations bcd writes. Its env is bcd's four keys; every other env, device node, mount, hook and additional gid must be, item for item, in root's own NVIDIA spec (`/etc/cdi` or `/var/run/cdi`, kind `nvidia.com/gpu`, root-owned, never a `bcd-*.json`) |
+
+A refused write fails the section that asked (`file.write <kind>: …`). This does not decide *whose*
+CA and principals they are: any well-formed CA key and any `<account>@<node>` principal pass, `root`
+included, so a compromised `bcd node` can still make sshd trust a CA of its own. Closing that needs
+the helper to check the signed access section, as `host.unit` checks the signed host section; it
+does not yet.
 Instance runtimes under the helper: libvirt-kvm's privileged operations (`define`, `start`,
 `shutdown`, `destroy`, `suspend`, `resume`, `undefine`, `blockresize`, the balloon's `setmem`, the rebind disk's
 `attach-disk`/`detach-disk`, memory `save`/`restore`, and the console pty) go through the helper's
@@ -418,6 +443,52 @@ events. It never drops a hold on its own.
 
 **Instances** (`agent/instances.go`, `agent/admission.go`, `runtime/`).
 
+- *A disk is created once.* A libvirt domain counts as absent only when libvirt answers and does not
+  list it. While libvirtd does not answer (a restart mid-pass), the instance's pass fails and is
+  tried again; nothing is created, resized offline or deleted on a guess.
+  - `instances/<id>/.creating` marks a creation that has not defined its domain yet. A directory
+    that still has it after a crash is started over.
+  - A directory with a `disk.qcow2`, no marker and no domain is the tenant's data: Ensure fails with
+    `bcd does not create a disk over it`. Define the domain again from
+    `instances/<id>/domain.xml`, or remove the directory to start the instance afresh.
+  - A cloud-hypervisor instance's directory appears with its `vm.json` already in it, marked
+    `"creating": true` until Ensure has finished. An unfinished instance is not listed and never
+    started. It is removed when bcd next starts, or made again by the next pass that still wants it.
+    A directory under `instances/` without a `vm.json` is not bcd's and stays refused (`is not
+    bcd's`): only one left by a bcd from before this rule can be in that state, and it is removed by
+    hand.
+- *Base images* (`Libvirt.baseImage`, shared by both runtimes) download once, on the converge path,
+  and are checked against their sha256 before they become visible. A download is https only,
+  through every redirect; it is cancelled when it moves less than 1 MiB in a 2-minute window
+  (`image download: the transfer stalled`) or runs past 6 hours, and an image larger than 64 GiB is
+  refused (`the image is larger than …`), by its Content-Length when it states one.
+- *A cloud-hypervisor VM's state* is its VMM's `vm.info`. When the VMM does not answer, the unit
+  decides (`systemctl show --property=ActiveState bcd-ch-<id>.service`, which the node runs as
+  itself): `inactive` or `failed` is stopped, and so is a running VMM that answers it has no VM.
+  A running unit whose API fails, or a systemd that cannot be asked, is *unknown*: the instance
+  reports `ERROR` with `the state of <id> is unknown…`, keeps its volumes taken, and bcd neither
+  resizes its disk offline, starts it (a start recreates its taps) nor snapshots it. A stop still
+  goes through.
+- *Snapshots of a running libvirt domain.* A memory snapshot is `virsh save` (the domain stops),
+  then `virsh restore` from the saved state; a disk-only one suspends and resumes. A domain that
+  does not carry on fails `instance.snapshot` with `snapshot-failed`, whatever was already
+  written: `did not carry on from its saved memory` (the state is kept as
+  `instances/<id>/memory.state`, and the domain's next start restores from it) or
+  `stayed paused` (the next pass resumes it).
+- *`instance.snapshot`'s progress watchdog* (`agent/snapshot.go`, `internal/transfer`) covers the
+  phases that move bytes: the runtime writing the snapshot's tar, and the upload. Either is
+  cancelled when it moves less than 1 MiB in a 2-minute window. Saving the guest's memory and
+  flattening its disk come first and write nothing there, so they are not watched: they are bounded
+  by the 6-hour maximum and the command's own cancellation.
+- *Leftovers.* At its first pass after a start, each runtime removes what a killed bcd left in its
+  directory: half-written downloads (`images/.pull-*`), snapshots' work directories
+  (`instances/<id>/.snapshot-*`) and instances whose creation never finished. One exception keeps
+  a guest's memory: a libvirt memory snapshot killed between its `virsh save` and its restore left
+  the domain `shut off (saved)` with its state in the work directory; that file becomes
+  `instances/<id>/memory.state` and the domain's next start restores from it. While libvirt does not
+  answer, what needs its word stays and the next pass looks again.
+- *Stopping.* On SIGTERM (and before a self-update's exec) the converger pass under way is cancelled
+  and bcd waits up to 20 s for it to return, so a download or an instance being created undoes itself.
 - *Admission.* bcd admits a start only when the host has memory for it:
   - MemTotal minus the hugetlb pool and 1 GiB, less what running and paused domains hold (their
     memory plus VMM overhead);
@@ -448,7 +519,13 @@ events. It never drops a hold on its own.
   given back to its driver at stop and delete. GPU instances are never memory-snapshotted.
   nvidia-persistenced holds every GPU open, so the GPU's persistence mode goes off before it leaves
   nvidia (`nvidia-smi -pm 0`) and on again once nvidia has it back. libvirt's managed hostdevs get the
-  same around `start`/`restore` and `destroy`, done by root (bcd itself, or `bcd helper`).
+  same around `start`/`restore` and `destroy`, done by root (bcd itself, or `bcd helper`). Each
+  `nvidia-smi` call is killed after 30 s (`no answer after 30s`): a hung driver fails the step
+  instead of holding the runtime. When a destroyed cloud-hypervisor instance's GPU cannot be given
+  back (its unbind fails), the instance still goes, and the address is kept in
+  `<data_dir>/cloud-hypervisor/vfio-release.json` (`{"<pci address>": "<instance id>"}`). bcd tries
+  the release again about once a minute until it works, or until another instance binds that GPU.
+  The file is absent when nothing is pending.
 - *NoCloud seed* (`runtime/netconfig.go`). It carries network-config v2 for leased NICs:
   - each NIC is matched by MAC and gets its CIDR addresses;
   - the gateway becomes the default route, and the NIC's nameservers are set;
@@ -456,6 +533,20 @@ events. It never drops a hold on its own.
 - *bcx runtimes* (`agent/pluginruntime.go`). A plugin runtime is told each NIC's tap name, the
   guest's gateway and nameservers, the rebind ref, host-only SSH and placement. When bcd's tap rules
   guard an instance and a running instance's taps are missing, the instance is stopped (fail closed).
+
+**Metadata service** (`internal/imds`, `agent/imds.go`; `[imds] listen`). A request is from the
+running instance whose address the loaded anti-spoofing rules bind to its tap, and a guest decides
+how often it asks, so:
+
+- each instance has its own token buckets: 20 requests a second with a burst of 100, and 2 identity
+  tokens a second with a burst of 10. Past them the answer is `429` with `Retry-After: 1`. The
+  request budget is counted before anything is looked up, the unauthenticated `PUT
+  /latest/api/token` included;
+- the running instances' addresses are read from the runtimes at most every 5 s (an address not
+  yet known is looked for again after 500 ms, so a guest that just started is found);
+- an identity token the control plane cannot be asked for now (no session, 64 requests already
+  waiting, the outbox half full, no answer in 10 s) is `503` with `Retry-After: 1`. Refusals by the
+  control plane stay `403` (`400` for the audience).
 
 **Site boot server** (`agent/bootserver.go`, `agent/discovery.go`, `agent/sanboot.go`). While a site
 agent holds the `site:<id>:boot` lease, it answers PXE only for machines metal prepared
@@ -512,7 +603,9 @@ Xid lines on `/dev/kmsg` become conditions on the matching GPU.
 - The Hello resumes from the last epoch, generation and event sequence, and replays unacked events
   after the Welcome.
 - Heartbeats default to every 10 s and carry free lane credits.
-- A full outbox (4096 frames) drops the session instead of blocking.
+- A full outbox (4096 frames) drops the session instead of blocking. Frames a guest causes (the
+  metadata service's workload-token requests) never do that: they go out only while the outbox is
+  under half full, at most 64 wait for an answer, and past either bound the guest gets a 503.
 - Reconnects use full-jitter backoff up to 60 s. A `Drain` frame sets the delay, and `Revoked`
   stops the agent.
 

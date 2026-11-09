@@ -36,6 +36,9 @@ type fakeCH struct {
 	chowns []string
 	// noAck: the guest has no bc-rebind unit.
 	noAck bool
+	// apiDown: the VMMs run but their API sockets do not answer; systemdDown: systemctl fails.
+	apiDown     bool
+	systemdDown bool
 }
 
 // guestAck is a guest's bc-rebind unit: it reads the disk's tar and writes its acknowledgement.
@@ -91,6 +94,9 @@ func (f *fakeCH) exec(ctx context.Context, name string, args ...string) ([]byte,
 	case "systemctl":
 		f.calls = append(f.calls, name+" "+strings.Join(args, " "))
 		defer f.mu.Unlock()
+		if f.systemdDown {
+			return nil, errors.New("Failed to connect to bus: Connection refused")
+		}
 		socket := f.units[args[len(args)-1]]
 		switch args[0] {
 		case "stop":
@@ -119,6 +125,9 @@ func (f *fakeCH) api(_ context.Context, socket, method, path string, body any, f
 	vmm := f.vmms[socket]
 	if vmm == nil {
 		return nil, 0, errors.New("connect: no such file or directory")
+	}
+	if f.apiDown {
+		return nil, 0, errors.New("dial unix " + socket + ": connect: resource temporarily unavailable")
 	}
 	op := strings.TrimPrefix(path, "/api/v1/")
 	call := method + " " + op
@@ -247,7 +256,7 @@ func TestCloudHypervisorRuntime(t *testing.T) {
 		if err := c.SetState(ctx, "inst_web", want); err != nil {
 			t.Fatal(err)
 		}
-		if got, _ := c.state(ctx, "inst_web"); got != want {
+		if got, _, _ := c.state(ctx, "inst_web"); got != want {
 			t.Fatalf("state = %s, want %s", got, want)
 		}
 	}
@@ -309,7 +318,7 @@ func TestCloudHypervisorRuntime(t *testing.T) {
 			t.Fatalf("snapshot lacks %s: %v", n, names)
 		}
 	}
-	if got, _ := c.state(ctx, "inst_web"); got != StateRunning {
+	if got, _, _ := c.state(ctx, "inst_web"); got != StateRunning {
 		t.Fatalf("after the snapshot: %s", got)
 	}
 
@@ -360,7 +369,7 @@ func TestCloudHypervisorRuntime(t *testing.T) {
 	if _, err := os.Stat(rebindImg); err == nil {
 		t.Fatal("an unacknowledged rebind disk stayed")
 	}
-	if got, _ := c.state(ctx, "inst_clone"); got != StateRunning {
+	if got, _, _ := c.state(ctx, "inst_clone"); got != StateRunning {
 		t.Fatalf("clone = %s", got)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "instances", "inst_clone", "snapshot")); err == nil {
@@ -371,7 +380,7 @@ func TestCloudHypervisorRuntime(t *testing.T) {
 	if err := c.SetState(ctx, "inst_web", StateStopped); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := c.state(ctx, "inst_web"); got != StateStopped || !strings.Contains(strings.Join(ch.calls, "\n"), "systemctl stop bcd-ch-inst_web.service") ||
+	if got, _, _ := c.state(ctx, "inst_web"); got != StateStopped || !strings.Contains(strings.Join(ch.calls, "\n"), "systemctl stop bcd-ch-inst_web.service") ||
 		!strings.Contains(strings.Join(ch.calls, "\n"), "ip link delete "+tap) || !strings.Contains(strings.Join(ch.chowns, "\n"), "/dev/vfio/42 0") {
 		t.Fatalf("stop: %s", got)
 	}

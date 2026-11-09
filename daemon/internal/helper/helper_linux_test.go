@@ -1,6 +1,7 @@
 package helper
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -57,16 +58,24 @@ func me(p Peer) error {
 func TestHelperFiles(t *testing.T) {
 	c, _, root := serve(t, me)
 	ctx := context.Background()
-	if err := c.WriteFile(ctx, "/etc/cdi/bcd-alloc_1.json", []byte(`{"cdiVersion":"0.6.0"}`)); err != nil {
+	cdi := `{"cdiVersion":"0.6.0","kind":"bcd.dev/gpu","annotations":{"bcd.dev/allocation-id":"alloc_1"},"devices":[],"containerEdits":{"env":["BCD_ALLOCATION_ID=alloc_1"]}}`
+	if err := c.WriteFile(ctx, "/etc/cdi/bcd-alloc_1.json", []byte(cdi)); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(filepath.Join(root, "etc/cdi/bcd-alloc_1.json"))
-	if err != nil || string(b) != `{"cdiVersion":"0.6.0"}` {
+	if err != nil || string(b) != cdi {
 		t.Fatalf("cdi = %q, %v", b, err)
 	}
-	for _, p := range []string{"/run/bcd/allocations/alloc_1.env", "/etc/ssh/sshd_config.d/10-better-compute.conf", "/etc/ssh/bc_ca.pub", "/etc/ssh/bc_krl", "/etc/ssh/bc_principals/root"} {
-		if err := c.WriteFile(ctx, p, []byte("x")); err != nil {
+	for p, content := range legitFiles() {
+		if err := c.WriteFile(ctx, p, content); err != nil {
 			t.Fatalf("%s: %v", p, err)
+		}
+		// The same path with anything else is refused: the kind and the name are not enough.
+		if err := c.WriteFile(ctx, p, []byte("x")); err == nil {
+			t.Fatalf("%s took arbitrary content", p)
+		}
+		if got, _ := os.ReadFile(filepath.Join(root, p)); !bytes.Equal(got, content) {
+			t.Fatalf("%s = %q", p, got)
 		}
 	}
 	if err := c.RemoveFile(ctx, "/etc/ssh/bc_principals/root"); err != nil {
@@ -99,7 +108,7 @@ func TestHelperFiles(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(root, "etc/ssh/bc_principals")); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.WriteFile(ctx, "/etc/ssh/bc_principals/root", []byte("x")); err == nil || !strings.Contains(err.Error(), "not a plain directory") {
+	if err := c.WriteFile(ctx, "/etc/ssh/bc_principals/root", []byte("root@node_1\n")); err == nil || !strings.Contains(err.Error(), "not a plain directory") {
 		t.Fatalf("through a symlinked directory: %v", err)
 	}
 	if entries, _ := os.ReadDir(outside); len(entries) != 0 {

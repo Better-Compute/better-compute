@@ -20,9 +20,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
+	"github.com/better-compute/better-compute/daemon/internal/transfer"
 )
 
 // Libvirt is the libvirt-kvm runtime (PLAN.md §12, v0.3), through virsh on qemu:///system and
@@ -55,8 +57,15 @@ type Libvirt struct {
 	// node's group (libvirt with dynamic_ownership off; libvirt-qemu in that group) rather than
 	// relabelled. nil: virsh on qemu:///system as root.
 	Hypervisor Hypervisor
-	// HTTP downloads base images (https only; default a client without a total timeout).
+	// HTTP downloads base images (https only, redirects too; default a client without a total
+	// timeout: a download is bounded by its progress and by MaxImageBytes).
 	HTTP *http.Client
+	// MaxImageBytes is the largest base image downloaded (default DefaultMaxImageBytes).
+	MaxImageBytes int64
+	// pullIdle is the window a download must move transfer.MinBytes in (default transfer.Idle; tests).
+	pullIdle time.Duration
+	// swept: what a killed bcd left behind was removed (sweep, at the first List that can).
+	swept atomic.Bool
 	// ShutdownTimeout bounds a graceful shutdown before the domain is destroyed (default 60 s).
 	ShutdownTimeout time.Duration
 	// GPUPersistence sets a passthrough GPU's persistence mode around starts and stops (persistence.go;
@@ -419,8 +428,83 @@ func stateOf(domstate string) string {
 	return StateStopped
 }
 
+// sweepPulls removes the downloads a killed bcd left half-written in images/ (.pull-*). Downloads
+// run with the runtime's lock held, which the caller holds: none is under way.
+func sweepPulls(dir string) {
+	images := filepath.Join(dir, "images")
+	entries, _ := os.ReadDir(images)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".pull-") {
+			_ = os.Remove(filepath.Join(images, e.Name()))
+		}
+	}
+}
+
+// snapshotWorkDirs are the work directories snapshots of the instance in dir left (.snapshot-*).
+func snapshotWorkDirs(dir string) []string {
+	var out []string
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), ".snapshot-") {
+			out = append(out, filepath.Join(dir, e.Name()))
+		}
+	}
+	return out
+}
+
+// sweep removes what a bcd killed mid-operation left behind (the caller holds the lock, so nothing
+// of it is in use): half-written image downloads, snapshots' work directories and the instances an
+// Ensure never finished. A memory snapshot killed between its `virsh save` and its restore left the
+// guest off with its memory in the work directory: when libvirt says the domain is shut off because
+// it was saved, that state becomes the instance's memory.state, which its next start restores from.
+// It reports false when libvirt did not answer for something: the next List tries again.
+func (l *Libvirt) sweep(ctx context.Context) bool {
+	sweepPulls(l.Dir)
+	done := true
+	instances := filepath.Join(l.Dir, "instances")
+	entries, _ := os.ReadDir(instances)
+	for _, e := range entries {
+		id := e.Name()
+		if !e.IsDir() || !instanceID.MatchString(id) {
+			continue
+		}
+		dir := filepath.Join(instances, id)
+		if _, err := os.Lstat(filepath.Join(dir, creatingMarker)); err == nil {
+			// An unfinished creation nobody may ask for again: gone, unless its domain was defined.
+			if exists, _, _, err := l.managed(ctx, id); err != nil {
+				done = false
+			} else if !exists {
+				_ = os.RemoveAll(dir)
+			}
+			continue
+		}
+		for _, work := range snapshotWorkDirs(dir) {
+			saved, kept := filepath.Join(work, "memory.state"), filepath.Join(dir, "memory.state")
+			if fileExists(saved) && !fileExists(kept) {
+				st, err := l.virsh(ctx, "domstate", id, "--reason")
+				if err != nil {
+					done = false
+					continue // not removed until libvirt says whether the guest's memory is in it
+				}
+				if strings.Contains(string(st), "(saved)") {
+					_ = os.Rename(saved, kept)
+				}
+			}
+			_ = os.RemoveAll(work)
+		}
+	}
+	return done
+}
+
 // List returns every domain of the connection, bcd's (Managed, with their metadata) and any other.
 func (l *Libvirt) List(ctx context.Context) ([]Domain, error) {
+	// The first List of a process comes before anything else it does to an instance.
+	if !l.swept.Load() && l.mu.TryLock() {
+		if !l.swept.Load() && l.sweep(ctx) {
+			l.swept.Store(true)
+		}
+		l.mu.Unlock()
+	}
 	out, err := l.virsh(ctx, "list", "--all", "--name")
 	if err != nil {
 		return nil, err
@@ -469,17 +553,44 @@ func (l *Libvirt) List(ctx context.Context) ([]Domain, error) {
 	return domains, nil
 }
 
-// managed reads a domain's metadata: whether it exists, and whether bcd created it.
-func (l *Libvirt) managed(ctx context.Context, id string) (exists, managed bool, meta instanceMetaXML) {
+// managed reads a domain's metadata: whether it exists, and whether bcd created it. A failed read is
+// never "it does not exist": a domain is absent only when libvirt, still answering, does not list it.
+// (libvirtd restarting mid-pass fails every call: Ensure once took that for a new instance and
+// created a disk over the tenant's.)
+func (l *Libvirt) managed(ctx context.Context, id string) (exists, managed bool, meta instanceMetaXML, err error) {
 	raw, err := l.virsh(ctx, "dumpxml", id)
 	if err != nil {
-		return false, false, meta
+		listed, listErr := l.virsh(ctx, "list", "--all", "--name")
+		if listErr != nil {
+			return false, false, meta, fmt.Errorf("libvirt does not answer for domain %s: %w", id, err)
+		}
+		for _, name := range strings.Split(string(listed), "\n") {
+			if strings.TrimSpace(name) == id {
+				return false, false, meta, fmt.Errorf("domain %s is defined but could not be read: %w", id, err)
+			}
+		}
+		return false, false, meta, nil
 	}
 	var x domainXML
 	if xml.Unmarshal(raw, &x) != nil || x.Metadata == nil || x.Metadata.Instance.ID != id {
-		return true, false, meta
+		return true, false, meta, nil
 	}
-	return true, true, x.Metadata.Instance
+	return true, true, x.Metadata.Instance, nil
+}
+
+// creatingMarker is in an instance's directory from before its disk is created until its domain is
+// defined: a directory that still has it belongs to an Ensure that never finished, whose domain never
+// existed, so it holds nothing of the tenant's and the next Ensure starts it over.
+const creatingMarker = ".creating"
+
+// stopped reads a domain's state for a decision that touches its disk: whether it is stopped. A
+// failed read is an error, never "stopped".
+func (l *Libvirt) stopped(ctx context.Context, id string) (bool, error) {
+	st, err := l.virsh(ctx, "domstate", id)
+	if err != nil {
+		return false, fmt.Errorf("domain %s's state: %w", id, err)
+	}
+	return stateOf(string(st)) == StateStopped, nil
 }
 
 // ---- Ensure -----------------------------------------------------------------------------------
@@ -498,7 +609,10 @@ func (l *Libvirt) Ensure(ctx context.Context, spec *agentv1.InstanceSpec, userDa
 		return err
 	}
 	dir := l.instanceDir(id)
-	exists, managed, meta := l.managed(ctx, id)
+	exists, managed, meta, err := l.managed(ctx, id)
+	if err != nil {
+		return err
+	}
 	if exists && !managed {
 		return fmt.Errorf("a domain named %s exists that bcd did not create", id)
 	}
@@ -507,8 +621,25 @@ func (l *Libvirt) Ensure(ctx context.Context, spec *agentv1.InstanceSpec, userDa
 		addrs = append(addrs, n.GetAddresses()...)
 	}
 	cdrom := ""
+	creating := filepath.Join(dir, creatingMarker)
 	if !exists {
+		// What an Ensure that never finished left (killed mid-download, mid-unpack): start it over.
+		if _, err := os.Lstat(creating); err == nil {
+			if err := os.RemoveAll(dir); err != nil {
+				return err
+			}
+		}
+		// Never a new disk over an existing one: a disk without a domain and without the marker was an
+		// instance's (its definition was lost, or removed by hand), and it is the tenant's data.
+		if _, err := os.Lstat(filepath.Join(dir, "disk.qcow2")); err == nil {
+			return fmt.Errorf("instances/%s/disk.qcow2 exists but libvirt has no domain %s: bcd does not create a disk over it (define the domain again from instances/%s/domain.xml, or remove the directory to start the instance afresh)", id, id, id)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(creating, nil, 0o600); err != nil {
 			return err
 		}
 		meta = instanceMetaXML{ID: id, Allocation: spec.GetAllocationId()}
@@ -558,6 +689,8 @@ func (l *Libvirt) Ensure(ctx context.Context, spec *agentv1.InstanceSpec, userDa
 		if err := l.grow(ctx, id, dir, spec.GetDiskBytes()); err != nil {
 			return err
 		}
+		// Defined: whatever marker a kill between the definition and its removal left is stale.
+		_ = os.Remove(creating)
 	}
 	meta.Addresses = strings.Join(addrs, ",")
 	d, err := l.domainFor(spec, dir, cdrom, meta)
@@ -593,14 +726,26 @@ func (l *Libvirt) Ensure(ctx context.Context, spec *agentv1.InstanceSpec, userDa
 			}
 		}
 	}
-	return l.define(ctx, d, dir)
+	if err := l.define(ctx, d, dir); err != nil {
+		return err
+	}
+	if err := os.Remove(creating); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func (l *Libvirt) basePath(digestHex, format string) string {
 	return filepath.Join(l.Dir, "images", digestHex+"."+format)
 }
 
-// baseImage downloads an image once, verified against its sha256 before it becomes visible.
+// DefaultMaxImageBytes caps a base image's download: the pinned sha256 says what the bytes must be,
+// not how many a server may send before the check.
+const DefaultMaxImageBytes = 64 << 30
+
+// baseImage downloads an image once, verified against its sha256 before it becomes visible. The
+// download runs on the converge path with the runtime's lock held, so it is bounded: it must keep
+// moving (transfer's watchdog), stay on https through every redirect, and fit in MaxImageBytes.
 func (l *Libvirt) baseImage(ctx context.Context, img *agentv1.ImageRef) (string, error) {
 	if img.GetUrl() == "" || len(img.GetSha256()) != sha256.Size {
 		return "", errors.New("the image has no URL or sha256")
@@ -619,21 +764,43 @@ func (l *Libvirt) baseImage(ctx context.Context, img *agentv1.ImageRef) (string,
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return "", err
 	}
+	limit := l.MaxImageBytes
+	if limit <= 0 {
+		limit = DefaultMaxImageBytes
+	}
+	idle := l.pullIdle
+	if idle <= 0 {
+		idle = transfer.Idle
+	}
+	ctx, watch, stop := transfer.WithProgress(ctx, idle, transfer.MinBytes, transfer.Max)
+	defer stop()
+	// stalled names why the download's context ended, when the watchdog ended it.
+	stalled := func(err error) error {
+		if cause := context.Cause(ctx); errors.Is(cause, transfer.ErrStalled) || errors.Is(cause, transfer.ErrTooLong) {
+			return fmt.Errorf("image download: %w", cause)
+		}
+		return err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, img.GetUrl(), nil)
 	if err != nil {
 		return "", err
 	}
-	client := l.HTTP
-	if client == nil {
-		client = &http.Client{}
+	client := http.Client{}
+	if l.HTTP != nil {
+		client = *l.HTTP
 	}
+	client.CheckRedirect = transfer.HTTPSOnly
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", stalled(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("image GET returned %s", resp.Status)
+	}
+	tooLarge := fmt.Errorf("the image is larger than the %d bytes this host downloads", limit)
+	if resp.ContentLength > limit {
+		return "", tooLarge
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(dst), ".pull-*")
 	if err != nil {
@@ -641,10 +808,13 @@ func (l *Libvirt) baseImage(ctx context.Context, img *agentv1.ImageRef) (string,
 	}
 	defer os.Remove(tmp.Name())
 	h := sha256.New()
-	_, err = io.Copy(io.MultiWriter(tmp, h), resp.Body)
+	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(transfer.Reader{R: resp.Body, W: watch}, limit+1))
 	tmp.Close()
 	if err != nil {
-		return "", err
+		return "", stalled(err)
+	}
+	if n > limit {
+		return "", tooLarge
 	}
 	if !bytes.Equal(h.Sum(nil), img.GetSha256()) {
 		return "", fmt.Errorf("image sha256 %x is not the pinned %x", h.Sum(nil), img.GetSha256())
@@ -798,8 +968,12 @@ func (l *Libvirt) grow(ctx context.Context, id, dir string, size uint64) error {
 	case size == current:
 		return nil
 	}
-	st, _ := l.virsh(ctx, "domstate", id)
-	if stateOf(string(st)) == StateStopped {
+	// qemu-img only on a disk no QEMU has open: an unreadable state is not "stopped".
+	stopped, err := l.stopped(ctx, id)
+	if err != nil {
+		return err
+	}
+	if stopped {
 		_, err = l.run(ctx, "qemu-img", "resize", "-f", "qcow2", disk, strconv.FormatUint(size, 10))
 	} else {
 		_, err = l.virsh(ctx, "blockresize", id, "vda", strconv.FormatUint(size, 10)+"B")
@@ -814,7 +988,10 @@ func (l *Libvirt) grow(ctx context.Context, id, dir string, size uint64) error {
 func (l *Libvirt) SetState(ctx context.Context, id, state string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	exists, managed, meta := l.managed(ctx, id)
+	exists, managed, meta, err := l.managed(ctx, id)
+	if err != nil {
+		return err
+	}
 	if !exists || !managed {
 		return fmt.Errorf("no managed domain %s", id)
 	}
@@ -963,12 +1140,20 @@ func (l *Libvirt) stopDomain(ctx context.Context, id string) error {
 func (l *Libvirt) Destroy(ctx context.Context, id string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	exists, managed, _ := l.managed(ctx, id)
+	exists, managed, _, err := l.managed(ctx, id)
+	if err != nil {
+		// Its files stay until libvirt says the domain is gone or lets bcd remove it.
+		return err
+	}
 	if exists && !managed {
 		return fmt.Errorf("the domain %s is not bcd's", id)
 	}
 	if exists {
-		if st, _ := l.virsh(ctx, "domstate", id); stateOf(string(st)) != StateStopped {
+		stopped, err := l.stopped(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !stopped {
 			if _, err := l.virsh(ctx, "destroy", id); err != nil {
 				return err
 			}
@@ -997,10 +1182,18 @@ type libvirtSnapshot struct {
 // Snapshot writes a tar of meta.json, disk.qcow2 (the overlay flattened onto its base), seed.iso
 // and, with memory, memory.state (virsh save, then the domain carries on from it). A disk-only
 // snapshot of a running domain pauses it for the copy.
-func (l *Libvirt) Snapshot(ctx context.Context, id string, includeMemory bool, cpuModel string, w io.Writer) (string, error) {
+//
+// A domain that does not carry on afterwards is an error, whatever was written to w: after a memory
+// snapshot `virsh save` has stopped it, and when the restore fails its saved state is kept as the
+// instance's memory.state, which its next start restores from (SetState), instead of being removed
+// with the work directory while Snapshot reports success.
+func (l *Libvirt) Snapshot(ctx context.Context, id string, includeMemory bool, cpuModel string, w io.Writer) (cpu string, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	exists, managed, dom := l.managed(ctx, id)
+	exists, managed, dom, err := l.managed(ctx, id)
+	if err != nil {
+		return "", err
+	}
 	if !exists || !managed {
 		return "", fmt.Errorf("no managed domain %s", id)
 	}
@@ -1046,13 +1239,30 @@ func (l *Libvirt) Snapshot(ctx context.Context, id string, includeMemory bool, c
 			if state == StatePaused {
 				args = append(args, "--paused")
 			}
-			_, _ = l.virsh(context.WithoutCancel(ctx), args...)
+			_, restoreErr := l.virsh(context.WithoutCancel(ctx), args...)
+			if restoreErr == nil {
+				return
+			}
+			// The guest is off and this file is all of its memory: out of the work directory (removed
+			// next) to where the next start restores from.
+			kept := filepath.Join(dir, "memory.state")
+			failure := fmt.Errorf("domain %s did not carry on from its saved memory after the snapshot: %w", id, restoreErr)
+			if mvErr := os.Rename(memory, kept); mvErr != nil {
+				failure = fmt.Errorf("%w; keeping its memory state failed too, the guest's memory is lost: %v", failure, mvErr)
+			} else {
+				failure = fmt.Errorf("%w; it is stopped, its memory state is kept in %s and its next start restores from it", failure, kept)
+			}
+			cpu, err = "", errors.Join(failure, err)
 		}()
 	case state == StateRunning:
 		if _, err := l.virsh(ctx, "suspend", id); err != nil {
 			return "", err
 		}
-		defer func() { _, _ = l.virsh(context.WithoutCancel(ctx), "resume", id) }()
+		defer func() {
+			if _, resumeErr := l.virsh(context.WithoutCancel(ctx), "resume", id); resumeErr != nil {
+				cpu, err = "", errors.Join(fmt.Errorf("domain %s stayed paused after the snapshot: %w", id, resumeErr), err)
+			}
+		}()
 	}
 	flat := filepath.Join(work, "disk.qcow2")
 	if _, err := l.run(ctx, "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2", filepath.Join(dir, "disk.qcow2"), flat); err != nil {
@@ -1187,8 +1397,11 @@ func (l *Libvirt) Console(ctx context.Context, id string) (io.ReadWriteCloser, e
 // acknowledgement; the disk is detached and its file scrubbed whatever happens.
 func (l *Libvirt) Rebind(ctx context.Context, id string, b Rebind) error {
 	l.mu.Lock()
-	if exists, managed, _ := l.managed(ctx, id); !exists || !managed {
+	if exists, managed, _, err := l.managed(ctx, id); err != nil || !exists || !managed {
 		l.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		return fmt.Errorf("no managed domain %s", id)
 	}
 	if st, _ := l.virsh(ctx, "domstate", id); stateOf(string(st)) != StateRunning {

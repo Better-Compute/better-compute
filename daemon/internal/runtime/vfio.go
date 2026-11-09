@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -39,15 +38,7 @@ func (v SysfsVFIO) persistence(addr string, on bool) error {
 	if v.Root != "" && v.Root != "/" {
 		return nil
 	}
-	mode := "0"
-	if on {
-		mode = "1"
-	}
-	out, err := exec.Command("nvidia-smi", "-i", addr, "-pm", mode).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("nvidia-smi -pm %s: %v: %s", mode, err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return NvidiaPersistence(addr, on) // bounded: 30 s
 }
 
 // unbind writes dev to its driver's unbind file, but waits at most UnbindTimeout. A driver's remove
