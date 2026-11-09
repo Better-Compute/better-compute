@@ -14,6 +14,7 @@ import { pglite } from '@better-compute/postgres/pglite';
 import {
   abortWorkflow,
   advanceWorkflow,
+  awaitCommand,
   defineProfile,
   defineStep,
   evaluateWhen,
@@ -101,7 +102,55 @@ const kexec = defineStep({
   command: 'boot.kexec',
   input: manifest({}),
 });
-const registry = stepRegistry([record, kexec]);
+/** A control-plane step that relays two commands as metal's do (`awaitCommand`): one to the site agent, one to the machine. */
+const relayed = defineStep({
+  id: 'test.relayed',
+  runsOn: 'control-plane',
+  timeout: '1m',
+  retrySafe: true,
+  input: manifest({}),
+  async run(_input, stepContext) {
+    await stepContext.sql.transaction((tx) =>
+      stepContext.commands.enqueue(tx, {
+        nodeId: SITE_AGENT,
+        kind: 'boot.prepareRamdisk',
+        payload: {},
+        idempotencyKey: `${stepContext.idempotencyKey}#${stepContext.attempt}:entry`,
+        notAfter: Date.now() + 600_000,
+      }),
+    );
+    await awaitCommand(stepContext, { nodeId: stepContext.node!.id, kind: 'disk.wipe', key: 'wipe', payload: {} });
+    return null;
+  },
+});
+/** A control-plane step that sends its command only once the test opens `gate` (a step still running when it is aborted). */
+let gate: Promise<void> = Promise.resolve();
+let gated: (() => void) | undefined;
+let lateEnqueue: unknown;
+const late = defineStep({
+  id: 'test.late',
+  runsOn: 'control-plane',
+  timeout: '1m',
+  retrySafe: true,
+  input: manifest({}),
+  async run(_input, stepContext) {
+    gated?.();
+    await gate;
+    lateEnqueue = await stepContext.sql
+      .transaction((tx) =>
+        stepContext.commands.enqueue(tx, {
+          nodeId: stepContext.node!.id,
+          kind: 'disk.wipe',
+          payload: {},
+          idempotencyKey: `${stepContext.idempotencyKey}#${stepContext.attempt}:late`,
+          notAfter: Date.now() + 600_000,
+        }),
+      )
+      .catch((error: unknown) => error);
+    return null;
+  },
+});
+const registry = stepRegistry([record, kexec, relayed, late]);
 
 const stored = new Map<string, ProfileDocument>();
 const options: AdvanceOptions = {
@@ -152,6 +201,14 @@ async function steps(id: string) {
   return rows;
 }
 const states = async (id: string) => Object.fromEntries((await steps(id)).map((s) => [s.id, s.state]));
+/** Every command sent under the workflow's keys: idempotency key → state. */
+async function stepCommands(id: string): Promise<Record<string, string>> {
+  const { rows } = await db.query<{ idempotency_key: string; state: string }>(
+    `SELECT idempotency_key, state FROM commands WHERE starts_with(idempotency_key, $1) ORDER BY idempotency_key`,
+    [`wf:${id}:`],
+  );
+  return Object.fromEntries(rows.map((row) => [row.idempotency_key, row.state]));
+}
 async function settleCommand(id: string, state: string, reason?: string) {
   await db.query('UPDATE commands SET state = $2, reason = $3 WHERE id = $1', [id, state, reason ?? null]);
 }
@@ -477,6 +534,27 @@ describe('timeouts and not-ready steps', () => {
     expect(await workflow(id)).toMatchObject({ state: 'failed', error: { code: 'TIMEOUT' } });
   });
 
+  it('cancels the commands a control-plane step relayed when it times out', async () => {
+    profile({ id: 'slow-relay', steps: [{ use: 'test.relayed', timeout: '1m' }] });
+    const { id } = await start('slow-relay');
+    await advance(id);
+    expect(await stepCommands(id)).toEqual({ [`wf:${id}:main.1#0:entry`]: 'pending', [`wf:${id}:main.1#0:wipe`]: 'pending' });
+    // Another step's command whose key only starts alike (main.10 is not main.1) is not this step's.
+    await db.query(
+      `INSERT INTO commands (id, node_id, seq, kind, body, state, not_after, retry_safe, self_terminating, attested, idempotency_key)
+       VALUES ($1, $2, 999, 'disk.wipe', ''::bytea, 'pending', compute_now() + interval '1 hour', false, false, false, $3)`,
+      [`cmd_other_${id}`, node, `wf:${id}:main.10#0:wipe`],
+    );
+    await tick(61_000);
+    expect((await advance(id)).done).toBe(true);
+    expect(await workflow(id)).toMatchObject({ state: 'failed', error: { code: 'TIMEOUT' } });
+    expect(await stepCommands(id)).toEqual({
+      [`wf:${id}:main.1#0:entry`]: 'cancelled',
+      [`wf:${id}:main.1#0:wipe`]: 'cancelled',
+      [`wf:${id}:main.10#0:wipe`]: 'pending',
+    });
+  });
+
   it('re-runs a not-ready control-plane step later, until it is ready', async () => {
     profile({ id: 'not-ready', steps: [{ use: 'test.record', with: { label: 'poll' } }] });
     notReadyUntil = Date.now() + 60_000;
@@ -523,6 +601,37 @@ describe('operator verbs', () => {
     expect(await workflow(id)).toMatchObject({ state: 'cancelled', error: { code: 'CANCELLED', message: 'operator' } });
     // Twice is fine.
     await db.transaction((tx) => abortWorkflow(context(), tx, id));
+  });
+
+  it('aborts a control-plane step: every command it relayed is cancelled, in flight or not', async () => {
+    profile({ id: 'abort-relay', steps: [{ use: 'test.relayed' }], cleanup: [{ use: 'test.record', with: { label: 'cleanup' } }] });
+    const { id } = await start('abort-relay');
+    await advance(id);
+    expect((await steps(id))[0]).toMatchObject({ state: 'running', command_id: null });
+    // The site agent took its command; the machine (a ramdisk that is reconnecting) has not seen the wipe yet.
+    await db.query(`UPDATE commands SET state = 'dispatched' WHERE idempotency_key = $1`, [`wf:${id}:main.1#0:entry`]);
+    await db.transaction((tx) => abortWorkflow(context(), tx, id, { reason: 'operator' }));
+    expect(await stepCommands(id)).toEqual({ [`wf:${id}:main.1#0:entry`]: 'cancelled', [`wf:${id}:main.1#0:wipe`]: 'cancelled' });
+    expect((await advance(id)).done).toBe(true);
+    expect(await workflow(id)).toMatchObject({ state: 'cancelled' });
+    expect(await states(id)).toEqual({ 'main.1': 'cancelled', 'cleanup.1': 'succeeded' });
+  });
+
+  it('refuses a command from a step that was aborted while it ran', async () => {
+    profile({ id: 'abort-late', steps: [{ use: 'test.late' }] });
+    const { id } = await start('abort-late');
+    let open!: () => void;
+    gate = new Promise((resolve) => (open = resolve));
+    const running = new Promise<void>((resolve) => (gated = resolve));
+    lateEnqueue = undefined;
+    const advancing = advance(id);
+    await running;
+    await db.transaction((tx) => abortWorkflow(context(), tx, id, { reason: 'operator' }));
+    open();
+    await advancing;
+    gated = undefined;
+    expect(lateEnqueue).toMatchObject({ code: 'INVALID_STATE' });
+    expect(await stepCommands(id)).toEqual({});
   });
 
   it('pauses between steps and resumes', async () => {

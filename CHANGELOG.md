@@ -167,6 +167,12 @@ All notable changes to the better-compute packages are documented here. The form
   GPU machine type (and so `TERMINATE`) when `machineTypes.get` fails now knows the `a4x-` and `g4-` families.
 - **GB200 and RTX PRO 6000 GPUs** (`@better-compute/provider-gcp`). `nvidia-gb200` and `nvidia-rtx-pro-6000`
   accelerators report the `GB200` and `RTX-PRO-6000` GPU families (and meters) instead of `other`.
+- **Aborting or timing out a workflow step cancels what it relayed** (`@better-compute/provision`, `metal`). Only
+  agent steps recorded their command, so `metal.abort`, `workflows.abort` and a step timeout cancelled nothing a
+  control-plane step had sent through `awaitCommand`: a `deploy.image` or `disk.wipe` still pending for a ramdisk
+  that reconnected later ran anyway. Now a step that is aborted, fails or times out has every open command under
+  its key (`wf:<workflow>:<step>…`) cancelled, pending ones at once and in-flight ones through the gateway, and a
+  step run that outlives its step is refused any further command (`INVALID_STATE`).
 
 ## 0.3.0 (2026-10-20)
 

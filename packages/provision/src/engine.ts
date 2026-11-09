@@ -132,6 +132,25 @@ export function commandKey(step: Pick<StepRow, 'idempotency_key' | 'attempt'>): 
   return step.attempt === 0 ? step.idempotency_key : `${step.idempotency_key}#${step.attempt}`;
 }
 
+/**
+ * Cancels every live command a step sent, whatever sent it: an agent step's one command
+ * (`wf:<id>:<step>`, `…#<n>` on a retry) and the commands a control-plane step relayed with
+ * `awaitCommand` (`…#<attempt>[:<key>]`), which `workflow_steps.command_id` never names. Matching is
+ * the secret broker's step binding: the step's key, or the key followed by `#` or `:`. Pending
+ * commands are cancelled at once; in-flight ones get a cancel request the gateway delivers.
+ */
+async function cancelStepCommands(context: EngineContext, tx: SqlTx, step: Pick<StepRow, 'idempotency_key'>): Promise<number> {
+  const { rows } = await tx.query<{ id: string }>(
+    `SELECT id FROM commands
+      WHERE state IN ('pending', 'dispatched', 'acked', 'running')
+        AND (idempotency_key = $1 OR starts_with(idempotency_key, $1 || '#') OR starts_with(idempotency_key, $1 || ':'))
+      ORDER BY node_id, seq`,
+    [step.idempotency_key],
+  );
+  for (const { id } of rows) await context.commands.cancel(tx, id);
+  return rows.length;
+}
+
 /** A locked workflow row, with the transaction's clock and its node's reference read in the same statement. */
 interface LockedWorkflow extends WorkflowRow {
   /** `compute_now()` at the lock (epoch ms). */
@@ -396,8 +415,11 @@ export async function abortWorkflow(
     if (step.phase === 'cleanup') continue;
     if (step.state === 'pending') await setStep(tx, step, 'cancelled', { finish: true });
     else if (step.state === 'running' || step.state === 'waiting') {
-      if (step.command_id) await context.commands.cancel(tx, step.command_id);
+      // The step is cancelled first: a run of it still in a worker is refused any further command
+      // (runControlPlaneStep), so the commands read next are all it will ever have sent.
       await setStep(tx, step, 'cancelled', { finish: true, error: { code: 'CANCELLED', message: 'aborted' } });
+      if (step.command_id) await context.commands.cancel(tx, step.command_id);
+      await cancelStepCommands(context, tx, step);
     }
   }
   await setWorkflow(tx, workflow, {
@@ -525,6 +547,10 @@ async function failStep(
   error: { code: string; message: string },
 ): Promise<void> {
   await setStep(tx, step, assertStepVerb(step.state, 'fail'), { finish: true, error });
+  // Whatever this attempt sent and is still open must not run after it: a timed-out control-plane
+  // step leaves its relayed commands pending (for a ramdisk that reconnects later), and a retry
+  // sends its own under the next attempt's key.
+  await cancelStepCommands(context, tx, step);
   if (step.attempt < step.retries) {
     await setStep(tx, step, assertStepVerb('failed', 'retry'), { attempt: step.attempt + 1, error });
     await publish(context, tx, workflow, 'workflow.step.retrying', { stepId: step.id, attempt: step.attempt, error });
@@ -807,17 +833,27 @@ async function runControlPlaneStep(
   // A step that declares what it relays (`sends`) may enqueue only those kinds: a batch's scope,
   // computed from the declarations, then covers everything the workflow can send.
   const sends = definition.sends;
-  const commands =
-    sends && context.commands
-      ? {
-          ...context.commands,
-          enqueue: (tx: SqlTx, command: Parameters<typeof context.commands.enqueue>[1]) => {
-            if (!sends.includes(command.kind))
-              throw new ComputeError('INVALID_CONFIG', `Step ${step.action} sends ${command.kind}, which it does not declare in sends`);
-            return context.commands.enqueue(tx, command);
-          },
-        }
-      : context.commands;
+  const commands = context.commands
+    ? {
+        ...context.commands,
+        enqueue: async (tx: SqlTx, command: Parameters<typeof context.commands.enqueue>[1]) => {
+          if (sends && !sends.includes(command.kind))
+            throw new ComputeError('INVALID_CONFIG', `Step ${step.action} sends ${command.kind}, which it does not declare in sends`);
+          const sent = await context.commands.enqueue(tx, command);
+          // A run that outlived its step (aborted, timed out or retried while it ran) sends nothing more:
+          // the step row is read after the enqueue, in its transaction, so the refusal rolls the command
+          // back, and an abort that commits later finds the command and cancels it. (After, not before:
+          // enqueue locks the target node's row, which a metal verb holds before it aborts the workflow.)
+          const { rows } = await tx.query<{ live: boolean }>(
+            `SELECT (state = 'running' AND attempt = $3) AS live FROM workflow_steps WHERE workflow_id = $1 AND id = $2 FOR SHARE`,
+            [workflow.id, step.id, step.attempt],
+          );
+          if (rows[0]?.live === false)
+            throw new ComputeError('INVALID_STATE', `Step ${step.id} of workflow ${workflow.id} is no longer running; ${command.kind} was not sent`);
+          return sent;
+        },
+      }
+    : context.commands;
   const stepContext = {
     ...(options.stepContext ?? {}),
     ...context,
