@@ -443,6 +443,12 @@ export async function createRollout(
       return existing;
     }
   }
+  // Two creates over the same pools take turns from here to commit: the "already in an active rollout"
+  // check below reads rollout_nodes with nothing behind it (no lock, no unique index), so two concurrent
+  // creates both passed it and a node landed in two rollouts issuing conflicting targets.
+  await tx.query(`SELECT pg_advisory_xact_lock(hashtext('better-compute:rollout-create:' || $1))`, [
+    input.tenantId,
+  ]);
   const pools = await tx.query<{ id: string }>(
     `SELECT id FROM pools WHERE owner_tenant_id = $1 ${input.poolIds ? 'AND id = ANY($2::text[])' : ''}
        AND (to_jsonb(pools) ->> 'archived_at') IS NULL ORDER BY id`,

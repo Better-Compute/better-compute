@@ -198,6 +198,10 @@ export async function dropEmptyHistoryPartitions(
   const dropped: string[] = [];
   for (const partition of await historyPartitions(tx, table)) {
     if (partition.isDefault || partition.to!.getTime() > horizon) continue;
+    // Locked before it is looked at: a late row inserted between the emptiness check and the drop was
+    // destroyed with the partition. An insert in flight now finishes first (and the partition is kept),
+    // or waits and lands in the default partition once this one is detached.
+    await tx.query(`LOCK TABLE ${partition.name} IN ACCESS EXCLUSIVE MODE`);
     const { rows } = await tx.query<{ empty: boolean }>(
       `SELECT NOT EXISTS (SELECT 1 FROM ${partition.name}) AS empty`,
     );
