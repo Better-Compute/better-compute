@@ -181,6 +181,14 @@ All notable changes to the better-compute packages are documented here. The form
   a healthy `create` or purchase waiting on the same refresh was rejected with someone else's abort. Both now run
   on their own signal and timeout (60 s; `cachedCredentials({ resolveTimeoutMs })`), each waiter leaves on its own
   signal only, and the work is cancelled once nobody waits. `aws-core` exports `sharedFlight`.
+- **A capacity purchase is not held back by a failure that sent nothing** (`@better-compute/vps`,
+  `@better-compute/provider-aws`). Any retryable failure marked a purchase attempt as one that may have bought,
+  including failures raised before `PurchaseCapacityBlock` was sent (one throttled describe, an STS blip); every
+  later attempt then answered `purchase-propagating` for 15 minutes and the block was bought late or not at all.
+  provider-aws now marks retryable failures raised before the purchase request with `details.reason:
+  'purchase-not-sent'` (the reason they had moves to `details.cause`), and vps leaves a purchase as uncertain as
+  it was for those and for failures before the provider was asked. A failure of the purchase request itself, or
+  after it, is uncertain as before: the double-buy guard is unchanged.
 
 ## 0.3.0 (2026-10-20)
 

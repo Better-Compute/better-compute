@@ -125,6 +125,17 @@ const imageTtlMs = 86_400_000;
  * reads settle in seconds; this is far beyond that.
  */
 export const purchasePropagationMs = 15 * 60_000;
+/**
+ * `details.reason` of a retryable purchase failure raised before the purchase request was sent:
+ * the attempt provably bought nothing (vps does not mark the purchase uncertain for it).
+ */
+export const purchaseNotSent = 'purchase-not-sent';
+/** The codes vps retries a purchase on. */
+const retriedPurchaseCodes: ReadonlySet<string> = new Set([
+  'UNAVAILABLE',
+  'RATE_LIMITED',
+  'TIMEOUT',
+]);
 /** Clock skew allowed between vps (the purchase's request time) and EC2 (a block's createDate). */
 const purchaseSkewMs = 5 * 60_000;
 /** EC2 allows 50 tags per resource; ours take 3, the rest is for tenant labels. */
@@ -853,36 +864,60 @@ export class AwsCompute implements ProviderImpl {
     const offering = parseOfferingId(id, this.config.zones);
     const { signal } = context;
     const token = clientToken(context.idempotencyKey);
-    const earlier = await this.#purchased(token, signal);
-    if (earlier) return earlier;
-    // PurchaseCapacityBlock takes no ClientToken, and EC2's reads are eventually consistent: when an
-    // earlier attempt may have bought (its answer was lost), the block it bought may not show its
-    // tag, or not show at all, yet. Look for it by what it is; until the window passes, never buy
-    // again (nor take a sold-out offering for a failure): the earlier attempt may be the buyer.
-    if (offering.kind === 'block' && attempt?.uncertainSince !== undefined) {
-      const like = await this.#boughtBlock(
-        offering,
-        token,
-        attempt.requestedAt,
-        new Set(attempt.excludeReservationIds ?? []),
-        signal,
-      );
-      if (like) return like;
-      if (this.context.clock.now() < attempt.uncertainSince + purchasePropagationMs)
-        throw new ComputeError(
-          'UNAVAILABLE',
-          'an earlier attempt of this purchase may have bought the Capacity Block; EC2 does not show it yet',
-          undefined,
-          { provider: 'aws', reason: 'purchase-propagating' },
+    // Everything before the purchase request only reads. A retryable failure there (a throttled
+    // describe, an STS blip) provably bought nothing, and says so (`purchase-not-sent`): vps then
+    // does not take the attempt for one that may have bought, which would hold every later attempt
+    // back for `purchasePropagationMs`. From the purchase request on, any failure may have bought.
+    const found = await this.#beforePurchaseRequest(async () => {
+      const earlier = await this.#purchased(token, signal);
+      if (earlier) return earlier;
+      // PurchaseCapacityBlock takes no ClientToken, and EC2's reads are eventually consistent: when
+      // an earlier attempt may have bought (its answer was lost), the block it bought may not show
+      // its tag, or not show at all, yet. Look for it by what it is; until the window passes, never
+      // buy again (nor take a sold-out offering for a failure): the earlier attempt may be the buyer.
+      if (offering.kind === 'block' && attempt?.uncertainSince !== undefined) {
+        const like = await this.#boughtBlock(
+          offering,
+          token,
+          attempt.requestedAt,
+          new Set(attempt.excludeReservationIds ?? []),
+          signal,
         );
-    }
+        if (like) return like;
+        if (this.context.clock.now() < attempt.uncertainSince + purchasePropagationMs)
+          throw new ComputeError(
+            'UNAVAILABLE',
+            'an earlier attempt of this purchase may have bought the Capacity Block; EC2 does not show it yet',
+            undefined,
+            { provider: 'aws', reason: 'purchase-propagating' },
+          );
+      }
+      if (offering.kind === 'block') await this.#confirmBlock(offering, signal);
+      else {
+        const offered = (await this.#offeringPairs(signal)).some(
+          ([zone, type]) => zone === offering.zone && type === offering.instanceType,
+        );
+        if (!offered)
+          throw new ComputeError(
+            'INVALID_INPUT',
+            `${offering.instanceType} is not offered in ${offering.zone}`,
+            undefined,
+            { provider: 'aws', reason: 'offering' },
+          );
+      }
+      // The identity check and the credentials the purchase request is signed with are resolved
+      // here (both are cached), so a failure of either is still before the request.
+      await this.ready(signal);
+      await this.deps.account.source.credentials({ signal, clock: this.context.clock });
+      return undefined;
+    });
+    if (found) return found;
     const purchaseTags = [
       { Key: tags.managed, Value: 'true' },
       { Key: purchaseTag, Value: token },
     ];
     let doc: XmlElement;
     if (offering.kind === 'block') {
-      await this.#confirmBlock(offering, signal);
       doc = await this.call(
         'PurchaseCapacityBlock',
         {
@@ -893,16 +928,6 @@ export class AwsCompute implements ProviderImpl {
         signal,
       );
     } else {
-      const offered = (await this.#offeringPairs(signal)).some(
-        ([zone, type]) => zone === offering.zone && type === offering.instanceType,
-      );
-      if (!offered)
-        throw new ComputeError(
-          'INVALID_INPUT',
-          `${offering.instanceType} is not offered in ${offering.zone}`,
-          undefined,
-          { provider: 'aws', reason: 'offering' },
-        );
       try {
         doc = await this.call(
           'CreateCapacityReservation',
@@ -956,6 +981,38 @@ export class AwsCompute implements ProviderImpl {
         { provider: 'aws', reason: 'purchase-answer-unreadable' },
       );
     return reservation;
+  }
+
+  /**
+   * Runs the part of a purchase that sends no purchase request. A retryable failure of it is
+   * rethrown with `details.reason: 'purchase-not-sent'` (the reason it had moves to `cause`):
+   * nothing can have been bought. `purchase-propagating` keeps its reason, and so does every
+   * failure that is not retried.
+   */
+  async #beforePurchaseRequest<T>(step: () => Promise<T>): Promise<T> {
+    try {
+      return await step();
+    } catch (error) {
+      if (!isComputeError(error)) {
+        this.context.log.warn('aws: a purchase failed before its request was sent', {
+          provider: 'aws',
+          error: error instanceof Error ? error.name : typeof error,
+        });
+        throw new ComputeError(
+          'UNAVAILABLE',
+          'the purchase could not be prepared; nothing was bought and it is retried',
+          undefined,
+          { provider: 'aws', reason: purchaseNotSent },
+        );
+      }
+      const reason = error.details?.reason;
+      if (!retriedPurchaseCodes.has(error.code) || reason === 'purchase-propagating') throw error;
+      throw new ComputeError(error.code, error.message, error.status, {
+        ...error.details,
+        reason: purchaseNotSent,
+        ...(typeof reason === 'string' ? { cause: reason } : {}),
+      });
+    }
   }
 
   /** The reservation an earlier attempt with this purchase token bought, if EC2 shows one. */

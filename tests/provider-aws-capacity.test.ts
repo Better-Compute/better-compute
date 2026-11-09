@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { CallContext, Logger, ProviderContext } from '@better-compute/core';
+import type { CallContext, ComputeError, Logger, ProviderContext } from '@better-compute/core';
 import { ec2Client, jsonClient } from '@better-compute/aws-core';
 import {
   accountCredentials,
@@ -936,6 +936,46 @@ describe('purchases', () => {
       { id: `cb:${theirs.id}` },
     );
     expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(0);
+  });
+
+  it('a retryable failure before the purchase request says purchase-not-sent; one of the request does not', async () => {
+    const w = world({ allowPurchases: true });
+    const start = offerings(w);
+    const id = blockId(w, start, 'cb-0aaaaaaaaaaaaaaa1', 235968);
+    // Reads before the request: nothing can have been bought.
+    for (const [operation, code] of [
+      ['GetCallerIdentity', 'ServiceUnavailable'],
+      ['DescribeCapacityReservations', 'RequestLimitExceeded'],
+      ['DescribeCapacityBlockOfferings', 'ServiceUnavailable'],
+    ] as const) {
+      w.emu.failNext(operation, code, 503);
+      const error = await w.compute
+        .purchaseReservation(id, w.call('buy-1'))
+        .catch((e: ComputeError) => e);
+      expect(error, operation).toMatchObject({
+        code: code === 'RequestLimitExceeded' ? 'RATE_LIMITED' : 'UNAVAILABLE',
+        details: { reason: 'purchase-not-sent', code },
+      });
+    }
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(0);
+    // A failure that is not retried keeps its own reason.
+    await expect(
+      w.compute.purchaseReservation(blockId(w, start, 'cb-0aaaaaaaaaaaaaaa1', 100), w.call('buy-2')),
+    ).rejects.toMatchObject({ details: { reason: expect.not.stringMatching('purchase-not-sent') } });
+    // The purchase request itself failing may have bought: never marked as not sent.
+    w.emu.failNext('PurchaseCapacityBlock', 'ServiceUnavailable', 503);
+    const sent = await w.compute.purchaseReservation(id, w.call('buy-1')).catch((e: ComputeError) => e);
+    expect(sent).toMatchObject({ code: 'UNAVAILABLE' });
+    expect((sent as ComputeError).details?.reason).not.toBe('purchase-not-sent');
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(1);
+    // So does a dropped connection on it.
+    w.emu.beforeAction('PurchaseCapacityBlock', () => {
+      throw new TypeError('fetch failed: connection reset');
+    });
+    const dropped = await w.compute
+      .purchaseReservation(id, w.call('buy-1'))
+      .catch((e: ComputeError) => e);
+    expect(dropped).toMatchObject({ code: 'UNAVAILABLE', details: { reason: 'network' } });
   });
 
   it('an answer it cannot read after EC2 sold is retried as uncertain, never a failure', async () => {
