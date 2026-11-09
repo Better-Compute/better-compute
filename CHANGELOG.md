@@ -207,6 +207,14 @@ All notable changes to the better-compute packages are documented here. The form
   `aws iam-policy --phases A10` adds `PlacementGroupDelete` (`ec2:DeletePlacementGroup` on tagged groups); an
   account with the older policy keeps its unused groups. Per-instance tag security groups were already swept
   (`ensureNetwork`, `ensureFirewall` and `setTags` delete tag groups unused at two looks).
+- **A retried Secrets Manager `put` no longer leaves a second secret** (`@better-compute/aws`).
+  `awsSecretsManagerStore().put` used a new name and a new `ClientRequestToken` on every call, so a `CreateSecret`
+  whose answer was lost, followed by a retry, left a secret holding tenant plaintext that no ref named. `put` now
+  takes `idempotencyKey` (`AwsSecretPutOptions`): the name and the token are derived from it and the tenant, so a
+  retry with the same key answers with the same ref (the same key with another value is `CONFLICT`); a rotation
+  with a key is one version however often it is retried. Without a key, a `CreateSecret` that may have created
+  the secret (no answer, a 5xx) is followed by a best-effort `DeleteSecret` of that name. `SecretStore.put` in
+  `core` does not carry a key yet, so callers pass it through the store's own type.
 
 ## 0.3.0 (2026-10-20)
 
