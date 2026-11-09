@@ -967,16 +967,29 @@ async function reconcileProvider(
       machineConditions,
       now,
     );
+    // A poll that read what the row already says writes nothing. Every write bumps `version`, and a
+    // provider instance is polled every 10 to 60 s: an edit made with `expectedVersion` from a form open
+    // longer than one poll was refused CONFLICT for a change the tenant never saw, and each instance
+    // cost a row write a minute for nothing.
+    const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+    const observedNothingNew =
+      current.externalId === machine.id &&
+      same(current.conditions, settled) &&
+      same(current.addresses, machine.addresses) &&
+      same(current.reportedState, reported) &&
+      (!labelsWritten || same(current.labelsApplied, row.labels)) &&
+      disks === undefined;
     await tx.query('SAVEPOINT vps_external_id');
     try {
-      current = await updateInstance(tx, current, {
-        conditions: settled,
-        externalId: machine.id,
-        addresses: machine.addresses,
-        reportedState: reported ?? null,
-        ...(labelsWritten ? { labelsApplied: row.labels ?? null } : {}),
-        ...(disks !== undefined ? { disks } : {}),
-      });
+      if (!observedNothingNew)
+        current = await updateInstance(tx, current, {
+          conditions: settled,
+          externalId: machine.id,
+          addresses: machine.addresses,
+          reportedState: reported ?? null,
+          ...(labelsWritten ? { labelsApplied: row.labels ?? null } : {}),
+          ...(disks !== undefined ? { disks } : {}),
+        });
       await tx.query('RELEASE SAVEPOINT vps_external_id');
     } catch (error) {
       await tx.query('ROLLBACK TO SAVEPOINT vps_external_id');

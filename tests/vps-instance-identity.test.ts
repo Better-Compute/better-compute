@@ -253,6 +253,30 @@ describe('instances.update', () => {
     });
   });
 
+  it('keeps the version still while polls read nothing new, so expectedVersion means what the caller saw', async () => {
+    const w = await gceWorld();
+    const instance = await create(w);
+    await settle(w);
+    const ref = { tenantId: w.acmeTenant, instanceId: instance.id };
+    const seen = (await w.api.instances.get(w.acme, ref)) as { version: number; state: string };
+    expect(seen.state).toBe('running');
+    // Polls that find the machine as the row says write nothing: each used to bump the version, so an
+    // edit made a poll later was refused CONFLICT though nothing the tenant could see had changed.
+    for (let round = 0; round < 4; round++) await poll(w);
+    expect(((await w.api.instances.get(w.acme, ref)) as { version: number }).version).toBe(seen.version);
+    const renamed = (await w.api.instances.update(w.acme, {
+      ...ref,
+      name: 'still-mine',
+      expectedVersion: seen.version,
+    })) as { version: number; name?: string };
+    expect(renamed).toMatchObject({ name: 'still-mine', version: seen.version + 1 });
+    // A real change on the machine is still written.
+    vmOf(w, instance.id)!.state = 'stopped';
+    await poll(w);
+    const stopped = (await w.api.instances.get(w.acme, ref)) as { version: number; state: string };
+    expect(stopped.version).toBeGreaterThan(renamed.version);
+  });
+
   it('drops the refused-write condition once the labels are back to what the machine holds', async () => {
     const w = await gceWorld();
     const instance = await create(w, { labels: { team: 'ml' } });
