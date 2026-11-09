@@ -27,6 +27,7 @@ import {
   offerId,
   parseMachineId,
   parseOfferId,
+  regionOf,
   requestIdFor,
   serviceAccountTokenSource,
   type TokenSource,
@@ -478,7 +479,22 @@ describe('compute', () => {
       };
     });
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
-    expect(report.passed).toHaveLength(providerConformanceCases().length);
+    // The cases Compute Engine has something to run: machines, power, attach, list prices and billing hints.
+    expect(report.passed).toEqual([
+      'the definition is well formed and builds a client from a valid config',
+      'listOffers returns well-formed offers, including the subject offer',
+      'create is idempotent by idempotencyKey: a retried create returns the same machine',
+      'get follows the machine; delete removes it; deleting again counts as deleted',
+      'power (when offered) stops and starts the machine',
+      'claim then release round-trips the label',
+      'discover yields the attachable machine',
+      'listPrices (when offered) answers well-formed list prices',
+      'the billing hints (when given) are well formed',
+      'every capability the definition declares is implemented by its client',
+    ]);
+    // Every other case says why it did not run.
+    expect(report.passed.length + report.skipped.length).toBe(providerConformanceCases().length);
+    for (const { reason } of report.skipped) expect(reason).not.toBe('');
   });
 
   it('is a well-formed definition with the documented capabilities', async () => {
@@ -580,6 +596,38 @@ describe('compute', () => {
     });
     const stored = emu.instances.get('us-central1-a/bc-ins-x')!;
     expect(stored.labels['better-compute-managed']).toBe('true');
+  });
+
+  it('an AI zone is in the region its name starts with: offers, machines and the subnet path', async () => {
+    expect(regionOf('us-south1-ai1b')).toBe('us-south1');
+    expect(regionOf('us-central1-ai1a')).toBe('us-central1');
+    expect(regionOf('us-central1-a')).toBe('us-central1');
+    expect(regionOf('northamerica-northeast2-c')).toBe('northamerica-northeast2');
+    // A region is nobody's zone: it is left as it is.
+    expect(regionOf('us-south1')).toBe('us-south1');
+    const emu = new GceEmulator();
+    emu.addZone('us-south1-ai1b');
+    const impl = await build(emu, { projectId: 'p', zones: ['us-south1-ai1b'] });
+    // vps asks the provider for the region of a zone it cannot read off the name.
+    expect(impl.zoneRegion!('us-south1-ai1b')).toBe('us-south1');
+    expect(impl.zoneRegion!('us-central1-a')).toBe('us-central1');
+    const offers = await impl.listOffers({ region: 'us-south1' });
+    expect(offers.length).toBeGreaterThan(0);
+    expect(new Set(offers.map((offer) => offer.region))).toEqual(new Set(['us-south1']));
+    const machine = await impl.create(
+      {
+        offerId: 'us-south1-ai1b/a3-highgpu-8g',
+        image: 'ubuntu-2404-lts',
+        userData: '',
+        name: 'ins_ai',
+        network: { network: 'bc-net', subnet: 'bc-sub' },
+      },
+      ctx('ai'),
+    );
+    expect(machine).toMatchObject({ zone: 'us-south1-ai1b', region: 'us-south1' });
+    expect(
+      emu.instances.get('us-south1-ai1b/bc-ins-ai')!.networkInterfaces[0].subnetwork,
+    ).toBe('regions/us-south1/subnetworks/bc-sub');
   });
 
   it('create without a network ref uses the configured network and subnet; a full image URL is kept', async () => {
@@ -1100,14 +1148,20 @@ describe('compute', () => {
         .filter((r) => r.method === 'POST' && r.url.pathname.includes('/instances/vm1/'))
         .map((r) => r.url.pathname.split('/').pop() + r.url.search);
     await impl.power!('us-central1-a/vm1', 'graceful-restart', ctx());
-    expect(verbs()).toEqual(['stop', 'start']);
+    expect(verbs()).toEqual(['stop?discardLocalSsd=false', 'start']);
     emu.requests.length = 0;
     await impl.power!('us-central1-a/vm1', 'off', ctx());
     await impl.power!('us-central1-a/vm1', 'graceful-off', ctx());
     await impl.power!('us-central1-a/vm1', 'on', ctx());
     await impl.power!('us-central1-a/vm1', 'reset', ctx());
     await impl.power!('us-central1-a/vm1', 'cycle', ctx());
-    expect(verbs()).toEqual(['stop?discardLocalSsd=false', 'stop', 'start', 'reset', 'reset']);
+    expect(verbs()).toEqual([
+      'stop?discardLocalSsd=false',
+      'stop?discardLocalSsd=false',
+      'start',
+      'reset',
+      'reset',
+    ]);
     await expect(impl.power!('us-central1-a/vm1', 'nmi', ctx())).rejects.toMatchObject({
       code: 'UNSUPPORTED',
     });
@@ -1117,6 +1171,42 @@ describe('compute', () => {
     await expect(impl.power!('us-central1-a/ghost', 'on', ctx())).rejects.toMatchObject({
       code: 'NOT_FOUND',
     });
+  });
+
+  it('stops a VM with Local SSD disks (A3, A4, G4), keeping their data, for every action that stops', async () => {
+    const emu = new GceEmulator();
+    emu.addInstance('us-central1-a', 'gpu1', {
+      machineType: 'a3-highgpu-8g',
+      labels: { 'better-compute-instance': 'ins_1' },
+      disks: [
+        { boot: true, type: 'PERSISTENT', source: 'zones/us-central1-a/disks/gpu1' },
+        { type: 'SCRATCH', interface: 'NVME', diskSizeGb: '375' },
+      ],
+    });
+    // The emulator refuses such a stop without the parameter, as Compute Engine does.
+    emu.validTokens.add('direct');
+    const stop = (query: string) =>
+      emu.fetch(
+        `https://compute.googleapis.com/compute/v1/projects/p/zones/us-central1-a/instances/gpu1/stop${query}`,
+        { method: 'POST', headers: { authorization: 'Bearer direct' } },
+      );
+    expect((await stop('')).status).toBe(400);
+    expect(emu.instances.get('us-central1-a/gpu1')!.status).toBe('RUNNING');
+    expect((await stop('?discardLocalSsd=true')).status).toBe(200);
+    const impl = await build(emu);
+    const stops = () =>
+      emu.requests
+        .filter((r) => r.method === 'POST' && r.url.pathname.endsWith('/instances/gpu1/stop'))
+        .map((r) => r.url.search);
+    for (const action of ['graceful-off', 'off', 'graceful-restart'] as const) {
+      emu.instances.get('us-central1-a/gpu1')!.status = 'RUNNING';
+      emu.requests.length = 0;
+      await impl.power!('us-central1-a/gpu1', action, ctx());
+      expect(stops(), action).toEqual(['?discardLocalSsd=false']);
+      expect(emu.instances.get('us-central1-a/gpu1')!.status, action).toBe(
+        action === 'graceful-restart' ? 'RUNNING' : 'TERMINATED',
+      );
+    }
   });
 
   it('graceful-restart waits for the stop, and gives up with UNAVAILABLE after 20 s', async () => {

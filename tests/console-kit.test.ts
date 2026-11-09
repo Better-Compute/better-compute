@@ -60,6 +60,47 @@ describe('list resources', () => {
     expect(racing.get().items).toEqual([{ id: 'new' }]);
   });
 
+  it('loadMore during a refresh is a no-op: the refresh lands, and the next page follows its cursor', async () => {
+    type Answer = { items: Item[]; cursor?: string };
+    const loads: {
+      cursor: string | undefined;
+      signal: AbortSignal;
+      answer: ReturnType<typeof deferred<Answer>>;
+    }[] = [];
+    const list = createListResource<Item>({
+      key: (item) => item.id,
+      load: (cursor, signal) => {
+        const answer = deferred<Answer>();
+        loads.push({ cursor, signal, answer });
+        return answer.promise;
+      },
+    });
+    const first = list.refresh();
+    loads[0]!.answer.resolve({ items: [{ id: 'old' }], cursor: 'c1' });
+    await first;
+    expect(list.get()).toMatchObject({ status: 'ready', hasMore: true });
+
+    const refreshing = list.refresh();
+    const during = list.loadMore();
+    // Nothing was started, and the refresh was not aborted.
+    expect(loads).toHaveLength(2);
+    expect(loads[1]!.signal.aborted).toBe(false);
+    await during;
+    loads[1]!.answer.resolve({ items: [{ id: 'fresh' }], cursor: 'c9' });
+    await refreshing;
+    expect(list.get()).toMatchObject({ status: 'ready', items: [{ id: 'fresh' }], hasMore: true });
+
+    // Afterwards the next page is the refreshed list's, and two calls share one load.
+    const more = list.loadMore();
+    const again = list.loadMore();
+    expect(loads).toHaveLength(3);
+    expect(loads[2]!.cursor).toBe('c9');
+    loads[2]!.answer.resolve({ items: [{ id: 'next' }] });
+    await Promise.all([more, again]);
+    expect(list.get().items).toEqual([{ id: 'fresh' }, { id: 'next' }]);
+    expect(list.get().hasMore).toBe(false);
+  });
+
   it('keeps the last good items on error', async () => {
     let fail = false;
     const list = createListResource<Item>({
@@ -255,6 +296,109 @@ describe('live console', () => {
     expect(live.connection.get()).toMatchObject({ status: 'open', lastEventId: 'e2' });
     await live.stop();
     expect(live.connection.get().status).toBe('stopped');
+  });
+
+  /** A compute API with one reservation, and a watch endpoint that streams only what happens while connected. */
+  function world() {
+    const reservation = { id: 'rsv_1', state: 'placed' };
+    const calls: string[] = [];
+    const streams = new Set<ReadableStreamDefaultController<Uint8Array>>();
+    /** What happens right after a list of reservations was answered. */
+    const hooks: { afterList?: () => void } = {};
+    const api: ComputeRequester = {
+      async $request<O>(path: string) {
+        calls.push(path);
+        if (path === 'reservations/get') return { ...reservation } as O;
+        if (path !== 'reservations/list') return { items: [] } as O;
+        const snapshot = { items: [{ ...reservation }] };
+        queueMicrotask(() => hooks.afterList?.());
+        return snapshot as O;
+      },
+    };
+    let sequence = 0;
+    const activate = () => {
+      reservation.state = 'active';
+      const id = String(++sequence);
+      const event = { id: `e${id}`, type: 'reservation.active', tenantId: 'acme', subject: 'reservation/rsv_1' };
+      const bytes = new TextEncoder().encode(`id: ${id}\ndata: ${JSON.stringify(event)}\n\n`);
+      // Nobody connected: nobody is told.
+      for (const stream of streams) stream.enqueue(bytes);
+    };
+    const open = () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start: (controller) => void streams.add(controller),
+        }),
+      );
+    const lists = () => calls.filter((path) => path === 'reservations/list').length;
+    return { api, calls, hooks, activate, open, lists, reservation };
+  }
+  const settled = async (done: () => boolean) => {
+    for (let i = 0; i < 200 && !done(); i++) await new Promise((resolve) => setTimeout(resolve, 2));
+  };
+
+  it('does not lose what happens between the first load and the stream: the stream is open first', async () => {
+    const server = world();
+    // The reservation becomes active right after its list was read, once.
+    server.hooks.afterList = () => {
+      delete server.hooks.afterList;
+      server.activate();
+    };
+    const live = await startLiveConsole(server.api, {
+      tenantId: 'acme',
+      watchUrl: 'https://compute.test/api/compute/watch',
+      fetch: (async () => server.open()) as unknown as typeof globalThis.fetch,
+    });
+    await settled(() => live.reservations.find('rsv_1')?.state === 'active');
+    expect(live.reservations.find('rsv_1')).toEqual({ id: 'rsv_1', state: 'active' });
+    // The event was held until the load finished, then applied: one list, one reread.
+    expect(server.lists()).toBe(1);
+    expect(server.calls.indexOf('reservations/get')).toBeGreaterThan(
+      server.calls.lastIndexOf('reservations/list'),
+    );
+    expect(live.connection.get()).toMatchObject({ status: 'open', lastEventId: 'e1' });
+    await live.stop();
+  });
+
+  it('loads once more when the stream opens only after the load, with nothing to resume from', async () => {
+    const server = world();
+    let attempts = 0;
+    const fetch = (async () =>
+      ++attempts === 1 ? new Response('down', { status: 503 }) : server.open()) as unknown as typeof globalThis.fetch;
+    const live = await startLiveConsole(server.api, {
+      tenantId: 'acme',
+      watchUrl: 'https://compute.test/api/compute/watch',
+      fetch,
+      sleep: () => new Promise((resolve) => setTimeout(resolve, 5)),
+    });
+    // The first attempt failed: the console is up from its load, and nobody streams to it yet.
+    expect(live.reservations.find('rsv_1')).toEqual({ id: 'rsv_1', state: 'placed' });
+    expect(server.lists()).toBe(1);
+    server.activate();
+    await settled(() => live.reservations.find('rsv_1')?.state === 'active');
+    expect(live.reservations.find('rsv_1')).toEqual({ id: 'rsv_1', state: 'active' });
+    expect(server.lists()).toBe(2);
+    expect(live.connection.get().status).toBe('open');
+    await live.stop();
+  });
+
+  it('does not wait for a stream that will not answer: it loads, and loads once more when the stream opens', async () => {
+    const server = world();
+    const hung = deferred<Response>();
+    const live = await startLiveConsole(server.api, {
+      tenantId: 'acme',
+      watchUrl: 'https://compute.test/api/compute/watch',
+      fetch: (() => hung.promise) as unknown as typeof globalThis.fetch,
+      openWaitMs: 5,
+    });
+    expect(live.connection.get().status).toBe('connecting');
+    expect(live.reservations.find('rsv_1')).toEqual({ id: 'rsv_1', state: 'placed' });
+    server.activate();
+    hung.resolve(server.open());
+    await settled(() => live.reservations.find('rsv_1')?.state === 'active');
+    expect(live.reservations.find('rsv_1')).toEqual({ id: 'rsv_1', state: 'active' });
+    expect(server.lists()).toBe(2);
+    await live.stop();
   });
 });
 

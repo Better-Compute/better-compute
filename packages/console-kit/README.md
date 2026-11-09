@@ -30,7 +30,7 @@ const allowed = await permissions.can(release);
 
 - **Lists** (`createListResource`) follow the server's list recipe (`{ items, cursor? }`).
   - `refresh()` reloads, and a stale response never overwrites a newer one.
-  - `loadMore()` appends the next page.
+  - `loadMore()` appends the next page. During a refresh it does nothing (the refresh is not aborted), and two calls share one load.
   - `upsert`/`remove` apply changes from events.
   - After an error, the list keeps the last good items.
 - **Stores**: `nodes`, `pools`, `reservations`, `instances` (vps) and `capacity` (summary) for one tenant.
@@ -39,6 +39,9 @@ const allowed = await permissions.can(release);
 - **Events** (`watchEvents`): Server-Sent Events read over `fetch`, so the request can carry an Authorization header.
   - A reconnect sends `Last-Event-ID` and resumes exactly after the last event.
   - It reconnects with the server's `retry:` delay, with capped exponential backoff after failures.
+- **Live console** (`startLiveConsole`) opens the stream first and loads the stores once it is open, so nothing that happens between the load and the stream is lost.
+  - Events that arrive while a load is in flight are held and applied when it finishes.
+  - If the stream does not open within `openWaitMs` (default 3 s) the stores load anyway. Whenever the stream opens with no cursor to resume from after a load began, the stores are loaded once more.
 - **Actions**: `describeAction(group, method, id)` and `actionsFor(kind, id)` map buttons to the §9.2 IAM action and prefixed resource, read from core's `apiSurface`.
   - `createPermissions` batches checks (50 per call) within one tick and caches answers for 10 s.
   - A failed batch rejects; it never answers "denied".

@@ -196,7 +196,13 @@ const report = await runConformance(kubernetesProviderConformanceCases(), () => 
   nodePool: { machineType: 'm7i.large', nodeCount: 1 },
   gpuNodePool: { machineType: 'g6.xlarge', nodeCount: 1, accelerators: { type: 'nvidia-l4', count: 1 } },
 }));
+// report.failed is empty when the driver conforms; report.skipped names what this subject could not run.
 ```
+
+A case the subject cannot run is reported under `report.skipped` with its reason, never under `report.passed`: the
+role and revoke cases without `can`, the unknown-cluster case without `missingCluster`, the adopt case without
+`adoptable`, the upgrade case with `upgrade: false`. A subject that sets `revoke: true` must also give `can`, or the
+revoke case fails. Every cluster a case makes is deleted when the case ends, also one that never became ready.
 
 ## Documentation
 

@@ -22,6 +22,11 @@ import { defineProvider, type ProviderDefinition } from '@better-compute/vps';
 // server of the account by naming it, "delete" releases the claim. `bootstrap` installs the OS from
 // rescue with installimage and delivers a single-use `provisioned` join token over SSH (stdin, into a
 // root-only file), never through user data.
+//
+// The name is the only record of who holds a server, and a call can land after the claim was released or
+// taken by another key. So every call on a server carries the idempotency key it was claimed under (the
+// reconciler's calls do), and `get`, `delete`, `power`, `rescue`, `identify` and `bootstrap` read the
+// server again and act only while its name is that key's claim.
 
 /** Server-name prefix that marks a server as claimed by better-compute. */
 export const robotClaimPrefix = 'bc-';
@@ -362,6 +367,21 @@ class HetznerRobotClient implements ProviderImpl {
       ?.server;
   }
 
+  /**
+   * The server `id` while this call's key still claims it, read now. One that was released, or that
+   * another key has claimed since, is not this call's: NOT_FOUND, and nothing is done to it. Robot has no
+   * compare-and-set, so this narrows the window to the moment between this read and the action.
+   */
+  async #claimed(id: string, context: CallContext): Promise<RobotServer> {
+    const server = await this.#server(id, context.signal);
+    if (!server || server.server_name !== robotClaimName(context.idempotencyKey))
+      throw new ComputeError(
+        'NOT_FOUND',
+        `Robot server ${id} is not claimed under this call's key`,
+      );
+    return server;
+  }
+
   #spec(product: string) {
     return this.#options.products?.[product] ?? robotProducts[product] ?? { vcpu: 1, memoryGiB: 1 };
   }
@@ -430,18 +450,16 @@ class HetznerRobotClient implements ProviderImpl {
     return toMachine(settled);
   }
 
-  /** A claimed server; unclaimed ones are not this provider's and read as absent. */
+  /** The server this call's key claims; any other (unclaimed, or claimed under another key) reads as absent. */
   async get(id: string, context: CallContext): Promise<ExternalMachine | undefined> {
     const server = await this.#server(id, context.signal);
-    if (!server || !server.server_name.startsWith(robotClaimPrefix)) return undefined;
+    if (!server || server.server_name !== robotClaimName(context.idempotencyKey)) return undefined;
     return toMachine(server);
   }
 
   /** Releases the claim (and rescue). The server itself stays: cancelling is for people, not APIs. */
   async delete(id: string, context: CallContext): Promise<void> {
-    const server = await this.#server(id, context.signal);
-    if (!server || !server.server_name.startsWith(robotClaimPrefix))
-      throw new ComputeError('NOT_FOUND', `Robot server ${id} is not claimed`);
+    const server = await this.#claimed(id, context);
     await this.#request(
       'DELETE',
       `/boot/${server.server_number}/rescue`,
@@ -456,15 +474,21 @@ class HetznerRobotClient implements ProviderImpl {
     );
   }
 
+  async #reset(id: string, type: string, signal: AbortSignal): Promise<void> {
+    const reset = await this.#request('POST', `/reset/${id}`, [['type', type]], signal);
+    if (reset === undefined) throw new ComputeError('NOT_FOUND', `Robot server ${id} not found`);
+  }
+
   async power(id: string, action: PowerAction, context: CallContext): Promise<void> {
     const type = resetTypes[action];
     if (!type) throw new ComputeError('UNSUPPORTED', `Hetzner Robot has no ${action} action`);
-    const reset = await this.#request('POST', `/reset/${id}`, [['type', type]], context.signal);
-    if (reset === undefined) throw new ComputeError('NOT_FOUND', `Robot server ${id} not found`);
+    await this.#claimed(id, context);
+    await this.#reset(id, type, context.signal);
   }
 
   /** Activates the Linux rescue system with the account's key and hardware-resets into it. */
   async rescue(id: string, context: CallContext): Promise<RescueAccess> {
+    await this.#claimed(id, context);
     const activated = await this.#request<{ rescue: { server_ip: string } }>(
       'POST',
       `/boot/${id}/rescue`,
@@ -475,7 +499,7 @@ class HetznerRobotClient implements ProviderImpl {
       context.signal,
     );
     if (!activated) throw new ComputeError('NOT_FOUND', `Robot server ${id} not found`);
-    await this.power(id, 'reset', context);
+    await this.#reset(id, 'hw', context.signal);
     return {
       address: activated.rescue.server_ip,
       username: 'root',
@@ -515,14 +539,16 @@ class HetznerRobotClient implements ProviderImpl {
 
   /**
    * Boots the server into rescue unless it is already there (identify left it so), and waits until
-   * rescue answers over SSH with the account's key.
+   * rescue answers over SSH with the account's key. The claim is read before anything is sent to the
+   * server and again once rescue is up (the reset takes minutes), so what the caller does next (reading
+   * the UUID, delivering the token, installimage) runs only on a server this call's key still claims.
    */
   async #rescueTarget(
     machine: ExternalMachine,
     context: CallContext,
   ): Promise<{ host: string; username: string; privateKey: string }> {
     const ssh = this.#ssh();
-    const already = await this.#inRescue(machine);
+    const already = await this.#inRescue(toMachine(await this.#claimed(machine.id, context)));
     if (already) return already;
     const access = await this.rescue(machine.id, context);
     const target = {
@@ -538,7 +564,10 @@ class HetznerRobotClient implements ProviderImpl {
     // Rescue is up when it answers; the hardware reset takes a minute or two.
     for (;;) {
       const probe = await ssh(target, rescueProbe).catch(() => undefined);
-      if (probe?.code === 0) return target;
+      if (probe?.code === 0) {
+        await this.#claimed(machine.id, context);
+        return target;
+      }
       if (clock.now() >= deadline || context.signal.aborted)
         throw new ComputeError(
           'PROVIDER_ERROR',

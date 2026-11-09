@@ -2360,7 +2360,7 @@ describe('definition', () => {
       };
     });
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
-    expect(report.passed).toHaveLength(providerConformanceCases().length);
+    expect(report.passed.length + report.skipped.length).toBe(providerConformanceCases().length);
     // The shared-volume case ran: one share made, attached to two Droplets (by tag), and deleted.
     const shared = emulators.filter((emu) =>
       emu.requests.some((r) => r.method === 'POST' && r.url.pathname === '/v2/nfs'),

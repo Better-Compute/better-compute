@@ -102,6 +102,8 @@ class InvalidFilter extends Error {}
 export class GceEmulator {
   /** Keyed `zone/name`. Values are GCE `Instance` resources. */
   instances = new Map<string, Json>();
+  /** The project's zones; `addZone` adds one. */
+  zones = [...zones];
   machineTypes: EmulatedMachineType[] = defaultMachineTypes();
   /** Keyed `zone/diskType`; a zone without an entry does not offer that type. */
   diskTypes = new Map<string, { validDiskSize: string }>(
@@ -109,6 +111,16 @@ export class GceEmulator {
       Object.entries(defaultDiskTypes()).map(([type, body]) => [`${zone}/${type}`, body] as const),
     ),
   );
+  /** Adds a zone (an AI zone such as `us-south1-ai1b`) with the default machine types and boot disk types. */
+  addZone(zone: string): void {
+    if (this.zones.includes(zone)) return;
+    this.zones.push(zone);
+    const shapes = new Map(defaultMachineTypes().map((type) => [type.name, type]));
+    for (const shape of shapes.values()) this.machineTypes.push({ ...shape, zone });
+    for (const [type, body] of Object.entries(defaultDiskTypes()))
+      this.diskTypes.set(`${zone}/${type}`, body);
+  }
+
   // --- [P4 disks] persistent disks (platform compute billing): what `disks.get` answers for an instance's
   // `disks[].source`. Keyed `zone/name`; an instance disk with no entry here answers 404.
   persistentDisks = new Map<
@@ -610,7 +622,7 @@ export class GceEmulator {
 
   #zonal(method: string, url: URL, zone: string, rest: string[], body?: Json): Response {
     const [collection, name, action] = rest;
-    if (!zones.includes(zone)) return this.error(404, 'notFound', `Zone ${zone} not found`);
+    if (!this.zones.includes(zone)) return this.error(404, 'notFound', `Zone ${zone} not found`);
     if (collection === 'instances') {
       const target = `${origin}/projects/p/zones/${zone}/instances/${name}`;
       if (!name && method === 'GET')
@@ -640,6 +652,18 @@ export class GceEmulator {
           .pop()!;
         if (!this.diskTypes.has(`${zone}/${bootType}`))
           return this.error(400, 'invalid', `Invalid value for field 'diskType': ${bootType}`);
+        // A VM takes a subnetwork of its zone's region only. A zone's region is its name without the last
+        // segment: `us-central1` for `us-central1-a`, and `us-south1` for the AI zone `us-south1-ai1b`.
+        const region = zone.slice(0, zone.lastIndexOf('-'));
+        for (const nic of (body?.networkInterfaces as Json[] | undefined) ?? []) {
+          const named = /(?:^|\/)regions\/([^/]+)\/subnetworks\//.exec(String(nic.subnetwork ?? ''));
+          if (named && named[1] !== region)
+            return this.error(
+              400,
+              'invalid',
+              `Invalid value for field 'resource.networkInterfaces[0].subnetwork': '${nic.subnetwork}'. The referenced subnetwork resource cannot be found.`,
+            );
+        }
         if (bootType.startsWith('pd-') && hyperdiskOnlyFamily.test(String(typeName)))
           return this.error(
             400,
@@ -692,6 +716,19 @@ export class GceEmulator {
           url.searchParams.get('requestId'),
         );
       if (method === 'POST' && (action === 'start' || action === 'stop' || action === 'reset')) {
+        // GCE refuses to stop a VM with Local SSD disks unless the request says what becomes of their
+        // data (`discardLocalSsd`); A3, A4 and G4 machine types always carry such disks. (GCE answers
+        // 400; the message here is this emulator's wording.)
+        if (
+          action === 'stop' &&
+          (instance.disks ?? []).some((disk: Json) => disk.type === 'SCRATCH') &&
+          !['true', 'false'].includes(url.searchParams.get('discardLocalSsd') ?? '')
+        )
+          return this.error(
+            400,
+            'invalid',
+            `Invalid value for field 'discardLocalSsd': it must be specified to stop instance '${name}', which has Local SSD disks`,
+          );
         return this.#operation('zones', zone, action, target, () => {
           instance.status = action === 'stop' ? 'TERMINATED' : 'RUNNING';
         });

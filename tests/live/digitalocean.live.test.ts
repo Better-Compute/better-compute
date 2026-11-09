@@ -781,7 +781,7 @@ describe.skipIf(!enabled)('provider-digitalocean live', () => {
       ...(attachable ? { attachable } : {}),
     });
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
-    expect(report.passed).toHaveLength(providerConformanceCases().length);
+    expect(report.passed.length + report.skipped.length).toBe(providerConformanceCases().length);
   });
 
   it('round-trips a network, a subnet and a firewall', { timeout: 600_000 }, async () => {

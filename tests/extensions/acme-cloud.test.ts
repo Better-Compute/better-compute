@@ -37,7 +37,7 @@ describe('walkthrough 2: the acme-cloud provider', () => {
     });
     const live = await runConformance(providerConformanceCases(), subject(tape.transport));
     expect(live.failed).toEqual([]);
-    expect(live.passed.length).toBe(providerConformanceCases().length);
+    expect(live.passed.length + live.skipped.length).toBe(providerConformanceCases().length);
     expect(cloud.servers.size).toBe(0); // every case cleaned up after itself
 
     const replay = replaying(tape.exchanges);

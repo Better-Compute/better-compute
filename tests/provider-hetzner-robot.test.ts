@@ -180,6 +180,18 @@ describe('hetznerRobot: providerConformance', () => {
       powerObservable: false,
     }));
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
+    // The cases Robot has something to run: claims and power.
+    expect(report.passed).toEqual([
+      'the definition is well formed and builds a client from a valid config',
+      'listOffers returns well-formed offers, including the subject offer',
+      'create is idempotent by idempotencyKey: a retried create returns the same machine',
+      'get follows the machine; delete removes it; deleting again counts as deleted',
+      'power (when offered) stops and starts the machine',
+      'every capability the definition declares is implemented by its client',
+    ]);
+    // Every other case says why it did not run.
+    expect(report.passed.length + report.skipped.length).toBe(providerConformanceCases().length);
+    for (const { reason } of report.skipped) expect(reason).not.toBe('');
   });
 
   it('declares metal and demands secret references', async () => {
@@ -233,7 +245,7 @@ describe('hetznerRobot specifics', () => {
     ).rejects.toMatchObject({ code: 'CONFLICT' });
     expect(api.servers.get(1004)!.server_name).toBe('someone-elses-box');
     expect((await impl.listOffers({})).map((offer) => offer.id)).toEqual(['1001', '1003']);
-    await impl.delete('1002', call('d'));
+    await impl.delete('1002', call('node_01ABC'));
     expect(api.servers.get(1002)!).toMatchObject({ server_name: '', cancelled: false });
     expect(
       api.requests.some(
@@ -246,8 +258,9 @@ describe('hetznerRobot specifics', () => {
   it('maps power to Robot resets and rate limits to RATE_LIMITED', async () => {
     const api = new RobotEmulator();
     const impl = await client(api);
+    await impl.create({ offerId: '1001', image: '', userData: '', name: 'n' }, call('node_p'));
     for (const action of ['reset', 'graceful-restart', 'graceful-off', 'off', 'on'] as const)
-      await impl.power!('1001', action, call(action));
+      await impl.power!('1001', action, call('node_p'));
     expect(api.resets.map((reset) => reset.type)).toEqual([
       'hw',
       'sw',
@@ -255,7 +268,7 @@ describe('hetznerRobot specifics', () => {
       'power_long',
       'power',
     ]);
-    await expect(impl.power!('1001', 'nmi', call('x'))).rejects.toMatchObject({
+    await expect(impl.power!('1001', 'nmi', call('node_p'))).rejects.toMatchObject({
       code: 'UNSUPPORTED',
     });
     api.failNext = { status: 403, code: 'RATE_LIMIT_EXCEEDED', interval: 3600 };
@@ -297,7 +310,7 @@ describe('hetznerRobot specifics', () => {
         controlPlaneUrl: 'https://compute.example/api/compute',
         pins,
       },
-      call('boot'),
+      call('node_01xyz'),
     );
     // Rescue with the account's key, then a hardware reset into it.
     expect(api.rescue.has(1001)).toBe(false); // deactivated again after the install
@@ -362,7 +375,7 @@ describe('hetznerRobot specifics', () => {
       { offerId: '1001', image: '', userData: '', name: '' },
       call('node_02'),
     );
-    expect(await impl.identify!(machine, call('id'))).toEqual({
+    expect(await impl.identify!(machine, call('node_02'))).toEqual({
       productUuid: '4c4c4544-0051-3010-8052-b4c04f4a4e32',
     });
     expect(api.rescue.has(1001)).toBe(true); // left in rescue for bootstrap
@@ -375,7 +388,7 @@ describe('hetznerRobot specifics', () => {
         controlPlaneUrl: 'https://compute.example',
         pins,
       },
-      call('boot'),
+      call('node_02'),
     );
     expect(api.resets).toEqual([{ server: 1001, type: 'hw' }]);
     expect(api.rescue.has(1001)).toBe(false);
@@ -385,7 +398,7 @@ describe('hetznerRobot specifics', () => {
         ? { code: 0, stdout: '', stderr: '' }
         : { code: 0, stdout: 'To Be Filled By O.E.M.', stderr: '' },
     );
-    await expect(liar.identify!(machine, call('id2'))).rejects.toMatchObject({
+    await expect(liar.identify!(machine, call('node_02'))).rejects.toMatchObject({
       code: 'PROVIDER_ERROR',
     });
   });
@@ -404,38 +417,128 @@ describe('hetznerRobot specifics', () => {
       controlPlaneUrl: 'https://compute.example',
       pins,
     };
-    await expect(noSsh.bootstrap!(machine, args, call('b'))).rejects.toMatchObject({
+    await expect(noSsh.bootstrap!(machine, args, call('k'))).rejects.toMatchObject({
       code: 'INVALID_CONFIG',
     });
     const silent = await client(api, async () => ({ code: 255, stdout: '', stderr: '' }));
     await expect(
-      silent.bootstrap!(machine, { ...args, sha256: 'nope' }, call('b')),
+      silent.bootstrap!(machine, { ...args, sha256: 'nope' }, call('k')),
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     await expect(
-      silent.bootstrap!(machine, { ...args, bcdUrl: 'http://d.example/bcd' }, call('b')),
+      silent.bootstrap!(machine, { ...args, bcdUrl: 'http://d.example/bcd' }, call('k')),
     ).rejects.toMatchObject({
       code: 'INVALID_INPUT',
     });
     // Without the control plane URL the installed OS could never join; one that could break out of
     // the systemd unit is refused before anything reaches the machine.
     const { controlPlaneUrl: _omitted, ...withoutUrl } = args;
-    await expect(silent.bootstrap!(machine, withoutUrl, call('b'))).rejects.toMatchObject({
+    await expect(silent.bootstrap!(machine, withoutUrl, call('k'))).rejects.toMatchObject({
       code: 'INVALID_CONFIG',
     });
     const { pins: _noPins, ...withoutPins } = args;
-    await expect(silent.bootstrap!(machine, withoutPins, call('b'))).rejects.toMatchObject({
+    await expect(silent.bootstrap!(machine, withoutPins, call('k'))).rejects.toMatchObject({
       code: 'INVALID_CONFIG',
     });
     await expect(
-      silent.bootstrap!(machine, { ...args, pins: { ...pins, joinEncryption: 'sha256/x' } }, call('b')),
+      silent.bootstrap!(machine, { ...args, pins: { ...pins, joinEncryption: 'sha256/x' } }, call('k')),
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     for (const controlPlaneUrl of ['https://c.example/%h', 'https://c.example/$HOME', 'https://c.example/a b'])
       await expect(
-        silent.bootstrap!(machine, { ...args, controlPlaneUrl }, call('b')),
+        silent.bootstrap!(machine, { ...args, controlPlaneUrl }, call('k')),
       ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
-    await expect(silent.bootstrap!(machine, args, call('b'))).rejects.toMatchObject({
+    await expect(silent.bootstrap!(machine, args, call('k'))).rejects.toMatchObject({
       code: 'PROVIDER_ERROR',
     });
+  });
+});
+
+describe('hetznerRobot: a call acts only on the server its key still claims', () => {
+  const args = {
+    joinToken: 'bcjt_secret',
+    bcdUrl: 'https://d.example/bcd',
+    sha256: 'ab'.repeat(32),
+    controlPlaneUrl: 'https://compute.example',
+    pins,
+  };
+  const claim = (impl: ProviderImpl, key: string) =>
+    impl.create({ offerId: '1001', image: '', userData: '', name: '' }, call(key));
+  const untouched = (api: RobotEmulator, sessions: string[]) => {
+    expect(api.resets).toEqual([]);
+    expect(api.rescue.size).toBe(0);
+    expect(sessions).toEqual([]);
+  };
+  const recording = (sessions: string[]): SshExecutor => {
+    return async (_target, command) => {
+      sessions.push(command);
+      return { code: command === 'sh -s' ? 255 : 0, stdout: '', stderr: '' };
+    };
+  };
+
+  it('refuses power, rescue, identify and bootstrap on a server that was never claimed or was released', async () => {
+    const api = new RobotEmulator();
+    const sessions: string[] = [];
+    const impl = await client(api, recording(sessions));
+    // Never claimed: an operator's server, or a free one.
+    for (const id of ['1001', '1004'])
+      await expect(impl.power!(id, 'reset', call('node_a'))).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      });
+    const machine = await claim(impl, 'node_a');
+    await impl.delete('1001', call('node_a'));
+    for (const act of [
+      () => impl.power!('1001', 'reset', call('node_a')),
+      () => impl.rescue!('1001', call('node_a')),
+      () => impl.identify!(machine, call('node_a')),
+      () => impl.bootstrap!(machine, args, call('node_a')),
+      () => impl.delete('1001', call('node_a')),
+    ])
+      await expect(act()).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(await impl.get('1001', call('node_a'))).toBeUndefined();
+    untouched(api, sessions);
+  });
+
+  it('refuses every call under a key whose server another key has claimed since', async () => {
+    const api = new RobotEmulator();
+    const sessions: string[] = [];
+    const impl = await client(api, recording(sessions));
+    const stale = await claim(impl, 'node_a');
+    await impl.delete('1001', call('node_a'));
+    await claim(impl, 'node_b');
+    for (const act of [
+      () => impl.power!('1001', 'off', call('node_a')),
+      () => impl.rescue!('1001', call('node_a')),
+      () => impl.identify!(stale, call('node_a')),
+      () => impl.bootstrap!(stale, args, call('node_a')),
+      () => impl.delete('1001', call('node_a')),
+    ])
+      await expect(act()).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(await impl.get('1001', call('node_a'))).toBeUndefined();
+    untouched(api, sessions);
+    // The new claim is intact, and its own key still acts on it.
+    expect(api.servers.get(1001)!.server_name).toBe(robotClaimName('node_b'));
+    expect(await impl.get('1001', call('node_b'))).toMatchObject({ id: '1001' });
+    await impl.power!('1001', 'reset', call('node_b'));
+    expect(api.resets).toEqual([{ server: 1001, type: 'hw' }]);
+  });
+
+  it('checks the claim again once rescue is up: a server released meanwhile gets no token and no install', async () => {
+    const api = new RobotEmulator();
+    const sessions: { command: string; stdin?: string }[] = [];
+    const impl = await client(api, async (_target, command, stdin) => {
+      sessions.push({ command, ...(stdin !== undefined ? { stdin } : {}) });
+      if (command.startsWith('test -e')) {
+        // The claim is released while bootstrap waits for rescue to answer.
+        if (api.resets.length === 0) return { code: 255, stdout: '', stderr: '' };
+        api.servers.get(1001)!.server_name = '';
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    });
+    const machine = await claim(impl, 'node_c');
+    await expect(impl.bootstrap!(machine, args, call('node_c'))).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+    expect(sessions.every((session) => session.command.startsWith('test -e'))).toBe(true);
+    expect(JSON.stringify(sessions)).not.toContain(args.joinToken);
   });
 });
 

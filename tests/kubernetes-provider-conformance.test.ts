@@ -24,8 +24,7 @@ import { TokenRequestApi } from './support/managed-kube.js';
 const platform = { id: 'pacct_platform', tenantId: 'root', platform: true };
 type Json = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-function gkeSubject(): KubernetesProviderConformanceSubject {
-  const gke = new GkeEmulator();
+function gkeSubject(gke = new GkeEmulator()): KubernetesProviderConformanceSubject {
   gke.operationDelayTicks = 1;
   const kube = new TokenRequestApi({
     authorize: (token) => gke.gce.mintedTokens.includes(token),
@@ -222,7 +221,77 @@ describe('kubernetesProviderConformanceCases', () => {
   ])('%s passes every case', async (_name, subject) => {
     const report = await runConformance(kubernetesProviderConformanceCases(), subject);
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
+    // Every subject here gives what every case needs: none is skipped.
+    expect(report.skipped).toEqual([]);
     expect(report.passed).toHaveLength(kubernetesProviderConformanceCases().length);
+  });
+
+  it('reports the cases a subject cannot run as skipped with a reason, never as passed', async () => {
+    const roles = 'a credential carries its role: view only reads, edit never reaches bc-access or kube-system';
+    const revoke = 'revokeCredentials removes the access of a subject only, and is idempotent';
+    const report = await runConformance(kubernetesProviderConformanceCases(), () => {
+      const { can: _can, revoke: _revoke, missingCluster: _missing, adoptable: _adoptable, ...bare } = gkeSubject();
+      return bare;
+    });
+    expect(report.failed).toEqual([]);
+    expect(report.skipped).toEqual([
+      { name: roles, reason: 'the subject gives no `can` to check what a credential may do' },
+      { name: revoke, reason: 'the subject gives no `can` to check what a credential may do' },
+      { name: 'node pool calls on an unknown cluster are NOT_FOUND', reason: 'the subject names no missingCluster' },
+      {
+        name: 'getCluster reads a cluster better-compute did not create (adopt), and a node pool can be added to it',
+        reason: 'the subject names no adoptable cluster',
+      },
+    ]);
+    expect(report.passed).toHaveLength(kubernetesProviderConformanceCases().length - 4);
+    for (const { name } of report.skipped) expect(report.passed).not.toContain(name);
+
+    // A driver without revokeCredentials, where the subject does not require it.
+    const without = await runConformance(
+      kubernetesProviderConformanceCases().filter((test) => test.name === revoke),
+      () => ({ ...withDriver(gkeSubject(), () => ({ revokeCredentials: undefined })), revoke: false }),
+    );
+    expect(without).toEqual({
+      passed: [],
+      failed: [],
+      skipped: [{ name: revoke, reason: 'the driver has no revokeCredentials' }],
+    });
+  });
+
+  it('fails the revoke case of a subject that requires revoke but cannot check access', async () => {
+    const report = await runConformance(kubernetesProviderConformanceCases(), () => {
+      const { can: _can, ...blind } = gkeSubject();
+      return blind;
+    });
+    expect(report.failed.map(({ name, error }) => [name, String(error)])).toEqual([
+      [
+        'revokeCredentials removes the access of a subject only, and is idempotent',
+        'ConformanceFailure: a subject with revoke: true gives `can`, or the revoke case checks nothing',
+      ],
+    ]);
+    expect(report.skipped.map(({ name }) => name)).toEqual([
+      'a credential carries its role: view only reads, edit never reaches bc-access or kube-system',
+    ]);
+  });
+
+  it('deletes the cluster of a case that fails before the cluster is ready', async () => {
+    const gke = new GkeEmulator();
+    // Every cluster the driver makes goes to error: no case ever sees one ready.
+    const report = await runConformance(kubernetesProviderConformanceCases(), () => ({
+      ...withDriver(gkeSubject(gke), (k8s) => ({
+        ensureCluster: async (...args: Parameters<ProviderKubernetes['ensureCluster']>) => ({
+          ...(await k8s.ensureCluster(...args)),
+          state: 'error' as const,
+          message: 'the control plane failed to start',
+        }),
+      })),
+      // GKE refuses a delete while the create runs: time passes between two polls.
+      advance: () => gke.finishOperations(),
+    }));
+    expect(report.failed.length).toBeGreaterThanOrEqual(8);
+    for (const { error } of report.failed) expect(String(error)).toMatch(/went error|is pending, not error/);
+    // Nothing the cases made is left running (and billed): only the tenant's own cluster remains.
+    expect([...gke.clusters.keys()]).toEqual(['us-central1/tenant-own']);
   });
 
   it('fails a provider whose credentials can do anything (the role cases), and nothing else', async () => {
@@ -282,6 +351,13 @@ describe('kubernetesProviderConformanceCases', () => {
       () => ({ ...singleMinor(gkeSubject()), upgrade: false }),
     );
     expect(skipped.failed).toEqual([]);
+    expect(skipped.passed).toEqual([]);
+    expect(skipped.skipped).toEqual([
+      {
+        name: 'raising the version upgrades the control plane in place (outputs.version runs it)',
+        reason: 'us-central1 offers one minor version and the subject sets upgrade: false',
+      },
+    ]);
   });
 
   it('fails a provider whose cluster refuses the credential it minted, and nothing else', async () => {

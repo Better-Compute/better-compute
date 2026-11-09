@@ -1,6 +1,7 @@
 import {
   ComputeError,
   field,
+  isComputeError,
   manifest,
   type CallContext,
   type ExternalMachine,
@@ -197,6 +198,13 @@ const powerCommands: Partial<Record<PowerAction, string>> = {
   'graceful-restart': 'reboot',
 };
 
+// PVE has no 404 for a VM: it answers 500 "Configuration file 'nodes/<node>/qemu-server/<vmid>.conf' does
+// not exist". Only a read or a delete of the VM's own path may take that as "no such VM"; anywhere else
+// the same words mean something the request named is missing (a storage, a pool) and the call failed.
+const vmPath = /^\/nodes\/[^/]+\/qemu\/\d+(?:\/|$)/;
+const missingMessage = /does not exist|no such VM/i;
+const vmGoneMessage = /Configuration file '[^']*' does not exist|no such VM/i;
+
 const defaultSleep = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
     if (signal.aborted) return reject(signal.reason);
@@ -275,8 +283,15 @@ class ProxmoxClient implements ProviderImpl {
     }
     if (response.ok) return payload.data as T;
     // PVE reports a missing VM as 500 "Configuration file … does not exist" and a missing route as 501.
+    // Only a read or a delete of a VM answers `undefined` for it: a clone, a config write or a start
+    // that names something missing has failed, and says so.
     const message = `${payload.message ?? response.statusText ?? ''}`.trim();
-    if (response.status === 404 || /does not exist|no such VM/i.test(message)) return undefined;
+    if (
+      (method === 'GET' || method === 'DELETE') &&
+      vmPath.test(path) &&
+      (response.status === 404 || missingMessage.test(message))
+    )
+      return undefined;
     const details: Record<string, unknown> = { provider: 'proxmox', status: response.status };
     if (payload.errors) details.errors = payload.errors;
     if (response.status === 401)
@@ -328,6 +343,23 @@ class ProxmoxClient implements ProviderImpl {
         },
       );
     return vm;
+  }
+
+  /** Starts a status command (`start`, `stop`, …) on a VM; one deleted meanwhile is NOT_FOUND. */
+  async #status(vm: PveResource, command: string, signal: AbortSignal): Promise<string> {
+    try {
+      const upid = await this.#request<string>(
+        'POST',
+        `/nodes/${encodeURIComponent(vm.node)}/qemu/${vm.vmid}/status/${command}`,
+        {},
+        signal,
+      );
+      return upid ?? '';
+    } catch (error) {
+      if (isComputeError(error, 'PROVIDER_ERROR') && vmGoneMessage.test(error.message))
+        throw new ComputeError('NOT_FOUND', `VM ${vm.vmid} not found`);
+      throw error;
+    }
   }
 
   /** Waits for a task (UPID) to finish; a failed task is a PROVIDER_ERROR. */
@@ -480,17 +512,27 @@ class ProxmoxClient implements ProviderImpl {
     const { vmidMin: min, vmidMax: max } = this.#config;
     const probes = Math.min(64, max - min + 1);
     let slot = await vmidFor(key, min, max);
+    // The slot whose clone PVE refused as taken, to be looked at once more.
+    let refused: number | undefined;
     for (let probe = 0; probe < probes; ) {
       const vm = (await this.#vms(signal)).find((candidate) => candidate.vmid === slot);
+      if (!vm && refused === slot) {
+        // PVE holds the VMID for something the listing does not show (a container, a VM this token
+        // cannot audit): it is another's slot like any other.
+        slot = slot >= max ? min : slot + 1;
+        probe++;
+        continue;
+      }
       if (!vm) {
         const template = await this.#template(request.image, signal);
         const node = this.#config.node ?? template.node;
         try {
           await this.#clone(template, slot, node, vmName(request.name), key, signal);
         } catch (error) {
-          // Someone cloned into the slot first: look again at who holds it.
-          if (/already exists/i.test((error as Error).message)) continue;
-          throw error;
+          // Someone cloned into the slot first: look once more at who holds it.
+          if (!/already exists/i.test((error as Error).message)) throw error;
+          refused = slot;
+          continue;
         }
         const cicustom = await this.#snippet(slot, request.userData, context);
         return this.#finish(slot, node, vmName(request.name), size, cicustom, context);
@@ -547,6 +589,14 @@ class ProxmoxClient implements ProviderImpl {
       },
       signal,
     );
+    // An accepted clone always answers its task: anything else is not a clone to configure and start.
+    if (typeof upid !== 'string' || upid === '')
+      throw new ComputeError(
+        'PROVIDER_ERROR',
+        `Proxmox VE did not start the clone of ${template.vmid} into ${vmid}`,
+        undefined,
+        { provider: 'proxmox' },
+      );
     await this.#wait(template.node, upid, signal);
   }
 
@@ -655,11 +705,7 @@ class ProxmoxClient implements ProviderImpl {
   async #destroy(vm: PveResource, signal: AbortSignal): Promise<void> {
     const path = `/nodes/${encodeURIComponent(vm.node)}/qemu/${vm.vmid}`;
     if (vm.status === 'running')
-      await this.#wait(
-        vm.node,
-        await this.#request<string>('POST', `${path}/status/stop`, {}, signal),
-        signal,
-      );
+      await this.#wait(vm.node, await this.#status(vm, 'stop', signal), signal);
     const upid = await this.#request<string>(
       'DELETE',
       path,
@@ -676,26 +722,16 @@ class ProxmoxClient implements ProviderImpl {
 
   async power(id: string, action: PowerAction, context: CallContext): Promise<void> {
     const vm = await this.#managed(id, context.signal);
-    const path = `/nodes/${encodeURIComponent(vm.node)}/qemu/${vm.vmid}/status`;
+    const { signal } = context;
     if (action === 'cycle') {
       if (vm.status === 'running')
-        await this.#wait(
-          vm.node,
-          await this.#request<string>('POST', `${path}/stop`, {}, context.signal),
-          context.signal,
-        );
-      await this.#wait(
-        vm.node,
-        await this.#request<string>('POST', `${path}/start`, {}, context.signal),
-        context.signal,
-      );
+        await this.#wait(vm.node, await this.#status(vm, 'stop', signal), signal);
+      await this.#wait(vm.node, await this.#status(vm, 'start', signal), signal);
       return;
     }
     const command = powerCommands[action];
     if (!command) throw new ComputeError('UNSUPPORTED', `Proxmox VE has no ${action} action`);
-    const upid = await this.#request<string>('POST', `${path}/${command}`, {}, context.signal);
-    if (upid === undefined) throw new ComputeError('NOT_FOUND', `VM ${id} not found`);
-    await this.#wait(vm.node, upid, context.signal);
+    await this.#wait(vm.node, await this.#status(vm, command, signal), signal);
   }
 
   async *list(context: CallContext): AsyncIterable<ExternalMachine> {

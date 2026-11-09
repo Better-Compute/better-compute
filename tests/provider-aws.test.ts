@@ -1148,7 +1148,7 @@ describe('conformance', () => {
       };
     });
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
-    expect(report.passed).toHaveLength(providerConformanceCases().length);
+    expect(report.passed.length + report.skipped.length).toBe(providerConformanceCases().length);
   });
 });
 
