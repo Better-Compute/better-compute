@@ -7,7 +7,7 @@ description: "A sandbox is a hosted VPS instance with a template and a lifetime:
 
 A sandbox is a hosted VPS instance with a template and a lifetime: `create` admits it after one IAM decision, then claims a warm instance of its template or creates one through the instance lifecycle, and the `vps.sandboxes` reconciler, which runs every 15 seconds, deletes it once `expiresAt` passes. A sandbox's `state` follows its instance: `starting`, `ready` while the instance runs, `failed` when it is in `error` or `lost`, `deleting` once deletion was asked, and `deleted` when the instance is gone. The instance belongs to the sandbox: `instances.start`, `stop`, `resize` and `delete` refuse it with `INVALID_STATE`, and `instances.get` still returns it. See [Sandboxes](/docs/guides/vps/sandboxes).
 
-All 7 methods are served by @better-compute/server 0.3.0.
+All 8 methods are served by @better-compute/server 0.3.0.
 
 | Method                  | Kind     | Authorization                                       | Phase | Status     |
 | ----------------------- | -------- | --------------------------------------------------- | ----- | ---------- |
@@ -18,6 +18,7 @@ All 7 methods are served by @better-compute/server 0.3.0.
 | [`snapshot`](#snapshot) | mutation | `compute:sandboxes:update` @ `compute-sandbox`      | v0.5  | registered |
 | [`exec`](#exec)         | mutation | `compute:sandboxes:exec` @ `compute-sandbox`        | v0.5  | registered |
 | [`delete`](#delete)     | mutation | `compute:sandboxes:delete` @ `compute-sandbox`      | v0.5  | registered |
+| [`update`](#update)     | mutation | `compute:sandboxes:update` @ `compute-sandbox`      | v1.0  | registered |
 
 ## create
 
@@ -33,6 +34,7 @@ Starts a sandbox from a template after one IAM decision on the draft, claiming a
 - **Lifetime.** `ttlSeconds` defaults to the template's `defaultTtlSeconds` and may not exceed its `maxTtlSeconds` (`INVALID_INPUT`). `expiresAt` is set when the sandbox is admitted.
 - **Errors.** `NOT_FOUND` for a template missing or deleted in the tenant. `INVALID_STATE` when the template's flavor has been archived or removed. On the new-instance path the template's pool, flavor and image are checked again, with the errors of `sandboxTemplates.create`; `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota and `CAPACITY_UNAVAILABLE` when the pool has no free IP address, both keeping the draft.
 - **Waiting.** `wait.timeoutMs` (at most 30 seconds) holds the answer until the sandbox leaves `starting`; a timeout returns it still `starting`, not an error.
+- **Identity.** `name`, `metadata` and `labels` take the rules of `instances.create` (`better-compute-` and `bc-` keys reserved) and are part of the request. They stay on the sandbox, never reach its host, and `update` changes them later.
 
 Publishes `sandbox.created` with `warm` and `expiresAt`. `sandbox.ready` follows from the reconciler once the instance first runs.
 
@@ -43,15 +45,18 @@ Publishes `sandbox.created` with `warm` and `expiresAt`. `sandbox.ready` follows
 
 **Input**
 
-| Field            | Type    | Required | Constraints                                                       |
-| ---------------- | ------- | -------- | ----------------------------------------------------------------- |
-| `tenantId`       | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
-| `templateId`     | string  | yes      | at most 57 characters; matches `^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$` |
-| `ttlSeconds`     | integer |          | 60-2592000                                                        |
-| `fromSnapshot`   | string  |          | at most 57 characters; matches `^snap_[0-9a-hjkmnp-tv-z]{26,52}$` |
-| `idempotencyKey` | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
-| `wait`           | object  |          |                                                                   |
-| `wait.timeoutMs` | integer | yes      | 0-30000                                                           |
+| Field            | Type          | Required | Constraints                                                          |
+| ---------------- | ------------- | -------- | -------------------------------------------------------------------- |
+| `tenantId`       | string        | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`           |
+| `templateId`     | string        | yes      | at most 57 characters; matches `^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$`    |
+| `ttlSeconds`     | integer       |          | 60-2592000                                                           |
+| `fromSnapshot`   | string        |          | at most 57 characters; matches `^snap_[0-9a-hjkmnp-tv-z]{26,52}$`    |
+| `name`           | string        |          | at most 128 characters                                               |
+| `metadata`       | map of string |          | at most 64 entries; keys match `^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$` |
+| `labels`         | map of string |          | at most 62 entries; keys match `^[a-z][a-z0-9_-]{0,62}$`             |
+| `idempotencyKey` | string        | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`           |
+| `wait`           | object        |          |                                                                      |
+| `wait.timeoutMs` | integer       | yes      | 0-30000                                                              |
 
 ## list
 
@@ -59,7 +64,7 @@ Publishes `sandbox.created` with `warm` and `expiresAt`. `sandbox.ready` follows
 
 Returns a page of the tenant's sandboxes, newest first, with a `cursor` when more remain.
 
-`scope` defaults to `mine`, the caller's own sandboxes, which needs no per-item check. `all` lists every sandbox of the tenant, each one checked for `compute:sandboxes:read`; those the caller may not read are left out, so a page can hold fewer than `limit` items. Deleted sandboxes are left out unless `deleted` is true, and `templateId` keeps one template's sandboxes. `limit` is 1 to 200 (default 50); `cursor` is the last sandbox id of the previous page. Drafts are never listed. Each item carries `identityRebound` as `get` describes.
+`scope` defaults to `mine`, the caller's own sandboxes, which needs no per-item check. `all` lists every sandbox of the tenant, each one checked for `compute:sandboxes:read`; those the caller may not read are left out, so a page can hold fewer than `limit` items. Deleted sandboxes are left out unless `deleted` is true, `templateId` keeps one template's sandboxes, and `labelSelector` (as `instances.list` takes it) keeps those whose labels match. `limit` is 1 to 200 (default 50); `cursor` is the last sandbox id of the previous page. Drafts are never listed. Each item carries `identityRebound` as `get` describes.
 
 - **Kind:** read
 - **Authorization:** `compute:sandboxes:read` @ `compute-tenant` + items
@@ -68,14 +73,15 @@ Returns a page of the tenant's sandboxes, newest first, with a `cursor` when mor
 
 **Input**
 
-| Field        | Type                 | Required | Constraints                                                       |
-| ------------ | -------------------- | -------- | ----------------------------------------------------------------- |
-| `tenantId`   | string               | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
-| `scope`      | one of `mine`, `all` |          | default `"mine"`                                                  |
-| `deleted`    | boolean              |          | default `false`                                                   |
-| `templateId` | string               |          | at most 57 characters; matches `^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$` |
-| `limit`      | integer              |          | 1-200                                                             |
-| `cursor`     | string               |          | at most 56 characters; matches `^sbx_[0-9a-hjkmnp-tv-z]{26,52}$`  |
+| Field           | Type                 | Required | Constraints                                                       |
+| --------------- | -------------------- | -------- | ----------------------------------------------------------------- |
+| `tenantId`      | string               | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `scope`         | one of `mine`, `all` |          | default `"mine"`                                                  |
+| `deleted`       | boolean              |          | default `false`                                                   |
+| `templateId`    | string               |          | at most 57 characters; matches `^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `labelSelector` | string               |          | at most 1024 characters                                           |
+| `limit`         | integer              |          | 1-200                                                             |
+| `cursor`        | string               |          | at most 56 characters; matches `^sbx_[0-9a-hjkmnp-tv-z]{26,52}$`  |
 
 ## get
 
@@ -200,3 +206,26 @@ When the instance is gone, the `vps.sandboxes` reconciler marks the sandbox dele
 | ----------- | ------ | -------- | ---------------------------------------------------------------- |
 | `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`       |
 | `sandboxId` | string | yes      | at most 56 characters; matches `^sbx_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
+## update
+
+`POST /api/compute/sandboxes/update`
+
+Renames a sandbox and replaces its metadata and labels; returns the sandbox.
+
+At least one of `name`, `metadata` and `labels`, with the rules of `create`; `null` clears a field and `{}` clears metadata or labels, which are replaced as a whole. Decided as `compute:sandboxes:update` on the sandbox. Nothing reaches the host. An update that changes nothing returns the sandbox as it is, with no event; otherwise `sandbox.updated` is published with `changed`. A sandbox being deleted, or deleted, is `INVALID_STATE`; one of another tenant, or none, is `NOT_FOUND`.
+
+- **Kind:** mutation
+- **Authorization:** `compute:sandboxes:update` @ `compute-sandbox`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field       | Type        | Required | Constraints                                                          |
+| ----------- | ----------- | -------- | -------------------------------------------------------------------- |
+| `tenantId`  | string      | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`           |
+| `sandboxId` | string      | yes      | at most 56 characters; matches `^sbx_[0-9a-hjkmnp-tv-z]{26,52}$`     |
+| `name`      | string,null |          | at most 128 characters                                               |
+| `metadata`  | object,null |          | at most 64 entries; keys match `^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$` |
+| `labels`    | object,null |          | at most 62 entries; keys match `^[a-z][a-z0-9_-]{0,62}$`             |

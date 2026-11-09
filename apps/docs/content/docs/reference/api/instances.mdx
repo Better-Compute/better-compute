@@ -7,7 +7,7 @@ description: "Instances are VMs in a VPS pool: hosted pools place them on a host
 
 Instances are VMs in a VPS pool: hosted pools place them on a host through capacity, and provider pools create them through the pool's provider account. After `create`, every call only changes `desiredState`; the `vps.instances` reconciler converges the instance and publishes `instance.*` events as its `state` moves. Instances are also the sandbox primitive today. See [Instances](/docs/guides/vps/instances).
 
-All 11 methods are served by @better-compute/server 0.3.0.
+All 13 methods are served by @better-compute/server 0.3.0.
 
 | Method                  | Kind     | Authorization                                       | Phase | Status     |
 | ----------------------- | -------- | --------------------------------------------------- | ----- | ---------- |
@@ -21,6 +21,8 @@ All 11 methods are served by @better-compute/server 0.3.0.
 | [`attach`](#attach)     | mutation | `compute:instances:attach` @ `compute-instance`     | v1.0  | registered |
 | [`detach`](#detach)     | mutation | `compute:instances:delete` @ `compute-instance`     | v1.0  | registered |
 | [`reboot`](#reboot)     | mutation | `compute:instances:update` @ `compute-instance`     | v1.0  | registered |
+| [`update`](#update)     | mutation | `compute:instances:update` @ `compute-instance`     | v1.0  | registered |
+| [`issued`](#issued)     | read     | `compute:instances:read` @ `compute-fleet`          | v1.0  | registered |
 | [`estimate`](#estimate) | read     | `compute:flavors:read` @ `compute-pool`             | v1.0  | registered |
 
 ## create
@@ -33,10 +35,12 @@ Admits a VM from a pool, flavor and image after one IAM decision on the draft; r
 - **IAM.** `compute:instances:create` is decided on `compute-instance/` plus the draft id, whose attributes (`vcpu`, `memoryGiB`, `gpus`, `imageId`, `imageVerified`, `projectId`, `poolId`, `flavor`, `region` (the pool's site), `provider` (the pool's account, provider pools) and one `labels.<key>` per label, in key order while the row has room: a row holds 64 attributes, and when labels are left out the last slot is `labelsTruncated: true`) policies can test, e.g. `resource.flavor` or `resource.labels.env`. A refusal deletes the draft; a delegated session can get `CONFIRMATION_REQUIRED`.
 - **Admission.** For every caller, after the decision and in the same transaction as the charge: the flavor must be one the tenant's offer lists (`pools.offer({ flavors })`, `QUOTA_EXCEEDED` `flavor-not-offered`) and one every quota row it consumes allows (`quotas.set({ flavors })`, `flavor-not-allowed`); then the host's `vps({ admissionPolicy })` runs with the request (pool, flavor, shape, demand, region, provider, labels, owner, decision) and may refuse with any error; then quota is charged: the shape, `instances` (one, where a row exists) and the tenant-level `*` rows. A refusal changes nothing and keeps the draft.
 - **Networks.** In a provider pool, `networkId` places the VM on a tenant network (`networks.create`) and `subnetId` in one of its subnets; the instance shows both. The network must be the tenant's and on the pool's provider account, must have been provisioned (it reached `ready` once; a network that went back to `pending` because a subnet or rule was added still takes instances) and must not be being deleted, and the subnet must be on it, in the offer's region and `ready`. A network not provisioned yet, being deleted, or a subnet not ready yet is `INVALID_STATE` with a retry hint. Without `subnetId` the network's only subnet in the offer's region is used; none, or several (the error names them), is `INVALID_INPUT`, as is an unknown network or subnet, one of another tenant or provider account, or a `subnetId` without a `networkId`. The VM is created in the subnet with a per-instance network tag, which the network's firewall rules target. The network and subnet stay until the instance is deleted: `networks.delete` and `networks.removeSubnet` are `INVALID_STATE` while it is on them.
-- **Labels.** In a provider pool, `labels` (at most 62, so the VM stays within Compute Engine's 64 with better-compute's own two) are passed to the provider's create and shown on the instance. Keys are a lower-case letter followed by lower-case letters, digits, `_` or `-`, at most 63 characters; values take the same characters, at most 63, and may be empty. Keys starting with `better-compute-` are reserved, and the provider's own ownership labels win over the tenant's. Anything else, or labels on a hosted pool, is `INVALID_INPUT`. Labels are part of the request: the same key with other labels is `CONFLICT`.
+- **Labels.** `labels` (at most 62, so a VM stays within Compute Engine's 64 with better-compute's own two) are kept on the instance in any pool, where `list`'s `labelSelector` matches them. In a provider pool they are also passed to the provider's create, which writes them on the VM and on its boot disk. Keys are a lower-case letter followed by lower-case letters, digits, `_` or `-`, at most 63 characters; values take the same characters, at most 63, and may be empty. Keys starting with `better-compute-` or `bc-` are better-compute's own and `INVALID_INPUT`; the provider also drops any such key and writes its ownership labels last, so they always win. Labels are part of the request: the same key with other labels is `CONFLICT`. `update` changes them later.
 - **Workload identity (AWS).** In a hosted pool, `workloadIdentity.awsRoleArn` names the IAM role the instance's workloads assume with no static keys: bcd exchanges the instance's workload token (audience `sts.amazonaws.com`, subject `t:<tenantId>:instance:<id>`) with STS `AssumeRoleWithWebIdentity` and serves the credentials on the guest's AWS-compatible metadata paths. The pool must turn workload identity on (`policy.workloadIdentity: true`) and list the role in `policy.workloadRoles.aws`; otherwise, and in a provider pool, the create is `INVALID_INPUT` (`details.reason` `workloadIdentityOff`, `awsRoleNotAllowed` or `workloadIdentityHostedOnly`). The instance shows the role. The host is sent the role only while the pool still allows it. The role's own trust policy (`better-compute aws workload-role`) limits it to the tenant's instances and to tokens tagged for that role (session tag `bc-role`), which the workload broker adds only for the role the pool allows.
 - **Placement.** In a provider pool, `placement` (`{ group, strategy: 'cluster' | 'spread' | 'partition', partition? }`) puts the machine in a provider placement group (an EC2 placement group on AWS): every instance of one tenant's `group` in the pool shares one, under a name vps derives from the tenant, pool and group, so two tenants never share a group. `cluster` keeps machines on one low-latency network segment, `spread` on distinct hardware, `partition` on disjoint racks (`partition` 1–7 picks one). The group is a lower-case letter followed by lower-case letters, digits or `-`, at most 63 characters. Another strategy for a group in use is `CONFLICT`; placement on a hosted pool, on a provider without placement groups or without that strategy (only AWS has them today; such a provider would ignore it, so it is refused rather than claimed), an unknown strategy or a partition without the partition strategy is `INVALID_INPUT`. Placement is part of the request: the same key with another placement is `CONFLICT`. The instance shows its `placement`.
 - **Filesystems.** On a tenant network, `filesystems` (`[{ filesystem, path }]`, at most 16) mounts shared [filesystems](/docs/reference/api/filesystems) of that network at boot: each must be the tenant's, on the instance's own network (`INVALID_INPUT` otherwise, also without a `networkId`) and `ready` (`INVALID_STATE` otherwise). A path is absolute, made of plain segments, outside the system directories, and used once (`INVALID_INPUT`). The provider renders the mounts into the machine's user data. The instance shows its `filesystems`; a filesystem it mounts cannot be deleted until the instance is.
+- **Name and metadata.** `name` is a display name (1 to 128 characters, no control characters, no surrounding whitespace), not unique. `metadata` is up to 64 string entries (keys a letter or digit, then letters, digits, `.`, `_`, `/` or `-`, at most 128; values at most 1024 characters; 16 KiB in all; `better-compute-` and `bc-` keys reserved). Both are kept by better-compute only, never sent to a provider or host, and both are part of the request. `update` changes them later.
+- **Provenance.** `issuedBy` records who issued the instance (`legionedge:admin`: up to 128 letters, digits, `.`, `_`, `:`, `@`, `/`, `+` or `-`). Only the platform (a root caller) sets it: anyone else is `ACCESS_DENIED` with `details.reason: 'issued-by-platform-only'`, before any decision. The instance shows it to everyone who can read it, and `issued` filters on it.
 - **Owner.** The instance is owned by the caller, or by `ownerIdentityId`: the platform (a root caller creating in another tenant) issues an instance to a person of that tenant this way, as `attach` does, so it shows in their `scope: 'mine'` list and owner-conditioned policies (`resource.ownerId`) apply to them. Anyone else naming an identity other than their own, and a root caller in its own tenant, is `ACCESS_DENIED` before any decision; a malformed one is `INVALID_INPUT`. When the IAM port can say (`IamPort.isMember`, the embedded better-iam bridge), the owner must also be an active identity of the tenant, else `INVALID_INPUT` and the draft is dropped; other ports check the id's shape only.
 - **DNS.** `dns: { zoneId, name?, ipv6? }` publishes the instance in a DNS zone of the tenant ([dnsZones](/docs/reference/api/dns-zones)): an A record `<name>.<zone>` (and an AAAA record with `ipv6: true`) that follows the instance's public address (its assigned reserved address first) and is deleted with the instance, exactly as a [dnsRecords](/docs/reference/api/dns-records) record with `instanceId`. `name` is relative to the zone (`web`, `web.eu`; no apex or wildcard) and defaults to the instance id with `-` for `_`. The records are made in the same transaction as the instance: a zone that is not the tenant's is `NOT_FOUND`, one being deleted `INVALID_STATE`, and a name the zone already holds `CONFLICT`, each refusing the whole create. Besides the decision on the instance, it is decided as `compute:dns:manage` on the zone, on the caller's own credential.
 - **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, an archived pool, a missing or archived flavor, or an image a hosted pool cannot resolve. `INVALID_INPUT` for a pool that is not `vps-host` or `provider`. `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota; `CAPACITY_UNAVAILABLE` when a hosted pool has no free IP address. `INVALID_STATE` for a provider pool without an account, `INVALID_CONFIG` for a hosted pool when `vps()` has no `images`.
@@ -69,6 +73,9 @@ Admits a VM from a pool, flavor and image after one IAM decision on the draft; r
 | `filesystems`                 | list of object                          |          | 0-16 items                                                                                                        |
 | `filesystems[].filesystem`    | string                                  | yes      | at most 55 characters; matches `^fs_[0-9a-hjkmnp-tv-z]{26,52}$`                                                   |
 | `filesystems[].path`          | string                                  | yes      | at most 200 characters; matches `^(/[A-Za-z0-9._-]+)+$`                                                           |
+| `name`                        | string                                  |          | at most 128 characters                                                                                            |
+| `metadata`                    | map of string                           |          | at most 64 entries; keys match `^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`                                              |
+| `issuedBy`                    | string                                  |          | at most 128 characters; matches `^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$`                                          |
 | `ownerIdentityId`             | string                                  |          | at most 128 characters; matches `^[A-Za-z0-9._:@-]{1,128}$`                                                       |
 | `workloadIdentity`            | object                                  |          |                                                                                                                   |
 | `workloadIdentity.awsRoleArn` | string                                  | yes      | at most 2048 characters; matches `^arn:(aws\|aws-cn\|aws-us-gov):iam::[0-9]{12}:role/[A-Za-z0-9_+=,.@/-]{1,512}$` |
@@ -86,7 +93,12 @@ Admits a VM from a pool, flavor and image after one IAM decision on the draft; r
 
 Returns a page of the tenant's instances, newest first, with a `cursor` when more remain.
 
-`scope` defaults to `mine`, the caller's own instances; `all` returns every instance of the tenant that the caller may read. `state` and `poolId` filter the list, and `limit` is 1 to 200 (default 50). Drafts are never listed.
+`scope` defaults to `mine`, the caller's own instances; `all` returns every instance of the tenant that the caller may read, each one checked for `compute:instances:read` after the page is read, so a page can hold fewer than `limit` items. `limit` is 1 to 200 (default 50); `cursor` is the last instance id of the previous page. Drafts and warm sandbox instances are never listed.
+
+- **Deleted instances.** Left out unless `state: 'deleted'` asks for them, in SQL, before the per-item checks: a deleted instance's access is gone, so it could never pass one. `state: 'deleted'` therefore needs `scope: 'mine'` (the owner's own, with no per-item check); with `scope: 'all'` it is `INVALID_INPUT`.
+- **Filters.** `state`, `poolId`, `projectId` and `labelSelector` all filter in SQL. A label selector is comma-separated requirements that must all hold: `key=value` (or `==`), `key!=value` (also true without the key), `key` (has it), `!key` (lacks it), `key in (a,b)` and `key notin (a,b)` (also true without the key); at most 20 requirements and 1024 characters, keys and values as the label rules allow, else `INVALID_INPUT`.
+
+Each instance shows its `name`, `metadata`, `labels`, `issuedBy` and `createdAt` (epoch ms), and, for a provider machine, the `disks` the provider last reported (boot disk first: `type`, `sizeGiB`, `boot`), which is what `disk.<type>.gib.hours` meters.
 
 - **Kind:** read
 - **Authorization:** `compute:instances:read` @ `compute-tenant` + items
@@ -95,14 +107,16 @@ Returns a page of the tenant's instances, newest first, with a `cursor` when mor
 
 **Input**
 
-| Field      | Type                                                                                                                                                        | Required | Constraints                                                       |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------------------------------------------------------------- |
-| `tenantId` | string                                                                                                                                                      | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
-| `scope`    | one of `mine`, `all`                                                                                                                                        |          | default `"mine"`                                                  |
-| `state`    | one of `pending`, `scheduling`, `provisioning`, `starting`, `running`, `stopped`, `rebooting`, `resizing`, `deleting`, `deleted`, `error`, `lost`, `paused` |          |                                                                   |
-| `poolId`   | string                                                                                                                                                      |          | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
-| `limit`    | integer                                                                                                                                                     |          | 1-200                                                             |
-| `cursor`   | string                                                                                                                                                      |          | at most 57 characters; matches `^inst_[0-9a-z]{26,52}$`           |
+| Field           | Type                                                                                                                                                        | Required | Constraints                                                       |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------------------------------------------------------------- |
+| `tenantId`      | string                                                                                                                                                      | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `scope`         | one of `mine`, `all`                                                                                                                                        |          | default `"mine"`                                                  |
+| `state`         | one of `pending`, `scheduling`, `provisioning`, `starting`, `running`, `stopped`, `rebooting`, `resizing`, `deleting`, `deleted`, `error`, `lost`, `paused` |          |                                                                   |
+| `poolId`        | string                                                                                                                                                      |          | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `projectId`     | string                                                                                                                                                      |          | at most 56 characters; matches `^prj_[0-9a-hjkmnp-tv-z]{26,52}$`  |
+| `labelSelector` | string                                                                                                                                                      |          | at most 1024 characters                                           |
+| `limit`         | integer                                                                                                                                                     |          | 1-200                                                             |
+| `cursor`        | string                                                                                                                                                      |          | at most 57 characters; matches `^inst_[0-9a-z]{26,52}$`           |
 
 ## get
 
@@ -213,6 +227,7 @@ Makes a provider machine that already runs an instance of a tenant, without recr
 
 - **Input.** `poolId` is a `provider` pool owned by or offered to `tenantId` and backed by the machine's provider account. `externalId` is the machine as `providerAccounts.machines` lists it, which discovery must have seen and which must be free. `ownerIdentityId` defaults to the caller, so an operator can hand the instance to a person of the tenant (it then shows in their `scope: 'mine'` list). As for `create`, only a root caller attaching into another tenant names someone else (`ACCESS_DENIED` otherwise, before any decision), and the owner must be an active identity of the tenant when the IAM port can say (`INVALID_INPUT`). `onDelete` is `detach` (the default: deleting releases the machine, which keeps running) or `delete` (deleting deletes the machine).
 - **Networks.** An attached machine keeps the network it is on. If its NIC is on one of the tenant's networks of the same provider account that is not deleted, whatever state it is in (`pending` included), the instance is linked to it (`networkId`, and `subnetId` when the NIC names one of its subnets), so its firewall rules apply and the network cannot be deleted from under it. `networkId` asserts that: the machine must already be on that network, otherwise `INVALID_STATE` with `details.hint: 'attached VMs keep their existing network'` (GCE cannot move a NIC to another VPC without a stop). A network that does not exist, is not the tenant's or is on another account is `INVALID_INPUT`; one being deleted is `INVALID_STATE` (`details.networkId`), also when the machine's NIC is on it and no `networkId` was given: attach neither links nor ignores a network being torn down.
+- **Identity.** `name`, `metadata` and `labels` follow the rules of `create` and are part of the request; the labels are written on the machine (`ProviderImpl.setLabels`) once it is claimed, next to the labels it already carries. `issuedBy` is the platform's only, as for `create` (`ACCESS_DENIED` otherwise, before any decision).
 - **Billing.** `billing: 'none'` writes off the machine: it opens no usage interval, so nothing of it is metered, stopped or running. Only the platform (a root caller) may pass it; any other caller gets `ACCESS_DENIED` before any decision and nothing is written. `billing: 'metered'`, or omitting it, leaves the decision to the pool's billing mode (`policy.billing.mode`, else metered, or a platform fee for a tenant's own cloud account). It is part of the request, so a retry with the same key but another `billing` is `CONFLICT`.
 - **Budgets.** A billed attach (the resulting mode is `metered` or `platform-fee`, so not `billing: 'none'` and not a pool whose mode is `none`) is checked against the tenant's budgets after the IAM decision, as `create` is: when the pool asks for it (`policy.admission.budgetCheck: 'meter'`) or the tenant's offer is `stop-new`, `drain` or `suspend`, a spent budget is `SPEND_LIMIT_REACHED` and nothing is written. A root caller attaching into a tenant is checked against that tenant's budgets, not root's. A suspended offer, or an offer whose `allowedRegions` leave out the pool's region, refuses every attach (`SPEND_LIMIT_REACHED`, `ACCESS_DENIED`), billed or not.
 - **Shape.** The flavor is the machine's own: its machine type, vCPU, memory and GPU count, with no disk. It is charged to the tenant's quota on the pool, as a create on a provider pool is, `instances` included.
@@ -231,18 +246,21 @@ Makes a provider machine that already runs an instance of a tenant, without recr
 
 **Input**
 
-| Field             | Type                      | Required | Constraints                                                             |
-| ----------------- | ------------------------- | -------- | ----------------------------------------------------------------------- |
-| `tenantId`        | string                    | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`              |
-| `poolId`          | string                    | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$`       |
-| `externalId`      | string                    | yes      | at most 256 characters; matches `^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$` |
-| `projectId`       | string                    |          | at most 56 characters; matches `^prj_[0-9a-hjkmnp-tv-z]{26,52}$`        |
-| `ownerIdentityId` | string                    |          | at most 128 characters; matches `^[A-Za-z0-9._:@-]{1,128}$`             |
-| `onDelete`        | one of `detach`, `delete` |          | default `"detach"`                                                      |
-| `name`            | string                    |          | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`            |
-| `networkId`       | string                    |          | at most 57 characters; matches `^net_[0-9a-hjkmnp-tv-z]{26,52}$`        |
-| `billing`         | one of `metered`, `none`  |          |                                                                         |
-| `idempotencyKey`  | string                    | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`              |
+| Field             | Type                      | Required | Constraints                                                              |
+| ----------------- | ------------------------- | -------- | ------------------------------------------------------------------------ |
+| `tenantId`        | string                    | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`               |
+| `poolId`          | string                    | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$`        |
+| `externalId`      | string                    | yes      | at most 256 characters; matches `^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$`  |
+| `projectId`       | string                    |          | at most 56 characters; matches `^prj_[0-9a-hjkmnp-tv-z]{26,52}$`         |
+| `ownerIdentityId` | string                    |          | at most 128 characters; matches `^[A-Za-z0-9._:@-]{1,128}$`              |
+| `onDelete`        | one of `detach`, `delete` |          | default `"detach"`                                                       |
+| `name`            | string                    |          | at most 128 characters                                                   |
+| `metadata`        | map of string             |          | at most 64 entries; keys match `^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`     |
+| `labels`          | map of string             |          | at most 62 entries; keys match `^[a-z][a-z0-9_-]{0,62}$`                 |
+| `issuedBy`        | string                    |          | at most 128 characters; matches `^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$` |
+| `networkId`       | string                    |          | at most 57 characters; matches `^net_[0-9a-hjkmnp-tv-z]{26,52}$`         |
+| `billing`         | one of `metered`, `none`  |          |                                                                          |
+| `idempotencyKey`  | string                    | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`               |
 
 ## detach
 
@@ -289,6 +307,62 @@ Asks for a restart of a running provider instance's machine; returns the instanc
 | `tenantId`   | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
 | `instanceId` | string  | yes      | at most 57 characters; matches `^inst_[0-9a-hjkmnp-tv-z]{26,52}$` |
 | `hard`       | boolean |          | default `false`                                                   |
+
+## update
+
+`POST /api/compute/instances/update`
+
+Renames an instance and replaces its metadata and labels; the platform records or corrects its provenance. Returns the instance.
+
+- **Input.** At least one of `name`, `metadata`, `labels` and `issuedBy`, with the rules of `create`; `null` clears a field, and `{}` clears metadata or labels. Metadata and labels are replaced as a whole, not merged. `expectedVersion` makes the update conditional: an instance at another `version` is `CONFLICT` with `details.version`.
+- **IAM.** `compute:instances:update` on the instance. `issuedBy` is the platform's: from anyone but a root caller it is `ACCESS_DENIED` (`details.reason: 'issued-by-platform-only'`) before any decision.
+- **Labels on the machine.** In a provider pool, new labels are written on the VM and its boot disk by the `vps.instances` reconciler (`ProviderImpl.setLabels`), which the update wakes: every wanted key is set, every key the provider last got that is no longer wanted is removed, labels someone else put on the machine stay, and better-compute's own (`better-compute-*`) are never touched. An attached machine gets them once claimed. A write the provider refuses leaves a `LabelsNotApplied` condition (the error's code as `reason`) and is tried again at the next poll; the instance keeps running. Hosted instances have nothing to write.
+- **Semantics.** An update that changes nothing returns the instance as it is, with no new version and no event. Otherwise the version moves on and `instance.updated` is published with `changed` (the fields that changed). Nothing else about the instance changes.
+- **Errors.** `NOT_FOUND` for an instance of another tenant, or none; `INVALID_STATE` for an instance being deleted or deleted, a sandbox's instance (use `sandboxes.update`) or a warm one; `INVALID_INPUT` for an empty update, an unknown field or a value the rules refuse.
+
+- **Kind:** mutation
+- **Authorization:** `compute:instances:update` @ `compute-instance`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field             | Type        | Required | Constraints                                                              |
+| ----------------- | ----------- | -------- | ------------------------------------------------------------------------ |
+| `tenantId`        | string      | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`               |
+| `instanceId`      | string      | yes      | at most 57 characters; matches `^inst_[0-9a-hjkmnp-tv-z]{26,52}$`        |
+| `name`            | string,null |          | at most 128 characters                                                   |
+| `metadata`        | object,null |          | at most 64 entries; keys match `^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`     |
+| `labels`          | object,null |          | at most 62 entries; keys match `^[a-z][a-z0-9_-]{0,62}$`                 |
+| `issuedBy`        | string,null |          | at most 128 characters; matches `^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$` |
+| `expectedVersion` | integer     |          | 1-9007199254740991                                                       |
+
+## issued
+
+`POST /api/compute/instances/issued`
+
+The platform's view of the instances it issued: a page of instances in tenants other than the root tenant, on pools the root tenant owns (created there, or attached into them), newest first, with a `cursor` when more remain.
+
+- **IAM.** `compute:instances:read` on `compute-fleet/global`, which resolves only in the root tenant: any other caller is `ACCESS_DENIED`. `INVALID_CONFIG` when the IAM port names no root tenant.
+- **Filters.** `tenantId` keeps one tenant's instances (here it is a filter, not the scope), `poolId` one pool's, `state` one state (without it, deleted instances are left out), `issuedBy` the instances whose recorded provenance is that value (`*`: any recorded provenance), and `labelSelector` as `list` takes it. `limit` is 1 to 500 (default 100); `cursor` is the last instance id of the previous page.
+- **Answer.** Instances as `get` shows them, with their `tenantId` and `ownerIdentityId`. It only reads.
+
+- **Kind:** read
+- **Authorization:** `compute:instances:read` @ `compute-fleet`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field           | Type                                                                                                                                                        | Required | Constraints                                                       |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------------------------------------------------------------- |
+| `tenantId`      | string                                                                                                                                                      |          | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`        | string                                                                                                                                                      |          | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `state`         | one of `pending`, `scheduling`, `provisioning`, `starting`, `running`, `stopped`, `rebooting`, `resizing`, `deleting`, `deleted`, `error`, `lost`, `paused` |          |                                                                   |
+| `issuedBy`      | string                                                                                                                                                      |          | at most 128 characters                                            |
+| `labelSelector` | string                                                                                                                                                      |          | at most 1024 characters                                           |
+| `limit`         | integer                                                                                                                                                     |          | 1-500                                                             |
+| `cursor`        | string                                                                                                                                                      |          | at most 57 characters; matches `^inst_[0-9a-z]{26,52}$`           |
 
 ## estimate
 

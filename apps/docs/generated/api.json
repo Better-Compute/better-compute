@@ -3438,6 +3438,51 @@
         },
         "summary": "Makes a verified image the tenant owns public, so every tenant can read and deploy it.",
         "description": "Makes a verified image the tenant owns public, so every tenant can read and deploy it.\n\nDecided as `compute:images:publish` on the image. An unsigned image is `INVALID_STATE`; an image the tenant does not own is `NOT_FOUND`. Promoting an image that is already public returns it unchanged. Site agents whose pools pre-warm this ref get their desired state refreshed."
+      },
+      {
+        "method": "resolve",
+        "route": "POST /api/compute/images/resolve",
+        "kind": "read",
+        "action": "compute:flavors:read",
+        "resource": "compute-pool",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "poolId": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "A provider pool the tenant owns or is offered"
+            },
+            "families": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 50,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._:/-]{0,199}$",
+                "maxLength": 200,
+                "description": "An image family (ubuntu-2404-lts-amd64, in the account's imageProject), project/family, or projects/<project>/global/images/family/<family>"
+              },
+              "description": "The families, at most 50"
+            }
+          },
+          "required": ["tenantId", "poolId", "families"],
+          "additionalProperties": false
+        },
+        "summary": "Resolves image families on a `provider` pool for a launch picker: each family's newest image that is not deprecated, as the pool's provider account sees it. Returns `poolId`, `provider`, `items` (one per family that resolved, in the order asked) and `missing` (each with `family` and `reason`: `notFound` when the family has no image, `deprecated` when its newest image is deprecated, obsolete or deleted). vps serves this method; the rest of the group is the bare-metal catalog.",
+        "description": "Resolves image families on a `provider` pool for a launch picker: each family's newest image that is not deprecated, as the pool's provider account sees it. Returns `poolId`, `provider`, `items` (one per family that resolved, in the order asked) and `missing` (each with `family` and `reason`: `notFound` when the family has no image, `deprecated` when its newest image is deprecated, obsolete or deleted). vps serves this method; the rest of the group is the bare-metal catalog.\n\n- **Input.** `families` lists 1 to 50 families; duplicates count once. On Compute Engine a family is a bare name, which resolves in the account's `imageProject` (`ubuntu-2404-lts-amd64`), `<project>/<family>` (`debian-cloud/debian-12`), or `projects/<project>/global/images/family/<family>`.\n- **Output.** Each item has `family` as asked; `image`, the reference `instances.create` takes as `imageId` to boot exactly that image (`projects/<project>/global/images/<name>`); `name` and `project`; `architecture` (`x86_64` or `arm64`); `minimumDiskGiB`, the smallest boot disk the image fits on; `guestOsFeatures` (`UEFI_COMPATIBLE`, `GVNIC`, `SEV_CAPABLE`, …, sorted); `loginUser`, the user the instance's `sshKeys` log in as; `deprecation` when a deprecation is scheduled (`replacement` and the `deprecated`, `obsolete` and `deleted` times); `createdAt` and `description`.\n- **Caching.** The provider keeps each answer a day per account (a family with no image an hour) and never returns an image whose deprecation time has passed, also from its cache. A failed read is not kept.\n- **Allowlist.** A family in a project the account does not allow (the Compute Engine account's `imageProjects`) refuses the whole call with `INVALID_INPUT` (`details.reason` `imageProjectNotAllowed`, with `details.allowed`), and nothing is read. `instances.create` applies the same allowlist to `imageId`.\n- **IAM.** Decided as `compute:flavors:read` on the pool: its owner and the tenants it is offered to, who see its flavors. Any other tenant gets `NOT_FOUND`. The pool's provider account is not shown.\n- **Errors.** `INVALID_INPUT` for a pool that is not a `provider` pool, `INVALID_STATE` for a provider pool without an account, `UNSUPPORTED` (`details.provider`) when its provider does not resolve image families. Provider failures (`ACCESS_DENIED`, `UNAVAILABLE`, `RATE_LIMITED`) are passed on."
       }
     ]
   },
@@ -3533,7 +3578,7 @@
                 "pattern": "^[a-z0-9_-]{0,63}$",
                 "maxLength": 63
               },
-              "description": "Provider labels for the machine (provider pools): GCE label rules, at most 62; keys starting with better-compute- are reserved"
+              "description": "Labels: GCE label rules, at most 62; keys starting with better-compute- or bc- are reserved. In provider pools also written on the machine and its boot disk"
             },
             "placement": {
               "type": "object",
@@ -3581,6 +3626,29 @@
                 "additionalProperties": false
               },
               "description": "(provider pools on a network) Shared filesystems of the network the machine mounts at boot; needs networkId"
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 128,
+              "description": "A display name: 1-128 characters, no control characters or surrounding whitespace"
+            },
+            "metadata": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "description": "Free-form string metadata kept by better-compute only (at most 64 entries, 16 KiB); keys starting with better-compute- or bc- are reserved"
+            },
+            "issuedBy": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$",
+              "maxLength": 128,
+              "description": "Who issued the instance (root callers only): the platform’s provenance"
             },
             "ownerIdentityId": {
               "type": "string",
@@ -3648,7 +3716,7 @@
           "additionalProperties": false
         },
         "summary": "Admits a VM from a pool, flavor and image after one IAM decision on the draft; returns the instance in `scheduling`, or in `provisioning` with a `nodeId` when a hosted pool placed it at once.",
-        "description": "Admits a VM from a pool, flavor and image after one IAM decision on the draft; returns the instance in `scheduling`, or in `provisioning` with a `nodeId` when a hosted pool placed it at once.\n\n- **Idempotency.** `idempotencyKey` is required. The instance id derives from the tenant, the caller and the key: a retry of a finished request returns the same instance without a second decision, and a different request under the same key is `CONFLICT` with `details.instanceId`.\n- **IAM.** `compute:instances:create` is decided on `compute-instance/` plus the draft id, whose attributes (`vcpu`, `memoryGiB`, `gpus`, `imageId`, `imageVerified`, `projectId`) policies can test. A refusal deletes the draft; a delegated session can get `CONFIRMATION_REQUIRED`.\n- **Networks.** In a provider pool, `networkId` places the VM on a tenant network (`networks.create`) and `subnetId` in one of its subnets; the instance shows both. The network must be the tenant's and on the pool's provider account, must have been provisioned (it reached `ready` once; a network that went back to `pending` because a subnet or rule was added still takes instances) and must not be being deleted, and the subnet must be on it, in the offer's region and `ready`. A network not provisioned yet, being deleted, or a subnet not ready yet is `INVALID_STATE` with a retry hint. Without `subnetId` the network's only subnet in the offer's region is used; none, or several (the error names them), is `INVALID_INPUT`, as is an unknown network or subnet, one of another tenant or provider account, or a `subnetId` without a `networkId`. The VM is created in the subnet with a per-instance network tag, which the network's firewall rules target. The network and subnet stay until the instance is deleted: `networks.delete` and `networks.removeSubnet` are `INVALID_STATE` while it is on them.\n- **Labels.** In a provider pool, `labels` (at most 62, so the VM stays within Compute Engine's 64 with better-compute's own two) are passed to the provider's create and shown on the instance. Keys are a lower-case letter followed by lower-case letters, digits, `_` or `-`, at most 63 characters; values take the same characters, at most 63, and may be empty. Keys starting with `better-compute-` are reserved, and the provider's own ownership labels win over the tenant's. Anything else, or labels on a hosted pool, is `INVALID_INPUT`. Labels are part of the request: the same key with other labels is `CONFLICT`.\n- **Workload identity (AWS).** In a hosted pool, `workloadIdentity.awsRoleArn` names the IAM role the instance's workloads assume with no static keys: bcd exchanges the instance's workload token (audience `sts.amazonaws.com`, subject `t:<tenantId>:instance:<id>`) with STS `AssumeRoleWithWebIdentity` and serves the credentials on the guest's AWS-compatible metadata paths. The pool must turn workload identity on (`policy.workloadIdentity: true`) and list the role in `policy.workloadRoles.aws`; otherwise, and in a provider pool, the create is `INVALID_INPUT` (`details.reason` `workloadIdentityOff`, `awsRoleNotAllowed` or `workloadIdentityHostedOnly`). The instance shows the role. The host is sent the role only while the pool still allows it. The role's own trust policy (`better-compute aws workload-role`) limits it to the tenant's instances and to tokens tagged for that role (session tag `bc-role`), which the workload broker adds only for the role the pool allows.\n- **Placement.** In a provider pool, `placement` (`{ group, strategy: 'cluster' | 'spread' | 'partition', partition? }`) puts the machine in a provider placement group (an EC2 placement group on AWS): every instance of one tenant's `group` in the pool shares one, under a name vps derives from the tenant, pool and group, so two tenants never share a group. `cluster` keeps machines on one low-latency network segment, `spread` on distinct hardware, `partition` on disjoint racks (`partition` 1–7 picks one). The group is a lower-case letter followed by lower-case letters, digits or `-`, at most 63 characters. Another strategy for a group in use is `CONFLICT`; placement on a hosted pool, on a provider without placement groups or without that strategy (only AWS has them today; such a provider would ignore it, so it is refused rather than claimed), an unknown strategy or a partition without the partition strategy is `INVALID_INPUT`. Placement is part of the request: the same key with another placement is `CONFLICT`. The instance shows its `placement`.\n- **Filesystems.** On a tenant network, `filesystems` (`[{ filesystem, path }]`, at most 16) mounts shared [filesystems](/docs/reference/api/filesystems) of that network at boot: each must be the tenant's, on the instance's own network (`INVALID_INPUT` otherwise, also without a `networkId`) and `ready` (`INVALID_STATE` otherwise). A path is absolute, made of plain segments, outside the system directories, and used once (`INVALID_INPUT`). The provider renders the mounts into the machine's user data. The instance shows its `filesystems`; a filesystem it mounts cannot be deleted until the instance is.\n- **Owner.** The instance is owned by the caller, or by `ownerIdentityId`: the platform (a root caller creating in another tenant) issues an instance to a person of that tenant this way, as `attach` does, so it shows in their `scope: 'mine'` list and owner-conditioned policies (`resource.ownerId`) apply to them. Anyone else naming an identity other than their own, and a root caller in its own tenant, is `ACCESS_DENIED` before any decision; a malformed one is `INVALID_INPUT`. When the IAM port can say (`IamPort.isMember`, the embedded better-iam bridge), the owner must also be an active identity of the tenant, else `INVALID_INPUT` and the draft is dropped; other ports check the id's shape only.\n- **DNS.** `dns: { zoneId, name?, ipv6? }` publishes the instance in a DNS zone of the tenant ([dnsZones](/docs/reference/api/dns-zones)): an A record `<name>.<zone>` (and an AAAA record with `ipv6: true`) that follows the instance's public address (its assigned reserved address first) and is deleted with the instance, exactly as a [dnsRecords](/docs/reference/api/dns-records) record with `instanceId`. `name` is relative to the zone (`web`, `web.eu`; no apex or wildcard) and defaults to the instance id with `-` for `_`. The records are made in the same transaction as the instance: a zone that is not the tenant's is `NOT_FOUND`, one being deleted `INVALID_STATE`, and a name the zone already holds `CONFLICT`, each refusing the whole create. Besides the decision on the instance, it is decided as `compute:dns:manage` on the zone, on the caller's own credential.\n- **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, an archived pool, a missing or archived flavor, or an image a hosted pool cannot resolve. `INVALID_INPUT` for a pool that is not `vps-host` or `provider`. `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota; `CAPACITY_UNAVAILABLE` when a hosted pool has no free IP address. `INVALID_STATE` for a provider pool without an account, `INVALID_CONFIG` for a hosted pool when `vps()` has no `images`.\n- **Events.** `instance.created`, and `instance.scheduled` with the `nodeId` when a hosted instance is placed. When no host fits, the instance stays in `scheduling` with an `Unschedulable` condition and is retried every 30 seconds. In a provider pool, a create the provider refuses for capacity or quota (at once, or after accepting it, as GCE reports a stockout) moves the instance to `error` with a `ProvisionFailed` condition (reason `CAPACITY_UNAVAILABLE` or `QUOTA_EXCEEDED`) and publishes `instance.failed`; it is not retried, and deleting it refunds the quota."
+        "description": "Admits a VM from a pool, flavor and image after one IAM decision on the draft; returns the instance in `scheduling`, or in `provisioning` with a `nodeId` when a hosted pool placed it at once.\n\n- **Idempotency.** `idempotencyKey` is required. The instance id derives from the tenant, the caller and the key: a retry of a finished request returns the same instance without a second decision, and a different request under the same key is `CONFLICT` with `details.instanceId`.\n- **IAM.** `compute:instances:create` is decided on `compute-instance/` plus the draft id, whose attributes (`vcpu`, `memoryGiB`, `gpus`, `imageId`, `imageVerified`, `projectId`, `poolId`, `flavor`, `region` (the pool's site), `provider` (the pool's account, provider pools) and one `labels.<key>` per label, in key order while the row has room: a row holds 64 attributes, and when labels are left out the last slot is `labelsTruncated: true`) policies can test, e.g. `resource.flavor` or `resource.labels.env`. A refusal deletes the draft; a delegated session can get `CONFIRMATION_REQUIRED`.\n- **Admission.** For every caller, after the decision and in the same transaction as the charge: the flavor must be one the tenant's offer lists (`pools.offer({ flavors })`, `QUOTA_EXCEEDED` `flavor-not-offered`) and one every quota row it consumes allows (`quotas.set({ flavors })`, `flavor-not-allowed`); then the host's `vps({ admissionPolicy })` runs with the request (pool, flavor, shape, demand, region, provider, labels, owner, decision) and may refuse with any error; then quota is charged: the shape, `instances` (one, where a row exists) and the tenant-level `*` rows. A refusal changes nothing and keeps the draft.\n- **Networks.** In a provider pool, `networkId` places the VM on a tenant network (`networks.create`) and `subnetId` in one of its subnets; the instance shows both. The network must be the tenant's and on the pool's provider account, must have been provisioned (it reached `ready` once; a network that went back to `pending` because a subnet or rule was added still takes instances) and must not be being deleted, and the subnet must be on it, in the offer's region and `ready`. A network not provisioned yet, being deleted, or a subnet not ready yet is `INVALID_STATE` with a retry hint. Without `subnetId` the network's only subnet in the offer's region is used; none, or several (the error names them), is `INVALID_INPUT`, as is an unknown network or subnet, one of another tenant or provider account, or a `subnetId` without a `networkId`. The VM is created in the subnet with a per-instance network tag, which the network's firewall rules target. The network and subnet stay until the instance is deleted: `networks.delete` and `networks.removeSubnet` are `INVALID_STATE` while it is on them.\n- **Labels.** `labels` (at most 62, so a VM stays within Compute Engine's 64 with better-compute's own two) are kept on the instance in any pool, where `list`'s `labelSelector` matches them. In a provider pool they are also passed to the provider's create, which writes them on the VM and on its boot disk. Keys are a lower-case letter followed by lower-case letters, digits, `_` or `-`, at most 63 characters; values take the same characters, at most 63, and may be empty. Keys starting with `better-compute-` or `bc-` are better-compute's own and `INVALID_INPUT`; the provider also drops any such key and writes its ownership labels last, so they always win. Labels are part of the request: the same key with other labels is `CONFLICT`. `update` changes them later.\n- **Workload identity (AWS).** In a hosted pool, `workloadIdentity.awsRoleArn` names the IAM role the instance's workloads assume with no static keys: bcd exchanges the instance's workload token (audience `sts.amazonaws.com`, subject `t:<tenantId>:instance:<id>`) with STS `AssumeRoleWithWebIdentity` and serves the credentials on the guest's AWS-compatible metadata paths. The pool must turn workload identity on (`policy.workloadIdentity: true`) and list the role in `policy.workloadRoles.aws`; otherwise, and in a provider pool, the create is `INVALID_INPUT` (`details.reason` `workloadIdentityOff`, `awsRoleNotAllowed` or `workloadIdentityHostedOnly`). The instance shows the role. The host is sent the role only while the pool still allows it. The role's own trust policy (`better-compute aws workload-role`) limits it to the tenant's instances and to tokens tagged for that role (session tag `bc-role`), which the workload broker adds only for the role the pool allows.\n- **Placement.** In a provider pool, `placement` (`{ group, strategy: 'cluster' | 'spread' | 'partition', partition? }`) puts the machine in a provider placement group (an EC2 placement group on AWS): every instance of one tenant's `group` in the pool shares one, under a name vps derives from the tenant, pool and group, so two tenants never share a group. `cluster` keeps machines on one low-latency network segment, `spread` on distinct hardware, `partition` on disjoint racks (`partition` 1–7 picks one). The group is a lower-case letter followed by lower-case letters, digits or `-`, at most 63 characters. Another strategy for a group in use is `CONFLICT`; placement on a hosted pool, on a provider without placement groups or without that strategy (only AWS has them today; such a provider would ignore it, so it is refused rather than claimed), an unknown strategy or a partition without the partition strategy is `INVALID_INPUT`. Placement is part of the request: the same key with another placement is `CONFLICT`. The instance shows its `placement`.\n- **Filesystems.** On a tenant network, `filesystems` (`[{ filesystem, path }]`, at most 16) mounts shared [filesystems](/docs/reference/api/filesystems) of that network at boot: each must be the tenant's, on the instance's own network (`INVALID_INPUT` otherwise, also without a `networkId`) and `ready` (`INVALID_STATE` otherwise). A path is absolute, made of plain segments, outside the system directories, and used once (`INVALID_INPUT`). The provider renders the mounts into the machine's user data. The instance shows its `filesystems`; a filesystem it mounts cannot be deleted until the instance is.\n- **Name and metadata.** `name` is a display name (1 to 128 characters, no control characters, no surrounding whitespace), not unique. `metadata` is up to 64 string entries (keys a letter or digit, then letters, digits, `.`, `_`, `/` or `-`, at most 128; values at most 1024 characters; 16 KiB in all; `better-compute-` and `bc-` keys reserved). Both are kept by better-compute only, never sent to a provider or host, and both are part of the request. `update` changes them later.\n- **Provenance.** `issuedBy` records who issued the instance (`legionedge:admin`: up to 128 letters, digits, `.`, `_`, `:`, `@`, `/`, `+` or `-`). Only the platform (a root caller) sets it: anyone else is `ACCESS_DENIED` with `details.reason: 'issued-by-platform-only'`, before any decision. The instance shows it to everyone who can read it, and `issued` filters on it.\n- **Owner.** The instance is owned by the caller, or by `ownerIdentityId`: the platform (a root caller creating in another tenant) issues an instance to a person of that tenant this way, as `attach` does, so it shows in their `scope: 'mine'` list and owner-conditioned policies (`resource.ownerId`) apply to them. Anyone else naming an identity other than their own, and a root caller in its own tenant, is `ACCESS_DENIED` before any decision; a malformed one is `INVALID_INPUT`. When the IAM port can say (`IamPort.isMember`, the embedded better-iam bridge), the owner must also be an active identity of the tenant, else `INVALID_INPUT` and the draft is dropped; other ports check the id's shape only.\n- **DNS.** `dns: { zoneId, name?, ipv6? }` publishes the instance in a DNS zone of the tenant ([dnsZones](/docs/reference/api/dns-zones)): an A record `<name>.<zone>` (and an AAAA record with `ipv6: true`) that follows the instance's public address (its assigned reserved address first) and is deleted with the instance, exactly as a [dnsRecords](/docs/reference/api/dns-records) record with `instanceId`. `name` is relative to the zone (`web`, `web.eu`; no apex or wildcard) and defaults to the instance id with `-` for `_`. The records are made in the same transaction as the instance: a zone that is not the tenant's is `NOT_FOUND`, one being deleted `INVALID_STATE`, and a name the zone already holds `CONFLICT`, each refusing the whole create. Besides the decision on the instance, it is decided as `compute:dns:manage` on the zone, on the caller's own credential.\n- **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, an archived pool, a missing or archived flavor, or an image a hosted pool cannot resolve. `INVALID_INPUT` for a pool that is not `vps-host` or `provider`. `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota; `CAPACITY_UNAVAILABLE` when a hosted pool has no free IP address. `INVALID_STATE` for a provider pool without an account, `INVALID_CONFIG` for a hosted pool when `vps()` has no `images`.\n- **Events.** `instance.created`, and `instance.scheduled` with the `nodeId` when a hosted instance is placed. When no host fits, the instance stays in `scheduling` with an `Unschedulable` condition and is retried every 30 seconds. In a provider pool, a create the provider refuses for capacity or quota (at once, or after accepting it, as GCE reports a stockout), or refuses as invalid (`INVALID_INPUT`; on Compute Engine, an `imageId` from a project the account does not allow), moves the instance to `error` with a `ProvisionFailed` condition (reason `CAPACITY_UNAVAILABLE`, `QUOTA_EXCEEDED` or `INVALID_INPUT`) and publishes `instance.failed`; it is not retried, and deleting it refunds the quota."
       },
       {
         "method": "list",
@@ -3689,13 +3757,25 @@
                 "error",
                 "lost",
                 "paused"
-              ]
+              ],
+              "description": "Only instances in this state; without it deleted instances are left out (deleted needs scope 'mine')"
             },
             "poolId": {
               "type": "string",
               "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
               "maxLength": 57,
               "description": "The pool"
+            },
+            "projectId": {
+              "type": "string",
+              "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 56,
+              "description": "Only instances of this project"
+            },
+            "labelSelector": {
+              "type": "string",
+              "maxLength": 1024,
+              "description": "Label requirements that must all hold, comma-separated: key=value, key!=value, key, !key, key in (a,b), key notin (a,b)"
             },
             "limit": {
               "type": "integer",
@@ -3713,7 +3793,7 @@
           "additionalProperties": false
         },
         "summary": "Returns a page of the tenant's instances, newest first, with a `cursor` when more remain.",
-        "description": "Returns a page of the tenant's instances, newest first, with a `cursor` when more remain.\n\n`scope` defaults to `mine`, the caller's own instances; `all` returns every instance of the tenant that the caller may read. `state` and `poolId` filter the list, and `limit` is 1 to 200 (default 50). Drafts are never listed."
+        "description": "Returns a page of the tenant's instances, newest first, with a `cursor` when more remain.\n\n`scope` defaults to `mine`, the caller's own instances; `all` returns every instance of the tenant that the caller may read, each one checked for `compute:instances:read` after the page is read, so a page can hold fewer than `limit` items. `limit` is 1 to 200 (default 50); `cursor` is the last instance id of the previous page. Drafts and warm sandbox instances are never listed.\n\n- **Deleted instances.** Left out unless `state: 'deleted'` asks for them, in SQL, before the per-item checks: a deleted instance's access is gone, so it could never pass one. `state: 'deleted'` therefore needs `scope: 'mine'` (the owner's own, with no per-item check); with `scope: 'all'` it is `INVALID_INPUT`.\n- **Filters.** `state`, `poolId`, `projectId` and `labelSelector` all filter in SQL. A label selector is comma-separated requirements that must all hold: `key=value` (or `==`), `key!=value` (also true without the key), `key` (has it), `!key` (lacks it), `key in (a,b)` and `key notin (a,b)` (also true without the key); at most 20 requirements and 1024 characters, keys and values as the label rules allow, else `INVALID_INPUT`.\n\nEach instance shows its `name`, `metadata`, `labels`, `issuedBy` and `createdAt` (epoch ms), and, for a provider machine, the `disks` the provider last reported (boot disk first: `type`, `sizeGiB`, `boot`), which is what `disk.<type>.gib.hours` meters."
       },
       {
         "method": "get",
@@ -3851,7 +3931,7 @@
           "additionalProperties": false
         },
         "summary": "Moves a stopped hosted instance to another flavor of its pool, in place on the same host; returns the instance `stopped` with the new flavor.",
-        "description": "Moves a stopped hosted instance to another flavor of its pool, in place on the same host; returns the instance `stopped` with the new flavor.\n\nGrowth is charged to quota first and shrinkage refunded after; if the host lacks room the charge is undone and the call is `CAPACITY_UNAVAILABLE` with `details.resource`. Other errors: `UNSUPPORTED` for a provider instance or a flavor with a different GPU count, `INVALID_STATE` when the instance is not stopped (both `state` and `desiredState`) or holds no allocation, `NOT_FOUND` for a missing or archived flavor, `QUOTA_EXCEEDED` when the growth does not fit. Publishes `instance.resized`."
+        "description": "Moves a stopped hosted instance to another flavor of its pool, in place on the same host; returns the instance `stopped` with the new flavor.\n\nThe new flavor must pass the flavor allowlists of the offer and of every quota row the instance consumes (`QUOTA_EXCEEDED` `flavor-not-offered` or `flavor-not-allowed`), then the host's `admissionPolicy` sees the growth. Growth is charged to quota first and shrinkage refunded after; if the host lacks room the charge is undone and the call is `CAPACITY_UNAVAILABLE` with `details.resource`. Other errors: `UNSUPPORTED` for a provider instance or a flavor with a different GPU count, `INVALID_STATE` when the instance is not stopped (both `state` and `desiredState`) or holds no allocation, `NOT_FOUND` for a missing or archived flavor, `QUOTA_EXCEEDED` when the growth does not fit. Publishes `instance.resized`."
       },
       {
         "method": "delete",
@@ -3937,9 +4017,39 @@
             },
             "name": {
               "type": "string",
-              "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
-              "maxLength": 63,
-              "description": "A display name"
+              "maxLength": 128,
+              "description": "A display name: 1-128 characters, no control characters or surrounding whitespace"
+            },
+            "metadata": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "description": "Free-form string metadata kept by better-compute only (at most 64 entries, 16 KiB); keys starting with better-compute- or bc- are reserved"
+            },
+            "labels": {
+              "type": "object",
+              "maxProperties": 62,
+              "propertyNames": {
+                "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^[a-z0-9_-]{0,63}$",
+                "maxLength": 63
+              },
+              "description": "Labels: GCE label rules, at most 62; keys starting with better-compute- or bc- are reserved. In provider pools also written on the machine and its boot disk"
+            },
+            "issuedBy": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$",
+              "maxLength": 128,
+              "description": "Who issued the instance (root callers only): the platform’s provenance"
             },
             "networkId": {
               "type": "string",
@@ -3962,7 +4072,7 @@
           "additionalProperties": false
         },
         "summary": "Makes a provider machine that already runs an instance of a tenant, without recreating it; returns the instance in `scheduling` with `origin: 'attached'`. The `vps.instances` reconciler then writes the provider's ownership label (`claim`) and follows the machine like any provider instance.",
-        "description": "Makes a provider machine that already runs an instance of a tenant, without recreating it; returns the instance in `scheduling` with `origin: 'attached'`. The `vps.instances` reconciler then writes the provider's ownership label (`claim`) and follows the machine like any provider instance.\n\n- **Input.** `poolId` is a `provider` pool owned by or offered to `tenantId` and backed by the machine's provider account. `externalId` is the machine as `providerAccounts.machines` lists it, which discovery must have seen and which must be free. `ownerIdentityId` defaults to the caller, so an operator can hand the instance to a person of the tenant (it then shows in their `scope: 'mine'` list). As for `create`, only a root caller attaching into another tenant names someone else (`ACCESS_DENIED` otherwise, before any decision), and the owner must be an active identity of the tenant when the IAM port can say (`INVALID_INPUT`). `onDelete` is `detach` (the default: deleting releases the machine, which keeps running) or `delete` (deleting deletes the machine).\n- **Networks.** An attached machine keeps the network it is on. If its NIC is on one of the tenant's networks of the same provider account that is not deleted, whatever state it is in (`pending` included), the instance is linked to it (`networkId`, and `subnetId` when the NIC names one of its subnets), so its firewall rules apply and the network cannot be deleted from under it. `networkId` asserts that: the machine must already be on that network, otherwise `INVALID_STATE` with `details.hint: 'attached VMs keep their existing network'` (GCE cannot move a NIC to another VPC without a stop). A network that does not exist, is not the tenant's or is on another account is `INVALID_INPUT`; one being deleted is `INVALID_STATE` (`details.networkId`), also when the machine's NIC is on it and no `networkId` was given: attach neither links nor ignores a network being torn down.\n- **Billing.** `billing: 'none'` writes off the machine: it opens no usage interval, so nothing of it is metered, stopped or running. Only the platform (a root caller) may pass it; any other caller gets `ACCESS_DENIED` before any decision and nothing is written. `billing: 'metered'`, or omitting it, leaves the decision to the pool's billing mode (`policy.billing.mode`, else metered, or a platform fee for a tenant's own cloud account). It is part of the request, so a retry with the same key but another `billing` is `CONFLICT`.\n- **Budgets.** A billed attach (the resulting mode is `metered` or `platform-fee`, so not `billing: 'none'` and not a pool whose mode is `none`) is checked against the tenant's budgets after the IAM decision, as `create` is: when the pool asks for it (`policy.admission.budgetCheck: 'meter'`) or the tenant's offer is `stop-new`, `drain` or `suspend`, a spent budget is `SPEND_LIMIT_REACHED` and nothing is written. A root caller attaching into a tenant is checked against that tenant's budgets, not root's. A suspended offer, or an offer whose `allowedRegions` leave out the pool's region, refuses every attach (`SPEND_LIMIT_REACHED`, `ACCESS_DENIED`), billed or not.\n- **Shape.** The flavor is the machine's own: its machine type, vCPU, memory and GPU count, with no disk. It is charged to the tenant's quota on the pool, as a create on a provider pool is.\n- **Idempotency.** `idempotencyKey` is required. The instance id derives from the tenant, the caller and the key: a retry returns the same instance, and a different request under the same key is `CONFLICT` with `details.instanceId`.\n- **IAM.** `compute:instances:attach` is decided on `compute-instance/` plus the instance id, whose attributes (`vcpu`, `memoryGiB`, `gpus`) policies can test. Only the platform (root callers) attaches machines of an account its own tenant does not own; a tenant attaches from its own accounts, and a tenant the pool is offered to attaches, into itself, a machine bound to the pool (`pools.bindMachines`). Anything else is `ACCESS_DENIED`, whether or not the machine exists.\n- **Pools.** A machine bound to a pool is attached into that pool only: another pool is `CONFLICT` with `details.poolId`. Detaching or deleting the instance leaves the binding, so the machine returns to its pool. For Compute Engine accounts (`gcp`), a machine whose region (or its zone's) is not the region of the pool's site is `INVALID_INPUT` with `details.machineRegion` and `details.poolRegion`; other providers, and machines without a region or zone, are not compared.\n- **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, or a machine discovery has not seen or marked gone (run `providerAccounts.discover`). `CONFLICT` with `details.instanceId` when another instance holds the machine, with `details.claimedBy` when discovery saw its ownership label name another instance, and when the pool is backed by a different provider account than the machine's. `INVALID_INPUT` for a pool that is not a provider pool, `QUOTA_EXCEEDED` when the machine does not fit the quota; nothing is written then.\n- **Events.** `instance.attached` with `instanceId`, `accountId`, `externalId`, `poolId` and `onDelete`.\n- **Ownership.** Once claimed, every read of the machine must show this instance's label. A machine whose label is gone or names another instance is never adopted, recovered or acted on again: the instance gets an `OwnershipLost` condition (an `AttachConflict` one when the first claim was refused), `start`, `stop` and `reboot` are `INVALID_STATE`, and deleting it finishes as a detach without any provider call."
+        "description": "Makes a provider machine that already runs an instance of a tenant, without recreating it; returns the instance in `scheduling` with `origin: 'attached'`. The `vps.instances` reconciler then writes the provider's ownership label (`claim`) and follows the machine like any provider instance.\n\n- **Input.** `poolId` is a `provider` pool owned by or offered to `tenantId` and backed by the machine's provider account. `externalId` is the machine as `providerAccounts.machines` lists it, which discovery must have seen and which must be free. `ownerIdentityId` defaults to the caller, so an operator can hand the instance to a person of the tenant (it then shows in their `scope: 'mine'` list). As for `create`, only a root caller attaching into another tenant names someone else (`ACCESS_DENIED` otherwise, before any decision), and the owner must be an active identity of the tenant when the IAM port can say (`INVALID_INPUT`). `onDelete` is `detach` (the default: deleting releases the machine, which keeps running) or `delete` (deleting deletes the machine).\n- **Networks.** An attached machine keeps the network it is on. If its NIC is on one of the tenant's networks of the same provider account that is not deleted, whatever state it is in (`pending` included), the instance is linked to it (`networkId`, and `subnetId` when the NIC names one of its subnets), so its firewall rules apply and the network cannot be deleted from under it. `networkId` asserts that: the machine must already be on that network, otherwise `INVALID_STATE` with `details.hint: 'attached VMs keep their existing network'` (GCE cannot move a NIC to another VPC without a stop). A network that does not exist, is not the tenant's or is on another account is `INVALID_INPUT`; one being deleted is `INVALID_STATE` (`details.networkId`), also when the machine's NIC is on it and no `networkId` was given: attach neither links nor ignores a network being torn down.\n- **Identity.** `name`, `metadata` and `labels` follow the rules of `create` and are part of the request; the labels are written on the machine (`ProviderImpl.setLabels`) once it is claimed, next to the labels it already carries. `issuedBy` is the platform's only, as for `create` (`ACCESS_DENIED` otherwise, before any decision).\n- **Billing.** `billing: 'none'` writes off the machine: it opens no usage interval, so nothing of it is metered, stopped or running. Only the platform (a root caller) may pass it; any other caller gets `ACCESS_DENIED` before any decision and nothing is written. `billing: 'metered'`, or omitting it, leaves the decision to the pool's billing mode (`policy.billing.mode`, else metered, or a platform fee for a tenant's own cloud account). It is part of the request, so a retry with the same key but another `billing` is `CONFLICT`.\n- **Budgets.** A billed attach (the resulting mode is `metered` or `platform-fee`, so not `billing: 'none'` and not a pool whose mode is `none`) is checked against the tenant's budgets after the IAM decision, as `create` is: when the pool asks for it (`policy.admission.budgetCheck: 'meter'`) or the tenant's offer is `stop-new`, `drain` or `suspend`, a spent budget is `SPEND_LIMIT_REACHED` and nothing is written. A root caller attaching into a tenant is checked against that tenant's budgets, not root's. A suspended offer, or an offer whose `allowedRegions` leave out the pool's region, refuses every attach (`SPEND_LIMIT_REACHED`, `ACCESS_DENIED`), billed or not.\n- **Shape.** The flavor is the machine's own: its machine type, vCPU, memory and GPU count, with no disk. It is charged to the tenant's quota on the pool, as a create on a provider pool is, `instances` included.\n- **Admission.** The machine is judged by the pool's flavor whose offer is its type (`<zone>/<type>` in its zone, else `<type>`, else any zone's): the offer's and the quota rows' flavor allowlists apply to that flavor as on `create`, and a machine whose type no flavor offers is refused by any allowlist (`details.flavor: null`). The host's `admissionPolicy` runs too, also for label-driven auto-attach (without a decision).\n- **Idempotency.** `idempotencyKey` is required. The instance id derives from the tenant, the caller and the key: a retry returns the same instance, and a different request under the same key is `CONFLICT` with `details.instanceId`.\n- **IAM.** `compute:instances:attach` is decided on `compute-instance/` plus the instance id, whose attributes (`vcpu`, `memoryGiB`, `gpus`, `poolId`, `flavor` (the mapped flavor, when one is), `region`, `provider`) policies can test. Only the platform (root callers) attaches machines of an account its own tenant does not own; a tenant attaches from its own accounts, and a tenant the pool is offered to attaches, into itself, a machine bound to the pool (`pools.bindMachines`). Anything else is `ACCESS_DENIED`, whether or not the machine exists.\n- **Pools.** A machine bound to a pool is attached into that pool only: another pool is `CONFLICT` with `details.poolId`. Detaching or deleting the instance leaves the binding, so the machine returns to its pool. For Compute Engine accounts (`gcp`), a machine whose region (or its zone's) is not the region of the pool's site is `INVALID_INPUT` with `details.machineRegion` and `details.poolRegion`; other providers, and machines without a region or zone, are not compared.\n- **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, or a machine discovery has not seen or marked gone (run `providerAccounts.discover`). `CONFLICT` with `details.instanceId` when another instance holds the machine, with `details.claimedBy` when discovery saw its ownership label name another instance, and when the pool is backed by a different provider account than the machine's. `INVALID_INPUT` for a pool that is not a provider pool, `QUOTA_EXCEEDED` when the machine does not fit the quota; nothing is written then.\n- **Events.** `instance.attached` with `instanceId`, `accountId`, `externalId`, `poolId` and `onDelete`.\n- **Ownership.** Once claimed, every read of the machine must show this instance's label. A machine whose label is gone or names another instance is never adopted, recovered or acted on again: the instance gets an `OwnershipLost` condition (an `AttachConflict` one when the first claim was refused), `start`, `stop` and `reboot` are `INVALID_STATE`, and deleting it finishes as a detach without any provider call."
       },
       {
         "method": "detach",
@@ -4034,6 +4144,153 @@
         },
         "summary": "Asks for a restart of a running provider instance's machine; returns the instance, still `running`. The `vps.instances` reconciler restarts the machine once, gracefully (`graceful-restart`) or, with `hard: true`, by a reset, and publishes `instance.rebooted` with `hard`.",
         "description": "Asks for a restart of a running provider instance's machine; returns the instance, still `running`. The `vps.instances` reconciler restarts the machine once, gracefully (`graceful-restart`) or, with `hard: true`, by a reset, and publishes `instance.rebooted` with `hard`.\n\n- **Semantics.** A second reboot asked for while the first is pending is one restart; one asked for after it restarts the machine again. A provider without power control drops the request and records a `ProviderError` condition.\n- **Errors.** `INVALID_STATE` when the instance is not running, or is being stopped or deleted. `UNSUPPORTED` for instances of hosted pools, for now. Instances of other tenants, or none, are `NOT_FOUND`.\n- **IAM.** Decided as `compute:instances:update` on the instance."
+      },
+      {
+        "method": "update",
+        "route": "POST /api/compute/instances/update",
+        "kind": "mutation",
+        "action": "compute:instances:update",
+        "resource": "compute-instance",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "instanceId": {
+              "type": "string",
+              "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The instance"
+            },
+            "name": {
+              "type": ["string", "null"],
+              "maxLength": 128,
+              "description": "The new display name; null clears it"
+            },
+            "metadata": {
+              "type": ["object", "null"],
+              "maxProperties": 64,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "description": "The new metadata, replacing the old; null or {} clears it"
+            },
+            "labels": {
+              "type": ["object", "null"],
+              "maxProperties": 62,
+              "propertyNames": {
+                "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^[a-z0-9_-]{0,63}$",
+                "maxLength": 63
+              },
+              "description": "The new labels, replacing the old; null or {} clears them. Provider pools write them on the machine and its boot disk"
+            },
+            "issuedBy": {
+              "type": ["string", "null"],
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$",
+              "maxLength": 128,
+              "description": "Who issued the instance (root callers only); null clears it"
+            },
+            "expectedVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991,
+              "description": "The version the caller read: CONFLICT when it moved on"
+            }
+          },
+          "required": ["tenantId", "instanceId"],
+          "additionalProperties": false
+        },
+        "summary": "Renames an instance and replaces its metadata and labels; the platform records or corrects its provenance. Returns the instance.",
+        "description": "Renames an instance and replaces its metadata and labels; the platform records or corrects its provenance. Returns the instance.\n\n- **Input.** At least one of `name`, `metadata`, `labels` and `issuedBy`, with the rules of `create`; `null` clears a field, and `{}` clears metadata or labels. Metadata and labels are replaced as a whole, not merged. `expectedVersion` makes the update conditional: an instance at another `version` is `CONFLICT` with `details.version`.\n- **IAM.** `compute:instances:update` on the instance. `issuedBy` is the platform's: from anyone but a root caller it is `ACCESS_DENIED` (`details.reason: 'issued-by-platform-only'`) before any decision.\n- **Labels on the machine.** In a provider pool, new labels are written on the VM and its boot disk by the `vps.instances` reconciler (`ProviderImpl.setLabels`), which the update wakes: every wanted key is set, every key the provider last got that is no longer wanted is removed, labels someone else put on the machine stay, and better-compute's own (`better-compute-*`) are never touched. An attached machine gets them once claimed. A write the provider refuses leaves a `LabelsNotApplied` condition (the error's code as `reason`) and is tried again at the next poll; the instance keeps running. Hosted instances have nothing to write.\n- **Semantics.** An update that changes nothing returns the instance as it is, with no new version and no event. Otherwise the version moves on and `instance.updated` is published with `changed` (the fields that changed). Nothing else about the instance changes.\n- **Errors.** `NOT_FOUND` for an instance of another tenant, or none; `INVALID_STATE` for an instance being deleted or deleted, a sandbox's instance (use `sandboxes.update`) or a warm one; `INVALID_INPUT` for an empty update, an unknown field or a value the rules refuse."
+      },
+      {
+        "method": "issued",
+        "route": "POST /api/compute/instances/issued",
+        "kind": "read",
+        "action": "compute:instances:read",
+        "resource": "compute-fleet",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "Only this tenant’s instances"
+            },
+            "poolId": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The pool"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "scheduling",
+                "provisioning",
+                "starting",
+                "running",
+                "stopped",
+                "rebooting",
+                "resizing",
+                "deleting",
+                "deleted",
+                "error",
+                "lost",
+                "paused"
+              ],
+              "description": "Only instances in this state; without it deleted instances are left out"
+            },
+            "issuedBy": {
+              "type": "string",
+              "maxLength": 128,
+              "description": "Only instances whose issuedBy is this; * for any recorded provenance"
+            },
+            "labelSelector": {
+              "type": "string",
+              "maxLength": 1024,
+              "description": "Label requirements that must all hold, comma-separated: key=value, key!=value, key, !key, key in (a,b), key notin (a,b)"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            },
+            "cursor": {
+              "type": "string",
+              "pattern": "^inst_[0-9a-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The last instance id of the previous page"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "summary": "The platform's view of the instances it issued: a page of instances in tenants other than the root tenant, on pools the root tenant owns (created there, or attached into them), newest first, with a `cursor` when more remain.",
+        "description": "The platform's view of the instances it issued: a page of instances in tenants other than the root tenant, on pools the root tenant owns (created there, or attached into them), newest first, with a `cursor` when more remain.\n\n- **IAM.** `compute:instances:read` on `compute-fleet/global`, which resolves only in the root tenant: any other caller is `ACCESS_DENIED`. `INVALID_CONFIG` when the IAM port names no root tenant.\n- **Filters.** `tenantId` keeps one tenant's instances (here it is a filter, not the scope), `poolId` one pool's, `state` one state (without it, deleted instances are left out), `issuedBy` the instances whose recorded provenance is that value (`*`: any recorded provenance), and `labelSelector` as `list` takes it. `limit` is 1 to 500 (default 100); `cursor` is the last instance id of the previous page.\n- **Answer.** Instances as `get` shows them, with their `tenantId` and `ownerIdentityId`. It only reads."
       },
       {
         "method": "estimate",
@@ -7843,8 +8100,8 @@
           "required": ["tenantId"],
           "additionalProperties": false
         },
-        "summary": "Returns the pools the tenant owns or is offered, each with `owned`, `archived` and the tenant's own quota rows.",
-        "description": "Returns the pools the tenant owns or is offered, each with `owned`, `archived` and the tenant's own quota rows.\n\nArchived pools appear only for their owner. After the coarse decision on the tenant, each pool is checked as `compute:pools:read` on the pool, and only the allowed ones are returned."
+        "summary": "Returns the pools the tenant owns or is offered, each with `owned`, `archived`, the tenant's own quota rows and, when its offer lists them, the `flavors` it may use.",
+        "description": "Returns the pools the tenant owns or is offered, each with `owned`, `archived`, the tenant's own quota rows and, when its offer lists them, the `flavors` it may use.\n\nArchived pools appear only for their owner. After the coarse decision on the tenant, each pool is checked as `compute:pools:read` on the pool, and only the allowed ones are returned."
       },
       {
         "method": "get",
@@ -8059,13 +8316,24 @@
                 "maxLength": 64
               },
               "description": "The regions the tenant's work may run in; a pool whose site (iamRegion, else region) is elsewhere refuses the tenant's new work"
+            },
+            "flavors": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+                "maxLength": 63
+              },
+              "description": "The flavors the tenant may create, and attach machines of, on the pool; others are refused with QUOTA_EXCEEDED (flavor-not-offered). Omitted keeps the stored list"
             }
           },
           "required": ["tenantId", "poolId", "toTenantId", "quota"],
           "additionalProperties": false
         },
         "summary": "Offers a pool the tenant owns to another tenant with a quota, or updates an existing offer and its quota; returns the pool as that tenant sees it.",
-        "description": "Offers a pool the tenant owns to another tenant with a quota, or updates an existing offer and its quota; returns the pool as that tenant sees it.\n\n- `quota` creates or resizes the offered tenant's quota rows. A new maximum below what is in use is raised to the amount in use.\n- `includeDescendants` and `priority` (default 0) are stored with the offer.\n- `onBudgetExceeded` (`notify`, `stop-new`, `drain` or `suspend`) and `allowedRegions` (1 to 16 region names) are stored with the offer; leaving one out keeps what the offer already has, so re-offering to change the quota does not clear them. See `updateOffer` for what the policies do. Anything else is `INVALID_INPUT`.\n- `INVALID_STATE` when the pool is archived, when a `timeslice` or `mps` pool or a pool holding `tenant-owned` nodes is offered to anyone but its owner, or when a `policy.singleTenant` pool is offered with `includeDescendants` or is already offered to another tenant.\n- The pool's IAM authz row is written for the offered tenant, with the attributes `gpuModel`, `class`, `sharing`, `region` and `owned`.\n\nEmits `pool.offered`."
+        "description": "Offers a pool the tenant owns to another tenant with a quota, or updates an existing offer and its quota; returns the pool as that tenant sees it.\n\n- `quota` creates or resizes the offered tenant's quota rows. A new maximum below what is in use is raised to the amount in use.\n- `includeDescendants` and `priority` (default 0) are stored with the offer; `offers` lists the offers a tenant inherits through them.\n- `flavors` (1 to 64 flavor names) lists the flavors the tenant may create, and attach machines of, on the pool: `instances.create`, `instances.attach` (the flavor whose offer is the machine's type), `instances.resize` and `sandboxes.create` (the template's flavor) refuse any other with `QUOTA_EXCEEDED` (`details.reason: 'flavor-not-offered'`), for every caller. Leaving it out keeps the stored list; `updateOffer({ flavors: null })` clears it, which allows every flavor again.\n- `quota` may also hold `instances` and `sandboxes`, counted one per instance and per sandbox (see `quotas`).\n- `onBudgetExceeded` (`notify`, `stop-new`, `drain` or `suspend`) and `allowedRegions` (1 to 16 region names) are stored with the offer; leaving one out keeps what the offer already has, so re-offering to change the quota does not clear them. See `updateOffer` for what the policies do. Anything else is `INVALID_INPUT`.\n- `INVALID_STATE` when the pool is archived, when a `timeslice` or `mps` pool or a pool holding `tenant-owned` nodes is offered to anyone but its owner, or when a `policy.singleTenant` pool is offered with `includeDescendants` or is already offered to another tenant.\n- The pool's IAM authz row is written for the offered tenant, with the attributes `gpuModel`, `class`, `sharing`, `region` and `owned`.\n\nEmits `pool.offered`."
       },
       {
         "method": "unoffer",
@@ -8156,13 +8424,51 @@
             "suspended": {
               "type": "boolean",
               "description": "true suspends the offer (new work is refused); false lifts a suspension and restarts nothing"
+            },
+            "flavors": {
+              "type": ["array", "null"],
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+                "maxLength": 63
+              },
+              "description": "The flavors the tenant may create and attach on the pool; null allows every flavor again"
             }
           },
           "required": ["tenantId", "poolId", "toTenantId"],
           "additionalProperties": false
         },
         "summary": "Changes the budget policy and regions of an existing offer, or suspends or lifts it, and returns the pool as the offered tenant sees it. It is the owner's call, decided as `compute:pools:share` on the pool like `offer`; a tenant that is only offered the pool gets `NOT_FOUND`.",
-        "description": "Changes the budget policy and regions of an existing offer, or suspends or lifts it, and returns the pool as the offered tenant sees it. It is the owner's call, decided as `compute:pools:share` on the pool like `offer`; a tenant that is only offered the pool gets `NOT_FOUND`.\n\n- **Fields.** `onBudgetExceeded`, `allowedRegions` and `suspended` are each optional, and a request naming none is `INVALID_INPUT`. `NOT_FOUND` when the pool is not offered to `toTenantId`; a pool has no offer to its owner (`INVALID_INPUT`).\n- **Budget policies.** When a budget of the tenant is spent, better-iam's alert applies the policy of each offer to that tenant. `notify` only publishes `quota.budget-exceeded`. `stop-new` and `drain` also make admissions check the tenant's budget, and `drain` cancels the tenant's reservations on the pool that have not started. `suspend` stops spend on the pool: it marks the offer suspended, publishes `quota.budget-suspended`, sets the tenant's running instances in the pool to `desiredState: 'stopped'` with the condition `BudgetSuspended` (the reconciler then stops the machines), and refuses the tenant's new work on the pool with `SPEND_LIMIT_REACHED` (`details.reason: 'offer-suspended'`): creating or attaching an instance, creating a network or reservation, and starting an instance. The stop does not depend on host wiring: the `vps.suspension` reconciler stops, every minute, the running instances of every suspended offer (a stop that failed is retried on the next pass), and the host's budget reaction (vps's `sandboxIamReactions`, in `iamReactions`) only makes it immediate. Sandbox warm pools of a suspended offer are emptied and not refilled. Other sandbox-managed instances follow their sandbox and are not stopped directly.\n- **Suspension.** `suspended: true` suspends the offer by hand, with the same effect as a `suspend` policy: new work is refused and the `vps.suspension` reconciler stops the tenant's running instances in the pool within a minute. `suspended: false` lifts it and restarts nothing: stopped instances stay stopped until the tenant starts them, and `BudgetSuspended` clears on that start. A new alert that finds the budget still spent suspends the offer again.\n- **Regions.** With `allowedRegions`, new work on a pool whose site is in another region is `ACCESS_DENIED` (`details.reason: 'region-not-allowed'`). The site's `iamRegion` is compared, else its `region`; a site with neither match is refused. It applies to instances, reservations, networks and sandboxes created on the pool.\n\nEmits `pool.offer-updated`."
+        "description": "Changes the budget policy and regions of an existing offer, or suspends or lifts it, and returns the pool as the offered tenant sees it. It is the owner's call, decided as `compute:pools:share` on the pool like `offer`; a tenant that is only offered the pool gets `NOT_FOUND`.\n\n- **Fields.** `onBudgetExceeded`, `allowedRegions`, `suspended` and `flavors` are each optional, and a request naming none is `INVALID_INPUT`. `flavors` replaces the offer's flavor allowlist (see `offer`); `null` clears it. `NOT_FOUND` when the pool is not offered to `toTenantId`; a pool has no offer to its owner (`INVALID_INPUT`).\n- **Budget policies.** When a budget of the tenant is spent, better-iam's alert applies the policy of each offer to that tenant. `notify` only publishes `quota.budget-exceeded`. `stop-new` and `drain` also make admissions check the tenant's budget, and `drain` cancels the tenant's reservations on the pool that have not started. `suspend` stops spend on the pool: it marks the offer suspended, publishes `quota.budget-suspended`, sets the tenant's running instances in the pool to `desiredState: 'stopped'` with the condition `BudgetSuspended` (the reconciler then stops the machines), and refuses the tenant's new work on the pool with `SPEND_LIMIT_REACHED` (`details.reason: 'offer-suspended'`): creating or attaching an instance, creating a network or reservation, and starting an instance. The stop does not depend on host wiring: the `vps.suspension` reconciler stops, every minute, the running instances of every suspended offer (a stop that failed is retried on the next pass), and the host's budget reaction (vps's `sandboxIamReactions`, in `iamReactions`) only makes it immediate. Sandbox warm pools of a suspended offer are emptied and not refilled. Other sandbox-managed instances follow their sandbox and are not stopped directly.\n- **Suspension.** `suspended: true` suspends the offer by hand, with the same effect as a `suspend` policy: new work is refused and the `vps.suspension` reconciler stops the tenant's running instances in the pool within a minute. `suspended: false` lifts it and restarts nothing: stopped instances stay stopped until the tenant starts them, and `BudgetSuspended` clears on that start. A new alert that finds the budget still spent suspends the offer again.\n- **Regions.** With `allowedRegions`, new work on a pool whose site is in another region is `ACCESS_DENIED` (`details.reason: 'region-not-allowed'`). The site's `iamRegion` is compared, else its `region`; a site with neither match is refused. It applies to instances, reservations, networks and sandboxes created on the pool.\n\nEmits `pool.offer-updated`."
+      },
+      {
+        "method": "offers",
+        "route": "POST /api/compute/pools/offers",
+        "kind": "read",
+        "action": "compute:pools:read",
+        "resource": "compute-tenant",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "capacity",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
+        "summary": "Returns the offers that reach the tenant, as `items`: its own, and those of its ancestors made with `includeDescendants`. Each item names the pool (`poolId`, and `pool` with its owner, site, class and GPU model), `offeredTo` (the tenant the offer was made to), `inherited` and `depth` (0 for the tenant's own offer, 1 for its parent's, and so on), `includeDescendants`, `priority`, the offer's `flavors`, `allowedRegions`, `onBudgetExceeded` and `suspended`, and the tenant's own quota rows on the pool (never an ancestor's: an inherited offer's limits and usage stay with the tenant it was made to, so an inherited item usually has none).",
+        "description": "Returns the offers that reach the tenant, as `items`: its own, and those of its ancestors made with `includeDescendants`. Each item names the pool (`poolId`, and `pool` with its owner, site, class and GPU model), `offeredTo` (the tenant the offer was made to), `inherited` and `depth` (0 for the tenant's own offer, 1 for its parent's, and so on), `includeDescendants`, `priority`, the offer's `flavors`, `allowedRegions`, `onBudgetExceeded` and `suspended`, and the tenant's own quota rows on the pool (never an ancestor's: an inherited offer's limits and usage stay with the tenant it was made to, so an inherited item usually has none).\n\n- **Order.** By `priority`, highest first, then nearest first, then pool id. One item per pool: the tenant's own offer shadows an inherited one, and a nearer ancestor's a farther one's. Archived pools and pools the tenant owns are left out.\n- **Ancestry.** The tenant tree is IAM's: compute asks the host's `capacity({ tenantAncestors })` (`iamTenantAncestors` from `@better-compute/iam`, with a root credential), with no transaction open. Without it, only the tenant's own offers are listed.\n- **Admission.** An inherited offer is a listing only: creating on the pool needs an offer to the tenant itself (`pools.offer`), with its own quota rows.\n- Decided as `compute:pools:read` on the tenant. A read: nothing is written."
       },
       {
         "method": "update",
@@ -8204,7 +8510,7 @@
           "additionalProperties": false
         },
         "summary": "Replaces the policy, the GPU model, or both, of a pool the tenant owns, and returns the pool with its version incremented.",
-        "description": "Replaces the policy, the GPU model, or both, of a pool the tenant owns, and returns the pool with its version incremented.\n\n- The new `policy` replaces the old one as a whole, and is checked as on `create`: the `pool-policy` validators, and `platformOperated` for a platform site's Kubernetes join. A request with neither field is `INVALID_INPUT`. Class, site, sharing mode and agent cannot change.\n- `policy.billing` is root's, as on `create`: a non-root caller may resend the pool's stored `billing` but not add, change or remove it (`ACCESS_DENIED`).\n- `policy.replacePreempted` must be a boolean, as on `create` (`INVALID_INPUT`). The new value applies to the next preemption.\n- Turning `policy.singleTenant` on is `INVALID_STATE` while more than one tenant, or any tenant with `includeDescendants`, holds an offer.\n- A new `migLayout` in a `mig` pool never repartitions booked GPUs; each node takes the new layout once its GPUs are idle. A change to `prewarmImages` refreshes the desired state of the site's agents.\n- The pool's authz rows are refreshed for the owner and every offered tenant.\n\nEmits `pool.updated`."
+        "description": "Replaces the policy, the GPU model, or both, of a pool the tenant owns, and returns the pool with its version incremented.\n\n- The new `policy` replaces the old one as a whole, and is checked as on `create`: the `pool-policy` validators, and `platformOperated` for a platform site's Kubernetes join. A request with neither field is `INVALID_INPUT`. Class, site, sharing mode and agent cannot change.\n- `policy.billing` is root's, as on `create`: a non-root caller may resend the pool's stored `billing` but not add, change or remove it (`ACCESS_DENIED`).\n- `policy.replacePreempted` must be a boolean, as on `create` (`INVALID_INPUT`). The new value applies to the next preemption.\n- Turning `policy.singleTenant` on is `INVALID_STATE` while more than one tenant, or any tenant with `includeDescendants`, holds an offer.\n- Changing `gpuModel` is `INVALID_STATE` (`details.tenantId`) while GPUs are charged on the pool to a tenant that has a per-model tenant quota row (`gpu.<model>` on `*`), so every refund reaches the row its charge took.\n- A new `migLayout` in a `mig` pool never repartitions booked GPUs; each node takes the new layout once its GPUs are idle. A change to `prewarmImages` refreshes the desired state of the site's agents.\n- The pool's authz rows are refreshed for the owner and every offered tenant.\n\nEmits `pool.updated`."
       },
       {
         "method": "archive",
@@ -8909,7 +9215,7 @@
           "additionalProperties": false
         },
         "summary": "Stores a provider account for the tenant after validating its `config` with the provider's manifest; returns the account.",
-        "description": "Stores a provider account for the tenant after validating its `config` with the provider's manifest; returns the account.\n\n- **Idempotency.** `idempotencyKey` is optional. With a key, the account id derives from the tenant, the caller and the key, and a repeat returns the stored account without a second IAM decision; a different `provider` or `name` under the same key is `CONFLICT`. A name the tenant already uses for another account is also `CONFLICT`.\n- **IAM.** Decided as `compute:providers:manage` on the tenant.\n- **Secret references.** An account of the root (platform) tenant may name any `secret://`, `vault://` or `env://` reference. An account of any other tenant, for every provider, may name only `secret://<its tenant>/…` references (secrets it put with `secrets.put`), plus the `vault://` paths the host allows that tenant with `vps({ tenantVaultPaths })` (an entry ending in `/` allows every path under it). It may never name `env://`, which reads the control plane's own environment, nor another tenant's or the platform's secrets: the account would run on the platform's credentials. The same rule holds when the provider resolves the account's credentials: a stored account that names a reference it may not use (written before this rule, or around the API) fails that call with `ACCESS_DENIED` and the value is never read, and a tenant's `secret://` reference is resolved for that tenant, so the store refuses a secret whose stored tenant is another.\n- **Errors.** `INVALID_INPUT` for an unknown provider (`details.known` lists the registered ones), a config the manifest rejects (`details.issues`), or a field ending in `token`, `secret`, `password` or `key` whose value is not a `secret://`, `vault://` or `env://` reference. `INVALID_CONFIG` for a secret reference the account may not use (see above; `details.path` names the field, `details.reason` is `secretRefScope`), or when the provider refuses to build a client for the account: a Google Cloud account of a tenant other than the root (platform) tenant must name its own service-account key in `credentials`, or instead sign in keyless with `federationAudience` (its workload identity pool provider, `//iam.googleapis.com/projects/<n>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`; see `federationSetup`), because without either it would run on the control plane's own identity (the metadata server or the host's token source).\n- **Pass-through (`billing`).** `billing.passThrough` (at most 50 rules of `{ skuPattern, meter, multiplier }`) passes the account's provider costs through to tenants (D11). The `vps.costs` worker reads the account's cost rows (for Google Cloud, the BigQuery billing export named by `billingExport`) and attributes each to a tenant by its `better-compute-instance` label (the instance's tenant), else its `better-compute-tenant` label. A regular-usage row attributed to a tenant other than the platform (and, for a row of an instance, an instance root bills: not `billing: none`, in a pool whose billing mode is `metered`), in the deployment currency (`vps({ billing: { currency } })`), whose SKU id or description contains `skuPattern` (case-insensitive; the first matching rule wins) and whose net cost (cost + credits) is positive becomes one usage event on `meter` for that tenant: `quantity` the row's usage, `cost` = net cost × `multiplier`, `occurredAt` the usage start (or, for a row whose usage month has already closed, `vps({ billing: { closeGraceHours } })` hours after the month ends, default 6, the first hour of the current UTC month: a late charge on the next statement, with the same key; the stored row keeps its usage start), tags `region`, `provider`, `source: cost` and the instance's `pool`, key `costx:<accountId>:<rowId>`. It is written as a `cost` usage window and recorded by the normal usage flush, once: a later correction of the row is published as `billing.cost-corrected` with `passedThrough: true` for a root credit note, never billed again. Rules are allowed only on the root (platform) tenant's accounts (another tenant's account is `INVALID_INPUT`: its costs are its own and are never passed through) and only for providers that declare which SKUs compute meters itself. `meter` must be a `reported` meter on the IAM root tenant (create it on the root tenant with `pricing: 'reported'`, through better-iam's `billing.createMeter` or the IAM port's `ensureMeters`: `billing.syncMeters` creates only the catalog's rate-card meters; otherwise `INVALID_INPUT`, and `UNSUPPORTED` when the IAM port cannot list meters); `multiplier` is 1 to 10. A `skuPattern` that matches a SKU family compute meters itself (for Compute Engine, `core`, `ram`, `gpu` and `instance` SKUs, and persistent disk and Hyperdisk capacity, local SSD storage (`SSD backed Local Storage`) and external IP charges) is `INVALID_CONFIG` (`details.reason` `meteredSku`), and a row of such a SKU is never passed through whatever the pattern, so nothing is billed twice.\n- **Keyless Google Cloud accounts.** For an account with `federationAudience`, `create` and `update` exchange tokens with Google before the account is stored, with no transaction open, and refuse it with `INVALID_CONFIG` and `details.reason`: `credentialsAndFederation` (both `credentials` and `federationAudience`), `noWorkloadIssuer` (the host runs no workload issuer), `federationAudience` (not a workload identity pool provider's resource name), `federationTrustsAnySubject` (the pool provider also accepts a subject that is not this account's: its attribute condition must be exactly `federationSetup`'s), `federationRefused` (Google STS refuses the account's own subject), `impersonationRefused` (the account may not impersonate the `impersonate` service account) or `projectAccess` (the resulting token cannot read the project). An audience another provider account already uses, of this tenant or any other, is `CONFLICT` with the message `Another provider account already uses this gcp identity` and no `details`. Google being unreachable, slow or throttling is `UNAVAILABLE` or `RATE_LIMITED`, retryable: nothing is stored, and a retry with the same `idempotencyKey` runs the checks again."
+        "description": "Stores a provider account for the tenant after validating its `config` with the provider's manifest; returns the account.\n\n- **Idempotency.** `idempotencyKey` is optional. With a key, the account id derives from the tenant, the caller and the key, and a repeat returns the stored account without a second IAM decision; a different `provider` or `name` under the same key is `CONFLICT`. A name the tenant already uses for another account is also `CONFLICT`.\n- **IAM.** Decided as `compute:providers:manage` on the tenant.\n- **Secret references.** An account of the root (platform) tenant may name any `secret://`, `vault://` or `env://` reference. An account of any other tenant, for every provider, may name only `secret://<its tenant>/…` references (secrets it put with `secrets.put`), plus the `vault://` paths the host allows that tenant with `vps({ tenantVaultPaths })` (an entry ending in `/` allows every path under it). It may never name `env://`, which reads the control plane's own environment, nor another tenant's or the platform's secrets: the account would run on the platform's credentials. The same rule holds when the provider resolves the account's credentials: a stored account that names a reference it may not use (written before this rule, or around the API) fails that call with `ACCESS_DENIED` and the value is never read, and a tenant's `secret://` reference is resolved for that tenant, so the store refuses a secret whose stored tenant is another.\n- **Errors.** `INVALID_INPUT` for an unknown provider (`details.known` lists the registered ones), a config the manifest rejects (`details.issues`), or a field ending in `token`, `secret`, `password` or `key` whose value is not a `secret://`, `vault://` or `env://` reference. `INVALID_CONFIG` for a secret reference the account may not use (see above; `details.path` names the field, `details.reason` is `secretRefScope`), or when the provider refuses to build a client for the account: a Google Cloud account of a tenant other than the root (platform) tenant must name its own service-account key in `credentials`, or instead sign in keyless with `federationAudience` (its workload identity pool provider, `//iam.googleapis.com/projects/<n>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`; see `federationSetup`), because without either it would run on the control plane's own identity (the metadata server or the host's token source).\n- **Endpoints (address policy).** A provider whose endpoints the account's config chooses (Proxmox's `url`; Hetzner when the host overrides its API URL) has each endpoint resolved before the account is stored: an endpoint that is not `https`, carries credentials, is an internal name (`localhost`, `*.internal`, `*.local`, `*.svc`, `*.cluster.local`, a single label) or resolves to any private, link-local (the metadata server included), loopback, CGNAT, multicast, reserved, documentation, unique-local or cluster address (`vps({ addressPolicy: { denyCidrs } })`) is `INVALID_CONFIG` with `details.reason` `endpoint-scheme`, `endpoint-address` (and `details.category`; the resolved address is never shown) or `endpoint-unresolved`; a resolver outage is `UNAVAILABLE`. The account's client then connects only through a fetch that checks the address again and connects to the one it checked (DNS pinning) and never follows redirects. The host may exempt ranges (`allowCidrs`), names (`allowHosts`) or its own platform accounts (`platformAccounts: 'exempt'`); a tenant's account is never exempt by account. Google Cloud accounts are not affected: their hosts come from host options only.\n- **Pass-through (`billing`).** `billing.passThrough` (at most 50 rules of `{ skuPattern, meter, multiplier }`) passes the account's provider costs through to tenants (D11). The `vps.costs` worker reads the account's cost rows (for Google Cloud, the BigQuery billing export named by `billingExport`) and attributes each to a tenant by its `better-compute-instance` label (the instance's tenant), else its `better-compute-tenant` label. A regular-usage row attributed to a tenant other than the platform (and, for a row of an instance, an instance root bills: not `billing: none`, in a pool whose billing mode is `metered`), in the deployment currency (`vps({ billing: { currency } })`), whose SKU id or description contains `skuPattern` (case-insensitive; the first matching rule wins) and whose net cost (cost + credits) is positive becomes one usage event on `meter` for that tenant: `quantity` the row's usage, `cost` = net cost × `multiplier`, `occurredAt` the usage start (or, for a row whose usage month has already closed, `vps({ billing: { closeGraceHours } })` hours after the month ends, default 6, the first hour of the current UTC month: a late charge on the next statement, with the same key; the stored row keeps its usage start), tags `region`, `provider`, `source: cost` and the instance's `pool`, key `costx:<accountId>:<rowId>`. It is written as a `cost` usage window and recorded by the normal usage flush, once: a later correction of the row is published as `billing.cost-corrected` with `passedThrough: true` for a root credit note, never billed again. Rules are allowed only on the root (platform) tenant's accounts (another tenant's account is `INVALID_INPUT`: its costs are its own and are never passed through) and only for providers that declare which SKUs compute meters itself. `meter` must be a `reported` meter on the IAM root tenant (create it on the root tenant with `pricing: 'reported'`, through better-iam's `billing.createMeter` or the IAM port's `ensureMeters`: `billing.syncMeters` creates only the catalog's rate-card meters; otherwise `INVALID_INPUT`, and `UNSUPPORTED` when the IAM port cannot list meters); `multiplier` is 1 to 10. A `skuPattern` that matches a SKU family compute meters itself (for Compute Engine, `core`, `ram`, `gpu` and `instance` SKUs, and persistent disk and Hyperdisk capacity, local SSD storage (`SSD backed Local Storage`) and external IP charges) is `INVALID_CONFIG` (`details.reason` `meteredSku`), and a row of such a SKU is never passed through whatever the pattern, so nothing is billed twice.\n- **Keyless Google Cloud accounts.** For an account with `federationAudience`, `create` and `update` exchange tokens with Google before the account is stored, with no transaction open, and refuse it with `INVALID_CONFIG` and `details.reason`: `credentialsAndFederation` (both `credentials` and `federationAudience`), `noWorkloadIssuer` (the host runs no workload issuer), `federationAudience` (not a workload identity pool provider's resource name), `federationTrustsAnySubject` (the pool provider also accepts a subject that is not this account's: its attribute condition must be exactly `federationSetup`'s), `federationRefused` (Google STS refuses the account's own subject), `impersonationRefused` (the account may not impersonate the `impersonate` service account) or `projectAccess` (the resulting token cannot read the project). An audience another provider account already uses, of this tenant or any other, is `CONFLICT` with the message `Another provider account already uses this gcp identity` and no `details`. Google being unreachable, slow or throttling is `UNAVAILABLE` or `RATE_LIMITED`, retryable: nothing is stored, and a retry with the same `idempotencyKey` runs the checks again."
       },
       {
         "method": "list",
@@ -10710,7 +11016,7 @@
     "group": "quotas",
     "slug": "quotas",
     "module": "capacity",
-    "overview": "A quota caps how much of one resource a tenant may hold in one pool at the same time, as a `max` and a `used` counter per tenant, pool and resource. A missing row grants 0; `pools.create` and `pools.offer` create the rows, and admissions charge them with `QUOTA_EXCEEDED` when a request does not fit. See [Quotas and usage](/docs/guides/capacity/quotas-and-usage).",
+    "overview": "A quota caps how much of one resource a tenant may hold in one pool at the same time, as a `max` and a `used` counter per tenant, pool and resource. A missing row grants 0; `pools.create` and `pools.offer` create the rows, and admissions charge them with `QUOTA_EXCEEDED` when a request does not fit.\n\n- **Tenant-level rows.** A row whose `poolId` is `*` caps the tenant's total over every pool (`vcpu`, `memoryGiB`, `diskGiB`, `gpu` and other device classes, and `gpu.<gpuModel>` for the GPUs of pools of one model). A missing tenant row limits nothing. Every charge and refund on any of the tenant's pools also moves the tenant row, all or nothing: a refusal there is `QUOTA_EXCEEDED` with `details.poolId: '*'` and `details.scope: 'tenant'`, and no pool row changes.\n- **Counted resources.** `instances` counts one per instance (`instances.create` and `instances.attach`, hosted or provider) and `sandboxes` one per sandbox; a sandbox's instance is not counted as an instance, and warm instances count as neither. Unlike scalars, a missing row limits nothing, on a pool or tenant-wide. Each instance records what its admission took and gives exactly that back when it is deleted, so a row set later counts the work admitted from then on.\n- **Flavor allowlists.** A row may list `flavors`: an admission that would consume the row (create, attach, resize, sandbox) with another flavor is `QUOTA_EXCEEDED` with `details.reason: 'flavor-not-allowed'`. Reservations and volumes have no flavor and are not restricted. See [Quotas and usage](/docs/guides/capacity/quotas-and-usage).",
     "methods": [
       {
         "method": "get",
@@ -10734,16 +11040,16 @@
             },
             "poolId": {
               "type": "string",
-              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "pattern": "^(\\*|pool_[0-9a-hjkmnp-tv-z]{26,52})$",
               "maxLength": 57,
-              "description": "The pool"
+              "description": "The pool, or * for the tenant-level row (the tenant's total over every pool)"
             }
           },
           "required": ["tenantId"],
           "additionalProperties": false
         },
-        "summary": "Returns the tenant's quota rows, each with `max`, `used` and `available`, optionally only those of one pool.",
-        "description": "Returns the tenant's quota rows, each with `max`, `used` and `available`, optionally only those of one pool.\n\nRows are ordered by pool, then resource. `available` is `max` minus `used`, never below 0."
+        "summary": "Returns the tenant's quota rows, each with `max`, `used`, `available` and, when the row lists them, `flavors`; optionally only those of one pool, or with `poolId: '*'` only the tenant-level rows.",
+        "description": "Returns the tenant's quota rows, each with `max`, `used`, `available` and, when the row lists them, `flavors`; optionally only those of one pool, or with `poolId: '*'` only the tenant-level rows.\n\nRows are ordered by pool, then resource. `available` is `max` minus `used`, never below 0."
       },
       {
         "method": "set",
@@ -10767,25 +11073,37 @@
             },
             "poolId": {
               "type": "string",
-              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "pattern": "^(\\*|pool_[0-9a-hjkmnp-tv-z]{26,52})$",
               "maxLength": 57,
-              "description": "The pool"
+              "description": "The pool, or * for the tenant-level row (the tenant's total over every pool)"
             },
             "resource": {
               "type": "string",
               "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,63}$",
-              "maxLength": 64
+              "maxLength": 64,
+              "description": "gpu, vcpu, memoryGiB, diskGiB (a missing pool row grants 0); instances and sandboxes (counted; a missing row limits nothing); on *, also gpu.<gpuModel>"
             },
             "max": {
               "type": "integer",
               "minimum": 0
+            },
+            "flavors": {
+              "type": ["array", "null"],
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+                "maxLength": 63
+              },
+              "description": "The flavors that may consume this row (QUOTA_EXCEEDED flavor-not-allowed otherwise); null allows every flavor, omitted keeps the list"
             }
           },
           "required": ["tenantId", "poolId", "resource", "max"],
           "additionalProperties": false
         },
-        "summary": "Sets one tenant's maximum for one resource in one pool, creating the row if needed, and returns the row with the maximum that took effect.",
-        "description": "Sets one tenant's maximum for one resource in one pool, creating the row if needed, and returns the row with the maximum that took effect.\n\n- It is decided as `compute:quotas:manage` on `compute-fleet`, which resolves only in the root tenant, so only callers in the root tenant get past the tenant pre-check. `tenantId` names the tenant whose quota is set.\n- A maximum below the current `used` is raised to `used`. To shrink a quota under live reservations, set it again once they have released.\n- `NOT_FOUND` when the pool does not exist.\n\nEmits `quota.updated` with the resource and the requested `max`."
+        "summary": "Sets one tenant's maximum for one resource in one pool, or tenant-wide with `poolId: '*'`, creating the row if needed, and returns the row with the maximum that took effect.",
+        "description": "Sets one tenant's maximum for one resource in one pool, or tenant-wide with `poolId: '*'`, creating the row if needed, and returns the row with the maximum that took effect.\n\n- It is decided as `compute:quotas:manage` on `compute-fleet`, which resolves only in the root tenant, so only callers in the root tenant get past the tenant pre-check. `tenantId` names the tenant whose quota is set.\n- A maximum below the current `used` is raised to `used`. To shrink a quota under live reservations, set it again once they have released.\n- A new tenant-level row of a scalar starts at the tenant's current total of it over its pool rows (`gpu.<model>`: its GPUs on pools of that model); a counted resource starts at 0.\n- `flavors` sets the row's flavor allowlist; `null` clears it, and leaving it out keeps it.\n- `NOT_FOUND` when the pool does not exist.\n\nEmits `quota.updated` with the resource and the requested `max` (and `flavors` when given); a tenant-level row's event has subject `tenant/<tenantId>` and `scope: 'tenant'`."
       }
     ]
   },
@@ -12491,6 +12809,36 @@
               "maxLength": 57,
               "description": "Restore this snapshot of the tenant (taken on the same runtime)"
             },
+            "name": {
+              "type": "string",
+              "maxLength": 128,
+              "description": "A display name: 1-128 characters, no control characters or surrounding whitespace"
+            },
+            "metadata": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "description": "Free-form string metadata kept by better-compute only (at most 64 entries, 16 KiB); keys starting with better-compute- or bc- are reserved"
+            },
+            "labels": {
+              "type": "object",
+              "maxProperties": 62,
+              "propertyNames": {
+                "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^[a-z0-9_-]{0,63}$",
+                "maxLength": 63
+              },
+              "description": "Labels for label selectors: GCE label rules, at most 62; keys starting with better-compute- or bc- are reserved"
+            },
             "idempotencyKey": {
               "type": "string",
               "pattern": "^[A-Za-z0-9._:-]{1,128}$",
@@ -12515,7 +12863,7 @@
           "additionalProperties": false
         },
         "summary": "Starts a sandbox from a template after one IAM decision on the draft, claiming a warm instance when the template holds one and creating a new instance otherwise; the lifetime starts at once.",
-        "description": "Starts a sandbox from a template after one IAM decision on the draft, claiming a warm instance when the template holds one and creating a new instance otherwise; the lifetime starts at once.\n\n- **Idempotency.** `idempotencyKey` is required. The sandbox id derives from the tenant, the caller's identity and the key: a retry of an admitted request returns the stored sandbox without a second decision, and a different request under the same key is `CONFLICT` with `details.sandboxId`, as is the key replayed by another agent or person. `wait` is not part of the compared request.\n- **IAM.** `compute:sandboxes:create` is decided on `compute-sandbox/` plus the draft id, whose parent is the template's pool. Policies can test `templateId`, `vcpu`, `memoryGiB`, `gpus`, `ttlSeconds` and `warm` (true when the template keeps a warm pool). A refusal deletes the draft; a delegated session can get `CONFIRMATION_REQUIRED`. After an allow, the pool's budget check can answer `SPEND_LIMIT_REACHED` and keep the draft for a retry with the same key.\n- **Start.** The oldest stopped or paused warm instance of the template is claimed: it changes owner to the caller, is set to run, and publishes `instance.starting`; the claim places nothing new. Without one, a new instance is created and placed as `instances.create` would, publishing `instance.created` and, once placed, `instance.scheduled`; when no host fits it waits in scheduling and the sandbox stays `starting`. `warm` in the answer tells which path was taken.\n- **Restore.** `fromSnapshot` starts the sandbox from one of the tenant's own `ready` snapshots of this template, taken on its runtime (another tenant's is `NOT_FOUND`, one not ready is `INVALID_STATE`, one of another template is `INVALID_INPUT`). An agent restores only snapshots of sandboxes it created itself; any other is `NOT_FOUND` to it. A restore never claims a warm instance, and a snapshot that includes memory places only on nodes with the same `cpu.model`. Policies see it as the `fromSnapshot` attribute.\n- **Lifetime.** `ttlSeconds` defaults to the template's `defaultTtlSeconds` and may not exceed its `maxTtlSeconds` (`INVALID_INPUT`). `expiresAt` is set when the sandbox is admitted.\n- **Errors.** `NOT_FOUND` for a template missing or deleted in the tenant. `INVALID_STATE` when the template's flavor has been archived or removed. On the new-instance path the template's pool, flavor and image are checked again, with the errors of `sandboxTemplates.create`; `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota and `CAPACITY_UNAVAILABLE` when the pool has no free IP address, both keeping the draft.\n- **Waiting.** `wait.timeoutMs` (at most 30 seconds) holds the answer until the sandbox leaves `starting`; a timeout returns it still `starting`, not an error.\n\nPublishes `sandbox.created` with `warm` and `expiresAt`. `sandbox.ready` follows from the reconciler once the instance first runs."
+        "description": "Starts a sandbox from a template after one IAM decision on the draft, claiming a warm instance when the template holds one and creating a new instance otherwise; the lifetime starts at once.\n\n- **Idempotency.** `idempotencyKey` is required. The sandbox id derives from the tenant, the caller's identity and the key: a retry of an admitted request returns the stored sandbox without a second decision, and a different request under the same key is `CONFLICT` with `details.sandboxId`, as is the key replayed by another agent or person. `wait` is not part of the compared request.\n- **IAM.** `compute:sandboxes:create` is decided on `compute-sandbox/` plus the draft id, whose parent is the template's pool. Policies can test `templateId`, `vcpu`, `memoryGiB`, `gpus`, `ttlSeconds` and `warm` (true when the template keeps a warm pool). A refusal deletes the draft; a delegated session can get `CONFIRMATION_REQUIRED`. After an allow, the pool's budget check can answer `SPEND_LIMIT_REACHED` and keep the draft for a retry with the same key.\n- **Start.** The oldest stopped or paused warm instance of the template is claimed: it changes owner to the caller, is set to run, and publishes `instance.starting`; the claim places nothing new. Without one, a new instance is created and placed as `instances.create` would, publishing `instance.created` and, once placed, `instance.scheduled`; when no host fits it waits in scheduling and the sandbox stays `starting`. `warm` in the answer tells which path was taken.\n- **Restore.** `fromSnapshot` starts the sandbox from one of the tenant's own `ready` snapshots of this template, taken on its runtime (another tenant's is `NOT_FOUND`, one not ready is `INVALID_STATE`, one of another template is `INVALID_INPUT`). An agent restores only snapshots of sandboxes it created itself; any other is `NOT_FOUND` to it. A restore never claims a warm instance, and a snapshot that includes memory places only on nodes with the same `cpu.model`. Policies see it as the `fromSnapshot` attribute.\n- **Admission.** For every caller, in the admission transaction: the template's flavor passes the flavor allowlists of the tenant's offer and of the quota rows it consumes (`QUOTA_EXCEEDED` `flavor-not-offered` or `flavor-not-allowed`), then the host's `vps({ admissionPolicy })` (method `sandboxes.create`), then `sandboxes` is charged, one per sandbox where a row exists on the pool or tenant-wide (`*`). The count rides on the sandbox's instance and comes back when that instance is deleted. A sandbox's instance is not counted as an `instances`.\n- **Lifetime.** `ttlSeconds` defaults to the template's `defaultTtlSeconds` and may not exceed its `maxTtlSeconds` (`INVALID_INPUT`). `expiresAt` is set when the sandbox is admitted.\n- **Errors.** `NOT_FOUND` for a template missing or deleted in the tenant. `INVALID_STATE` when the template's flavor has been archived or removed. On the new-instance path the template's pool, flavor and image are checked again, with the errors of `sandboxTemplates.create`; `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota and `CAPACITY_UNAVAILABLE` when the pool has no free IP address, both keeping the draft.\n- **Waiting.** `wait.timeoutMs` (at most 30 seconds) holds the answer until the sandbox leaves `starting`; a timeout returns it still `starting`, not an error.\n- **Identity.** `name`, `metadata` and `labels` take the rules of `instances.create` (`better-compute-` and `bc-` keys reserved) and are part of the request. They stay on the sandbox, never reach its host, and `update` changes them later.\n\nPublishes `sandbox.created` with `warm` and `expiresAt`. `sandbox.ready` follows from the reconciler once the instance first runs."
       },
       {
         "method": "list",
@@ -12552,6 +12900,11 @@
               "maxLength": 57,
               "description": "The sandbox template"
             },
+            "labelSelector": {
+              "type": "string",
+              "maxLength": 1024,
+              "description": "Label requirements that must all hold, comma-separated: key=value, key!=value, key, !key, key in (a,b), key notin (a,b)"
+            },
             "limit": {
               "type": "integer",
               "minimum": 1,
@@ -12568,7 +12921,7 @@
           "additionalProperties": false
         },
         "summary": "Returns a page of the tenant's sandboxes, newest first, with a `cursor` when more remain.",
-        "description": "Returns a page of the tenant's sandboxes, newest first, with a `cursor` when more remain.\n\n`scope` defaults to `mine`, the caller's own sandboxes, which needs no per-item check. `all` lists every sandbox of the tenant, each one checked for `compute:sandboxes:read`; those the caller may not read are left out, so a page can hold fewer than `limit` items. Deleted sandboxes are left out unless `deleted` is true, and `templateId` keeps one template's sandboxes. `limit` is 1 to 200 (default 50); `cursor` is the last sandbox id of the previous page. Drafts are never listed. Each item carries `identityRebound` as `get` describes."
+        "description": "Returns a page of the tenant's sandboxes, newest first, with a `cursor` when more remain.\n\n`scope` defaults to `mine`, the caller's own sandboxes, which needs no per-item check. `all` lists every sandbox of the tenant, each one checked for `compute:sandboxes:read`; those the caller may not read are left out, so a page can hold fewer than `limit` items. Deleted sandboxes are left out unless `deleted` is true, `templateId` keeps one template's sandboxes, and `labelSelector` (as `instances.list` takes it) keeps those whose labels match. `limit` is 1 to 200 (default 50); `cursor` is the last sandbox id of the previous page. Drafts are never listed. Each item carries `identityRebound` as `get` describes."
       },
       {
         "method": "get",
@@ -12771,6 +13124,69 @@
         },
         "summary": "Asks for the sandbox's instance to be deleted and marks the sandbox `deleting`; returns the sandbox at once.",
         "description": "Asks for the sandbox's instance to be deleted and marks the sandbox `deleting`; returns the sandbox at once.\n\nThe instance's `desiredState` becomes `deleted` and the `vps.instances` reconciler releases its allocation, IP lease and quota as for any instance, publishing `instance.deleting` with the `sandboxId`. The call is idempotent: a sandbox already deleting is returned in its current state. Drafts and missing sandboxes are `NOT_FOUND`.\n\nWhen the instance is gone, the `vps.sandboxes` reconciler marks the sandbox deleted, removes it from the authorization projection and publishes `sandbox.deleted` with `expired: false`. Expiry takes the same path after publishing `sandbox.expired`, and its `sandbox.deleted` carries `expired: true`."
+      },
+      {
+        "method": "update",
+        "route": "POST /api/compute/sandboxes/update",
+        "kind": "mutation",
+        "action": "compute:sandboxes:update",
+        "resource": "compute-sandbox",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "sandboxId": {
+              "type": "string",
+              "pattern": "^sbx_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 56,
+              "description": "The sandbox"
+            },
+            "name": {
+              "type": ["string", "null"],
+              "maxLength": 128,
+              "description": "The new display name; null clears it"
+            },
+            "metadata": {
+              "type": ["object", "null"],
+              "maxProperties": 64,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "description": "The new metadata, replacing the old; null or {} clears it"
+            },
+            "labels": {
+              "type": ["object", "null"],
+              "maxProperties": 62,
+              "propertyNames": {
+                "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^[a-z0-9_-]{0,63}$",
+                "maxLength": 63
+              },
+              "description": "The new labels, replacing the old; null or {} clears them"
+            }
+          },
+          "required": ["tenantId", "sandboxId"],
+          "additionalProperties": false
+        },
+        "summary": "Renames a sandbox and replaces its metadata and labels; returns the sandbox.",
+        "description": "Renames a sandbox and replaces its metadata and labels; returns the sandbox.\n\nAt least one of `name`, `metadata` and `labels`, with the rules of `create`; `null` clears a field and `{}` clears metadata or labels, which are replaced as a whole. Decided as `compute:sandboxes:update` on the sandbox. Nothing reaches the host. An update that changes nothing returns the sandbox as it is, with no event; otherwise `sandbox.updated` is published with `changed`. A sandbox being deleted, or deleted, is `INVALID_STATE`; one of another tenant, or none, is `NOT_FOUND`."
       }
     ]
   },
@@ -13188,7 +13604,7 @@
     "group": "system",
     "slug": "system",
     "module": "server",
-    "overview": "The `system` group answers questions about the deployment itself. `whoami` and `version` are public and answer without a credential, which makes them a quick connectivity and credential check; `selfCheck` is a fleet administrator's health report. See [Observability](/docs/operations/observability).",
+    "overview": "The `system` group answers questions about the deployment itself. `whoami` and `version` are public and answer without a credential, which makes them a quick connectivity and credential check; `selfCheck` is a fleet administrator's health report and `workQueue` the work queue's backlog. See [Observability](/docs/operations/observability).",
     "methods": [
       {
         "method": "whoami",
@@ -13252,6 +13668,45 @@
         },
         "summary": "Runs the deployment's read-only health checks and returns the findings, with `ok` false when any finding is an `error`.",
         "description": "Runs the deployment's read-only health checks and returns the findings, with `ok` false when any finding is an `error`.\n\nDecided as `compute:fleet:admin` on `compute-fleet/global`, which resolves only in the root tenant. The report covers the method catalog, applied migrations, the `btree_gist` extension, `compute_now()` against the database clock, the operations checks (overdue work, command sweeper lag, usage dead letters and backlog, gateway headroom, stale heartbeats, daemon protocol skew, expiring node certificates) and every module's own `selfCheck`. A failing check becomes an `error` finding rather than a failed call."
+      },
+      {
+        "method": "workQueue",
+        "route": "POST /api/compute/system/workQueue",
+        "kind": "read",
+        "action": "compute:fleet:admin",
+        "resource": "compute-fleet",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "server",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [],
+          "properties": {
+            "kinds": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 100,
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                "maxLength": 128
+              },
+              "description": "Only these kinds, in this order (a kind with no rows reports zeros); omitted: every kind queued"
+            },
+            "overdueAfterMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 604800000,
+              "default": 300000,
+              "description": "How long past due an unclaimed row counts as overdue"
+            }
+          }
+        },
+        "summary": "Returns the work queue's backlog per kind: how many rows are queued, due, overdue and held by a worker, how many are backing off after failures, and when the next one is due, with how many workers are alive.",
+        "description": "Returns the work queue's backlog per kind: how many rows are queued, due, overdue and held by a worker, how many are backing off after failures, and when the next one is due, with how many workers are alive.\n\nDecided as `compute:fleet:admin` on `compute-fleet/global`, which resolves only in the root tenant. `kinds` (1 to 100) answers those kinds in that order, a kind with no rows as zeros; without it, every kind with rows, sorted. A row is due once its `not_before` passed and no worker holds it, and overdue when that was more than `overdueAfterMs` ago (default 5 minutes, as `selfCheck`'s `workers.queue` check counts it). `nextDueAt` (epoch ms) is the earliest `not_before` of the rows no worker holds, absent when there is none; `at` is the database clock (`compute_now()`) the counts were taken at. It only reads, in one statement."
       }
     ]
   },

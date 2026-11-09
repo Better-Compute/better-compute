@@ -7,7 +7,7 @@ description: "The images group is the catalog of OS images and ramdisks that dep
 
 The images group is the catalog of OS images and ramdisks that deploys write to disk. An image is registered by its digest and source URL, never uploaded, and a signature from a signer on the tenant's or the platform's allowlist marks it verified. Unsigned images stay private to their tenant; only verified images can be made public. See [Profiles and images](/docs/guides/bare-metal/profiles-and-images).
 
-All 4 methods are served by @better-compute/server 0.3.0.
+All 5 methods are served by @better-compute/server 0.3.0.
 
 | Method                  | Kind     | Authorization                                                                             | Phase | Status     |
 | ----------------------- | -------- | ----------------------------------------------------------------------------------------- | ----- | ---------- |
@@ -15,6 +15,7 @@ All 4 methods are served by @better-compute/server 0.3.0.
 | [`get`](#get)           | read     | `compute:images:read` @ `compute-image`                                                   | v0.2  | registered |
 | [`list`](#list)         | read     | `compute:images:read` @ `compute-tenant` + items                                          | v0.2  | registered |
 | [`promote`](#promote)   | mutation | `compute:images:publish` @ `compute-image`                                                | v0.2  | registered |
+| [`resolve`](#resolve)   | read     | `compute:flavors:read` @ `compute-pool`                                                   | v1.0  | registered |
 
 ## register
 
@@ -110,3 +111,29 @@ Decided as `compute:images:publish` on the image. An unsigned image is `INVALID_
 | ---------- | ------ | -------- | ---------------------------------------------------------------- |
 | `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`       |
 | `imageId`  | string | yes      | at most 56 characters; matches `^img_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
+## resolve
+
+`POST /api/compute/images/resolve`
+
+Resolves image families on a `provider` pool for a launch picker: each family's newest image that is not deprecated, as the pool's provider account sees it. Returns `poolId`, `provider`, `items` (one per family that resolved, in the order asked) and `missing` (each with `family` and `reason`: `notFound` when the family has no image, `deprecated` when its newest image is deprecated, obsolete or deleted). vps serves this method; the rest of the group is the bare-metal catalog.
+
+- **Input.** `families` lists 1 to 50 families; duplicates count once. On Compute Engine a family is a bare name, which resolves in the account's `imageProject` (`ubuntu-2404-lts-amd64`), `<project>/<family>` (`debian-cloud/debian-12`), or `projects/<project>/global/images/family/<family>`.
+- **Output.** Each item has `family` as asked; `image`, the reference `instances.create` takes as `imageId` to boot exactly that image (`projects/<project>/global/images/<name>`); `name` and `project`; `architecture` (`x86_64` or `arm64`); `minimumDiskGiB`, the smallest boot disk the image fits on; `guestOsFeatures` (`UEFI_COMPATIBLE`, `GVNIC`, `SEV_CAPABLE`, …, sorted); `loginUser`, the user the instance's `sshKeys` log in as; `deprecation` when a deprecation is scheduled (`replacement` and the `deprecated`, `obsolete` and `deleted` times); `createdAt` and `description`.
+- **Caching.** The provider keeps each answer a day per account (a family with no image an hour) and never returns an image whose deprecation time has passed, also from its cache. A failed read is not kept.
+- **Allowlist.** A family in a project the account does not allow (the Compute Engine account's `imageProjects`) refuses the whole call with `INVALID_INPUT` (`details.reason` `imageProjectNotAllowed`, with `details.allowed`), and nothing is read. `instances.create` applies the same allowlist to `imageId`.
+- **IAM.** Decided as `compute:flavors:read` on the pool: its owner and the tenants it is offered to, who see its flavors. Any other tenant gets `NOT_FOUND`. The pool's provider account is not shown.
+- **Errors.** `INVALID_INPUT` for a pool that is not a `provider` pool, `INVALID_STATE` for a provider pool without an account, `UNSUPPORTED` (`details.provider`) when its provider does not resolve image families. Provider failures (`ACCESS_DENIED`, `UNAVAILABLE`, `RATE_LIMITED`) are passed on.
+
+- **Kind:** read
+- **Authorization:** `compute:flavors:read` @ `compute-pool`
+- **Module:** `vps`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field      | Type           | Required | Constraints                                                       |
+| ---------- | -------------- | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string         | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`   | string         | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `families` | list of string | yes      | 1-50 items                                                        |

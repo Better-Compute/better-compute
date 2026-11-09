@@ -3686,29 +3686,6 @@
             },
             "description": "Labels: GCE label rules, at most 62; keys starting with better-compute- or bc- are reserved. In provider pools also written on the machine and its boot disk"
           },
-          "name": {
-            "type": "string",
-            "maxLength": 128,
-            "description": "A display name: 1-128 characters, no control characters or surrounding whitespace"
-          },
-          "metadata": {
-            "type": "object",
-            "maxProperties": 64,
-            "propertyNames": {
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
-            },
-            "additionalProperties": {
-              "type": "string",
-              "maxLength": 1024
-            },
-            "description": "Free-form string metadata kept by better-compute only (at most 64 entries, 16 KiB); keys starting with better-compute- or bc- are reserved"
-          },
-          "issuedBy": {
-            "type": "string",
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$",
-            "maxLength": 128,
-            "description": "Who issued the instance (root callers only): the platform’s provenance"
-          },
           "placement": {
             "type": "object",
             "properties": {
@@ -3765,6 +3742,29 @@
               "additionalProperties": false
             },
             "description": "(provider pools on a network) Shared filesystems of the network the machine mounts at boot; needs networkId"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "A display name: 1-128 characters, no control characters or surrounding whitespace"
+          },
+          "metadata": {
+            "type": "object",
+            "maxProperties": 64,
+            "propertyNames": {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "description": "Free-form string metadata kept by better-compute only (at most 64 entries, 16 KiB); keys starting with better-compute- or bc- are reserved"
+          },
+          "issuedBy": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$",
+            "maxLength": 128,
+            "description": "Who issued the instance (root callers only): the platform’s provenance"
           },
           "ownerIdentityId": {
             "type": "string",
