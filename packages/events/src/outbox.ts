@@ -18,10 +18,17 @@ export function formatCursor(cursor: OutboxCursor): string {
   return `${cursor.txid}.${cursor.seq}`;
 }
 
-/** Parses `<txid>.<seq>`; `INVALID_INPUT` otherwise. */
+const maxTxid = (1n << 64n) - 1n; // xid8
+const maxSeq = (1n << 63n) - 1n; // bigint
+
+/**
+ * Parses `<txid>.<seq>`; `INVALID_INPUT` otherwise, also for a number the columns cannot hold (twenty
+ * digits can exceed them, and the database would refuse the cast with an error of its own).
+ */
 export function parseCursor(value: string): OutboxCursor {
   const match = cursorPattern.exec(value.trim());
-  if (!match) throw new ComputeError('INVALID_INPUT', 'Invalid event cursor');
+  if (!match || BigInt(match[1]!) > maxTxid || BigInt(match[2]!) > maxSeq)
+    throw new ComputeError('INVALID_INPUT', 'Invalid event cursor');
   return { txid: match[1]!, seq: match[2]! };
 }
 

@@ -134,6 +134,11 @@ export interface WatchOptions {
   retryMs?: number;
   /** Close the stream after this long (clients reconnect with Last-Event-ID). Default 1 h. */
   maxDurationMs?: number;
+  /**
+   * Told about an unexpected failure that ended a stream (the database went away, say), for the host's
+   * logs. The client only hears that the stream failed, never the error's text.
+   */
+  onError?: (error: unknown) => void;
 }
 
 function errorResponse(error: unknown): Response {
@@ -256,7 +261,19 @@ export async function handleWatch(request: Request, options: WatchOptions): Prom
           );
         }
       } catch (error) {
-        send(`event: error\ndata: ${JSON.stringify({ message: (error as Error).message })}\n\n`);
+        // The client is a tenant: a ComputeError's own code and message are meant for it, anything else
+        // (a database error naming hosts, ports or SQL) goes to the host's `onError` and not on the wire.
+        if (!isComputeError(error)) {
+          try {
+            options.onError?.(error);
+          } catch {
+            // A failing reporter must not keep the stream from closing.
+          }
+        }
+        const shown = isComputeError(error)
+          ? { code: error.code, message: error.message }
+          : { code: 'UNAVAILABLE', message: 'The event stream failed; reconnect to resume' };
+        send(`event: error\ndata: ${JSON.stringify(shown)}\n\n`);
       } finally {
         closed = true;
         unregister?.();

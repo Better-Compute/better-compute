@@ -274,5 +274,33 @@ describe('handleWatch', () => {
     expect((await watch('/watch', { headers: { 'last-event-id': 'nope' } })).status).toBe(400);
     expect((await watch('/watch?types=')).status).toBe(400);
     expect((await watch('/watch', { method: 'POST' })).status).toBe(405);
+    // Twenty digits fit the pattern but not the columns: refused as a bad cursor, before any query.
+    for (const overflow of ['99999999999999999999.1', '1.99999999999999999999', '18446744073709551616.0'])
+      expect((await watch('/watch', { headers: { 'last-event-id': overflow } })).status, overflow).toBe(400);
+    expect((await watch('/watch', { headers: { 'last-event-id': '18446744073709551615.1' } })).status).toBe(200);
+  });
+
+  it('never streams an unexpected error’s text to the client; the host hears it', async () => {
+    const heard: unknown[] = [];
+    const failing = {
+      ...db,
+      transaction: () => {
+        throw new Error('connect ECONNREFUSED 10.20.30.40:5432 (db-primary.internal)');
+      },
+      query: () => {
+        throw new Error('connect ECONNREFUSED 10.20.30.40:5432 (db-primary.internal)');
+      },
+    } as unknown as typeof db;
+    const response = await handleWatch(
+      new Request('https://compute.test/watch', { headers: { 'last-event-id': '1.1' } }),
+      { sql: failing, authorize: async () => ({ tenantId: 'ten_a' }), pollMs: 20, onError: (e) => heard.push(e) },
+    );
+    const closed = await drain(response);
+    expect(closed.ended).toBe(true);
+    expect(closed.raw).toContain('event: error');
+    expect(closed.raw).toContain('"code":"UNAVAILABLE"');
+    expect(closed.raw).not.toMatch(/ECONNREFUSED|10\.20\.30\.40|internal/);
+    expect(heard).toHaveLength(1);
+    expect(String(heard[0])).toContain('ECONNREFUSED');
   });
 });
