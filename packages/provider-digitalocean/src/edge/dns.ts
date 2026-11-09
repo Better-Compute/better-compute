@@ -23,6 +23,14 @@ import { deploymentHash } from '../ids.js';
 // than DO's apex NS and SOA and the marker: deleting a domain deletes every record in it, and those
 // may be a tenant's own.
 //
+// The create and the marker are two writes. When the marker write fails after the domain was made
+// (a 429, a 5xx), `ensureZone` deletes the empty domain it just made, so the next ensure starts
+// over instead of meeting an unmarked zone no call may touch. Should that delete fail as well, this
+// client remembers (in memory) that it made the zone: a later `ensureZone` writes the marker and a
+// later `deleteZone` deletes it, but only while the zone still holds nothing but DO's apex NS and
+// SOA records. Any other client (after a restart) sees an unmarked zone and fails closed, as for a
+// create whose answer was lost: it is taken only with `adopt`.
+//
 // Records are found by the id an earlier ensure returned, else by identical name, type and data
 // (host names compared without the final dot, which DO may or may not hand back); a record changes
 // its data, TTL and its type's fields in place (one PUT). The marker and the apex NS records are
@@ -169,6 +177,11 @@ export class DoDns implements ProviderDns {
   protected readonly log: Logger;
   /** The marker record's data for this deployment. */
   protected readonly marker: string;
+  /**
+   * Zones this client made (DO answered the create) that still carry no marker: its write failed, and
+   * so did taking the domain back. Only while such a zone is still empty is it marked or deleted.
+   */
+  protected readonly unmarked = new Set<string>();
 
   constructor(client: DoClient, deployment: string, log: Logger) {
     this.client = client;
@@ -248,6 +261,26 @@ export class DoDns implements ProviderDns {
     });
   }
 
+  /**
+   * Whether an unmarked zone is one this client made and nothing was put into since: it holds only
+   * DO's apex NS and SOA records. A zone that got a record of someone's is forgotten: it is theirs now.
+   */
+  protected async madeHere(zone: string, signal: AbortSignal): Promise<boolean> {
+    if (!this.unmarked.has(zone)) return false;
+    const left = (await this.records(zone, signal)).filter((r) => !reserved(r));
+    if (left.length === 0) return true;
+    this.unmarked.delete(zone);
+    return false;
+  }
+
+  protected async writeMarker(zone: string, signal: AbortSignal): Promise<void> {
+    await this.client.request('POST', `${this.zonePath(zone)}/records`, {
+      body: { type: 'TXT', name: dnsMarkerName, data: this.marker, ttl: markerTtl },
+      signal,
+      budget: 'mutate',
+    });
+  }
+
   // ------------------------------------------------------------------------------------- zones
 
   /**
@@ -287,6 +320,13 @@ export class DoDns implements ProviderDns {
           `DNS zone ${zone} belongs to another better-compute deployment; it is never taken over`,
           'otherDeployment',
         );
+      if (marker === 'none' && (await this.madeHere(zone, signal))) {
+        // The zone this client made, whose marker write failed: the marker is written now.
+        await this.writeMarker(zone, signal);
+        this.unmarked.delete(zone);
+        this.log.info('digitalocean.zoneMarked', { zone });
+        return this.zoneState(zone, 'ours', signal);
+      }
       if (marker === 'none' && !spec.adopt)
         throw fail(
           'CONFLICT',
@@ -295,6 +335,8 @@ export class DoDns implements ProviderDns {
         );
       return this.zoneState(zone, marker, signal);
     }
+    // No such zone any more: whatever this client remembered of one is void.
+    this.unmarked.delete(zone);
     await this.refuseNested(zone, signal);
     try {
       await this.client.request('POST', '/domains', {
@@ -309,14 +351,24 @@ export class DoDns implements ProviderDns {
     }
     this.log.info('digitalocean.zoneCreated', { zone });
     try {
-      await this.client.request('POST', `${this.zonePath(zone)}/records`, {
-        body: { type: 'TXT', name: dnsMarkerName, data: this.marker, ttl: markerTtl },
-        signal,
-        budget: 'mutate',
-      });
+      await this.writeMarker(zone, signal);
     } catch (error) {
-      // The zone is ours but carries no marker: the next ensure refuses it until it is adopted.
-      this.log.warn('digitalocean.zoneMarkerMissing', { zone });
+      // The zone is ours but carries no marker, and no later call may touch an unmarked zone: the
+      // empty domain is taken back, so the next ensure starts over. If that fails too, this client
+      // keeps knowing it made the zone (see `madeHere`).
+      this.unmarked.add(zone);
+      try {
+        await this.client.request('DELETE', this.zonePath(zone), { signal, budget: 'mutate' });
+        this.unmarked.delete(zone);
+        this.log.warn('digitalocean.zoneMarkerFailed', { zone, takenBack: true });
+      } catch (rollback) {
+        if (isComputeError(rollback, 'NOT_FOUND')) this.unmarked.delete(zone);
+        this.log.warn('digitalocean.zoneMarkerMissing', {
+          zone,
+          takenBack: false,
+          code: isComputeError(rollback) ? rollback.code : 'UNKNOWN',
+        });
+      }
       throw error;
     }
     return this.zoneState(zone, 'ours', signal);
@@ -332,8 +384,13 @@ export class DoDns implements ProviderDns {
   async deleteZone(zone: string, ctx: CallContext): Promise<ProviderResourceState> {
     const name = parseZoneName(zone);
     const { signal } = ctx;
-    if (!(await this.exists(name, signal))) return state(name, 'deleted');
-    if ((await this.markerOf(name, signal)) !== 'ours')
+    if (!(await this.exists(name, signal))) {
+      this.unmarked.delete(name);
+      return state(name, 'deleted');
+    }
+    const marker = await this.markerOf(name, signal);
+    // An unmarked zone this client made (its marker write failed) and that is still empty is ours to delete.
+    if (marker !== 'ours' && !(marker === 'none' && (await this.madeHere(name, signal))))
       throw fail(
         'INVALID_STATE',
         `DNS zone ${name} was not made by this better-compute deployment and is never deleted by it`,
@@ -351,6 +408,7 @@ export class DoDns implements ProviderDns {
     } catch (error) {
       if (!isComputeError(error, 'NOT_FOUND')) throw error;
     }
+    this.unmarked.delete(name);
     this.log.info('digitalocean.zoneDeleted', { zone: name });
     return state(name, 'deleted');
   }

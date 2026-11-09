@@ -83,6 +83,82 @@ describe('provider-digitalocean dns: zones', () => {
     expect([taken.code, taken.details?.reason]).toEqual(['CONFLICT', 'zoneExists']);
   });
 
+  it('a marker write that fails takes the just-made zone back, so the next ensure starts over', async () => {
+    const { emu, impl } = await setup();
+    // The domain is made, then the marker write is rate limited.
+    emu.failNext({ method: 'POST', path: /^\/domains\/example\.com\/records$/ }, 429, {
+      id: 'too_many_requests',
+      message: 'API Rate limit exceeded.',
+    });
+    const failed = await failure(impl.dns.ensureZone({ name: 'example.com' }, ctx()));
+    expect(failed.code).toBe('RATE_LIMITED');
+    // The empty domain it made is gone again: nothing is left that no call could manage.
+    expect(calls(emu, 'DELETE', /^\/v2\/domains\/example\.com$/)).toHaveLength(1);
+    expect(emu.state.domains.has('example.com')).toBe(false);
+    expect(records(emu, 'example.com')).toEqual([]);
+    // So the retry makes it, marked, and it can be deleted.
+    const zone = await impl.dns.ensureZone({ name: 'example.com' }, ctx());
+    expect(zone).toMatchObject({ state: 'ready', outputs: { adopted: 'false' } });
+    expect(records(emu, 'example.com').some((r) => r.name === dnsMarkerName)).toBe(true);
+    expect((await impl.dns.deleteZone('example.com', ctx())).state).toBe('deleted');
+  });
+
+  it('when taking the zone back fails too, this client still knows it made the zone: it marks or deletes it', async () => {
+    for (const next of ['ensure', 'delete'] as const) {
+      const { emu, impl } = await setup();
+      emu.failNext({ method: 'POST', path: /^\/domains\/example\.com\/records$/ }, 429, {
+        id: 'too_many_requests',
+        message: 'API Rate limit exceeded.',
+      });
+      emu.failNext({ method: 'DELETE', path: /^\/domains\/example\.com$/ }, 429, {
+        id: 'too_many_requests',
+        message: 'API Rate limit exceeded.',
+      });
+      expect((await failure(impl.dns.ensureZone({ name: 'example.com' }, ctx()))).code).toBe(
+        'RATE_LIMITED',
+      );
+      // The zone is there without a marker.
+      expect(emu.state.domains.has('example.com')).toBe(true);
+      expect(records(emu, 'example.com').some((r) => r.name === dnsMarkerName)).toBe(false);
+      if (next === 'ensure') {
+        const zone = await impl.dns.ensureZone({ name: 'example.com' }, ctx());
+        expect(zone).toMatchObject({ state: 'ready', outputs: { adopted: 'false' } });
+        expect(
+          records(emu, 'example.com').filter((r) => r.name === dnsMarkerName).map((r) => r.data),
+        ).toEqual([marker]);
+      }
+      expect((await impl.dns.deleteZone('example.com', ctx())).state).toBe('deleted');
+      expect(emu.state.domains.has('example.com')).toBe(false);
+    }
+  });
+
+  it('never claims an unmarked zone it made once records it did not write are in it, nor one another client made', async () => {
+    const { emu, impl } = await setup();
+    emu.failNext({ method: 'POST', path: /^\/domains\/example\.com\/records$/ }, 500, {
+      id: 'server_error',
+      message: 'x',
+    });
+    emu.failNext({ method: 'DELETE', path: /^\/domains\/example\.com$/ }, 500, {
+      id: 'server_error',
+      message: 'x',
+    });
+    expect((await failure(impl.dns.ensureZone({ name: 'example.com' }, ctx()))).code).toBe(
+      'UNAVAILABLE',
+    );
+    // Someone put a record in it meanwhile: it is no longer the empty zone this client made.
+    seedRecord(emu.state, 'example.com', { type: 'A', name: 'www', data: '198.51.100.7' });
+    const taken = await failure(impl.dns.ensureZone({ name: 'example.com' }, ctx()));
+    expect([taken.code, taken.details?.reason]).toEqual(['CONFLICT', 'zoneExists']);
+    const kept = await failure(impl.dns.deleteZone('example.com', ctx()));
+    expect([kept.code, kept.details?.reason]).toEqual(['INVALID_STATE', 'notManaged']);
+    expect(emu.state.domains.has('example.com')).toBe(true);
+    // Another client (a restart) knows nothing of an unmarked zone: fail closed, as before.
+    seedDomain(emu.state, 'other.example');
+    const fresh = await build(emu, doAccount);
+    const refused = await failure(fresh.dns.ensureZone({ name: 'other.example' }, ctx()));
+    expect([refused.code, refused.details?.reason]).toEqual(['CONFLICT', 'zoneExists']);
+  });
+
   it('takes over a foreign zone only with adopt, and never deletes an adopted zone', async () => {
     const { emu, impl } = await setup();
     seedDomain(emu.state, 'tenant.example', [{ type: 'A', name: 'www', data: '198.51.100.1' }]);

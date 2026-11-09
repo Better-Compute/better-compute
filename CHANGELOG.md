@@ -166,6 +166,11 @@ All notable changes to the better-compute packages are documented here. The form
   (the `Do…` request, state and definition types are aliases), implement `find`, and get the request's
   `accountScope` and `secretOutputs`: a CDN endpoint's `certificateId`/`customDomain` are refused on a shared
   account (`accountWide`), and a Spaces key whose secret was never sealed answers `error` instead of `ready`.
+- **A DNS zone whose marker write failed is no longer orphaned** (`@better-compute/provider-digitalocean`). When
+  `POST /domains` succeeded and the marker TXT write then failed (a 429, say), the zone was left unmarked: every
+  later `ensureZone` was `CONFLICT` (`zoneExists`) and `deleteZone` `INVALID_STATE` (`notManaged`). `ensureZone`
+  now deletes the empty domain it just made when the marker cannot be written; if that fails too, the same client
+  marks (or deletes) the zone on a later call while it still holds only DigitalOcean's apex NS and SOA records.
 - **Scripts on images without cloud-init** (`@better-compute/provider-gcp`). Compute Engine's Debian, Rocky,
   CentOS, RHEL, AlmaLinux and SUSE images do not run cloud-init, so a shell-script `userData` (`#!…`) never ran on
   them. Create now also writes it as `startup-script` metadata, wrapped to run once on the first boot as cloud-init
