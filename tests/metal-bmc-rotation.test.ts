@@ -61,11 +61,14 @@ const condition = async (nodeId: string) =>
   ).rows[0];
 
 describe('metal.rotateBmcCredential', () => {
-  it('flips to the new password only after a signed, verified login, and purges the old secret', async () => {
+  it("flips to the new password only after a signed, verified login, and leaves the operator's enrollment secret alone", async () => {
+    sim.secretsStore.set('secret://root/bmc-initial', 'rack-initial');
     const node = await readyNode();
     expect(await run(node, 'rotate-bmc')).toBe('succeeded');
     const [old, next] = await versions(node);
-    expect(old).toMatchObject({ version: 1, ref: 'secret://root/bmc-initial', state: 'superseded', purged: true });
+    // Version 1 is the secret the machine was enrolled with: the operator's, not rotation's to delete.
+    expect(old).toMatchObject({ version: 1, ref: 'secret://root/bmc-initial', state: 'superseded', purged: false });
+    expect(sim.secretsStore.get('secret://root/bmc-initial')).toBe('rack-initial');
     expect(next).toMatchObject({ version: 2, state: 'current', purged: false });
     expect(await current(node)).toBe(next!.ref);
     expect(await condition(node)).toEqual({ status: 'True', reason: null });
@@ -109,12 +112,60 @@ describe('metal.rotateBmcCredential', () => {
     expect(rotatedCredentialValue('', 'b')).toBe('b');
   });
 
-  it('rotates again from a rotated credential', async () => {
+  it('rotates again from a rotated credential, and purges only the secret rotation made', async () => {
     const node = await readyNode();
     await run(node, 'rotate-bmc');
+    const made = await current(node);
     expect(await run(node, 'rotate-bmc')).toBe('succeeded');
-    expect((await versions(node)).map((v) => v.state)).toEqual(['superseded', 'superseded', 'current']);
+    expect(await versions(node)).toMatchObject([
+      { version: 1, ref: 'secret://root/bmc-initial', state: 'superseded', purged: false },
+      { version: 2, ref: made, state: 'superseded', purged: true },
+      { version: 3, state: 'current', purged: false },
+    ]);
+    expect(sim.secretsStore.has(made)).toBe(false);
     expect(await run(node, 'probe-bmc')).toBe('succeeded');
+  });
+
+  it('keeps a rack-wide enrollment secret that other machines still use', async () => {
+    const rack = 'secret://root/bmc-rack-7';
+    sim.secretsStore.set(rack, '{"username":"admin","password":"rack-7"}');
+    const enroll = async () => {
+      const node = await sim.call('enroll', {
+        tenantId: 'root',
+        siteId: 'site_a',
+        poolId: 'pool_metal',
+        bmc: { address: `https://10.13.0.${++n}`, driver: 'redfish', credentials: rack },
+      });
+      await sim.settle();
+      return node.nodeId as string;
+    };
+    const [a, b] = [await enroll(), await enroll()];
+    expect(await run(a, 'rotate-bmc')).toBe('succeeded');
+    // The other machine's credential is untouched: the secret is still there, and it rotates from it.
+    expect(sim.secretsStore.get(rack)).toBe('{"username":"admin","password":"rack-7"}');
+    expect(await current(b)).toBe(rack);
+    expect(await run(b, 'probe-bmc')).toBe('succeeded');
+    expect(await run(b, 'rotate-bmc')).toBe('succeeded');
+    const resolved = JSON.parse(await sim.context.secrets!.resolve((await current(b)) as never)) as { username: string };
+    expect(resolved.username).toBe('admin');
+    expect(sim.secretsStore.has(rack)).toBe(true);
+  });
+
+  it('does not purge a rotated secret another machine was enrolled with', async () => {
+    const first = await readyNode();
+    await run(first, 'rotate-bmc');
+    const shared = await current(first);
+    const other = await sim.call('enroll', {
+      tenantId: 'root',
+      siteId: 'site_a',
+      poolId: 'pool_metal',
+      bmc: { address: `https://10.13.0.${++n}`, driver: 'redfish', credentials: shared },
+    });
+    await sim.settle();
+    expect(await run(first, 'rotate-bmc')).toBe('succeeded');
+    expect((await versions(first))[1]).toMatchObject({ version: 2, ref: shared, state: 'superseded', purged: false });
+    expect(sim.secretsStore.has(shared)).toBe(true);
+    expect(await current(other.nodeId)).toBe(shared);
   });
 
   for (const [fault, why] of [

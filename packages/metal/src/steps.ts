@@ -956,7 +956,8 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       if (!(await verifySite(context.sql, outcome, context)))
         return fail(new ComputeError('DRIVER_ERROR', 'The rotation result is not signed by the site agent'));
       await context.sql.transaction((tx) => promoteCredential(tx, node.node_id, pending!, previousRef));
-      // The old secrets go once nothing queued still names them.
+      // Old secrets that rotation made go once nothing queued and no other machine still names them;
+      // the enrollment secret stays (it is the operator's, and may be rack-wide).
       const purgeable = await purgeableCredentials(context.sql, node.node_id);
       let purged = 0;
       if (context.secrets.delete)

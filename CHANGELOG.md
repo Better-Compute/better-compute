@@ -179,6 +179,11 @@ All notable changes to the better-compute packages are documented here. The form
   (`steps[0].retries: deploy.deploy is not retry-safe…`), `defineStep` refuses `retries` with `retrySafe: false`,
   and the engine never retries such a step even when its row says so (a workflow started before the check).
   Driver operations written with `on:` (no registered step) keep their `retries`.
+- **BMC credential rotation no longer deletes the enrollment secret** (`@better-compute/metal`).
+  `metal.rotateBmcCredential` purged every superseded credential from the secret store, including the one the
+  machine was enrolled with: two machines enrolled with one rack-wide `secret://` broke each other on the first
+  rotation. Now only secrets rotation itself made are purged, and only when no open command and no other machine
+  names them; the enrollment secret is the operator's to delete.
 
 ## 0.3.0 (2026-10-20)
 

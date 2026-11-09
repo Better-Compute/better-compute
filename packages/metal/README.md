@@ -80,7 +80,8 @@ const compute = betterCompute({ modules: [provisionModule({ modules: [bareMetal]
   2. `bmc.rotate` sends only refs. The site agent fetches the value as a JWE, applies it through the
      driver's `management.rotateCredential`, logs in with it, and signs the result.
   3. Only a site-signed `verified: true` makes the version current. That also rewrites the node's
-     credential refs, and superseded secrets are deleted once no open command names them.
+     credential refs. Superseded secrets that rotation made are deleted once no open command and no
+     other machine names them; the enrollment secret is the operator's and is never deleted.
   4. On failure the old credential stays current, the failed version keeps its secret, and the node
      gets `BmcCredentialRotated=False`.
 
