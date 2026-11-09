@@ -940,4 +940,33 @@ describe('discover, adopt and release', () => {
     const after = await failure(resources.delete('do.database.pg', byHand.id, ctx()));
     expect(after.details?.reason).toBe('notManaged');
   });
+
+  it('says which kinds can be released, with nothing sent: exactly those whose release is not UNSUPPORTED', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const sent = emu.requests.length;
+    const releasable = resources
+      .kinds()
+      .map((kind) => kind.kind)
+      .filter((kind) => resources.releasable(kind));
+    expect(releasable).toEqual(
+      expect.arrayContaining(['do.database.pg', 'do.app', 'do.addon', 'do.knowledge-base']),
+    );
+    // Kinds owned by their name or by the resource they live in have nothing to take off.
+    for (const kind of ['do.database.pg.user', 'do.functions-namespace', 'do.inference-key']) {
+      expect(resources.kinds().map((entry) => entry.kind)).toContain(kind);
+      expect(releasable).not.toContain(kind);
+    }
+    expect(resources.releasable('do.nothing')).toBe(false);
+    expect(emu.requests.length).toBe(sent);
+    // The answer matches what release does: a kind that is not releasable refuses before any request.
+    for (const kind of resources.kinds().map((entry) => entry.kind)) {
+      if (resources.releasable(kind)) continue;
+      const refused = await failure(
+        resources.release(kind, '9cc10173-e9ea-4176-9dbc-a4cee4c4ff30', ctx()),
+      );
+      expect([kind, refused.code]).toEqual([kind, 'UNSUPPORTED']);
+    }
+    expect(emu.requests.length).toBe(sent);
+  });
 });

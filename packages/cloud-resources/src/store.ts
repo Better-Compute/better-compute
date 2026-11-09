@@ -272,6 +272,18 @@ export async function poolResources(
   return { ...(await accountResources(deps, account)), poolOwnerTenantId: pool.ownerTenantId };
 }
 
+/**
+ * Whether the provider can release a resource of the kind (take its ownership labels off and leave it running): it
+ * implements `release`, and does not say otherwise for the kind. A provider whose kinds differ (a kind owned by its
+ * name has no labels to take off) says so through an optional, pure `releasable(kind)` next to `release`; without
+ * it, every kind counts as releasable and a refusal shows only when the reconciler calls `release`.
+ */
+export function canRelease(resources: ProviderResources, kind: string): boolean {
+  if (typeof resources.release !== 'function') return false;
+  const releasable = (resources as { releasable?: (kind: string) => boolean }).releasable;
+  return typeof releasable !== 'function' || releasable.call(resources, kind) !== false;
+}
+
 /** The kind the provider serves, or UNSUPPORTED naming the ones it does. */
 export function kindOf(
   provider: Pick<ResourcesProvider, 'resources' | 'account'>,

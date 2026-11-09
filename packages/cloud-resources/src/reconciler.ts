@@ -19,6 +19,7 @@ import {
 } from '@better-compute/vps';
 import {
   accountResources,
+  canRelease,
   json,
   kindOf,
   publish,
@@ -775,18 +776,21 @@ class ResourceWorker {
       if (lost === 'wait') return this.#next();
       if (lost === 'gone') return this.finish('released');
     }
-    if (typeof provider.resources.release !== 'function') {
-      await this.#set({
-        state: 'error',
-        message: `Provider ${row.provider} cannot release resources`,
-      });
-      return this.#next();
-    }
-    const released = await this.#attempt(async () => {
-      await provider.resources.release!(row.kind, row.provider_id!, this.#call());
+    if (!canRelease(provider.resources, row.kind))
+      return this.#cannotRelease(`Provider ${row.provider} cannot release ${row.kind}`);
+    let unsupported: string | undefined;
+    const released = await this.#attempt(async (): Promise<ProviderResourceState> => {
+      try {
+        await provider.resources.release!(row.kind, row.provider_id!, this.#call());
+      } catch (error) {
+        if (!isComputeError(error, 'UNSUPPORTED')) throw error;
+        unsupported = text(error);
+        return { id: row.provider_id!, state: 'error', message: unsupported };
+      }
       return { id: row.provider_id!, state: 'deleted' };
     });
     if (!released) return this.#next();
+    if (unsupported !== undefined) return this.#cannotRelease(unsupported);
     if (released.state === 'error') {
       await this.#set({
         state: 'error',
@@ -795,6 +799,40 @@ class ResourceWorker {
       return this.#next();
     }
     return this.finish('released');
+  }
+
+  /**
+   * The provider cannot release the resource (it has no `release`, or none for the kind), so asking again would
+   * never help. An adopted resource is let go here all the same: it was the tenant's before better-compute and is
+   * never deleted for it, so the row ends `released` and the provider's ownership labels stay (a tenant teardown
+   * ends this way too). One better-compute created stays managed: the release is withdrawn (`desired_state` back to
+   * `present`, in `error` with the reason until the next refresh converges it), so it can still be updated or deleted.
+   */
+  async #cannotRelease(reason: string): Promise<number | undefined> {
+    const row = this.#row;
+    if (row.adopted) {
+      this.deps.log.warn('cloud-resources: let an adopted resource go without a provider release', {
+        resourceId: row.id,
+        kind: row.kind,
+        reason,
+      });
+      return this.finish('released');
+    }
+    const message = `${reason}; the release was withdrawn`.slice(0, 500);
+    const withdrawn = await this.sql.transaction(async (tx) => {
+      const { rows } = await tx.query(
+        `UPDATE cloud_resources
+            SET desired_state = 'present', state = 'error', message = $3, version = version + 1,
+                updated_at = compute_now()
+          WHERE id = $1 AND version = $2 AND desired_state = 'released' RETURNING id`,
+        [row.id, row.version, message],
+      );
+      if (rows.length === 0) return false;
+      await publish(this.deps, tx, row, 'failed', { message, reason: 'releaseWithdrawn' });
+      return true;
+    });
+    if (!withdrawn) await this.#changedMeanwhile();
+    return this.#next();
   }
 
   /** The resource is gone (or let go): it is `deleted` or `released`, its authz row and sealed secrets go. */

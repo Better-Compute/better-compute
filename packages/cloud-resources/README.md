@@ -80,12 +80,20 @@ betterCompute({
   does not count); its spec stays the provider's (observed) until the tenant changes it. A spec change before the
   takeover is `INVALID_STATE` (`adopting`). One deleted or released before the takeover completed (or after it
   failed) is let go here (`released`) with no provider call. An adopted resource bills from its first `ready`.
+- **Release** lets a resource go: its ownership labels are taken off and it keeps running. A kind the provider
+  cannot release is refused up front (`UNSUPPORTED`, `reason 'release'`), so no release is recorded that could never
+  complete. A provider says which kinds it can release through an optional, pure `releasable(kind)` next to
+  `ProviderResources.release`; one that does not is asked by the reconciler, and when it refuses (`UNSUPPORTED`)
+  the release of a resource better-compute created is withdrawn (`desired_state` back to `present`; `error` with
+  the reason until the next refresh), while an adopted resource is let go here without the provider call.
+  `delete` overrides a release that is still pending: the resource is deleted instead.
 - **Tenant teardown** (`tenantDeleted`). When a tenant is deleted, what better-compute created for it is deleted at
   the provider, children first. What the tenant adopted is **released**, never deleted: it existed before
   better-compute (a production database on the tenant's own account), so its ownership labels are taken off and it
   keeps running there, unmanaged (`cloud.resource.releasing` with `reason: 'tenant-deleted'`). Resources created
-  inside an adopted one (a user of an adopted database) are deleted first, then the adopted one is released. The
-  hook answers `DONE` once every resource of the tenant is `deleted` or `released`.
+  inside an adopted one (a user of an adopted database) are deleted first, then the adopted one is released. An
+  adopted resource of a kind the provider cannot release is let go all the same (its labels stay): it is never
+  deleted. The hook answers `DONE` once every resource of the tenant is `deleted` or `released`.
 - **Whose account.** Every `ensure` says `accountScope: 'tenant'` on the tenant's own (BYO) account and
   `'shared'` on a hosted pool. A kind names the spec fields that reach account-wide objects (a VPC, a registry,
   linked repositories, another resource by name) through its pure `accountWide(spec)`: on a shared account

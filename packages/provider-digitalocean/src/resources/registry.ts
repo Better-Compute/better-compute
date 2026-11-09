@@ -153,6 +153,18 @@ export class DoResources implements ProviderResources {
     return found.adopt(this.#env, id, labels, context);
   }
 
+  /**
+   * Whether `release` works for the kind, with nothing sent: the kind has one (a kind owned by its name, or living in
+   * another resource, has no ownership tags to take off), and the account may use it (a preview kind needs previews).
+   * The cloud-resources module asks before it accepts `cloudResources.release`, so a release that could never
+   * complete is refused instead of recorded.
+   */
+  releasable(kind: string): boolean {
+    const found = this.#kinds.get(kind);
+    if (!found || typeof found.release !== 'function') return false;
+    return found.definition.preview !== true || this.#env.previews;
+  }
+
   async release(kind: string, id: string, context: CallContext): Promise<void> {
     const found = this.#kind(kind);
     if (!found.release)

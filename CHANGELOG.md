@@ -149,6 +149,14 @@ All notable changes to the better-compute packages are documented here. The form
   production database that existed before better-compute) was deleted at the provider. Adopted resources are now
   released (ownership labels removed, left running; `cloud.resource.releasing` with `reason: 'tenant-deleted'`);
   resources better-compute created are deleted as before, those created inside an adopted resource first.
+- **A release that cannot complete no longer strands the resource** (`@better-compute/cloud-resources`,
+  `@better-compute/provider-digitalocean`). `cloudResources.release` was accepted for kinds the provider cannot
+  release (a DigitalOcean Functions namespace, a model access key): the row went to `error` still wanting to be
+  released, and `cloudResources.delete` then did nothing, so it kept its name, its quota slot and its hourly fee for
+  good. Release is now refused up front for such a kind (`UNSUPPORTED`, `details.reason: 'release'`; the provider
+  says which kinds through `releasable(kind)`, which the DigitalOcean provider implements), and `delete` overrides a
+  release that is still pending. A row already stranded recovers on the next sweep: the release of a resource
+  better-compute created is withdrawn, an adopted one is let go without the provider call.
 - **Scripts on images without cloud-init** (`@better-compute/provider-gcp`). Compute Engine's Debian, Rocky,
   CentOS, RHEL, AlmaLinux and SUSE images do not run cloud-init, so a shell-script `userData` (`#!…`) never ran on
   them. Create now also writes it as `startup-script` metadata, wrapped to run once on the first boot as cloud-init
