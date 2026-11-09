@@ -51,6 +51,9 @@ import {
 //      bcd (the injected `SubstrateAgent`: provider-kubernetes' DaemonSet, device plugin only);
 //   3. keeps a hosted `kubernetes` join token (and its Secret) only while Nodes outnumber the substrate's joined
 //      nodes, with exactly that many uses; once every node joined, the token is revoked and the Secret deleted.
+// Steps 2 and 3 also run while the substrate is in `error` for a reason that leaves the control plane usable (a
+// refused node pool, a policy that cannot be converged): an error is reported, never a reason to stop retiring gone
+// nodes or admitting replacements.
 // The substrate owns only the pool nodes its own hosted tokens admitted (`learnOwnership`): machines joined into the
 // pool some other way are never counted, drained for, cordoned or retired by it.
 // Rows are read in one transaction, the provider and the cluster API are called with none open, and each result is
@@ -790,10 +793,17 @@ async function finishUpgrade(
 interface Plan {
   row: SubstrateRow;
   pool: PoolRow;
-  substrate: PoolSubstrate;
+  /** Whether the substrate's Nodes are the ones carrying its label (it has flavors), or every Node of the cluster. */
+  labelled: boolean;
   cluster?: ClusterRow;
   /** An `upgrades: 'drain'` version bump still waiting for bookings to end. */
   drain?: { version: string; bookings: number };
+  /**
+   * Why the substrate is in `error` although its cluster is still tended: a policy that cannot be converged (it no
+   * longer parses, names another account or cluster, changes a flavor's shape) or a cluster in error (a refused node
+   * pool). The nodes that joined live on: gone ones are retired, new Nodes get a token, bcd stays applied.
+   */
+  problem?: string;
 }
 
 /** Writes the substrate's state (guarded by the version decided on) and publishes the transitions. */
@@ -876,6 +886,23 @@ async function prepare(
     }
     const wanted = pool !== undefined && !pool.archived && (substrate !== undefined || parseError !== undefined);
     if (!wanted) return row && row.state !== 'deleted' ? { teardown: row } : {};
+    // The substrate stays in error, and the nodes that already joined its cluster are still tended (`Plan.problem`):
+    // the row as it is now, its cluster, and whether it has flavors (from its node pool rows: the policy cannot say).
+    const tended = async (problem: string): Promise<{ plan?: Plan }> => {
+      const current = await readSubstrate(tx, poolId, { lock: true });
+      if (!current || current.cluster_id === null || current.desired_state !== 'present') return {};
+      const { rows: clusters } = await tx.query<ClusterRow>(
+        `SELECT ${clusterColumns} FROM kubernetes_clusters WHERE id = $1`,
+        [current.cluster_id],
+      );
+      if (!clusters[0]) return {};
+      const { rows: flavors } = await tx.query(
+        `SELECT 1 FROM kubernetes_node_pools
+          WHERE cluster_id = $1 AND substrate_pool_id = $2 AND state <> 'deleted' AND desired_state = 'present' LIMIT 1`,
+        [current.cluster_id, poolId],
+      );
+      return { plan: { row: current, pool: pool!, labelled: flavors.length > 0, cluster: clusters[0], problem } };
+    };
     // An error settles the row on the pool's version: the 30 s sweep leaves it until the pool changes (the 2 minute
     // refresh retries it).
     const settle = async () => {
@@ -886,6 +913,8 @@ async function prepare(
       );
     };
     if (parseError !== undefined || !substrate) {
+      // Being torn down already: finish that, whatever the policy says now.
+      if (row && row.desired_state === 'deleted' && row.state !== 'deleted') return { teardown: row };
       if (row && row.state !== 'deleted' && (row.state !== 'error' || row.message !== parseError)) {
         await tx.query(
           `UPDATE kubernetes_pool_substrates SET state = 'error', message = $2, updated_at = compute_now(),
@@ -894,8 +923,9 @@ async function prepare(
         );
         await publishSubstrate(deps, tx, row, 'kubernetes.substrate.error', { message: parseError ?? '' });
       }
-      if (row && row.state !== 'deleted') await settle();
-      return {};
+      if (!row || row.state === 'deleted') return {};
+      await settle();
+      return tended(parseError ?? 'The pool policy has no substrate');
     }
     const identity = substrateIdentity(substrate);
     if (row && row.desired_state === 'deleted' && row.state !== 'deleted')
@@ -942,8 +972,9 @@ async function prepare(
         await publishSubstrate(deps, tx, row, 'kubernetes.substrate.error', { message });
       }
       await settle();
-      return {};
+      return tended(message);
     }
+    let problem: string | undefined;
     if (row.cluster_id === null) {
       try {
         const established = await establishCluster(deps, tx, pool!, substrate);
@@ -989,8 +1020,8 @@ async function prepare(
           );
           await publishSubstrate(deps, tx, row, 'kubernetes.substrate.error', { message });
         }
-        await settle();
-        return {};
+        // The flavors that could be synced were; the cluster's nodes are tended with the problem reported.
+        problem = message;
       }
       row = (await readSubstrate(tx, poolId, { lock: true }))!;
     }
@@ -1013,7 +1044,14 @@ async function prepare(
         clusters[0],
       );
     return {
-      plan: { row, pool: pool!, substrate, ...(clusters[0] ? { cluster: clusters[0] } : {}), ...(drain ? { drain } : {}) },
+      plan: {
+        row,
+        pool: pool!,
+        labelled: substrate.flavors.length > 0,
+        ...(clusters[0] ? { cluster: clusters[0] } : {}),
+        ...(drain ? { drain } : {}),
+        ...(problem !== undefined ? { problem } : {}),
+      },
     };
   });
 }
@@ -1388,6 +1426,20 @@ async function revokeToken(tx: SqlTx, tokenId: string | null): Promise<void> {
   await tx.query(`UPDATE join_tokens SET revoked_at = compute_now() WHERE id = $1 AND revoked_at IS NULL`, [tokenId]);
 }
 
+/**
+ * Whether a cluster in error (or whose substrate is) still has a control plane to tend nodes on: the provider has it,
+ * it answered once (it was ready, or its endpoint is known: a cluster whose first node pool was refused never was
+ * `ready`), and it is not being deleted.
+ */
+function clusterUsable(cluster: ClusterRow): boolean {
+  return (
+    cluster.provider_id !== null &&
+    (cluster.ready_at !== null || cluster.endpoint !== null) &&
+    cluster.desired_state === 'present' &&
+    !['deleting', 'deleted'].includes(cluster.state)
+  );
+}
+
 /** One step of one pool's substrate. Returns the next wake-up, or undefined when settled. */
 export async function reconcileSubstrate(
   deps: SubstrateDeps,
@@ -1401,10 +1453,19 @@ export async function reconcileSubstrate(
   const plan = prepared.plan;
   if (!plan) return undefined;
   const { row, cluster } = plan;
-  if (!cluster) return now() + substratePollMs;
-  if (cluster.state === 'error') {
-    await setState(deps, sql, row, { state: 'error', message: `cluster: ${cluster.message ?? 'in error'}` });
-    return undefined;
+  if (!cluster) return plan.problem !== undefined ? undefined : now() + substratePollMs;
+  const problem =
+    plan.problem ?? (cluster.state === 'error' ? `cluster: ${cluster.message ?? 'in error'}` : undefined);
+  if (problem !== undefined) {
+    // An error never halts node lifecycle on a control plane that works: a refused node pool (quota, a stockout) or
+    // a policy that cannot be converged leaves the nodes that joined where they are, so gone ones must still be
+    // retired (their bookings and quota released) and replacement Nodes must still get a join token. Only a control
+    // plane that never answered, or one being deleted, is left alone.
+    if (!clusterUsable(cluster) || !deps.substrate || !deps.pki) {
+      if (plan.problem === undefined) await setState(deps, sql, row, { state: 'error', message: problem });
+      return undefined;
+    }
+    return applyBcd(deps, sql, { ...plan, problem }, cluster, signal);
   }
   if (cluster.provider_id === null || !['ready', 'updating'].includes(cluster.state)) {
     await setState(deps, sql, row, { state: row.state === 'ready' ? 'updating' : 'provisioning' });
@@ -1442,17 +1503,24 @@ async function applyBcd(
   cluster: ClusterRow,
   signal: AbortSignal,
 ): Promise<number | undefined> {
-  const { row, pool, substrate } = plan;
+  const { row, pool } = plan;
   const agent = deps.substrate!.agent;
   const retry = () => deps.clock.now() + substrateRetryMs;
+  /** A step failed for good: `error`, after the problem the substrate already has (if any). */
+  const fail = async (message: string): Promise<undefined> => {
+    await setState(deps, sql, row, {
+      state: 'error',
+      message: (plan.problem !== undefined ? `${plan.problem}; ${message}` : message).slice(0, 500),
+    });
+    return undefined;
+  };
   let kubernetes: ProviderKubernetes;
   try {
     const account = await sql.transaction((tx) => readAccount(tx, row.provider_account_id, row.tenant_id));
     if (!account) throw new ComputeError('NOT_FOUND', `Provider account ${row.provider_account_id} not found`);
     kubernetes = (await accountKubernetes(deps, account)).kubernetes;
   } catch (error) {
-    await setState(deps, sql, row, { state: 'error', message: text(error) });
-    return undefined;
+    return fail(text(error));
   }
   const call: CallContext = {
     idempotencyKey: `substrate:${row.pool_id}`,
@@ -1469,20 +1537,14 @@ async function applyBcd(
     ),
   );
   if (!minted) return retry();
-  if ('error' in minted) {
-    await setState(deps, sql, row, { state: 'error', message: `credentials: ${minted.error}` });
-    return undefined;
-  }
+  if ('error' in minted) return fail(`credentials: ${minted.error}`);
   const api = agent.connect(minted.value, { signal });
-  const selector = substrate.flavors.length > 0 ? { [substratePoolLabel]: row.pool_id } : undefined;
+  const selector = plan.labelled ? { [substratePoolLabel]: row.pool_id } : undefined;
   const listed = await attempt(deps, row.pool_id, signal, () =>
     api.nodes(selector ? `${substratePoolLabel}=${row.pool_id}` : undefined),
   );
   if (!listed) return retry();
-  if ('error' in listed) {
-    await setState(deps, sql, row, { state: 'error', message: `nodes: ${listed.error}` });
-    return undefined;
-  }
+  if ('error' in listed) return fail(`nodes: ${listed.error}`);
   const nodes = listed.value;
   // Which pool nodes are the substrate's; those that never connected within the grace window are retired.
   await learnOwnership(sql, row.pool_id);
@@ -1506,10 +1568,7 @@ async function applyBcd(
       // (drift) is restored with a new token now, not when the old one nears its expiry.
       const secret = await attempt(deps, row.pool_id, signal, () => api.get(refOf(agent.tokenSecret)));
       if (!secret) return retry();
-      if ('error' in secret) {
-        await setState(deps, sql, row, { state: 'error', message: `token Secret: ${secret.error}` });
-        return undefined;
-      }
+      if ('error' in secret) return fail(`token Secret: ${secret.error}`);
       usable = secret.value !== undefined && secret.value.metadata.labels[substratePoolLabel] === row.pool_id;
     }
     if (!usable) {
@@ -1576,37 +1635,22 @@ async function applyBcd(
         foreignObjects(api, row.pool_id, joinToken !== undefined ? objects : [...objects, agent.tokenSecret]),
       );
       if (!foreign) return retry();
-      if ('error' in foreign) {
-        await setState(deps, sql, row, { state: 'error', message: `apply: ${foreign.error}` });
-        return undefined;
-      }
-      if (foreign.value.length > 0) {
-        await setState(deps, sql, row, {
-          state: 'error',
-          message: `The adopted cluster already has ${foreign.value.join(', ')}, not made by this substrate: better-compute never takes over or deletes objects it did not create. Remove them (or install bcd under another namespace) and the substrate applies bcd`.slice(
-            0,
-            500,
-          ),
-        });
-        return undefined;
-      }
+      if ('error' in foreign) return fail(`apply: ${foreign.error}`);
+      if (foreign.value.length > 0)
+        return fail(
+          `The adopted cluster already has ${foreign.value.join(', ')}, not made by this substrate: better-compute never takes over or deletes objects it did not create. Remove them (or install bcd under another namespace) and the substrate applies bcd`,
+        );
     }
     for (const object of objects) {
       const applied = await attempt(deps, row.pool_id, signal, () => api.apply(object));
       if (!applied) return retry();
-      if ('error' in applied) {
-        await setState(deps, sql, row, { state: 'error', message: `apply: ${applied.error}` });
-        return undefined;
-      }
+      if ('error' in applied) return fail(`apply: ${applied.error}`);
     }
   }
   if (revoke) {
     const removed = await attempt(deps, row.pool_id, signal, () => removeOwned(api, row.pool_id, agent.tokenSecret));
     if (!removed) return retry();
-    if ('error' in removed) {
-      await setState(deps, sql, row, { state: 'error', message: `token Secret: ${removed.error}` });
-      return undefined;
-    }
+    if ('error' in removed) return fail(`token Secret: ${removed.error}`);
     await sql.transaction(async (tx) => {
       await revokeToken(tx, tokenId);
       await publishSubstrate(deps, tx, row, 'kubernetes.substrate.token-revoked', {
@@ -1616,11 +1660,14 @@ async function applyBcd(
     });
   }
   const drain = plan.drain;
+  // With a problem the substrate stays in error (its message says why); its nodes were tended all the same.
   const written = await setState(deps, sql, row, {
-    state: drain ? 'updating' : 'ready',
-    message: drain
-      ? `Draining before the upgrade to ${drain.version}: waiting for ${drain.bookings} booking(s) on the substrate's nodes to end (no new bookings meanwhile)`
-      : null,
+    state: plan.problem !== undefined ? 'error' : drain ? 'updating' : 'ready',
+    message:
+      plan.problem ??
+      (drain
+        ? `Draining before the upgrade to ${drain.version}: waiting for ${drain.bookings} booking(s) on the substrate's nodes to end (no new bookings meanwhile)`
+        : null),
     fields: {
       ...(due ? { applied: true, manifests_sha256: hash } : {}),
       nodes_listed: nodes.length,
@@ -1632,8 +1679,10 @@ async function applyBcd(
   if (!written) return deps.clock.now();
   // Nodes still joining, or the cluster still converging (a resize, an upgrade): look again soon. A drain looks
   // again for its bookings now and then; a drained upgrade until the cluster runs the version. Otherwise the
-  // periodic refresh comes back.
-  if (gap > 0 || cluster.state !== 'ready') return deps.clock.now() + substratePollMs;
+  // periodic refresh comes back (as it does to a substrate in error, every 2 minutes).
+  if (gap > 0) return deps.clock.now() + substratePollMs;
+  if (plan.problem !== undefined) return drain ? deps.clock.now() + substrateUpgradeRecheckMs : undefined;
+  if (cluster.state !== 'ready') return deps.clock.now() + substratePollMs;
   if (drain) return deps.clock.now() + substrateUpgradeRecheckMs;
   return row.upgrade_version !== null ? deps.clock.now() + substratePollMs : undefined;
 }

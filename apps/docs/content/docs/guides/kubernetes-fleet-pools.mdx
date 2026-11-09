@@ -188,6 +188,12 @@ identity: a plan that changes them is blocked, so create a new pool instead. Siz
 Read the state with `kubernetesSubstrates.get({ tenantId, poolId })`: mode, cluster, state and message, Nodes listed
 and joined, and a drain's upgrade. It never returns a token or a credential.
 
+An `error` does not stop the nodes that already joined from being looked after. When the provider refuses one
+flavor's node pool (quota, a stockout), or a change to the document cannot be made in place, the substrate stays in
+`error` with the reason as its message, and each run still lists the Nodes, retires the ones that are gone, keeps a
+join token for new Nodes and re-applies bcd. It only stops at a cluster whose control plane never answered or is
+being deleted.
+
 ## Adopt a cluster you already run
 
 Use `"cluster": { "adopt": "<provider cluster id>" }` instead of `create`. The cluster is read and never created,

@@ -144,6 +144,15 @@ All notable changes to the better-compute packages are documented here. The form
 
 ### Fixed
 
+- **A fleet pool in error keeps tending its nodes** (`@better-compute/kubernetes`). A pool substrate whose cluster
+  went to `error` (one flavor's node pool refused: quota, a stockout), or whose policy could not be converged (a
+  flavor's shape changed, the account or cluster changed, the substrate no longer parsed), stopped before it looked
+  at the cluster: gone or Spot-reclaimed nodes were never retired, their bookings and quota stayed held, and
+  replacement Nodes got no join token. The substrate now stays in `error` with the reason as its message and still
+  lists the Nodes, retires gone nodes, keeps the join token and re-applies bcd, as long as the cluster's control
+  plane answered once and is not being deleted. A step that then fails is appended to the message
+  (`cluster: …; credentials: …`).
+
 - **Scripts on images without cloud-init** (`@better-compute/provider-gcp`). Compute Engine's Debian, Rocky,
   CentOS, RHEL, AlmaLinux and SUSE images do not run cloud-init, so a shell-script `userData` (`#!…`) never ran on
   them. Create now also writes it as `startup-script` metadata, wrapped to run once on the first boot as cloud-init
