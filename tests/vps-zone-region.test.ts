@@ -18,6 +18,9 @@ describe('zoneRegion', () => {
       ['eu-central-1c', 'eu-central-1'],
       ['us-west-2-lax-1a', 'us-west-2'],
       ['us-gov-west-1b', 'us-gov-west-1'],
+      // Any other name that ends in a zone letter loses it (what the rule always did).
+      ['dev-1-a', 'dev-1'],
+      ['lab-b', 'lab'],
       // Already a region, or nothing it knows: unchanged.
       ['us-central1', 'us-central1'],
       ['fsn1', 'fsn1'],

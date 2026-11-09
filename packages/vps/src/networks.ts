@@ -1137,7 +1137,8 @@ function assertCidrPrefix(client: ProviderImpl, kind: 'network' | 'subnet', cidr
 
 /**
  * A zone's region: GCE `us-central1-a` is in `us-central1` (and an AI zone such as `us-south1-ai1b` in
- * `us-south1`), AWS `us-east-1a` in `us-east-1`. A name that is neither is returned as it is.
+ * `us-south1`), AWS `us-east-1a` in `us-east-1`. Any other name loses a trailing zone letter (`dev-1-a` is in
+ * `dev-1`), and one without is returned as it is.
  */
 export function zoneRegion(zone: string): string {
   // AWS: us-east-1a, us-west-2-lax-1a (a Local Zone) → us-east-1, us-west-2.
@@ -1145,7 +1146,10 @@ export function zoneRegion(zone: string): string {
   if (aws) return aws[1]!;
   // GCP: the name without its last segment (us-central1-a, us-south1-ai1b → us-central1, us-south1).
   // Only a one-letter suffix was stripped, so an AI zone was its own region and its subnet path refused.
-  return /^([a-z]+-[a-z]+\d+)-[a-z0-9]+$/.exec(zone)?.[1] ?? zone;
+  const gcp = /^([a-z]+-[a-z]+\d+)-[a-z0-9]+$/.exec(zone);
+  if (gcp) return gcp[1]!;
+  // Any other name that ends in a zone letter (`dev-1-a`): the name without it, as before.
+  return zone.replace(/-[a-z]$/, '');
 }
 
 const requestHash = (input: CreateNetworkInput) =>
