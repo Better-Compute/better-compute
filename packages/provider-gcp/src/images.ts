@@ -191,7 +191,11 @@ export function sourceImageOf(
   return `projects/${parsed.project}/global/images/family/${parsed.name}`;
 }
 
-/** The login `ssh-keys` names for an image (the distribution's default user). */
+/**
+ * The login `ssh-keys` names for an image (the distribution's default user), read off its reference. Give it
+ * the image itself (`projects/<project>/global/images/<name>`, what `GcpImages.bootImage` and `resolve` name)
+ * rather than a family: a family's name need not say what its images are.
+ */
 export function sshUserOf(image: ImageRef): string {
   const lowered = image.toLowerCase();
   if (lowered.includes('debian')) return 'debian';
@@ -360,6 +364,24 @@ export class GcpImages implements ProviderImages {
       else items.push(toProviderImage(target.asked, target.project, image!));
     });
     return { items, missing };
+  }
+
+  /**
+   * The image a reference boots, as `projects/<project>/global/images/<name>`: the reference's own image when it
+   * names one, the family's current image when it names a family (the day's answer `resolve` gives, so what is
+   * decided from it agrees with `resolve`). Undefined when the family has no image or cannot be read: the caller
+   * then goes by the reference.
+   */
+  async bootImage(image: ImageRef, signal: AbortSignal): Promise<string | undefined> {
+    const parsed = parseImageRef(this.#config, image, this.#options);
+    if (!parsed.family) return `projects/${parsed.project}/global/images/${parsed.name}`;
+    try {
+      const { image: found } = await this.#entry(parsed.project, parsed.name, signal);
+      return found ? `projects/${parsed.project}/global/images/${found.name}` : undefined;
+    } catch (error) {
+      if (signal.aborted) throw error;
+      return undefined;
+    }
   }
 
   /** The cached answer for one family, read when missing or stale. */

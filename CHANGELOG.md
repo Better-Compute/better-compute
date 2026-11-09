@@ -174,6 +174,17 @@ All notable changes to the better-compute packages are documented here. The form
   must pass the key the server was claimed under on every call** (the reconciler and `providerAccounts.bootstrap`
   already do). `providerConformanceCases()` now calls `get`, `delete`, `power` and `reinstall` under the key the
   machine was created with.
+- **Scripts and SSH keys on images whose reference does not say what they are** (`@better-compute/provider-gcp`).
+  Whether an image runs cloud-init, and the user its SSH keys log in as, were guessed from words in the image
+  reference. A Debian-based family named without the distribution (`common-cpu`, `pytorch-latest-gpu`),
+  `oracle-linux-*` and custom families got no `startup-script`, so a `#!` user data never ran there; and a create by
+  family could install the keys for another user than `images.resolve` reported for that family. Create now reads
+  the image a family resolves to (the day's cached answer `resolve` gives; only when a key or a script needs it) and
+  decides both from that image, so the login user is the one `resolve` reports. A `#!` user data is sent as
+  `startup-script` to every image except Canonical's Ubuntu images, and the wrapper (`firstBootScript`) is safe on
+  an image that does run cloud-init: it runs nothing where cloud-init has taken the script. `runsCloudInit(image)`
+  now answers `true` only for an image known to run cloud-init (a `projects/ubuntu-os-*/global/images/…`
+  reference); new `GcpImages.bootImage(image, signal)`.
 
 ## 0.3.0 (2026-10-20)
 

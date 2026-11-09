@@ -96,6 +96,7 @@ export class GcpCompute implements ProviderImpl {
   readonly networks: ProviderNetworks;
   /** (U-03) Image families resolved through `getFromFamily`, cached a day (images.ts). */
   readonly images: ProviderImages;
+  readonly #images: GcpImages;
   readonly #prices: ReturnType<typeof catalogReader> | undefined;
   /** Provider costs from the BigQuery billing export (D10); set only when the account names one. */
   costs?: ProviderImpl['costs'];
@@ -115,7 +116,8 @@ export class GcpCompute implements ProviderImpl {
     this.options = options;
     this.client = client;
     this.networks = new GcpNetworks(client, options);
-    this.images = new GcpImages(client, config, context, options);
+    this.#images = new GcpImages(client, config, context, options);
+    this.images = this.#images;
   }
 
   // ------------------------------------------------------------------------------- shared
@@ -421,17 +423,27 @@ export class GcpCompute implements ProviderImpl {
     const diskGiB = this.config.diskGiB ?? 100;
     const diskType = await this.bootDiskType(zone, machineType, diskGiB, context.signal);
     const nicType = nicTypeOf(machineType);
+    // Who logs in and whether cloud-init runs are read off the image the VM boots, not off the words of
+    // the reference: a family is looked up (the day's answer `images.resolve` gives, so the login user
+    // installed here is the one resolve reported), and only when a key or a script needs the answer. A
+    // family that cannot be read is judged by its reference.
+    const script = request.userData.startsWith('#!');
+    const bootImage =
+      request.sshKeys?.length || script
+        ? ((await this.#images.bootImage(request.image, context.signal)) ?? sourceImage)
+        : sourceImage;
     // The guest agent of every Compute Engine image installs `ssh-keys`; cloud-init (which reads
     // user-data) only runs on some images, so the keys go in both.
     const metadata = [{ key: 'user-data', value: request.userData }];
     if (request.sshKeys?.length)
       metadata.push({
         key: 'ssh-keys',
-        value: request.sshKeys.map((key) => `${sshUserOf(request.image)}:${key.trim()}`).join('\n'),
+        value: request.sshKeys.map((key) => `${sshUserOf(bootImage)}:${key.trim()}`).join('\n'),
       });
-    // A shell script on an image without cloud-init would never run: the guest agent runs it
-    // instead, once, as cloud-init would have.
-    if (request.userData.startsWith('#!') && !runsCloudInit(request.image))
+    // A shell script on an image without cloud-init would never run, so the guest agent gets it too, as
+    // a startup script that runs it once unless cloud-init has taken it. Only an image known to run
+    // cloud-init goes without.
+    if (script && !runsCloudInit(bootImage))
       metadata.push({ key: 'startup-script', value: firstBootScript(request.userData) });
     const body: Record<string, unknown> = {
       name,
@@ -892,27 +904,74 @@ export function parseDiscoverLabel(
 }
 
 /**
- * Whether an image runs cloud-init, which reads `user-data`. Compute Engine's Debian and
- * Enterprise Linux (Rocky, CentOS, RHEL, AlmaLinux) and SUSE images do not; their guest agent
- * runs `startup-script` instead.
+ * Whether an image is known to run cloud-init, which reads `user-data` and runs a script in it: the
+ * images of Canonical's projects, named as `projects/<project>/global/images/[family/]<name>` (or a
+ * compute URL of that). Nothing is assumed of any other image. Compute Engine's Debian, Enterprise
+ * Linux, Oracle Linux and SUSE images have no cloud-init, Deep Learning VM and custom images may or
+ * may not, and neither a family's name nor an image's says which: those get the script as a
+ * `startup-script` too (`firstBootScript`), which finds out on the machine.
  */
 export function runsCloudInit(image: ImageRef): boolean {
-  return !/debian|rocky|centos|rhel|almalinux|sles|suse/.test(image.toLowerCase());
+  return /(?:^|\/)projects\/ubuntu-os-(?:cloud|pro-cloud|accelerator-images)\/global\/images\//.test(
+    image,
+  );
 }
 
 /**
- * A shell-script user data as a `startup-script`. The guest agent runs a startup script on every
- * boot; the wrapper runs the user data on the first boot only, like cloud-init, and keeps its exit
- * status. The script travels base64-encoded so no heredoc delimiter in it can end it early.
+ * A shell-script user data as a `startup-script`, safe to send to any image. The guest agent runs a
+ * startup script on every boot; the wrapper runs the user data on the first boot only, like
+ * cloud-init, and keeps its exit status. Where the image has cloud-init and cloud-init has taken the
+ * script (it writes a script user data under `/var/lib/cloud/instance/scripts` in its network stage
+ * and runs it in its final stage), the wrapper runs nothing. It looks once cloud-init says it is
+ * disabled or finished, or its network stage is over, waiting at most five minutes for that; the
+ * guest agent starts startup scripts after the network is up, which is after that stage. The script
+ * travels base64-encoded so no heredoc delimiter in it can end it early.
  */
 export function firstBootScript(userData: string): string {
   const encoded = Buffer.from(userData, 'utf8').toString('base64');
   return [
     '#!/bin/sh',
-    '# better-compute: the instance user data, run once (this image has no cloud-init).',
+    '# better-compute: the instance user data, run once on the first boot. Where the image runs',
+    '# cloud-init, cloud-init runs it and this script leaves it alone; where it does not, this does.',
     'dir=/var/lib/better-compute',
+    'cloud=/var/lib/cloud/instance',
+    'run=/run/cloud-init',
+    'etc=/etc/cloud',
     '[ -e "$dir/user-data.done" ] && exit 0',
     'mkdir -p "$dir" && chmod 0700 "$dir"',
+    '# cloud-init writes a script user data under scripts/ and runs it in its final stage.',
+    'taken() {',
+    '  for part in "$cloud"/scripts/*; do',
+    '    [ -f "$part" ] && return 0',
+    '  done',
+    '  return 1',
+    '}',
+    '# cloud-init is off, or its network stage (which reads the user data) is over.',
+    'settled() {',
+    '  [ -e "$etc/cloud-init.disabled" ] && return 0',
+    '  [ -e "$run/disabled" ] && return 0',
+    '  [ -r "$run/status.json" ] &&',
+    `    tr -d ' \\n' < "$run/status.json" | grep -q '"init":{[^}]*"finished":[0-9]' &&`,
+    '    return 0',
+    '  case "$(cloud-init status 2> /dev/null)" in',
+    `    *running* | *'not run'* | *'not started'*) return 1 ;;`,
+    '  esac',
+    '  return 0',
+    '}',
+    'if command -v cloud-init > /dev/null 2>&1; then',
+    '  tries=0',
+    '  while :; do',
+    '    settled && over=1 || over=0',
+    '    if taken; then',
+    '      touch "$dir/user-data.done"',
+    '      exit 0',
+    '    fi',
+    '    [ "$over" = 1 ] && break',
+    '    tries=$((tries + 1))',
+    '    [ "$tries" -gt 150 ] && break',
+    '    sleep 2',
+    '  done',
+    'fi',
     `echo '${encoded}' | base64 -d > "$dir/user-data"`,
     'chmod 0700 "$dir/user-data"',
     '"$dir/user-data"',
@@ -922,4 +981,3 @@ export function firstBootScript(userData: string): string {
     '',
   ].join('\n');
 }
-
