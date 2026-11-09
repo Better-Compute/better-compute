@@ -213,6 +213,11 @@ All notable changes to the better-compute packages are documented here. The form
   now reserve the file (created exclusively, mode 0600) before the call, refuse a taken or uncreatable path while
   nothing has changed (`ALREADY_EXISTS`, `FILE_NOT_WRITABLE`), and remove the file if the call fails.
   `usage export --out` reserves its file the same way.
+- **An upgrade by the install script keeps the operator's top-level `config.toml` keys** (`@better-compute/cli`).
+  A script from `daemon install-script` run on an installed host rewrote `/etc/bcd/config.toml` with its own keys,
+  two pins and the sections of the old file; every other top-level key was dropped, so `gateway_server_name`,
+  `data_dir` and `socket_path` silently went back to their defaults. The script now carries over every top-level
+  key it does not set itself, as written, never a key twice. Regenerate your install scripts to get the fix.
 - **BMC credential rotation no longer deletes the enrollment secret** (`@better-compute/metal`).
   `metal.rotateBmcCredential` purged every superseded credential from the secret store, including the one the
   machine was enrolled with: two machines enrolled with one rack-wide `secret://` broke each other on the first

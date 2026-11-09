@@ -666,6 +666,78 @@ describe('daemon install-script', () => {
     expect(await run([...base, '--privileged-plugins', 'kata;rm'])).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
   });
 
+  it('keeps every top-level setting the script does not set itself on upgrade', async () => {
+    const shell = posixShell();
+    if (!shell) return;
+    const root = (await mkdtemp(join(tmpdir(), 'bc-install-root-'))).replace(/\\/g, '/');
+    const apply = async (extra: string[]) => {
+      const script = (await run([...base, ...extra])).stdout;
+      const block = script
+        .slice(script.indexOf("cat > /etc/bcd/config.toml.new"), script.indexOf('cat > /etc/bcd/join-encryption.jwk.new'))
+        .split('/etc/')
+        .join(`${root}/etc/`);
+      const file = join(scratch, 'top-level-check.sh');
+      await writeFile(file, `set -eu\ncommand -v chmod >/dev/null 2>&1 || chmod() { :; }\nmkdir -p ${root}/etc/bcd\n${block}`);
+      const result = spawnSync(shell, [file], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${dirname(shell)}${delimiter}${process.env.PATH ?? ''}` },
+      });
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
+      return readFile(`${root}/etc/bcd/config.toml`, 'utf8');
+    };
+    const count = (config: string, key: string) => (config.match(new RegExp(`^\\s*${key}\\s*=`, 'gm')) ?? []).length;
+    const topLevel = (config: string) => config.slice(0, config.search(/^\s*\[/m) < 0 ? undefined : config.search(/^\s*\[/m));
+    const fresh = await apply([]);
+    // What an operator added by hand since the install, and what an older script wrote (other pins, another gateway).
+    const pin = 'ab'.repeat(32);
+    await writeFile(
+      `${root}/etc/bcd/config.toml`,
+      [
+        '# the operator edited this file',
+        'gateway_url = "https://old-gateway.example.com:8443"',
+        'site = "site_old"',
+        '  gateway_server_name = "gw.internal.example"',
+        'data_dir="/srv/bcd"',
+        'socket_path = "/run/bcd/custom.sock"',
+        `approver_set_sha256 = "${pin}"`,
+        'serving_ca_spki_pin = "sha256/old"',
+        '',
+        '[imds]',
+        'listen = "169.254.169.254:80"',
+        'data_dir = "/a/section/key/not/a/top-level/one"',
+        '',
+      ].join('\n'),
+    );
+    let config = await apply([]);
+    // Carried over, as written.
+    expect(topLevel(config)).toContain('  gateway_server_name = "gw.internal.example"\n');
+    expect(topLevel(config)).toContain('data_dir="/srv/bcd"\n');
+    expect(topLevel(config)).toContain('socket_path = "/run/bcd/custom.sock"\n');
+    expect(topLevel(config)).toContain(`approver_set_sha256 = "${pin}"\n`);
+    // What the script sets is the script's: once, with the new value.
+    for (const key of ['gateway_url', 'site', 'serving_ca_spki_pin', 'join_signing_key_pin', 'join_encryption_key_pin'])
+      expect(count(topLevel(config), key), key).toBe(1);
+    expect(config).not.toContain('old-gateway.example.com');
+    expect(config).not.toContain('site_old');
+    expect(config).not.toContain('sha256/old');
+    expect(topLevel(config)).toContain(fresh.split('\n').find((line) => line.startsWith('gateway_url'))!);
+    // The section and its own keys are untouched, and stay in the section.
+    expect(config).toContain('[imds]\nlisten = "169.254.169.254:80"\ndata_dir = "/a/section/key/not/a/top-level/one"\n');
+    expect(count(topLevel(config), 'data_dir')).toBe(1);
+    // Running it again adds nothing twice.
+    config = await apply([]);
+    for (const key of ['gateway_server_name', 'socket_path', 'approver_set_sha256', 'gateway_url'])
+      expect(count(topLevel(config), key), key).toBe(1);
+    expect(count(config, 'data_dir')).toBe(2);
+    // A flag replaces the carried value.
+    const other = 'ef'.repeat(32);
+    config = await apply(['--approver-set-sha256', other]);
+    expect(count(config, 'approver_set_sha256')).toBe(1);
+    expect(config).toContain(`approver_set_sha256 = "${other}"`);
+    expect(topLevel(config)).toContain('socket_path = "/run/bcd/custom.sock"\n');
+  });
+
   it('runs bcd node unprivileged beside a root bcd helper with --unprivileged, and keeps the mode on upgrade', async () => {
     const shell = posixShell();
     if (!shell) return;

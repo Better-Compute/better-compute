@@ -556,25 +556,18 @@ mv -f /usr/local/bin/bcd.new /usr/local/bin/bcd
 ${options.pluginInstalls?.length ? renderPluginInstalls(options.pluginInstalls) : ''}
 cat > /etc/bcd/config.toml.new <<'BCD_CONFIG'
 ${renderBcdConfig(options)}BCD_CONFIG
-${
-  options.approverSetSha256
-    ? ''
-    : `# An upgrade keeps the approver-set pin this node was installed with (a script without --approver-set-sha256
-# must not drop it).
+# An upgrade keeps every top-level setting this script does not set itself: what the operator added by hand
+# (gateway_server_name, data_dir, socket_path...) and the pins of an earlier install this run has no flag for
+# (approver_set_sha256, command_root_sha256: dropping one would stop bcd checking approvals or signatures).
+# What the script sets above wins, and no key is written twice (bcd refuses a duplicate key).
 if [ -f /etc/bcd/config.toml ]; then
-  sed -n '/^[[:space:]]*\\[/q; /^[[:space:]]*approver_set_sha256[[:space:]]*=/p' /etc/bcd/config.toml >> /etc/bcd/config.toml.new
+  sed -n '/^[[:space:]]*\\[/q; /^[[:space:]]*[A-Za-z0-9_-][A-Za-z0-9_-]*[[:space:]]*=/p' /etc/bcd/config.toml |
+    while IFS= read -r LINE; do
+      KEY=$(printf '%s\\n' "$LINE" | sed 's/^[[:space:]]*\\([A-Za-z0-9_-]*\\).*$/\\1/')
+      grep -Eq "^[[:space:]]*$KEY[[:space:]]*=" /etc/bcd/config.toml.new || printf '%s\\n' "$LINE" >> /etc/bcd/config.toml.new
+    done
 fi
-`
-}${
-  options.commandRootSha256?.length
-    ? ''
-    : `# An upgrade keeps the command-root pins this node was installed with (a script without --command-root-sha256
-# must not drop them: bcd helper would stop checking host units' signatures).
-if [ -f /etc/bcd/config.toml ]; then
-  sed -n '/^[[:space:]]*\\[/q; /^[[:space:]]*command_root_sha256[[:space:]]*=/p' /etc/bcd/config.toml >> /etc/bcd/config.toml.new
-fi
-`
-}if [ -f /etc/bcd/config.toml ] && grep -q '^[[:space:]]*\\[' /etc/bcd/config.toml; then
+if [ -f /etc/bcd/config.toml ] && grep -q '^[[:space:]]*\\[' /etc/bcd/config.toml; then
   # An upgrade keeps the sections the operator configured ([plugins], [boot], [imds]..., headers indented or not).
   sed -n '/^[[:space:]]*\\[/,$p' /etc/bcd/config.toml >> /etc/bcd/config.toml.new
 fi
