@@ -52,6 +52,7 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
         ...action('drivers', 'read'),
         ...action('billing', 'read', 'manage'),
         ...action('usage', 'read', 'manage'),
+        'compute:instances:read',
       ],
     },
     [`${p}tenant`]: {
@@ -167,6 +168,11 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
         imageId: 'string',
         imageVerified: 'boolean',
         projectId: 'string',
+        poolId: 'string',
+        flavor: 'string',
+        region: 'string',
+        provider: 'string',
+        labelsTruncated: 'boolean',
       },
     },
     [`${p}image`]: {

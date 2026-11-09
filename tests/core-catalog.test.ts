@@ -28,6 +28,7 @@ const planActions: Record<string, string[]> = {
     ...a('drivers', 'read'),
     ...a('billing', 'read', 'manage'),
     ...a('usage', 'read', 'manage'),
+    'compute:instances:read',
   ],
   'compute-tenant': [
     ...a('sites', 'read', 'manage'),
@@ -508,6 +509,8 @@ describe('apiSurface (§9.2)', () => {
       'instances.detach': 'v1.0',
       'instances.reboot': 'v1.0',
       'instances.estimate': 'v1.0',
+      'instances.update': 'v1.0',
+      'instances.issued': 'v1.0',
       'images.resolve': 'v1.0',
     };
     for (const [path, phase] of Object.entries(later))

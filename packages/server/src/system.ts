@@ -1,5 +1,6 @@
 import {
   defineMethod,
+  describedBy,
   fleetResourceId,
   manifest,
   type Caller,
@@ -98,7 +99,7 @@ export function systemApi(host: {
         action: 'compute:fleet:admin',
         kind: 'read',
         resource: () => ({ type: 'fleet', id: fleetResourceId }),
-        validate: Object.assign(parseWorkQueueStats, { jsonSchema: workQueueStatsSchema }),
+        validate: describedBy(workQueueStatsSchema, parseWorkQueueStats),
         handler: (context, input) => workQueueStats(context.sql, input),
       }),
     },
