@@ -12,6 +12,12 @@ import type { RevocationSet } from './revocation.js';
  * needs); after that it re-reads a window of `lookbackMs` before the newest revocation it saw, every
  * `intervalMs`, so transactions that commit out of `compute_now()` order are still caught.
  * `RevocationSet.add` is idempotent, so the overlap costs nothing.
+ *
+ * The window is a guess about how late a commit can be: `revoked_at` is the revoking transaction's start
+ * time, so one that commits more than `lookbackMs` after a newer revocation was already read (a long
+ * transaction, a lagging replica) falls behind the window and would never be learned until a restart.
+ * Every `fullReloadMs` the feed therefore reads the whole unexpired set again, which bounds how long any
+ * revocation can stay unseen whatever its timing.
  */
 export interface RevocationFeedOptions {
   /** The compute database (an executor; each poll is one statement). */
@@ -22,6 +28,8 @@ export interface RevocationFeedOptions {
   intervalMs?: number;
   /** Re-read window before the newest revocation seen (default 60 000 ms). */
   lookbackMs?: number;
+  /** How often the whole unexpired set is read again (default 300 000 ms; 0 never). */
+  fullReloadMs?: number;
   /** Called with poll failures; the feed keeps polling. */
   onError?(error: unknown): void;
   /** Called after a poll that learned something new. */
@@ -50,14 +58,20 @@ const ms = (value: Date | string) => (value instanceof Date ? value : new Date(v
 export function createRevocationFeed(options: RevocationFeedOptions): RevocationFeed {
   const intervalMs = options.intervalMs ?? 1_000;
   const lookbackMs = options.lookbackMs ?? 60_000;
+  const fullReloadMs = options.fullReloadMs ?? 300_000;
+  const wallNow = () => options.clock?.now() ?? Date.now();
+  let lastFullAt: number | undefined;
   let newest: number | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running = false;
   let inFlight: Promise<number> | undefined;
 
   async function pollOnce(): Promise<number> {
+    const full =
+      newest === undefined ||
+      (fullReloadMs > 0 && (lastFullAt === undefined || wallNow() - lastFullAt >= fullReloadMs));
     const { rows } =
-      newest === undefined
+      full
         ? await options.sql.query<RevokedRow>(
             `SELECT serial, node_id, revoked_at, not_after, revocation_reason FROM node_certs
               WHERE revoked_at IS NOT NULL AND not_after > compute_now()`,
@@ -65,7 +79,7 @@ export function createRevocationFeed(options: RevocationFeedOptions): Revocation
         : await options.sql.query<RevokedRow>(
             `SELECT serial, node_id, revoked_at, not_after, revocation_reason FROM node_certs
               WHERE revoked_at >= $1 AND not_after > compute_now()`,
-            [new Date(newest - lookbackMs)],
+            [new Date((newest ?? 0) - lookbackMs)],
           );
     const learned: { serial: string; nodeId: string; reason?: string }[] = [];
     let latest = newest ?? 0;
@@ -90,6 +104,7 @@ export function createRevocationFeed(options: RevocationFeedOptions): Revocation
       latest = ms(now.rows[0]!.now);
     }
     newest = latest;
+    if (full) lastFullAt = wallNow();
     options.revocations.prune(options.clock?.now() ?? Date.now());
     if (learned.length > 0) options.onRevoked?.(learned);
     return learned.length;

@@ -96,6 +96,53 @@ describe('revocation feed', () => {
     expect(revocations.has(b)).toBe(true);
   });
 
+  it('learns a revocation that commits behind the lookback at the next full reload', async () => {
+    const revocations = createRevocationSet();
+    let clock = now + 20_000;
+    await setSimClock(db, clock);
+    const feed = createRevocationFeed({
+      sql: db,
+      revocations,
+      lookbackMs: 60_000,
+      fullReloadMs: 300_000,
+      clock: { now: () => clock },
+    });
+    await feed.poll();
+    const recent = await cert();
+    const late = await cert();
+    clock += 200_000;
+    await setSimClock(db, clock);
+    await revoke(recent, clock);
+    expect(await feed.poll()).toBe(1);
+    // A long transaction: it took its time 150 s ago, well behind the 60 s window, and commits now.
+    await revoke(late, clock - 150_000);
+    expect(await feed.poll()).toBe(0);
+    expect(revocations.has(late)).toBe(false);
+    // The windowed polls never see it; the full reload does, within fullReloadMs of the last one.
+    clock += 100_001;
+    await setSimClock(db, clock);
+    expect(await feed.poll()).toBe(1);
+    expect(revocations.has(late)).toBe(true);
+    // With full reloads off it is the old behaviour: only the window.
+    const windowOnly = createRevocationSet();
+    const noReload = createRevocationFeed({
+      sql: db,
+      revocations: windowOnly,
+      lookbackMs: 60_000,
+      fullReloadMs: 0,
+      clock: { now: () => clock },
+    });
+    await noReload.poll();
+    const missed = await cert();
+    clock += 600_000;
+    await setSimClock(db, clock);
+    await revoke(await cert(), clock);
+    await noReload.poll();
+    await revoke(missed, clock - 400_000);
+    expect(await noReload.poll()).toBe(0);
+    expect(windowOnly.has(missed)).toBe(false);
+  });
+
   it('keeps polling through failures and backs off; a running feed closes the gap within a tick', async () => {
     const revocations = createRevocationSet();
     let broken = true;
