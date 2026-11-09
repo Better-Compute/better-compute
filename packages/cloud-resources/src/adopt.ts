@@ -351,6 +351,20 @@ export async function releaseResource(
       'INVALID_STATE',
       `Resources still live in ${row.id}; delete them before releasing it`,
     );
+  await markReleased(deps, tx, row);
+  return resourceViewOf(tx, row.id);
+}
+
+/**
+ * Marks a resource to be released and wakes the reconciler; the caller holds the row's lock and has checked that
+ * nothing lives in it. `reason` (`tenant-deleted`) goes on the `releasing` event.
+ */
+export async function markReleased(
+  deps: CloudResourcesDeps,
+  tx: SqlTx,
+  row: { id: string; tenant_id: string; kind: string },
+  reason?: string,
+): Promise<void> {
   await tx.query(
     `UPDATE cloud_resources
         SET desired_state = 'released', message = NULL, version = version + 1, updated_at = compute_now()
@@ -358,6 +372,5 @@ export async function releaseResource(
     [row.id],
   );
   await deps.work.enqueue(tx, resourcesWork, row.id);
-  await publish(deps, tx, row, 'releasing');
-  return resourceViewOf(tx, row.id);
+  await publish(deps, tx, row, 'releasing', reason !== undefined ? { reason } : {});
 }

@@ -144,6 +144,11 @@ All notable changes to the better-compute packages are documented here. The form
 
 ### Fixed
 
+- **Deleting a tenant no longer destroys what it adopted** (`@better-compute/cloud-resources`). The tenant teardown
+  marked every live cloud resource for deletion, so a resource the tenant had adopted on its own provider account (a
+  production database that existed before better-compute) was deleted at the provider. Adopted resources are now
+  released (ownership labels removed, left running; `cloud.resource.releasing` with `reason: 'tenant-deleted'`);
+  resources better-compute created are deleted as before, those created inside an adopted resource first.
 - **Scripts on images without cloud-init** (`@better-compute/provider-gcp`). Compute Engine's Debian, Rocky,
   CentOS, RHEL, AlmaLinux and SUSE images do not run cloud-init, so a shell-script `userData` (`#!…`) never ran on
   them. Create now also writes it as `startup-script` metadata, wrapped to run once on the first boot as cloud-init

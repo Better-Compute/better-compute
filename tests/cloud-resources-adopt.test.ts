@@ -323,3 +323,79 @@ describe('cloudResources.adopt: finding the resource', () => {
     expect((await app(mine.id, 'legacy-app')).state).toBe('pending');
   });
 });
+
+// Last: it tears down everything acme has.
+describe('cloud-resources tenantDeleted: adopted resources', () => {
+  it('releases what the tenant adopted (left running at the provider) and deletes what it created', async () => {
+    const legacy = world.cloud.seed({
+      kind: 'fake.database',
+      name: 'production',
+      spec,
+      owner: 'none',
+      password: 'pw-production-abcdefgh',
+    });
+    const adopted = await adopt(legacy.id, { name: 'production', idempotencyKey: 'production' });
+    await world.until(async () => (await get(adopted.id)).state === 'ready');
+    // A user made through better-compute in the adopted database, and an app of its own: both created here.
+    const user = await world.api.cloudResources.create(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: world.acmePoolId,
+      kind: 'fake.database-user',
+      name: 'production-user',
+      spec: { user: 'app' },
+      parentId: adopted.id,
+      idempotencyKey: 'production-user',
+    });
+    const app = await world.api.cloudResources.create(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: world.acmePoolId,
+      kind: 'fake.app',
+      name: 'teardown-app',
+      spec: { image: 'nginx' },
+      idempotencyKey: 'teardown-app',
+    });
+    await world.until(
+      async () => (await get(user.id)).state === 'ready' && (await get(app.id)).state === 'ready',
+    );
+    const userProviderId = (await get(user.id)).providerId!;
+    const appProviderId = (await get(app.id)).providerId!;
+
+    const hook = world.module.tenantDeleted!;
+    const context = world.fixture.compute.context;
+    let answer = await hook(context, world.acmeTenant);
+    expect(answer).toBe('SYNC_AGAIN');
+    for (let round = 0; round < 20 && answer !== 'DONE'; round++) {
+      await world.tick();
+      answer = await hook(context, world.acmeTenant);
+    }
+    expect(answer).toBe('DONE');
+
+    // The adopted database is let go: never deleted, its ownership labels taken off, still running.
+    expect((await get(adopted.id)).state).toBe('released');
+    expect(world.cloud.calls).not.toContain(`delete fake.database ${legacy.id}`);
+    expect(world.cloud.calls).toContain(`release fake.database ${legacy.id}`);
+    expect(legacy.deleted).toBe(false);
+    expect(legacy.owner).toBe('none');
+    expect(Object.keys(legacy.labels).some((label) => label.startsWith('better-compute-'))).toBe(
+      false,
+    );
+    // What better-compute created is deleted, the user inside the adopted database included (before the release).
+    expect((await get(user.id)).state).toBe('deleted');
+    expect((await get(app.id)).state).toBe('deleted');
+    expect(world.cloud.resources.get(userProviderId)!.deleted).toBe(true);
+    expect(world.cloud.resources.get(appProviderId)!.deleted).toBe(true);
+    expect(world.cloud.calls.indexOf(`delete fake.database-user ${userProviderId}`)).toBeLessThan(
+      world.cloud.calls.indexOf(`release fake.database ${legacy.id}`),
+    );
+    const releasing = (await world.events('cloud.resource.releasing')).filter(
+      (event) => event.data.resourceId === adopted.id,
+    );
+    expect(releasing.map((event) => event.data.reason)).toEqual(['tenant-deleted']);
+    // The release never showed as a failure while the user was still being deleted.
+    expect(
+      (await world.events('cloud.resource.failed')).filter(
+        (event) => event.data.resourceId === adopted.id,
+      ),
+    ).toEqual([]);
+  });
+});
