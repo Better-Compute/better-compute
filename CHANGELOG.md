@@ -169,6 +169,12 @@ All notable changes to the better-compute packages are documented here. The form
   rotated the secret every call answered `AuthFailure` until the process restarted. `AuthFailure`,
   `InvalidClientTokenId` and `UnrecognizedClientException` (now `UNAUTHENTICATED`) re-read the credentials and
   retry once, and only when the source then gives a different key.
+- **`RequestExpired` from expired temporary credentials recovers** (`@better-compute/aws-core`,
+  `@better-compute/aws`). `RequestExpired` was handled only as clock skew: one retry with the same credentials,
+  then `UNAUTHENTICATED` until the local clock reached the refresh point. When the measured skew is under a minute,
+  or the clock-corrected retry is refused again, the credentials are now read again and the request retried once
+  with the new ones. Each call makes at most one clock correction and one credential re-read. The platform
+  transport of `@better-compute/aws` gets the same retries, including the one for a refused (rotated) key.
 
 ## 0.3.0 (2026-10-20)
 

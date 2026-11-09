@@ -156,6 +156,11 @@ interface WireResponse {
 }
 
 const skewCodes: ReadonlySet<string> = new Set(['RequestTimeTooSkewed', 'RequestExpired']);
+/**
+ * A measured clock difference below this does not explain a refused request time (AWS allows
+ * minutes): the credentials are tried first.
+ */
+const skewToleranceMs = 60_000;
 const expiredTokenCodes: ReadonlySet<string> = new Set(['ExpiredToken', 'ExpiredTokenException']);
 /**
  * The key itself was refused. A long-term key is cached until `invalidate()`, so after an operator
@@ -224,11 +229,37 @@ class Transport {
       const skewed =
         skewCodes.has(code) ||
         (code === 'InvalidSignatureException' && /expired/i.test(parsed.message ?? ''));
-      if (skewed && !skewRetried) {
+      /**
+       * Reads the credentials again, once per call. True when the source then gives a key it did
+       * not give before (a refreshed session, a rotated secret): the same key would be refused again.
+       */
+      const reread = async (): Promise<boolean> => {
+        if (tokenRetried || !source.invalidate) return false;
+        tokenRetried = true;
+        source.invalidate();
+        const fresh = await source.credentials({ signal, clock: this.clock });
+        return !sameCredentials(fresh, credentials);
+      };
+      if (skewed) {
         const serverDate = Date.parse(response.headers.get('date') ?? '');
-        if (Number.isFinite(serverDate)) {
+        const measured = Number.isFinite(serverDate);
+        // How far the time this request was signed with is from the server's.
+        const drift = measured ? Math.abs(serverDate - (this.clock.now() + this.#skewMs)) : 0;
+        const correct = (): void => {
           skewRetried = true;
           this.#skewMs = serverDate - this.clock.now();
+        };
+        // A clock that is really off: sign with the server's time and retry.
+        if (!skewRetried && measured && drift >= skewToleranceMs) {
+          correct();
+          continue;
+        }
+        // The clock is right, or the corrected retry was refused too: these codes also mean expired
+        // temporary credentials (EC2 answers RequestExpired for them), which no clock fixes.
+        if (await reread()) continue;
+        // No other credentials to try: the small correction, once.
+        if (!skewRetried && measured) {
+          correct();
           continue;
         }
       }
@@ -237,14 +268,7 @@ class Transport {
         source.invalidate();
         continue;
       }
-      if (rejectedKeyCodes.has(code) && !tokenRetried && source.invalidate) {
-        tokenRetried = true;
-        source.invalidate();
-        // Retried only with a key the source did not give before (a rotated secret): the same key
-        // would be refused again.
-        const fresh = await source.credentials({ signal, clock: this.clock });
-        if (!sameCredentials(fresh, credentials)) continue;
-      }
+      if (rejectedKeyCodes.has(code) && (await reread())) continue;
       throw mapAwsError({ ...parsed, service: this.options.service });
     }
   }

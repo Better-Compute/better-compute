@@ -216,6 +216,17 @@ export interface Transport {
 
 const skewCodes = new Set(['RequestTimeTooSkewed', 'RequestExpired']);
 const expiredTokenCodes = new Set(['ExpiredToken', 'ExpiredTokenException']);
+const rejectedKeyCodes = new Set(['AuthFailure', 'InvalidClientTokenId', 'UnrecognizedClientException']);
+/** A measured clock difference below this does not explain a refused request time. */
+const skewToleranceMs = 60_000;
+
+function sameCredentials(a: AwsCredentials, b: AwsCredentials): boolean {
+  return (
+    a.accessKeyId === b.accessKeyId &&
+    a.secretAccessKey === b.secretAccessKey &&
+    a.sessionToken === b.sessionToken
+  );
+}
 
 export function createTransport(options: TransportOptions): Transport {
   const region = assertRegion(options.region);
@@ -300,11 +311,35 @@ export function createTransport(options: TransportOptions): Transport {
       const skewed =
         skewCodes.has(code) ||
         (code === 'InvalidSignatureException' && /expired/i.test(parsed.message ?? ''));
-      if (skewed && !retriedSkew) {
+      // The same two bounded retries as aws-core's transport: one clock correction and one re-read
+      // of the credentials per call.
+      const refused = creds;
+      /** Reads the credentials again, once per call; true when the source then gives another key. */
+      const reread = async (): Promise<boolean> => {
+        if (retriedToken || !options.credentials.invalidate) return false;
+        retriedToken = true;
+        options.credentials.invalidate();
+        creds = await credentials(input.signal);
+        return !sameCredentials(creds, refused);
+      };
+      if (skewed) {
         const serverDate = Date.parse(response.headers.get('date') ?? '');
-        if (Number.isFinite(serverDate)) {
+        const measured = Number.isFinite(serverDate);
+        const drift = measured ? Math.abs(serverDate - (clock.now() + skewMs)) : 0;
+        const correct = (): void => {
           skewMs = serverDate - clock.now();
           retriedSkew = true;
+        };
+        // A clock that is really off: sign with the server's time and retry.
+        if (!retriedSkew && measured && drift >= skewToleranceMs) {
+          correct();
+          continue;
+        }
+        // The clock is right, or the corrected retry was refused too: these codes also mean expired
+        // temporary credentials, which no clock fixes.
+        if (await reread()) continue;
+        if (!retriedSkew && measured) {
+          correct();
           continue;
         }
       }
@@ -314,6 +349,8 @@ export function createTransport(options: TransportOptions): Transport {
         retriedToken = true;
         continue;
       }
+      // A refused key: a static secret rotated in place is read again, and retried if it changed.
+      if (rejectedKeyCodes.has(code) && (await reread())) continue;
       options.log?.debug('aws request failed', {
         service: input.service,
         operation: input.operation,

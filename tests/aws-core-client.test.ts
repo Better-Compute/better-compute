@@ -284,6 +284,76 @@ describe('aws-core clients', () => {
     expect(JSON.stringify([error.message, error.details])).not.toMatch(/AKIA|secret/);
   });
 
+  /** A source of temporary credentials that mints the next generation after each invalidate. */
+  function sessions() {
+    const state = { minted: 0, invalidated: 0 };
+    const source = cachedCredentials({
+      kind: 'test',
+      credentials: async () => ({
+        accessKeyId: `ASIAGEN${(state.minted += 1)}XXXXXXXXXXXX`,
+        secretAccessKey: 's',
+        sessionToken: 't',
+      }),
+      invalidate: () => void (state.invalidated += 1),
+    });
+    return { state, source };
+  }
+  /** EC2 answering RequestExpired to the first session, with a Date header `aheadMs` from now. */
+  function expiring(aheadMs: number, accepts = 'ASIAGEN2') {
+    const seen: string[] = [];
+    const fetchImpl = (async (_url: unknown, init: { headers: Record<string, string> }) => {
+      const auth = init.headers.authorization ?? '';
+      seen.push(`${/ASIAGEN\d/.exec(auth)?.[0]}@${init.headers['x-amz-date']}`);
+      const ok = auth.includes(accepts);
+      return new Response(
+        ok
+          ? '<DescribeRegionsResponse><requestId>r</requestId></DescribeRegionsResponse>'
+          : '<?xml version="1.0"?><Response><Errors><Error><Code>RequestExpired</Code><Message>Request has expired.</Message></Error></Errors><RequestID>r</RequestID></Response>',
+        {
+          status: ok ? 200 : 400,
+          headers: { date: new Date(Date.now() + aheadMs).toUTCString() },
+        },
+      );
+    }) as unknown as typeof fetch;
+    return { seen, fetchImpl };
+  }
+
+  it('RequestExpired with a right clock is an expired session: the credentials are read again', async () => {
+    const { state, source } = sessions();
+    const { seen, fetchImpl } = expiring(0);
+    const ec2 = ec2Client({ region: 'us-east-1', credentials: source, fetch: fetchImpl });
+    await ec2.call('DescribeRegions', {}, { signal });
+    expect(seen.map((entry) => entry.split('@')[0])).toEqual(['ASIAGEN1', 'ASIAGEN2']);
+    expect(state.invalidated).toBe(1);
+    // The next call signs with the new session at once.
+    await ec2.call('DescribeRegions', {}, { signal });
+    expect(seen).toHaveLength(3);
+  });
+
+  it('RequestExpired again after the clock correction reads the credentials again, then stops', async () => {
+    const { state, source } = sessions();
+    const { seen, fetchImpl } = expiring(20 * 60_000);
+    const ec2 = ec2Client({ region: 'us-east-1', credentials: source, fetch: fetchImpl });
+    await ec2.call('DescribeRegions', {}, { signal });
+    // The first session with the local time, then with the server's, then the second session.
+    expect(seen.map((entry) => entry.split('@')[0])).toEqual(['ASIAGEN1', 'ASIAGEN1', 'ASIAGEN2']);
+    expect(seen[1]!.split('@')[1]).not.toBe(seen[0]!.split('@')[1]);
+    expect(state.invalidated).toBe(1);
+
+    // Refused whatever is tried: one clock correction and one re-read, never a loop.
+    const never = sessions();
+    const refused = expiring(20 * 60_000, 'ASIANEVER');
+    const client = ec2Client({
+      region: 'us-east-1',
+      credentials: never.source,
+      fetch: refused.fetchImpl,
+    });
+    const error = await failure(() => client.call('DescribeRegions', {}, { signal }));
+    expect(error.code).toBe('UNAUTHENTICATED');
+    expect(refused.seen).toHaveLength(3);
+    expect(never.state.invalidated).toBe(1);
+  });
+
   it('times out as UNAVAILABLE with reason timeout', async () => {
     vi.useFakeTimers();
     const never: typeof fetch = (_input, init) =>
