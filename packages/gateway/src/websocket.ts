@@ -166,9 +166,12 @@ export class WsConnection {
 
   close(code = 1000, reason = ''): void {
     if (this.closed) return;
-    const body = Buffer.alloc(2 + Buffer.byteLength(reason));
+    // A control frame carries at most 125 bytes (RFC 6455 §5.5): 2 of status and 123 of reason, cut on
+    // a character boundary so the peer never reads half a code point.
+    const text = closeReasonBytes(reason);
+    const body = Buffer.alloc(2 + text.byteLength);
     body.writeUInt16BE(code, 0);
-    body.write(reason.slice(0, 120), 2);
+    text.copy(body, 2);
     this.socket.write(encodeWsFrame(WsOpcode.close, body, this.mask()));
     this.finish(code, reason);
     this.socket.end();
@@ -244,4 +247,14 @@ export class WsConnection {
       }
     }
   }
+}
+
+/** A close reason as at most 123 UTF-8 bytes, never ending inside a code point. */
+export function closeReasonBytes(reason: string): Buffer {
+  const bytes = Buffer.from(reason, 'utf8');
+  if (bytes.byteLength <= 123) return bytes;
+  let end = 123;
+  // Step back over continuation bytes (10xxxxxx) so the cut lands before a lead byte.
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end);
 }

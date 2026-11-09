@@ -1,4 +1,5 @@
 import { connect, type Socket } from 'node:net';
+import { PassThrough } from 'node:stream';
 import { create, toBinary } from '@bufbuild/protobuf';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -71,6 +72,32 @@ describe('RFC 6455 codec', () => {
     expect(() => new WsFrameDecoder(false, 1024).push(encodeWsFrame(WsOpcode.binary, new Uint8Array(1), mask))).toThrow(
       /must not be masked/,
     );
+  });
+
+  it('keeps a close frame within the control-frame limit, cutting the reason on a character boundary', () => {
+    // A long reason (a GrpcError's message, say) used to size the frame from the whole reason: a
+    // control frame over 125 bytes, which the peer refuses as a protocol error, losing the status.
+    for (const reason of ['x'.repeat(300), 'é'.repeat(100), `${'x'.repeat(122)}€`, 'short', '']) {
+      const written: Buffer[] = [];
+      const socket = new PassThrough();
+      socket.write = ((chunk: Buffer) => (written.push(Buffer.from(chunk)), true)) as typeof socket.write;
+      let closed: { code: number; reason: string } | undefined;
+      const conn = new WsConnection(socket, { role: 'server', onMessage: () => {}, onClose: (info) => (closed = info) });
+      conn.close(1011, reason);
+      // The peer (a client) decodes what was written: one close frame, a whole number of characters.
+      const frames = new WsFrameDecoder(false, 1024).push(Buffer.concat(written));
+      expect(frames).toHaveLength(1);
+      expect(frames[0]!.opcode).toBe(WsOpcode.close);
+      expect(frames[0]!.payload.byteLength).toBeLessThanOrEqual(125);
+      expect(frames[0]!.payload.readUInt16BE(0)).toBe(1011);
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(frames[0]!.payload.subarray(2));
+      expect(reason.startsWith(text)).toBe(true);
+      expect(text.includes('\0')).toBe(false);
+      if (Buffer.byteLength(reason) <= 123) expect(text).toBe(reason);
+      // The local side still hears the whole reason.
+      expect(closed).toEqual({ code: 1011, reason });
+      socket.destroy();
+    }
   });
 });
 

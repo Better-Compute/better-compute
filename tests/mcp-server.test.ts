@@ -130,6 +130,35 @@ describe('JSON-RPC over Streamable HTTP', () => {
       'exec_command',
     );
   });
+
+  it('refuses a body over maxBodyBytes without buffering it, counting bytes and not characters', async () => {
+    const small = mcpWith(recorder().api, { maxBodyBytes: 64 });
+    const post = (body: BodyInit, headers: Record<string, string> = {}) =>
+      small.handler(
+        new Request('https://mcp.test/mcp', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...headers },
+          body,
+          duplex: 'half',
+        } as RequestInit),
+      );
+    // A stream that would never end: the handler stops reading once it is past the limit.
+    let pulled = 0;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled++;
+        controller.enqueue(new Uint8Array(48).fill(0x20));
+      },
+    });
+    expect((await post(endless)).status).toBe(413);
+    expect(pulled).toBeLessThan(8);
+    // 40 characters, 120 bytes: over the limit in bytes though not in UTF-16 units.
+    expect((await post(JSON.stringify({ jsonrpc: '2.0', id: 1, method: '€'.repeat(40) }))).status).toBe(413);
+    // A declared length over the limit is refused unread.
+    expect((await post('{}', { 'content-length': '65' })).status).toBe(413);
+    const ok = await post(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }));
+    expect(ok.status).toBe(200);
+  });
 });
 
 describe('command batches (v1.0 quorum, §13)', () => {

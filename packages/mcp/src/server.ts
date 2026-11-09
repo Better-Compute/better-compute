@@ -286,8 +286,8 @@ export function createComputeMcp(options: ComputeMcpOptions): ComputeMcp {
         });
       if (!(request.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json'))
         return rpcError(null, -32700, 'Expected application/json', 415);
-      const text = await request.text();
-      if (text.length > maxBodyBytes) return rpcError(null, -32600, 'Request too large', 413);
+      const text = await limitedText(request, maxBodyBytes);
+      if (text === undefined) return rpcError(null, -32600, 'Request too large', 413);
       let message: {
         jsonrpc?: unknown;
         id?: unknown;
@@ -461,4 +461,34 @@ export function gateTools(
     rules.provider_account_connect_url = { public: true };
   }
   return rules;
+}
+
+/**
+ * The request body as text, read as a stream and given up (`undefined`) once it passes `limit` bytes,
+ * so an oversized body is never buffered whole. A declared content-length over the limit is refused unread.
+ */
+async function limitedText(request: Request, limit: number): Promise<string | undefined> {
+  const declared = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > limit) return undefined;
+  const reader = request.body?.getReader();
+  if (!reader) return '';
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const item = await reader.read();
+    if (item.done) break;
+    size += item.value.byteLength;
+    if (size > limit) {
+      await reader.cancel().catch(() => undefined);
+      return undefined;
+    }
+    chunks.push(item.value);
+  }
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(body);
 }
