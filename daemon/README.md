@@ -477,7 +477,9 @@ events. It never drops a hold on its own.
   given back to its driver at stop and delete. GPU instances are never memory-snapshotted.
   nvidia-persistenced holds every GPU open, so the GPU's persistence mode goes off before it leaves
   nvidia (`nvidia-smi -pm 0`) and on again once nvidia has it back. libvirt's managed hostdevs get the
-  same around `start`/`restore` and `destroy`, done by root (bcd itself, or `bcd helper`).
+  same around `start`/`restore` and `destroy`, done by root (bcd itself, or `bcd helper`). Each
+  `nvidia-smi` call is killed after 30 s (`no answer after 30s`): a hung driver fails the step
+  instead of holding the runtime.
 - *NoCloud seed* (`runtime/netconfig.go`). It carries network-config v2 for leased NICs:
   - each NIC is matched by MAC and gets its CIDR addresses;
   - the gateway becomes the default route, and the NIC's nameservers are set;

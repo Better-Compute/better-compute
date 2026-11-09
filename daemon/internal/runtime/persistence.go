@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // GPU persistence mode around passthrough. nvidia-persistenced (kept running by the nvidia-driver
@@ -14,13 +15,30 @@ import (
 // their own) then hangs or fails. Persistence goes off for exactly the GPUs a VM takes before it
 // starts, and on again once they are back on nvidia. Best effort both ways; root's work.
 
-// NvidiaPersistence sets one GPU's persistence mode (nvidia-smi -i <pci address> -pm 0|1).
+// nvidia-smi hangs when the driver does (a GPU fallen off the bus, an Xid storm): each call is
+// killed after nvidiaSMITimeout, so a start, stop or destroy waiting on it fails instead of holding
+// the runtime's lock for good. Variables for the tests.
+var (
+	nvidiaSMI        = "nvidia-smi"
+	nvidiaSMITimeout = 30 * time.Second
+)
+
+// NvidiaPersistence sets one GPU's persistence mode (nvidia-smi -i <pci address> -pm 0|1), waiting
+// at most 30 s for it.
 func NvidiaPersistence(addr string, on bool) error {
 	mode := "0"
 	if on {
 		mode = "1"
 	}
-	out, err := exec.Command("nvidia-smi", "-i", addr, "-pm", mode).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), nvidiaSMITimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, nvidiaSMI, "-i", addr, "-pm", mode)
+	// A killed nvidia-smi whose child still holds its output does not keep the wait open either.
+	cmd.WaitDelay = 2 * time.Second
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return fmt.Errorf("nvidia-smi -i %s -pm %s: no answer after %s", addr, mode, nvidiaSMITimeout)
+	}
 	if err != nil {
 		return fmt.Errorf("nvidia-smi -i %s -pm %s: %v: %s", addr, mode, err, strings.TrimSpace(string(out)))
 	}
