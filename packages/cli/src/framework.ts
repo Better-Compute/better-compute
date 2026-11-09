@@ -713,6 +713,40 @@ export function createCliProgram(
   };
 }
 
+/**
+ * The `defaults` of a configuration's `cli` export, checked: a key of the export other than `defaults`, a
+ * scope that names no command (and is not `'*'`), or a flag its command does not have (under `'*'`: that no
+ * command has) is `INVALID_CONFIG` with the nearest name. Such a default would otherwise never apply, and
+ * the command would run without it as if nothing were wrong.
+ */
+function cliDefaults(
+  cli: unknown,
+  commands: readonly CommandSpec<any>[],
+): Record<string, Record<string, string | number | boolean>> {
+  if (cli === undefined) return {};
+  const refuse = (message: string) => new CliError('INVALID_CONFIG', message, 'Fix the cli export of the configuration file.');
+  const plain = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+  if (!plain(cli)) throw refuse('The cli export must be an object: export const cli = { defaults: { … } }');
+  for (const key of Object.keys(cli))
+    if (key !== 'defaults')
+      throw refuse(`cli.${key} is not a setting of the cli export.${didYouMean(key, ['defaults'], 'cli.')} It takes defaults.`);
+  if (cli.defaults === undefined) return {};
+  if (!plain(cli.defaults)) throw refuse("cli.defaults must be an object of flag defaults by command name, or '*'");
+  const names = commands.map((command) => command.name);
+  const anyFlag = new Set(commands.flatMap((command) => Object.keys(commandFlags(command))));
+  for (const [scope, values] of Object.entries(cli.defaults)) {
+    const command = commands.find((candidate) => candidate.name === scope);
+    if (scope !== '*' && !command)
+      throw refuse(`cli.defaults['${scope}'] names no command.${didYouMean(scope, names)} Use a command name, or '*' for every command.`);
+    if (!plain(values)) throw refuse(`cli.defaults['${scope}'] must be an object of flag names and values`);
+    const known = command ? new Set(Object.keys(commandFlags(command))) : anyFlag;
+    for (const flag of Object.keys(values))
+      if (!known.has(flag))
+        throw refuse(`cli.defaults['${scope}'].${flag} is not a flag of ${command ? scope : 'any command'}.${didYouMean(flag, known)}`);
+  }
+  return cli.defaults as Record<string, Record<string, string | number | boolean>>;
+}
+
 async function execute(
   spec: CommandSpec<any>,
   argv: string[],
@@ -776,7 +810,7 @@ async function execute(
         )
       : false;
     if (where && present && missing.length) {
-      const defaults = (await configModule()).cli?.defaults ?? {};
+      const defaults = cliDefaults((await configModule()).cli, program.commands);
       for (const scope of [spec.name, '*'])
         for (const [name, raw] of Object.entries(defaults[scope] ?? {}))
           if (Object.hasOwn(flags, name) && !has(name) && !targetFlags.has(name))

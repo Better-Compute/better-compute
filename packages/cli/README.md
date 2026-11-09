@@ -100,7 +100,9 @@ Configuration commands find the deployment in this order:
 The module's default export is `defineConfig(options)` or `defineConfig(factory)` from
 `better-compute/server`. A factory receives `{ command, env, cwd }`. Two named exports are
 optional: `commands` (project commands built with `defineCommand`) and `cli.defaults`
-(flag defaults, per command or `'*'`). The module is trusted, executable code.
+(flag defaults, per command or `'*'`). The module is trusted, executable code. Unknown keys of the
+`cli` and `host` exports (a mistyped command, flag or setting) are refused with `INVALID_CONFIG` and
+the nearest known name, not ignored.
 
 **Environment-only mode** (`configFromEnv`) reads three variables:
 

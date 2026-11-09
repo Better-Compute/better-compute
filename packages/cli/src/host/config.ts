@@ -3,6 +3,7 @@ import { ComputeError } from '@better-compute/core';
 import type { MetricsRegistry } from '@better-compute/observability';
 import type { RevocationSet } from '@better-compute/pki';
 import type { AnyCompute, AnyComputeOptions } from '../config.js';
+import { didYouMean } from '../errors.js';
 import type { HostRoute, HostUpgradeHandler } from './http.js';
 import type { HostIamConfig, HostIamReaction, HostStreamRegistry } from './iam.js';
 import type { HostTunnelsConfig } from './tunnels.js';
@@ -179,7 +180,52 @@ export function defineHost<T extends HostExport>(host: T): T {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-/** Resolves a `host` export (calling a factory) and checks its shape; `INVALID_CONFIG` otherwise. */
+// What each object of the host export takes. A key outside these is a mistake (`gatway`, `listn`), and
+// dropping it silently starts `serve` without the thing it was meant to configure. Objects handed on as
+// they are (`tls`, `gateway.options`, `http.wellKnown`, registries, bridges, handlers) are not listed.
+const listenKeys = ['host', 'port'] as const;
+const tlsFilesKeys = ['key', 'cert', 'ca', 'intervalMs'] as const;
+const hostKeys = {
+  host: ['metrics', 'tunnels', 'iam', 'streams', 'iamReactions', 'mcp', 'http', 'gateway'],
+  'host.metrics': ['registry', 'bearerToken', 'path'],
+  'host.tunnels': ['authorize', 'control', 'reauthorizeMs', 'maxDurationMs', 'onClose'],
+  'host.tunnels.control': ['tls', 'timeoutMs'],
+  'host.iam': ['bridge', 'handlers', 'readTenants', 'gatewayStaleMs', 'streams', 'reactions', 'onError', 'webhook'],
+  'host.iam.webhook': ['secret', 'path'],
+  'host.mcp': ['path', 'handler'],
+  'host.http': ['routes', 'upgrade', 'wellKnown'],
+  'host.gateway': ['region', 'listen', 'tls', 'tlsFiles', 'internal', 'identity', 'ws', 'options'],
+  'host.gateway.listen': listenKeys,
+  'host.gateway.tlsFiles': tlsFilesKeys,
+  'host.gateway.internal': ['url', 'listen', 'tls', 'tlsFiles'],
+  'host.gateway.internal.listen': listenKeys,
+  'host.gateway.internal.tlsFiles': tlsFilesKeys,
+  'host.gateway.identity': ['roots', 'trustDomain', 'revocations'],
+  'host.gateway.ws': ['publicHost', 'listen'],
+  'host.gateway.ws.listen': listenKeys,
+} as const satisfies Record<string, readonly string[]>;
+
+/** Refuses (`INVALID_CONFIG`) the first key of the host export that its object does not take, with the nearest one. */
+function refuseUnknownKeys(host: Record<string, unknown>): void {
+  for (const [where, allowed] of Object.entries(hostKeys) as [string, readonly string[]][]) {
+    // `host.gateway.listen` → host.gateway.listen, when every object on the way is there.
+    let value: unknown = host;
+    for (const part of where.split('.').slice(1)) value = isRecord(value) ? value[part] : undefined;
+    // Not an object: missing, or a shape the checks below report.
+    if (!isRecord(value)) continue;
+    for (const key of Object.keys(value))
+      if (!allowed.includes(key))
+        throw new ComputeError(
+          'INVALID_CONFIG',
+          `${where}.${key} is not a setting of ${where}.${didYouMean(key, allowed, `${where}.`)} It takes ${allowed.join(', ')}.`,
+        );
+  }
+}
+
+/**
+ * Resolves a `host` export (calling a factory) and checks its shape; `INVALID_CONFIG` otherwise, also for
+ * a key it does not know.
+ */
 export async function resolveHost(exported: unknown, context: HostContext): Promise<HostConfig> {
   if (exported === undefined) return {};
   const value = typeof exported === 'function' ? await exported(context) : exported;
@@ -188,6 +234,7 @@ export async function resolveHost(exported: unknown, context: HostContext): Prom
       'INVALID_CONFIG',
       'The host export must be defineHost({ … }) or a factory',
     );
+  refuseUnknownKeys(value);
   const { http, gateway, metrics, iam, mcp, streams, iamReactions } = value as HostConfig;
   const reactionOk = (reaction: unknown) =>
     isRecord(reaction) &&

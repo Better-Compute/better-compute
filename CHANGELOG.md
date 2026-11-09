@@ -223,6 +223,12 @@ All notable changes to the better-compute packages are documented here. The form
   running `doctor` passed over an unmigrated or unreachable database. Now any `error` finding exits 1 with
   `DOCTOR_FINDINGS` (the report is still printed first), `--strict` adds warnings, and `info` findings never fail.
   Scripts that ran plain `doctor` on a deployment with error findings and expected status 0 need to handle it.
+- **Unknown configuration keys are refused** (`@better-compute/cli`). The `host` export took any key: a typo such
+  as `host.gatway` was dropped and `serve` started with no gateway role. The `cli` export likewise ignored a
+  mistyped `defaults`, command name or flag. Both now answer `INVALID_CONFIG` with the nearest known name
+  (`host.gatway is not a setting of host. Did you mean host.gateway?`), at every level of `host` except the objects
+  passed through as they are (`gateway.tls`, `gateway.options`, `http.wellKnown`). A configuration that carried an
+  unused key must drop it.
 - **BMC credential rotation no longer deletes the enrollment secret** (`@better-compute/metal`).
   `metal.rotateBmcCredential` purged every superseded credential from the secret store, including the one the
   machine was enrolled with: two machines enrolled with one rack-wide `secret://` broke each other on the first

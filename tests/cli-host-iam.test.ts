@@ -67,6 +67,33 @@ describe('host.iam', () => {
     await expect(resolveHost({ streams: registry }, context)).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
   });
 
+  it('refuses a key it does not know, at any level, naming the nearest one', async () => {
+    const context = { compute: {} as never, options: {} as never, env: {}, cwd: '.' };
+    const bridge = { setHandlers() {} };
+    // An unknown key is refused, never dropped: host.gatway would start serve with no gateway at all.
+    const tls = { key: 'k', cert: 'c', ca: 'a' };
+    for (const [host, message] of [
+      [{ gatway: { region: 'eu-1', tls } }, /^host\.gatway is not a setting of host\. Did you mean host\.gateway\?/],
+      [{ gateway: { region: 'eu-1', tls, listn: { port: 8443 } } }, /^host\.gateway\.listn is not a setting of host\.gateway\. Did you mean host\.gateway\.listen\?/],
+      [{ gateway: { region: 'eu-1', tls, listen: { prot: 8443 } } }, /^host\.gateway\.listen\.prot is not a setting of host\.gateway\.listen\. Did you mean host\.gateway\.listen\.port\?/],
+      [{ gateway: { region: 'eu-1', tls, internal: { url: 'https://gw:9443', tls, tlsFile: {} } } }, /^host\.gateway\.internal\.tlsFile is not a setting.* Did you mean host\.gateway\.internal\.tls or host\.gateway\.internal\.tlsFiles\?/],
+      [{ gateway: { region: 'eu-1', tls, ws: { publicHost: 'gw.example', publichost: 'x' } } }, /^host\.gateway\.ws\.publichost is not a setting/],
+      [{ http: { route: [] } }, /^host\.http\.route is not a setting of host\.http\. Did you mean host\.http\.routes\?/],
+      [{ iam: { bridge, webhok: { secret: 's' } } }, /^host\.iam\.webhok is not a setting of host\.iam\. Did you mean host\.iam\.webhook\?/],
+      [{ iam: { bridge, webhook: { secret: 's', pth: '/x' } } }, /^host\.iam\.webhook\.pth is not a setting.* Did you mean host\.iam\.webhook\.path\?/],
+      [{ tunnels: { maxDuration: 5 } }, /^host\.tunnels\.maxDuration is not a setting of host\.tunnels\. Did you mean host\.tunnels\.maxDurationMs\?/],
+      [{ mcp: { handler: () => new Response(), pathh: '/mcp' } }, /^host\.mcp\.pathh is not a setting/],
+      [{ somethingElse: true }, /^host\.somethingElse is not a setting of host\. It takes /],
+    ] as const)
+      await expect(resolveHost(host, context), JSON.stringify(Object.keys(host))).rejects.toMatchObject({
+        code: 'INVALID_CONFIG',
+        message: expect.stringMatching(message),
+      });
+    // Pass-through objects keep whatever their consumers take: TLS options, gateway options, well-known fields.
+    const open = { gateway: { region: 'eu-1', tls: { ...tls, minVersion: 'TLSv1.3' }, options: { anything: 1 } }, http: { wellKnown: { anything: 1 } } };
+    await expect(resolveHost(open, context)).resolves.toEqual(open);
+  });
+
   it('doctor warns when the IAM bridge is registered but its events have no reactions', async () => {
     const { compute, options } = await deploy([{ name: 'iam' }]);
     const checks = (host: object) => hostFindings(compute, options, host).map((finding) => finding.check);

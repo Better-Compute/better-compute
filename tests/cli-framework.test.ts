@@ -719,6 +719,37 @@ export const cli = { defaults: { hello: { who: 'defaults' }, '*': { times: 2, ur
     expect(JSON.parse(flagged.stdout)).toMatchObject({ who: 'flag', times: 5 });
   });
 
+  it('refuses a cli export with a key, command or flag it does not know, naming the nearest one', async () => {
+    let files = 0;
+    const withCli = async (cli: string) => {
+      // A file per case: a module is imported once per path.
+      const file = join(scratch, `typo-${++files}.config.mjs`);
+      await writeFile(file, `${configModule('typo').replace(/^export const cli = .*$/m, '')}\nexport const cli = ${cli};\n`);
+      return run(['hello', '--config', file]);
+    };
+    // The export itself: `defaults` is all it takes.
+    let outcome = await withCli(`{ defualts: { hello: { who: 'x' } } }`);
+    expect(outcome.status).toBe(1);
+    expect(outcome.stderr).toMatch(/^INVALID_CONFIG: cli\.defualts is not a setting of the cli export\. Did you mean cli\.defaults\?/);
+    // A scope that names no command (it would never apply).
+    outcome = await withCli(`{ defaults: { helo: { who: 'x' } } }`);
+    expect(outcome.status).toBe(1);
+    expect(outcome.stderr).toMatch(/^INVALID_CONFIG: cli\.defaults\['helo'\] names no command\. Did you mean hello\?/);
+    // A flag the command does not have, and one no command has under '*'.
+    outcome = await withCli(`{ defaults: { hello: { woh: 'x' } } }`);
+    expect(outcome.status).toBe(1);
+    expect(outcome.stderr).toMatch(/^INVALID_CONFIG: cli\.defaults\['hello'\]\.woh is not a flag of hello\. Did you mean who\?/);
+    outcome = await withCli(`{ defaults: { '*': { tenent: 'org_acme' } } }`);
+    expect(outcome.status).toBe(1);
+    expect(outcome.stderr).toMatch(/^INVALID_CONFIG: cli\.defaults\['\*'\]\.tenent is not a flag of any command\. Did you mean tenant\?/);
+    outcome = await withCli(`'defaults'`);
+    expect(outcome.stderr).toMatch(/^INVALID_CONFIG: The cli export must be an object/);
+    // What is right still applies: a built-in command's scope, and '*' for a flag only some commands have.
+    outcome = await withCli(`{ defaults: { hello: { who: 'ok' }, 'nodes list': { tenant: 'org_acme' }, '*': { tenant: 'org_acme', times: 3 } } }`);
+    expect(outcome.stderr).toBe('');
+    expect(JSON.parse(outcome.stdout)).toMatchObject({ who: 'ok', times: 3 });
+  });
+
   it('prefers --config over BETTER_COMPUTE_CONFIG over discovery', async () => {
     const env = { BETTER_COMPUTE_CONFIG: join(scratch, 'other.config.mjs') };
     const fromEnv = await run(['hello'], { cwd: nested, env });
