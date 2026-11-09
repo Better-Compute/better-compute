@@ -1,6 +1,7 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   createComputeClient,
+  paginate,
   type ComputeCallOptions,
   type ComputeClient,
 } from '@better-compute/client';
@@ -105,6 +106,10 @@ describe('client inference', () => {
     >();
     expectTypeOf(bareClient.nodes.cordon).returns.resolves.toEqualTypeOf<NodeInfo>();
     expectTypeOf(bareClient.projects.list).toBeCallableWith({ tenantId: 't' });
+    // paginate() takes a list method as it is and yields its items.
+    expectTypeOf(paginate(bareClient.projects.list, { tenantId: 't' })).toEqualTypeOf<
+      AsyncGenerator<Awaited<ReturnType<typeof bareClient.projects.list>>['items'][number], void, undefined>
+    >();
     expectTypeOf(client.plugins.acme.widgets.poke).parameters.toEqualTypeOf<
       [input: WidgetInput, options?: ComputeCallOptions]
     >();

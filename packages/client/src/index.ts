@@ -58,6 +58,44 @@ export interface ComputeCallOptions {
   headers?: HeadersInit;
 }
 
+export interface PaginateOptions extends ComputeCallOptions {
+  /** Stop after this many pages (default: no limit; the iteration ends with the last page). */
+  maxPages?: number;
+}
+
+/**
+ * Every item of a list method, across its pages: calls `list` with `input`, then again with each page's
+ * `cursor` until a page has none. Pages are fetched as the iteration reaches them, so `break` stops early.
+ *
+ * ```ts
+ * for await (const node of paginate(client.nodes.list, { tenantId })) console.log(node.id);
+ * ```
+ *
+ * A page that hands back the cursor it was asked with (a server that does not advance) ends the iteration
+ * with `INVALID_RESPONSE` rather than looping.
+ */
+export async function* paginate<Input extends { cursor?: unknown }, Item>(
+  list: (
+    input: Input,
+    options?: ComputeCallOptions,
+  ) => Promise<{ items: Item[]; cursor?: Input['cursor'] }>,
+  input: Input,
+  options: PaginateOptions = {},
+): AsyncGenerator<Item, void, undefined> {
+  const { maxPages, ...callOptions } = options;
+  let cursor = input.cursor;
+  for (let page = 0; maxPages === undefined || page < maxPages; page++) {
+    const result = await list(cursor === undefined ? input : { ...input, cursor }, callOptions);
+    if (result === null || typeof result !== 'object' || !Array.isArray(result.items))
+      throw new ComputeClientError('INVALID_RESPONSE', 'The list answered something that is not a page', 0);
+    yield* result.items;
+    if (result.cursor === undefined || result.cursor === null) return;
+    if (result.cursor === cursor)
+      throw new ComputeClientError('INVALID_RESPONSE', 'The list answered a page that does not advance', 0);
+    cursor = result.cursor;
+  }
+}
+
 type AnyMethod = (...args: never[]) => unknown;
 /** The input of a method that takes none. */
 type NoInput = Record<string, never>;
@@ -304,15 +342,31 @@ export function createComputeClient<T extends { api: unknown }>(
     } catch {
       throw new ComputeClientError('INVALID_INPUT', 'Request input must be serializable JSON', 0);
     }
-    const response = await fetcher(new URL(`${basePath}/${path}`, base.origin), {
-      method: 'POST',
-      headers,
-      body,
-      credentials,
-      redirect: 'error',
-      cache: 'no-store',
-      signal: callOptions.signal,
-    });
+    let response: Response;
+    try {
+      response = await fetcher(new URL(`${basePath}/${path}`, base.origin), {
+        method: 'POST',
+        headers,
+        body,
+        credentials,
+        redirect: 'error',
+        cache: 'no-store',
+        signal: callOptions.signal,
+      });
+    } catch (cause) {
+      // The caller's own abort stays what it threw; anything else is the transport failing (DNS, a
+      // refused connection, TLS, a redirect), which fetch reports as a bare TypeError.
+      if (callOptions.signal?.aborted) throw cause;
+      const error = new ComputeClientError(
+        'NETWORK_ERROR',
+        'The compute server could not be reached',
+        0,
+        undefined,
+        requestId,
+      );
+      (error as { cause?: unknown }).cause = cause;
+      throw error;
+    }
     const echoed = response.headers.get('x-request-id');
     const seenId = requestId ?? (echoed && requestIdPattern.test(echoed) ? echoed : undefined);
     const fail = (

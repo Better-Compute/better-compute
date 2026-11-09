@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { ComputeClientError, createComputeClient } from '@better-compute/client';
+import { ComputeClientError, createComputeClient, paginate } from '@better-compute/client';
 import type { SqlExecutor } from '@better-compute/core';
 import { pglite } from '@better-compute/postgres/pglite';
 import { betterCompute, serverVersion } from '@better-compute/server';
@@ -327,5 +327,92 @@ describe('createComputeClient()', () => {
       code: 'RATE_LIMITED',
       retryAfterMs: 3000,
     });
+  });
+
+  it('reports a transport failure as NETWORK_ERROR, and leaves the caller\'s abort alone', async () => {
+    const refused = new TypeError('fetch failed');
+    const down = (async () => {
+      throw refused;
+    }) as unknown as typeof globalThis.fetch;
+    const api = createComputeClient<Compute>({ baseURL: BASE_URL, fetch: down, requestId: () => 'req-net-1' });
+    const error = await failure(api.system.version());
+    expect(error).toMatchObject({ code: 'NETWORK_ERROR', status: 0, requestId: 'req-net-1' });
+    expect((error as { cause?: unknown }).cause).toBe(refused);
+    // An abort is the caller's doing: it surfaces as what the signal carried, not as a network error.
+    const controller = new AbortController();
+    const hanging = ((_: unknown, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) =>
+        init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason)),
+      )) as unknown as typeof globalThis.fetch;
+    const slow = createComputeClient<Compute>({ baseURL: BASE_URL, fetch: hanging });
+    const pending = slow.system.version({}, { signal: controller.signal });
+    controller.abort(new Error('user gave up'));
+    await expect(pending).rejects.toThrow('user gave up');
+  });
+});
+
+describe('paginate()', () => {
+  type Row = { id: number };
+  const pages: Record<string, { items: Row[]; cursor?: string }> = {
+    start: { items: [{ id: 1 }, { id: 2 }], cursor: 'b' },
+    b: { items: [{ id: 3 }], cursor: 'c' },
+    c: { items: [], cursor: 'd' },
+    d: { items: [{ id: 4 }] },
+  };
+  const lister = () => {
+    const asked: ({ tenantId: string; cursor?: string } | undefined)[] = [];
+    const list = async (input: { tenantId: string; cursor?: string }, options?: { signal?: AbortSignal }) => {
+      asked.push(input);
+      options?.signal?.throwIfAborted();
+      return pages[input.cursor ?? 'start']!;
+    };
+    return { asked, list };
+  };
+
+  it('yields every item across pages, fetching a page only when the iteration reaches it', async () => {
+    const { asked, list } = lister();
+    const seen: number[] = [];
+    for await (const row of paginate(list, { tenantId: 't' })) seen.push(row.id);
+    expect(seen).toEqual([1, 2, 3, 4]);
+    expect(asked).toEqual([
+      { tenantId: 't' },
+      { tenantId: 't', cursor: 'b' },
+      { tenantId: 't', cursor: 'c' },
+      { tenantId: 't', cursor: 'd' },
+    ]);
+    // Breaking out stops the calls.
+    const early = lister();
+    for await (const row of paginate(early.list, { tenantId: 't' })) if (row.id === 2) break;
+    expect(early.asked).toHaveLength(1);
+    // A start cursor and a page limit.
+    const limited = lister();
+    const some: number[] = [];
+    for await (const row of paginate(limited.list, { tenantId: 't', cursor: 'b' }, { maxPages: 1 })) some.push(row.id);
+    expect(some).toEqual([3]);
+    expect(limited.asked).toEqual([{ tenantId: 't', cursor: 'b' }]);
+  });
+
+  it('ends with INVALID_RESPONSE on a page that does not advance or is not a page', async () => {
+    const stuck = async (input: { cursor?: string }) => ({ items: [1], cursor: input.cursor ?? 'x' });
+    const seen: number[] = [];
+    const drain = async () => {
+      for await (const item of paginate(stuck, {})) seen.push(item);
+    };
+    await expect(drain()).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+    expect(seen).toEqual([1, 1]);
+    const broken = (async () => ({ rows: [] })) as unknown as (input: { cursor?: string }) => Promise<{ items: number[] }>;
+    await expect(paginate(broken, {}).next()).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+  });
+
+  it('walks a real list method of the client and passes call options through', async () => {
+    const { client: api } = client({ token: USER });
+    const all = [];
+    for await (const project of paginate(api.projects.list, { tenantId: ACME, limit: 1 })) all.push(project);
+    const direct = await api.projects.list({ tenantId: ACME });
+    expect(all.map((project) => project.id)).toEqual(direct.items.map((project) => project.id));
+    const controller = new AbortController();
+    controller.abort(new Error('stop'));
+    const { list } = lister();
+    await expect(paginate(list, { tenantId: 't' }, { signal: controller.signal }).next()).rejects.toThrow('stop');
   });
 });
