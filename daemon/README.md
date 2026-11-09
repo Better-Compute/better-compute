@@ -452,6 +452,11 @@ events. It never drops a hold on its own.
   written: `did not carry on from its saved memory` (the state is kept as
   `instances/<id>/memory.state`, and the domain's next start restores from it) or
   `stayed paused` (the next pass resumes it).
+- *`instance.snapshot`'s progress watchdog* (`agent/snapshot.go`, `internal/transfer`) covers the
+  phases that move bytes: the runtime writing the snapshot's tar, and the upload. Either is
+  cancelled when it moves less than 1 MiB in a 2-minute window. Saving the guest's memory and
+  flattening its disk come first and write nothing there, so they are not watched: they are bounded
+  by the 6-hour maximum and the command's own cancellation.
 - *Leftovers.* At its first pass after a start, each runtime removes what a killed bcd left in its
   directory: half-written downloads (`images/.pull-*`), snapshots' work directories
   (`instances/<id>/.snapshot-*`) and instances whose creation never finished. One exception keeps

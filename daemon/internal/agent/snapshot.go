@@ -55,7 +55,7 @@ func (a *Agent) downloadVerified(ctx context.Context, rawURL string, digest []by
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	ctx, watch, stop := withProgress(ctx, transferIdle, transferMinBytes, transferMax)
+	ctx, watch, stop := withProgress(ctx, a.o.TransferIdle, transferMinBytes, transferMax)
 	defer stop()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -128,12 +128,18 @@ func (a *Agent) runInstanceSnapshot(ctx context.Context, cmd dispatch.Command) (
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 	h := sha256.New()
-	ctx, watch, stop := withProgress(ctx, transferIdle, transferMinBytes, transferMax)
+	ctx, watch, stop := withProgress(ctx, a.o.TransferIdle, transferMinBytes, transferMax)
 	defer stop()
+	// The progress watchdog covers the two phases that move bytes: the runtime writing the snapshot's
+	// tar (armed by its first byte, touchWriter) and the upload. Before the tar the runtime saves the
+	// guest's memory and flattens its disk (virsh save, qemu-img convert), which takes minutes on a
+	// large instance and writes nothing here: only transferMax and the command's context bound that.
+	watch.Disarm()
 	cpu, err := rt.Snapshot(ctx, req.GetInstanceId(), req.GetIncludeMemory(), a.cpuModel(), io.MultiWriter(tmp, h, touchWriter{watch}))
 	if err != nil {
 		return journal.Result{}, &KindError{Code: "snapshot-failed", Message: err.Error()}
 	}
+	watch.Arm() // the upload is watched, whatever was written
 	size, _ := tmp.Seek(0, io.SeekCurrent)
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		return journal.Result{}, err

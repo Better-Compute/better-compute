@@ -33,10 +33,13 @@ func (p progressReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// touchWriter counts the bytes a runtime producing a snapshot writes.
+// touchWriter counts the bytes a runtime producing a snapshot writes, and arms the watchdog at the
+// first of them: what the runtime does before it writes (saving the guest's memory, flattening its
+// disk) moves no bytes here and is not a stalled transfer.
 type touchWriter struct{ w *transfer.Watchdog }
 
 func (t touchWriter) Write(b []byte) (int, error) {
+	t.w.Arm()
 	t.w.Touch(len(b))
 	return len(b), nil
 }

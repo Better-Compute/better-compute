@@ -84,6 +84,9 @@ type Options struct {
 	Lanes map[dispatch.Lane]dispatch.LaneConfig
 	// ConvergeRetry re-runs a converger pass that is still progressing (default 30 s).
 	ConvergeRetry time.Duration
+	// TransferIdle is the window in which a snapshot's tar, upload or download must move 1 MiB
+	// (default 2 min; tests).
+	TransferIdle time.Duration
 	// ShutdownGrace is how long Run waits, once it is stopping, for the converger pass under way to
 	// return (default 20 s): the pass is cancelled, and what it was in the middle of (a download, an
 	// instance being created) undoes itself instead of being cut off by the process exiting.
@@ -272,6 +275,9 @@ func New(o Options) (*Agent, error) {
 	}
 	if o.ShutdownGrace == 0 {
 		o.ShutdownGrace = 20 * time.Second
+	}
+	if o.TransferIdle == 0 {
+		o.TransferIdle = transferIdle
 	}
 	if o.HealthInterval == 0 {
 		o.HealthInterval = 30 * time.Second
