@@ -23,6 +23,7 @@ import (
 	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
+	"github.com/better-compute/better-compute/daemon/internal/transfer"
 )
 
 // Libvirt is the libvirt-kvm runtime (PLAN.md §12, v0.3), through virsh on qemu:///system and
@@ -55,8 +56,13 @@ type Libvirt struct {
 	// node's group (libvirt with dynamic_ownership off; libvirt-qemu in that group) rather than
 	// relabelled. nil: virsh on qemu:///system as root.
 	Hypervisor Hypervisor
-	// HTTP downloads base images (https only; default a client without a total timeout).
+	// HTTP downloads base images (https only, redirects too; default a client without a total
+	// timeout: a download is bounded by its progress and by MaxImageBytes).
 	HTTP *http.Client
+	// MaxImageBytes is the largest base image downloaded (default DefaultMaxImageBytes).
+	MaxImageBytes int64
+	// pullIdle is the window a download must move transfer.MinBytes in (default transfer.Idle; tests).
+	pullIdle time.Duration
 	// ShutdownTimeout bounds a graceful shutdown before the domain is destroyed (default 60 s).
 	ShutdownTimeout time.Duration
 	// GPUPersistence sets a passthrough GPU's persistence mode around starts and stops (persistence.go;
@@ -655,7 +661,13 @@ func (l *Libvirt) basePath(digestHex, format string) string {
 	return filepath.Join(l.Dir, "images", digestHex+"."+format)
 }
 
-// baseImage downloads an image once, verified against its sha256 before it becomes visible.
+// DefaultMaxImageBytes caps a base image's download: the pinned sha256 says what the bytes must be,
+// not how many a server may send before the check.
+const DefaultMaxImageBytes = 64 << 30
+
+// baseImage downloads an image once, verified against its sha256 before it becomes visible. The
+// download runs on the converge path with the runtime's lock held, so it is bounded: it must keep
+// moving (transfer's watchdog), stay on https through every redirect, and fit in MaxImageBytes.
 func (l *Libvirt) baseImage(ctx context.Context, img *agentv1.ImageRef) (string, error) {
 	if img.GetUrl() == "" || len(img.GetSha256()) != sha256.Size {
 		return "", errors.New("the image has no URL or sha256")
@@ -674,21 +686,43 @@ func (l *Libvirt) baseImage(ctx context.Context, img *agentv1.ImageRef) (string,
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return "", err
 	}
+	limit := l.MaxImageBytes
+	if limit <= 0 {
+		limit = DefaultMaxImageBytes
+	}
+	idle := l.pullIdle
+	if idle <= 0 {
+		idle = transfer.Idle
+	}
+	ctx, watch, stop := transfer.WithProgress(ctx, idle, transfer.MinBytes, transfer.Max)
+	defer stop()
+	// stalled names why the download's context ended, when the watchdog ended it.
+	stalled := func(err error) error {
+		if cause := context.Cause(ctx); errors.Is(cause, transfer.ErrStalled) || errors.Is(cause, transfer.ErrTooLong) {
+			return fmt.Errorf("image download: %w", cause)
+		}
+		return err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, img.GetUrl(), nil)
 	if err != nil {
 		return "", err
 	}
-	client := l.HTTP
-	if client == nil {
-		client = &http.Client{}
+	client := http.Client{}
+	if l.HTTP != nil {
+		client = *l.HTTP
 	}
+	client.CheckRedirect = transfer.HTTPSOnly
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", stalled(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("image GET returned %s", resp.Status)
+	}
+	tooLarge := fmt.Errorf("the image is larger than the %d bytes this host downloads", limit)
+	if resp.ContentLength > limit {
+		return "", tooLarge
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(dst), ".pull-*")
 	if err != nil {
@@ -696,10 +730,13 @@ func (l *Libvirt) baseImage(ctx context.Context, img *agentv1.ImageRef) (string,
 	}
 	defer os.Remove(tmp.Name())
 	h := sha256.New()
-	_, err = io.Copy(io.MultiWriter(tmp, h), resp.Body)
+	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(transfer.Reader{R: resp.Body, W: watch}, limit+1))
 	tmp.Close()
 	if err != nil {
-		return "", err
+		return "", stalled(err)
+	}
+	if n > limit {
+		return "", tooLarge
 	}
 	if !bytes.Equal(h.Sum(nil), img.GetSha256()) {
 		return "", fmt.Errorf("image sha256 %x is not the pinned %x", h.Sum(nil), img.GetSha256())

@@ -78,8 +78,10 @@ type CloudHypervisor struct {
 	NodeUID int
 	// rootShared: root's side of the helper's file model (CHLaunch builds the shared unit).
 	rootShared bool
-	// HTTP downloads base images (https only).
-	HTTP *http.Client
+	// HTTP downloads base images (https only); MaxImageBytes is the largest one downloaded (default
+	// DefaultMaxImageBytes).
+	HTTP          *http.Client
+	MaxImageBytes int64
 	// ShutdownTimeout bounds a graceful (ACPI) shutdown before the VM is stopped (default 60 s).
 	ShutdownTimeout time.Duration
 	// Poll is how often a starting VMM or a shutting-down VM is checked (default 200 ms).
@@ -158,7 +160,7 @@ func (c *CloudHypervisor) Name() string {
 
 // storage is the libvirt runtime's image and seed handling, over the same directory layout.
 func (c *CloudHypervisor) storage() *Libvirt {
-	return &Libvirt{RuntimeName: c.Name(), Dir: c.Dir, Exec: c.Exec, HTTP: c.HTTP}
+	return &Libvirt{RuntimeName: c.Name(), Dir: c.Dir, Exec: c.Exec, HTTP: c.HTTP, MaxImageBytes: c.MaxImageBytes}
 }
 
 func (c *CloudHypervisor) run(ctx context.Context, name string, args ...string) ([]byte, error) {

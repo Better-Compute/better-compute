@@ -54,6 +54,7 @@ dependencies are connect-go, bbolt and protobuf.
 | `internal/selfupdate` | the A/B binary slots, `upgrade.json`, the release floor and the crash-loop rollback units |
 | `internal/bcx` | bcx driver plugins: the sandbox shim (`bcd __bcx-exec`: no-new-privs, seccomp, per-plugin uid), cgroups |
 | `internal/runtime` | instance runtimes: `Libvirt` (virsh, qemu-img, NoCloud seeds, snapshots, serial consoles), `CloudHypervisor` (a VMM per instance in a confined `bcd-ch-<id>.service` unit, driven over its REST socket: its own uid, no capabilities, no network, only KVM and VFIO devices, only its own instance and base image visible, /run and /var hidden, bounded by its flavor; persistent taps created and bridged by bcd, handed to it as fds; every disk's qcow2 header checked in Go before use; VFIO GPUs, memory snapshots bound to the CPU model and flavor. Needs systemd ≥ 247 and a cloud-hypervisor whose API takes net fds: `vm.add-net`, `vm.restore` `net_fds`) and `Fake` |
+| `internal/transfer` | the progress watchdog and the https-only redirect rule of long transfers (snapshots, release binaries, base images) |
 | `internal/redfish` | the Redfish client of the site agent's `bmc.*` kinds (power, boot, BIOS, RAID, firmware, accounts) |
 | `internal/bootparams`, `internal/pxe` | the ramdisk's `bc.*` kernel command line; the site agent's proxyDHCP and TFTP |
 | `internal/imds` | the instance metadata service of VPS hosts |
@@ -432,6 +433,11 @@ events. It never drops a hold on its own.
     A directory under `instances/` without a `vm.json` is not bcd's and stays refused (`is not
     bcd's`): only one left by a bcd from before this rule can be in that state, and it is removed by
     hand.
+- *Base images* (`Libvirt.baseImage`, shared by both runtimes) download once, on the converge path,
+  and are checked against their sha256 before they become visible. A download is https only,
+  through every redirect; it is cancelled when it moves less than 1 MiB in a 2-minute window
+  (`image download: the transfer stalled`) or runs past 6 hours, and an image larger than 64 GiB is
+  refused (`the image is larger than …`), by its Content-Length when it states one.
 - *A cloud-hypervisor VM's state* is its VMM's `vm.info`. When the VMM does not answer, the unit
   decides (`systemctl show --property=ActiveState bcd-ch-<id>.service`, which the node runs as
   itself): `inactive` or `failed` is stopped, and so is a running VMM that answers it has no VM.
