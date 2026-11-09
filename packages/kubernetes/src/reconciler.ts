@@ -19,6 +19,7 @@ import {
 import {
   accountKubernetes,
   clustersWork,
+  deleteRetryDue,
   json,
   publish,
   readCluster,
@@ -247,6 +248,10 @@ class ClusterWorker {
       const { rows } = await tx.query<{ kubernetes_version: string | null }>(
         `UPDATE kubernetes_clusters
             SET state = $3, message = $4,
+                updated_at = CASE WHEN state IS DISTINCT FROM $3 OR message IS DISTINCT FROM $4::text
+                                  THEN compute_now() ELSE updated_at END,
+                retried_at = CASE WHEN state IS DISTINCT FROM $3 OR message IS DISTINCT FROM $4::text
+                                  THEN NULL ELSE retried_at END,
                 provider_id = coalesce($5, provider_id),
                 endpoint = coalesce($6, endpoint),
                 kubernetes_version = coalesce($7, kubernetes_version),
@@ -300,6 +305,24 @@ class ClusterWorker {
       return;
     }
     await this.#changedMeanwhile();
+  }
+
+  /**
+   * The provider refused a delete: `error`, and the try is recorded (`retried_at`) when the cluster was in this
+   * error already, so the refresh spaces the next one out (`deleteRetryDue`). Nothing polls it meanwhile.
+   */
+  async #deleteRefused(message: string): Promise<void> {
+    const cluster = this.#cluster;
+    const again = cluster.state === 'error' && cluster.message === message;
+    await this.#setCluster({ state: 'error', message });
+    if (again)
+      await this.sql.transaction((tx) =>
+        tx.query(
+          `UPDATE kubernetes_clusters SET retried_at = compute_now()
+            WHERE id = $1 AND state = 'error' AND desired_state = 'deleted'`,
+          [cluster.id],
+        ),
+      );
   }
 
   /** A write guarded by the version found a newer one (a change through the API): converge again at once. */
@@ -569,7 +592,7 @@ class ClusterWorker {
       }
     }
     if (problems.length > 0) {
-      await this.#setCluster({ state: 'error', message: problems.join('; ').slice(0, 500) });
+      await this.#deleteRefused(problems.join('; ').slice(0, 500));
       return this.#next();
     }
     if (waiting || this.#backoff) {
@@ -588,10 +611,7 @@ class ClusterWorker {
     );
     if (!gone) return this.#next();
     if (gone.state === 'error') {
-      await this.#setCluster({
-        state: 'error',
-        message: gone.message ?? 'The provider refused to delete the cluster',
-      });
+      await this.#deleteRefused(gone.message ?? 'The provider refused to delete the cluster');
       return this.#next();
     }
     if (gone.state !== 'deleted') {
@@ -628,6 +648,8 @@ class ClusterWorker {
         tenantId: cluster.tenant_id,
       });
       await publish(this.deps, tx, cluster, 'kubernetes.cluster.deleted');
+      // Its substrate's teardown goes on from here (it does not poll a cluster whose delete was refused).
+      await this.#wakeSubstrate(tx);
       return true;
     });
     if (!done) await this.#changedMeanwhile();
@@ -646,10 +668,16 @@ async function enqueueAll(
   else for (const id of ids) await context.work.enqueue(tx, clustersWork, id);
 }
 
+/** How long after a refused delete the first retry comes; each later wait doubles (`deleteRetryDue`). */
+export const clusterDeleteRetryMinutes = 5;
+
 /**
  * The `kubernetes.clusters` reconciler (key: a cluster id). `all` (every 30 s) queues the clusters still
  * converging or being deleted; `refresh` (every 5 minutes) queues the settled ones, `ready` and `error`, so an
  * error is retried and what changed at the provider (a release-channel upgrade, a pool deleted by hand) is seen.
+ * A cluster whose delete the provider refused (`error` with `desired_state = 'deleted'`: a permanent error, as far
+ * as anyone can tell) is neither: it leaves the 30 s sweep and the refresh queues it with exponential backoff
+ * (`deleteRetryDue`: 5, 10, 20 minutes, ... at most every 6 hours). `kubernetesClusters.delete` tries at once.
  */
 export function clustersReconciler(depsOf: (context: ModuleContext) => KubernetesDeps): Reconciler {
   return {
@@ -666,9 +694,13 @@ export function clustersReconciler(depsOf: (context: ModuleContext) => Kubernete
             key === 'all'
               ? `SELECT id FROM kubernetes_clusters
                   WHERE state IN ('pending', 'provisioning', 'updating', 'deleting')
-                     OR (desired_state = 'deleted' AND state <> 'deleted')
+                     OR (desired_state = 'deleted' AND state NOT IN ('deleted', 'error'))
                   ORDER BY id`
-              : `SELECT id FROM kubernetes_clusters WHERE state IN ('ready', 'error') ORDER BY id`,
+              : `SELECT id FROM kubernetes_clusters c
+                  WHERE c.state = 'ready'
+                     OR (c.state = 'error'
+                         AND (c.desired_state <> 'deleted' OR ${deleteRetryDue('c', clusterDeleteRetryMinutes)}))
+                  ORDER BY id`,
           );
           await enqueueAll(
             context,

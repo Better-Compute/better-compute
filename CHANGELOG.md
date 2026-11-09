@@ -144,6 +144,15 @@ All notable changes to the better-compute packages are documented here. The form
 
 ### Fixed
 
+- **A refused delete backs off** (`@better-compute/kubernetes`). A cluster whose delete the provider refuses for
+  good was asked for again every 30 s forever (the fast sweep queued every row still to delete, the one in `error`
+  included), and a substrate tearing down polled that cluster every 10 s. A cluster in `error` with a pending
+  delete now leaves the 30 s sweep; the 5 minute refresh retries it 5, 10, 20, 40 minutes after the last try and so
+  on, at most every 6 hours, counted from when it went to that error (migration `kubernetes/0006_delete_backoff`:
+  `kubernetes_clusters.updated_at` and `retried_at`, `kubernetes_pool_substrates.retried_at`).
+  `kubernetesClusters.delete` on such a cluster tries at once. The substrate of such a cluster goes to `error`
+  (`cluster: …`, `desired_state` still `deleted`), stops polling, is looked at with the same backoff from 2 minutes,
+  and is woken when the cluster is deleted, which now finishes its teardown.
 - **`fleet.apply` without `prune` no longer deletes a cluster** (`@better-compute/fleet`). A document that dropped
   `policy.substrate` from a pool it kept planned as a plain `pool update (policy)`, and the substrate reconciler
   then tore the pool's cluster down. It is a delete now: with `prune` the plan carries a `delete` change on the pool

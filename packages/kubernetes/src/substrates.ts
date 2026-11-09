@@ -22,6 +22,7 @@ import { canonical, sha256Hex } from './input.js';
 import {
   accountKubernetes,
   clustersWork,
+  deleteRetryDue,
   json,
   providerClusterName,
   publish as publishCluster,
@@ -838,7 +839,7 @@ async function setState(
     const fields = update.fields ?? {};
     const { rows } = await tx.query<{ pool_id: string }>(
       `UPDATE kubernetes_pool_substrates
-          SET state = $3, message = $4, updated_at = compute_now(),
+          SET state = $3, message = $4, updated_at = compute_now(), retried_at = NULL,
               manifests_sha256 = CASE WHEN $5 THEN $6 ELSE manifests_sha256 END,
               applied_at = CASE WHEN $5 THEN compute_now() ELSE applied_at END,
               nodes_listed = coalesce($7, nodes_listed),
@@ -1896,7 +1897,22 @@ async function teardown(
     });
     return poll();
   }
-  if (cluster && cluster.state !== 'deleted') return poll();
+  if (cluster && cluster.state === 'error') {
+    // The provider refused the delete (a permanent error, as far as anyone can tell): the substrate says so and
+    // stops polling. The cluster reconciler retries with backoff and wakes this one when the cluster's state
+    // changes; the refresh comes back with the same backoff (`deleteRetryDue`) in case that wake is lost.
+    const message = `cluster: ${cluster.message ?? 'the provider refused the delete'}`.slice(0, 500);
+    if (row.state !== 'error' || row.message !== message) await setState(deps, sql, row, { state: 'error', message });
+    else
+      await sql.query(`UPDATE kubernetes_pool_substrates SET retried_at = compute_now() WHERE pool_id = $1`, [
+        row.pool_id,
+      ]);
+    return undefined;
+  }
+  if (cluster && cluster.state !== 'deleted') {
+    if (row.state === 'error') await setState(deps, sql, row, { state: 'deleting' });
+    return poll();
+  }
   // bcd is gone from the cluster (or the cluster is): the substrate's nodes are machines that left for good.
   const retired = await retireTornDownNodes(deps, sql, row);
   if (retired === undefined) return poll();
@@ -2065,10 +2081,15 @@ async function enqueueAll(context: ModuleContext, tx: SqlTx, ids: readonly strin
   else for (const id of ids) await context.work.enqueue(tx, substratesWork, id);
 }
 
+/** How long after a teardown stopped at a refused delete it is looked at again; each later wait doubles. */
+export const substrateDeleteRetryMinutes = 2;
+
 /**
  * The `kubernetes.substrates` reconciler (key: a pool id). `all` (every 30 s) queues pools whose policy has a
  * substrate and that have no settled row, and every substrate being torn down; `refresh` (every 2 minutes) queues
- * the settled ones (ready, error), so drift is repaired, an error retried and new Nodes get a token.
+ * the settled ones (ready, error), so drift is repaired, an error retried and new Nodes get a token. A teardown
+ * stopped by a delete the provider refused (`error` with `desired_state = 'deleted'`) leaves the 30 s sweep: the
+ * refresh queues it with exponential backoff (`deleteRetryDue`: 2, 4, 8 minutes, ... at most every 6 hours).
  */
 export function substratesReconciler(depsOf: (context: ModuleContext) => SubstrateDeps): Reconciler {
   return {
@@ -2086,12 +2107,18 @@ export function substratesReconciler(depsOf: (context: ModuleContext) => Substra
               ? `SELECT p.id FROM pools p
                    LEFT JOIN kubernetes_pool_substrates s ON s.pool_id = p.id
                   WHERE (p.policy ? 'substrate' AND p.archived_at IS NULL
-                         AND (s.pool_id IS NULL OR s.state NOT IN ('ready', 'error')
-                              OR s.pool_version IS DISTINCT FROM p.version))
+                         AND (s.pool_id IS NULL
+                              OR ((s.state NOT IN ('ready', 'error') OR s.pool_version IS DISTINCT FROM p.version)
+                                  AND NOT (s.state = 'error' AND s.desired_state = 'deleted'))))
                      OR (s.state IS NOT NULL AND s.state <> 'deleted'
+                         AND NOT (s.state = 'error' AND s.desired_state = 'deleted')
                          AND (s.desired_state = 'deleted' OR p.archived_at IS NOT NULL OR NOT p.policy ? 'substrate'))
                   ORDER BY p.id`
-              : `SELECT pool_id AS id FROM kubernetes_pool_substrates WHERE state IN ('ready', 'error') ORDER BY pool_id`,
+              : `SELECT s.pool_id AS id FROM kubernetes_pool_substrates s
+                  WHERE s.state = 'ready'
+                     OR (s.state = 'error'
+                         AND (s.desired_state <> 'deleted' OR ${deleteRetryDue('s', substrateDeleteRetryMinutes)}))
+                  ORDER BY s.pool_id`,
           );
           await enqueueAll(
             context,

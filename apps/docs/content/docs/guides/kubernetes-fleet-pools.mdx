@@ -222,6 +222,10 @@ One cluster backs one pool, whichever account or deployment reaches it. Three ch
   adopts the same cluster is refused before it adds node pools or applies bcd. Teardown deletes the claim, and a
   substrate that never held it removes nothing and does not revoke the `bc-substrate` identity.
 
+If the provider refuses to delete a created cluster (it is in use, the account lost a permission), the cluster and
+its substrate go to `error` with the provider's message and the delete is retried with a growing wait: 5 minutes,
+then 10, 20, 40 and so on, at most every 6 hours. Fix the cause and the next retry finishes the teardown.
+
 To move a cluster to another pool, archive the first pool and wait for its substrate to be `deleted`. Delete the
 ConfigMap by hand only for a cluster whose deployment is gone for good.
 

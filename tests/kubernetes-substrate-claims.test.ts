@@ -66,7 +66,7 @@ describe('substrate: one cluster backs one pool', () => {
     expect(kubernetesMigrations.map((migration) => migration.name).sort()).toEqual(
       kubernetesMigrations.map((migration) => migration.name),
     );
-    expect(kubernetesMigrations.at(-1)!.name).toBe('kubernetes/0005_cluster_claims');
+    expect(kubernetesMigrations.map((migration) => migration.name)).toContain('kubernetes/0005_cluster_claims');
     world = await substrateWorld();
     const { rows } = await world.fixture.database.query<{ indexdef: string }>(
       `SELECT indexdef FROM pg_indexes WHERE indexname = 'kubernetes_clusters_claim'`,

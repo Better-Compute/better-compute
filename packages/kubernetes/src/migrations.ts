@@ -283,10 +283,32 @@ CREATE UNIQUE INDEX kubernetes_clusters_claim ON kubernetes_clusters (claim_key)
 `,
 };
 
+/**
+ * A delete the provider refuses for good is retried with exponential backoff, not every 30 s forever.
+ *
+ * - `kubernetes_clusters.updated_at`: when the cluster's state or message last changed (so: since when it has been
+ *   in its current error). `retried_at`: when a delete that stayed in the same error was last tried.
+ * - `kubernetes_pool_substrates.retried_at`: the same for a substrate whose teardown waits on such a cluster (its
+ *   `updated_at` already is when its state or message last changed).
+ *
+ * A row in `error` with `desired_state = 'deleted'` leaves the 30 s sweeps; the refreshes queue it when
+ * `deleteRetryDue` says so: after the refresh interval, then each time after as long again as it has been in error
+ * (5, 10, 20, 40 minutes, ...), at most every 6 hours. Asking for the delete again tries at once.
+ */
+export const kubernetesDeleteBackoffMigration: Migration = {
+  name: 'kubernetes/0006_delete_backoff',
+  sql: `
+ALTER TABLE kubernetes_clusters ADD COLUMN updated_at timestamptz NOT NULL DEFAULT compute_now();
+ALTER TABLE kubernetes_clusters ADD COLUMN retried_at timestamptz;
+ALTER TABLE kubernetes_pool_substrates ADD COLUMN retried_at timestamptz;
+`,
+};
+
 export const kubernetesMigrations: readonly Migration[] = Object.freeze([
   kubernetesClustersMigration,
   kubernetesSubstratesMigration,
   kubernetesSubstrateNodesMigration,
   kubernetesSubstrateOwnershipMigration,
   kubernetesClusterClaimsMigration,
+  kubernetesDeleteBackoffMigration,
 ]);

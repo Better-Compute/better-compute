@@ -31,7 +31,7 @@ Changes the control-plane `version`, the `releaseChannel`, the `authorizedNetwor
 
 ## delete
 
-Marks the cluster and its node pools for deletion and returns it `deleting`. The reconciler deletes the cluster at the provider (its node pools go with it); the cluster and its pools are then `deleted`, its authorization row is removed and `kubernetes.cluster.deleted` is published. Deleting a cluster that is being deleted returns it unchanged. Publishes `kubernetes.cluster.deleting`. Decided as `compute:kubernetes:delete` on the cluster.
+Marks the cluster and its node pools for deletion and returns it `deleting`. The reconciler deletes the cluster at the provider (its node pools go with it); the cluster and its pools are then `deleted`, its authorization row is removed and `kubernetes.cluster.deleted` is published. Deleting a cluster that is being deleted returns it unchanged. If the provider refuses the delete the cluster is `error` with its message and the delete is retried with a growing wait (5, 10, 20 minutes and so on, at most every 6 hours); calling `delete` again tries at once. Publishes `kubernetes.cluster.deleting`. Decided as `compute:kubernetes:delete` on the cluster.
 
 ## credentials
 

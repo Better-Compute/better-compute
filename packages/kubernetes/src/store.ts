@@ -131,6 +131,20 @@ export const nodePoolColumns = `id, cluster_id, tenant_id, name, machine_type, n
   autoscaling_max, disk_gib, disk_type, spot, accelerator_type, accelerator_count, zones, labels, taints, initial,
   state, desired_state, message, encode(request_hash, 'hex') AS request_hash, version, created_at, updated_at`;
 
+/** The longest a refused delete waits before it is tried again. */
+export const deleteRetryMaxHours = 6;
+
+/**
+ * SQL: whether a row in `error` whose delete the provider refused is due for another try (`alias` has
+ * `updated_at`, since when it is in this error, and `retried_at`, the last try). The first retry comes
+ * `baseMinutes` after the error, each later one after as long again as the row has been in error by then (the wait
+ * doubles), capped at `deleteRetryMaxHours`.
+ */
+export const deleteRetryDue = (alias: string, baseMinutes: number): string =>
+  `compute_now() >= coalesce(${alias}.retried_at, ${alias}.updated_at)
+     + least(interval '${deleteRetryMaxHours} hours',
+             greatest(interval '${baseMinutes} minutes', coalesce(${alias}.retried_at, ${alias}.updated_at) - ${alias}.updated_at))`;
+
 export const json = <T>(value: T | string): T =>
   typeof value === 'string' ? (JSON.parse(value) as T) : value;
 const ms = (value: Date | string) => new Date(value).getTime();
