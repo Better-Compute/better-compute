@@ -190,6 +190,74 @@ describe('do.knowledge-base', () => {
     expect(error.details).toMatchObject({ reason: 'replaceRequired', field: 'embeddingModel' });
   });
 
+  it('a failed indexing job does not lock the knowledge base: a source change is still applied and a new job started', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const ready = await settle(resources, request());
+    const bad = { ...kbSpec, webSources: ['https://unreachable.example.com/'] };
+    expect((await resources.ensure(request({ id: ready.id, spec: bad }), call())).state).toBe(
+      'updating',
+    );
+    // The job over the new source ends failed.
+    const kb = emu.state.knowledgeBases.get(ready.id)!;
+    kb.last_indexing_job.status = 'INDEX_JOB_STATUS_FAILED';
+    // With nothing to change the failure is reported, and no job is started again and again.
+    for (let pass = 0; pass < 3; pass++) {
+      const failed = await resources.ensure(request({ id: ready.id, spec: bad }), call());
+      expect(failed.state).toBe('error');
+      expect(failed.message).toMatch(/INDEX_JOB_STATUS_FAILED/);
+    }
+    expect(mutations(emu, 'POST', /indexing_jobs$/)).toHaveLength(1);
+    // The tenant fixes the sources: the change is applied and a new job starts.
+    const fixed = { ...kbSpec, webSources: ['https://docs.example.org/'] };
+    const retried = await resources.ensure(request({ id: ready.id, spec: fixed }), call());
+    expect(retried.state).toBe('updating');
+    expect(retried.message).toBeUndefined();
+    expect(kb._sources.map((source: any) => source.web_crawler_data_source.base_url)).toEqual([
+      'https://docs.example.org/',
+    ]);
+    expect(mutations(emu, 'POST', /indexing_jobs$/)).toHaveLength(2);
+    expect(kb.last_indexing_job.status).toBe('INDEX_JOB_STATUS_RUNNING');
+    expect(kb.tags).not.toContain('better-compute-kb-reindex:pending');
+    const after = await settle(resources, request({ id: ready.id, spec: fixed }));
+    expect(after).toMatchObject({ state: 'ready', spec: fixed });
+    expect(mutations(emu, 'POST', /indexing_jobs$/)).toHaveLength(2);
+  });
+
+  it('a job still owed is started after a failed one; a database in error, or a job running, is left alone', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const ready = await settle(resources, request());
+    const changed = { ...kbSpec, webSources: ['https://blog.example.com/'] };
+    // The sources changed, the job start failed (it stays owed), and the last job DigitalOcean shows is a failed one.
+    emu.failNext({ method: 'POST', path: /^\/gen-ai\/indexing_jobs$/ }, 503, {
+      id: 'service_unavailable',
+      message: 'try again later',
+    });
+    await failure(resources.ensure(request({ id: ready.id, spec: changed }), call()));
+    const kb = emu.state.knowledgeBases.get(ready.id)!;
+    kb.last_indexing_job.status = 'INDEX_JOB_STATUS_FAILED';
+    const retried = await resources.ensure(request({ id: ready.id, spec: changed }), call());
+    expect(retried.state).toBe('updating');
+    expect(mutations(emu, 'POST', /indexing_jobs$/)).toHaveLength(2);
+    // While that job runs, another source change waits: nothing is changed under a running job.
+    const again = { ...kbSpec, webSources: ['https://third.example.com/'] };
+    const writes = emu.requests.filter((r) => r.method !== 'GET').length;
+    kb.last_indexing_job.status = 'INDEX_JOB_STATUS_RUNNING';
+    kb._reads = -5;
+    expect((await resources.ensure(request({ id: ready.id, spec: again }), call())).state).toBe(
+      'updating',
+    );
+    // Nor when the database itself is in error.
+    kb._reads = 0;
+    kb.last_indexing_job.status = 'INDEX_JOB_STATUS_COMPLETED';
+    kb._status = 'ERROR';
+    expect((await resources.ensure(request({ id: ready.id, spec: again }), call())).state).toBe(
+      'error',
+    );
+    expect(emu.requests.filter((r) => r.method !== 'GET').length).toBe(writes);
+  });
+
   it('a reindex whose start failed after the sources changed is started on the next ensure, exactly once', async () => {
     const emu = emulator();
     const { resources } = await build(emu);

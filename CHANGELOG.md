@@ -171,6 +171,11 @@ All notable changes to the better-compute packages are documented here. The form
   later `ensureZone` was `CONFLICT` (`zoneExists`) and `deleteZone` `INVALID_STATE` (`notManaged`). `ensureZone`
   now deletes the empty domain it just made when the marker cannot be written; if that fails too, the same client
   marks (or deletes) the zone on a later call while it still holds only DigitalOcean's apex NS and SOA records.
+- **A failed indexing job no longer locks a knowledge base** (`@better-compute/provider-digitalocean`). After a
+  `do.knowledge-base` indexing job ended failed, `ensure` returned `error` before it looked at the sources, so no
+  source change was ever applied and no new job started. A failed job is still reported, but a source change (or a
+  job still owed) is now applied and starts a new job; only a job still running, or a database that is not online,
+  holds a change back.
 - **Scripts on images without cloud-init** (`@better-compute/provider-gcp`). Compute Engine's Debian, Rocky,
   CentOS, RHEL, AlmaLinux and SUSE images do not run cloud-init, so a shell-script `userData` (`#!…`) never ran on
   them. Create now also writes it as `startup-script` metadata, wrapped to run once on the first boot as cloud-init

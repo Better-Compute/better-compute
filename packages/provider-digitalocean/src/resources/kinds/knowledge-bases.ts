@@ -135,7 +135,7 @@ function specOf(kb: DoKnowledgeBase, sources: readonly DoDataSource[] | undefine
 
 function phase(
   databaseStatus: string | undefined,
-  kb: DoKnowledgeBase,
+  kb: Pick<DoKnowledgeBase, 'last_indexing_job'>,
 ): ProviderResourceState['state'] {
   const db = (databaseStatus ?? '').toUpperCase();
   if (db === 'ERROR' || db === 'FAILED') return 'error';
@@ -354,7 +354,12 @@ export function knowledgeBaseKind(): DoKind {
         throw replaceRequired(knowledgeBaseKindName, 'vpc');
       const have = await sourcesOf(env, kb.uuid, context.signal);
       const current = state(kb, databaseStatus, have);
-      if (current.state !== 'ready') return current;
+      // Nothing is changed under a database still coming up or a job still running, and a database in error cannot
+      // be indexed. A job that ended failed is different: it stays the last job until another one runs, so returning
+      // here would lock the knowledge base (no source change applied, no job started, ever). Its sources are still
+      // diffed below, and a change (or a job still owed) starts a new job; with neither, the failure is reported.
+      const jobFailed = current.state === 'error' && phase(databaseStatus, {}) === 'ready';
+      if (current.state !== 'ready' && !jobFailed) return current;
       const haveKeys = new Map(have.map((source) => [sourceKey(source), source]));
       const add = [...sources.entries()].filter(([key]) => !haveKeys.has(key));
       const remove = have.filter((source) => {
@@ -393,7 +398,9 @@ export function knowledgeBaseKind(): DoKind {
         (kb.tags ?? []).filter((tag) => tag.toLowerCase() !== reindexTag),
         context.signal,
       );
-      return { ...current, state: 'updating', spec: specOf(kb, [...sources.keys()].map(fromKey)) };
+      // The message of the failed job (if that is what `current` reports) no longer holds: a new job runs.
+      const { message: _stale, ...started } = current;
+      return { ...started, state: 'updating', spec: specOf(kb, [...sources.keys()].map(fromKey)) };
     },
 
     // A create whose answer was lost: the knowledge base carrying the request's key tag, as ensure finds it.
