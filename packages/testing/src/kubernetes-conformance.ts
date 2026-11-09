@@ -12,7 +12,7 @@ import {
   type ProviderKubernetes,
   type ProviderResourceState,
 } from '@better-compute/core';
-import { check, checkEqual, ConformanceFailure, type ConformanceCase } from '@better-compute/core/conformance';
+import { check, checkEqual, ConformanceFailure, skip, type ConformanceCase } from '@better-compute/core/conformance';
 
 // kubernetesProviderConformanceCases: what the kubernetes module's cluster and pool substrate reconcilers need of
 // any `ProviderImpl.kubernetes` (GKE, EKS, DOKS, a fake), as behavioural cases shaped like vps'
@@ -58,25 +58,33 @@ export interface KubernetesProviderConformanceSubject {
   polls?: number;
   /** Cluster names start with this (default `bc-k-conf`); concurrent runs need distinct ones. */
   prefix?: string;
-  /** A cluster id of the provider's form that names no cluster (getCluster's undefined). Skipped without. */
+  /**
+   * A cluster id of the provider's form that names no cluster (getCluster's undefined). Without it the unknown-cluster
+   * case is reported as skipped, and the other cases leave their unknown-cluster checks out.
+   */
   missingCluster?: string;
-  /** An existing cluster the subject did not create: `getCluster` must read it, as a substrate's adopt does. */
+  /**
+   * An existing cluster the subject did not create: `getCluster` must read it, as a substrate's adopt does. Without it
+   * the adopt case is reported as skipped.
+   */
   adoptable?: string;
   /** Whether the cluster's own API accepts a minted credential (the emulator's check). Skipped without. */
   accepts?: (credentials: KubernetesCredentials) => boolean | Promise<boolean>;
   /**
    * Whether a minted credential may do `check` on its cluster now (the emulator's RBAC and admission policies, or a
-   * SubjectAccessReview against a live cluster). The role cases are skipped without.
+   * SubjectAccessReview against a live cluster). Without it the role case and the revoke case are reported as skipped
+   * (they could check nothing), and the revoke case fails when the subject sets `revoke`.
    */
   can?: (credentials: KubernetesCredentials, check: KubernetesAccessCheck) => boolean | Promise<boolean>;
   /**
-   * `false` when the location offers a single minor version on purpose: the upgrade case is then skipped. Otherwise a
-   * location with fewer than two minors fails that case (it would test nothing).
+   * `false` when the location offers a single minor version on purpose: the upgrade case is then reported as skipped.
+   * Otherwise a location with fewer than two minors fails that case (it would test nothing).
    */
   upgrade?: boolean;
   /**
    * `true` when the driver must implement `revokeCredentials` (a pool substrate's adopt teardown fails closed on it):
-   * a driver without it then fails the revoke case instead of skipping it.
+   * a driver without it then fails the revoke case instead of skipping it, and so does a subject without `can`, which
+   * could not show that a revoked credential stopped working.
    */
   revoke?: boolean;
 }
@@ -171,10 +179,30 @@ function names(subject: KubernetesProviderConformanceSubject, name: string) {
   };
 }
 
-async function readyCluster(subject: KubernetesProviderConformanceSubject, c: Client, spec: KubernetesClusterSpec) {
-  const state = await settle(subject, `ensureCluster ${spec.name}`, () => c.k8s.ensureCluster(spec, c.call(spec.name)), [
-    'ready',
-  ]);
+/**
+ * The cluster a case made. Its id is taken from the first `ensureCluster` answer, before anything is checked of it, so
+ * a cluster that never gets ready (or goes to `error`) is still deleted when the case ends, not left running.
+ */
+interface Made {
+  id?: string;
+}
+
+async function readyCluster(
+  subject: KubernetesProviderConformanceSubject,
+  c: Client,
+  spec: KubernetesClusterSpec,
+  made: Made,
+) {
+  const state = await settle(
+    subject,
+    `ensureCluster ${spec.name}`,
+    async () => {
+      const answer = await c.k8s.ensureCluster(spec, c.call(spec.name));
+      if (typeof answer?.id === 'string' && answer.id !== '') made.id ??= answer.id;
+      return answer;
+    },
+    ['ready'],
+  );
   return state!;
 }
 
@@ -243,13 +271,14 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
       async run(subject) {
         const c = await client(subject);
         const { spec } = names(subject, 'create');
-        let id: string | undefined;
+        const made: Made = {};
         try {
           const first = await c.k8s.ensureCluster(spec(), c.call('create'));
+          if (typeof first?.id === 'string' && first.id !== '') made.id = first.id;
           checkState(first, 'ensureCluster');
-          id = first.id;
+          const id = first.id;
           check(['pending', 'updating', 'ready'].includes(first.state), `a new cluster is pending, not ${first.state}`);
-          const ready = await readyCluster(subject, c, spec());
+          const ready = await readyCluster(subject, c, spec(), made);
           checkEqual(ready.id, id, 'a repeated ensureCluster names the same cluster');
           const outputs = ready.outputs ?? {};
           check(/^https:\/\/[^/\s]+$/.test(outputs.endpoint ?? ''), `outputs.endpoint is https://<host> (${outputs.endpoint})`);
@@ -267,7 +296,7 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
               'getCluster of an unknown cluster is undefined',
             );
         } finally {
-          await cleanUp(subject, c, id);
+          await cleanUp(subject, c, made.id);
         }
       },
     },
@@ -276,9 +305,9 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
       async run(subject) {
         const c = await client(subject);
         const { spec } = names(subject, 'mode');
-        let id: string | undefined;
+        const made: Made = {};
         try {
-          id = (await readyCluster(subject, c, spec())).id;
+          const { id } = await readyCluster(subject, c, spec(), made);
           const { initialNodePools: _, ...rest } = spec();
           const error = await rejection(() => c.k8s.ensureCluster({ ...rest, mode: 'autopilot' }, c.call('mode')));
           // A provider without an autopilot mode (DOKS) refuses the mode itself.
@@ -289,7 +318,7 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
           const after = await c.k8s.getCluster(id, c.call('mode-after'));
           checkEqual(after?.state, 'ready', 'a refused mode change leaves the cluster as it was');
         } finally {
-          await cleanUp(subject, c, id);
+          await cleanUp(subject, c, made.id);
         }
       },
     },
@@ -305,7 +334,8 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
           return y[0]! - x[0]! || y[1]! - x[1]!;
         });
         if (minors.length < 2) {
-          if (subject.upgrade === false) return;
+          if (subject.upgrade === false)
+            return skip(`${subject.location} offers one minor version and the subject sets upgrade: false`);
           throw new ConformanceFailure(
             `${subject.location} offers ${minors.length} minor version(s): an upgrade needs two (set upgrade: false to skip this case)`,
           );
@@ -314,10 +344,10 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
         const runs = (actual: string | undefined, version: string) =>
           actual !== undefined && (actual === version || actual.startsWith(`${version}.`) || actual.startsWith(`${version}-`));
         const { spec } = names(subject, 'upgrade');
-        let id: string | undefined;
+        const made: Made = {};
         try {
-          const created = await readyCluster(subject, c, spec({ version: older }));
-          id = created.id;
+          const created = await readyCluster(subject, c, spec({ version: older }), made);
+          const id = created.id;
           check(runs(created.outputs?.version, older), `created on ${older}, runs ${created.outputs?.version}`);
           const upgraded = await settle(
             subject,
@@ -331,7 +361,7 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
           checkEqual(upgraded!.id, id, 'an upgrade keeps the cluster');
           check(runs(upgraded!.outputs?.version, newer), `upgraded to ${newer}, runs ${upgraded!.outputs?.version}`);
         } finally {
-          await cleanUp(subject, c, id);
+          await cleanUp(subject, c, made.id);
         }
       },
     },
@@ -340,10 +370,9 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
       async run(subject) {
         const c = await client(subject);
         const { spec } = names(subject, 'pools');
-        let id: string | undefined;
+        const made: Made = {};
         try {
-          id = (await readyCluster(subject, c, spec())).id;
-          const cluster = id;
+          const cluster = (await readyCluster(subject, c, spec(), made)).id;
           const gpu: KubernetesNodePoolSpec = {
             name: 'bc-conf-gpu',
             ...subject.gpuNodePool,
@@ -417,7 +446,7 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
           const twice = await c.k8s.deleteNodePool(cluster, gpu.name, c.call('gpu-delete-again'));
           checkEqual(twice.state, 'deleted', 'deleting a deleted node pool');
         } finally {
-          await cleanUp(subject, c, id);
+          await cleanUp(subject, c, made.id);
         }
       },
     },
@@ -426,10 +455,10 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
       async run(subject) {
         const c = await client(subject);
         const { spec } = names(subject, 'creds');
-        let id: string | undefined;
+        const made: Made = {};
         try {
-          const ready = await readyCluster(subject, c, spec());
-          id = ready.id;
+          const ready = await readyCluster(subject, c, spec(), made);
+          const id = ready.id;
           const before = c.clock.now();
           const minted = await c.k8s.credentials(
             id,
@@ -457,7 +486,7 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
             [{ subject: 'bc-substrate', role: 'view', ttlSeconds: 60 }, 'ttlSeconds below 600'],
             [{ subject: 'bc-substrate', role: 'view', ttlSeconds: 100_000 }, 'ttlSeconds above 86400'],
           ] as const) {
-            const refused = await rejection(() => c.k8s.credentials(id!, request, c.call('bad-request')));
+            const refused = await rejection(() => c.k8s.credentials(id, request, c.call('bad-request')));
             check(isComputeError(refused, 'INVALID_INPUT'), `${what} is INVALID_INPUT, not ${String(refused)}`);
             const said = `${String(refused)} ${JSON.stringify((refused as { details?: unknown }).details ?? {})}`;
             check(!said.includes(minted.token) && !said.includes(view.token), `refusing ${what} names no token`);
@@ -469,21 +498,21 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
             check(isComputeError(missing, 'NOT_FOUND'), `credentials on an unknown cluster are NOT_FOUND, not ${String(missing)}`);
           }
         } finally {
-          await cleanUp(subject, c, id);
+          await cleanUp(subject, c, made.id);
         }
       },
     },
     {
       name: 'a credential carries its role: view only reads, edit never reaches bc-access or kube-system',
       async run(subject) {
-        if (!subject.can) return;
+        if (!subject.can) return skip('the subject gives no `can` to check what a credential may do');
         const c = await client(subject);
         const { spec } = names(subject, 'roles');
-        let id: string | undefined;
+        const made: Made = {};
         try {
-          id = (await readyCluster(subject, c, spec())).id;
+          const { id } = await readyCluster(subject, c, spec(), made);
           const mint = (name: string, role: 'view' | 'edit' | 'admin') =>
-            c.k8s.credentials(id!, { subject: name, role, ttlSeconds: 600 }, c.call(`roles-${name}`));
+            c.k8s.credentials(id, { subject: name, role, ttlSeconds: 600 }, c.call(`roles-${name}`));
           const admin = await mint('bc-conf-admin', 'admin');
           const view = await mint('bc-conf-viewer', 'view');
           const edit = await mint('bc-conf-editor', 'edit');
@@ -510,7 +539,7 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
             check(await can(admin, 'create', 'pods', namespace), `an admin credential creates pods in ${namespace}`);
           }
         } finally {
-          await cleanUp(subject, c, id);
+          await cleanUp(subject, c, made.id);
         }
       },
     },
@@ -520,13 +549,19 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
         const c = await client(subject);
         if (!c.k8s.revokeCredentials) {
           if (subject.revoke) throw new ConformanceFailure('the driver implements revokeCredentials');
-          return;
+          return skip('the driver has no revokeCredentials');
         }
-        if (!subject.can) return;
+        if (!subject.can) {
+          // Without `can` nothing shows that a revoked credential stopped working: a subject that requires revoke
+          // must not have this case pass (or be skipped) unchecked.
+          if (subject.revoke)
+            throw new ConformanceFailure('a subject with revoke: true gives `can`, or the revoke case checks nothing');
+          return skip('the subject gives no `can` to check what a credential may do');
+        }
         const { spec } = names(subject, 'forget');
-        let id: string | undefined;
+        const made: Made = {};
         try {
-          id = (await readyCluster(subject, c, spec())).id;
+          const { id } = await readyCluster(subject, c, spec(), made);
           const minted = await c.k8s.credentials(id, { subject: 'bc-conf-forget', role: 'admin', ttlSeconds: 600 }, c.call('forget'));
           // Another subject on the same cluster: revoking one must leave it (and bc-access, where it lives) alone.
           const kept = await c.k8s.credentials(id, { subject: 'bc-conf-keep', role: 'view', ttlSeconds: 600 }, c.call('keep'));
@@ -540,14 +575,14 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
           if (subject.missingCluster !== undefined)
             await c.k8s.revokeCredentials(subject.missingCluster, 'bc-conf-forget', c.call('forget-missing'));
         } finally {
-          await cleanUp(subject, c, id);
+          await cleanUp(subject, c, made.id);
         }
       },
     },
     {
       name: 'node pool calls on an unknown cluster are NOT_FOUND',
       async run(subject) {
-        if (subject.missingCluster === undefined) return;
+        if (subject.missingCluster === undefined) return skip('the subject names no missingCluster');
         const c = await client(subject);
         const pool: KubernetesNodePoolSpec = { name: 'bc-conf-missing', ...subject.nodePool };
         const error = await rejection(() => c.k8s.ensureNodePool(subject.missingCluster!, pool, c.call('missing-pool')));
@@ -559,19 +594,27 @@ export function kubernetesProviderConformanceCases(): ConformanceCase<Kubernetes
       async run(subject) {
         const c = await client(subject);
         const { spec } = names(subject, 'delete');
-        const { id } = await readyCluster(subject, c, spec());
-        await deleted(subject, c, id);
-        const after = await c.k8s.getCluster(id, c.call('get-after'));
-        check(after === undefined || after.state === 'deleted', `getCluster after delete finds nothing live (${after?.state})`);
-        const again = await c.k8s.deleteCluster(id, c.call('delete-again'));
-        checkEqual(again.state, 'deleted', 'deleting a deleted cluster');
+        const made: Made = {};
+        let gone = false;
+        try {
+          const { id } = await readyCluster(subject, c, spec(), made);
+          await deleted(subject, c, id);
+          gone = true;
+          const after = await c.k8s.getCluster(id, c.call('get-after'));
+          check(after === undefined || after.state === 'deleted', `getCluster after delete finds nothing live (${after?.state})`);
+          const again = await c.k8s.deleteCluster(id, c.call('delete-again'));
+          checkEqual(again.state, 'deleted', 'deleting a deleted cluster');
+        } finally {
+          // A cluster that never got ready, or whose delete did not finish, is not left behind.
+          if (!gone) await cleanUp(subject, c, made.id);
+        }
       },
     },
     {
       name: 'getCluster reads a cluster better-compute did not create (adopt), and a node pool can be added to it',
       async run(subject) {
         const id = subject.adoptable;
-        if (id === undefined) return;
+        if (id === undefined) return skip('the subject names no adoptable cluster');
         const c = await client(subject);
         const read = await c.k8s.getCluster(id, c.call('adopt'));
         checkState(read, 'getCluster of an adoptable cluster');

@@ -59,4 +59,6 @@ import { runConformance, type ConformanceCase } from '@better-compute/core/confo
 - **catalog**: `computeResourceTypes(prefix)` and `computeActions` (§12.3), and `apiSurface`, the
   §9.2 table as data with one row per method.
 - **conformance** (subpath): `ConformanceCase<T>`, `ConformanceFailure`, `check`, `checkEqual`,
-  `checkRejects`, `runConformance`.
+  `checkRejects`, `runConformance`. A case that does not apply to its subject returns (or throws)
+  `skip(reason)` (`ConformanceSkip`, `isConformanceSkip`); `runConformance` reports
+  `{ passed, failed, skipped }`, and a skipped case is never among the passed.

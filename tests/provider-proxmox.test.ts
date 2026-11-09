@@ -293,9 +293,22 @@ describe('proxmox: providerConformance', () => {
       offerId: '2c-4g',
       image: 'ubuntu-24.04',
       context: { secrets, clock },
+      reinstallable: true,
     }));
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
-    expect(report.passed).toHaveLength(providerConformanceCases().length);
+    // The cases Proxmox VE has something to run: machines, power and reinstall.
+    expect(report.passed).toEqual([
+      'the definition is well formed and builds a client from a valid config',
+      'listOffers returns well-formed offers, including the subject offer',
+      'create is idempotent by idempotencyKey: a retried create returns the same machine',
+      'get follows the machine; delete removes it; deleting again counts as deleted',
+      'power (when offered) stops and starts the machine',
+      'reinstall (when offered) needs no options: the catalog-image identity is optional',
+      'every capability the definition declares is implemented by its client',
+    ]);
+    // Every other case says why it did not run.
+    expect(report.passed.length + report.skipped.length).toBe(providerConformanceCases().length);
+    for (const { reason } of report.skipped) expect(reason).not.toBe('');
   });
 
   it('is a well-formed definition whose config demands a secret reference', async () => {

@@ -179,7 +179,87 @@ describe('provider contract extensions', () => {
       context: { clock },
     });
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
-    expect(report.passed).toEqual(names);
+    // What the provider has nothing for is skipped with the reason, never counted as passed.
+    expect(report.passed).toEqual([
+      'the definition is well formed and builds a client from a valid config',
+      'listOffers returns well-formed offers, including the subject offer',
+      'create is idempotent by idempotencyKey: a retried create returns the same machine',
+      'get follows the machine; delete removes it; deleting again counts as deleted',
+    ]);
+    expect(report.skipped).toEqual(
+      expect.arrayContaining([
+        {
+          name: 'every capability the definition declares is implemented by its client',
+          reason: 'the definition declares no capabilities',
+        },
+        {
+          name: 'power (when offered) stops and starts the machine',
+          reason: 'the provider has no power',
+        },
+        {
+          name: 'claim then release round-trips the label',
+          reason: 'the provider has no claim and release',
+        },
+        {
+          name: 'discover yields the attachable machine',
+          reason: 'the provider has no discover',
+        },
+        {
+          name: 'volumes (when offered): ensure by name, attach, grow-only resize, delete',
+          reason: 'the provider has no volumes',
+        },
+      ]),
+    );
+    expect([...report.passed, ...report.skipped.map(({ name }) => name)].sort()).toEqual(
+      [...names].sort(),
+    );
+
+    // The same client behind a definition that declares what it lacks: those cases fail, they are not skipped.
+    const overpromising = defineProvider({
+      id: 'overpromising',
+      version: hetznerLike.version,
+      provides: hetznerLike.provides,
+      config: hetznerLike.config,
+      create: hetznerLike.create,
+      capabilities: ['power', 'claim', 'volumes', 'spot-offers'],
+    });
+    const broken = await runConformance(cases, {
+      provider: overpromising,
+      config: {},
+      offerId: 'o',
+      image: 'ubuntu-24.04',
+      context: { clock },
+    });
+    expect(broken.failed.map(({ name, error }) => [name, String(error)])).toEqual([
+      [
+        'power (when offered) stops and starts the machine',
+        'ConformanceFailure: the definition declares the power capability, but its client has no power',
+      ],
+      [
+        'claim then release round-trips the label',
+        'ConformanceFailure: the definition declares the claim capability, but its client has no claim and release',
+      ],
+      ...[
+        'volumes (when offered): ensure by name, attach, grow-only resize, delete',
+        'volume snapshots (when offered): snapshot by name, delete idempotently',
+      ].map((name) => [
+        name,
+        'ConformanceFailure: the definition declares the volumes capability, but its client has no volumes',
+      ]),
+      ...[
+        'volumes and addresses (when offered): a second machine is CONFLICT while on the first',
+        'volumes and addresses (when offered): a machine in another region is INVALID_INPUT',
+        'volumes and addresses (when offered): a delete refuses what this deployment did not make',
+      ].map((name) => [
+        name,
+        'ConformanceFailure: the definition declares the volumes capability, but its client has no volumes or addresses',
+      ]),
+      [
+        'every capability the definition declares is implemented by its client',
+        'ConformanceFailure: the definition declares the power capability, but its client has no power',
+      ],
+    ]);
+    for (const { name } of broken.failed) expect(broken.skipped.map((entry) => entry.name)).not.toContain(name);
   });
 
   it('runs the claim and discover cases against a provider that offers them', async () => {
@@ -227,6 +307,28 @@ describe('provider contract extensions', () => {
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
     expect(report.passed).toContain('claim then release round-trips the label');
     expect(report.passed).toContain('discover yields the attachable machine');
+
+    // Without a machine to attach, the same provider's cases say so instead of passing.
+    const unattached = await runConformance(providerConformanceCases(), {
+      provider: def,
+      config: {},
+      offerId: 'o',
+      image: 'i',
+      context: { clock },
+    });
+    expect(unattached.failed).toEqual([]);
+    expect(unattached.skipped).toEqual(
+      expect.arrayContaining([
+        {
+          name: 'claim then release round-trips the label',
+          reason: 'the subject names no attachable machine',
+        },
+        {
+          name: 'discover yields the attachable machine',
+          reason: 'the subject names no attachable machine',
+        },
+      ]),
+    );
   });
 
   it('defineProvider accepts the capacity-market members (AWS A3)', async () => {

@@ -479,7 +479,22 @@ describe('compute', () => {
       };
     });
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
-    expect(report.passed).toHaveLength(providerConformanceCases().length);
+    // The cases Compute Engine has something to run: machines, power, attach, list prices and billing hints.
+    expect(report.passed).toEqual([
+      'the definition is well formed and builds a client from a valid config',
+      'listOffers returns well-formed offers, including the subject offer',
+      'create is idempotent by idempotencyKey: a retried create returns the same machine',
+      'get follows the machine; delete removes it; deleting again counts as deleted',
+      'power (when offered) stops and starts the machine',
+      'claim then release round-trips the label',
+      'discover yields the attachable machine',
+      'listPrices (when offered) answers well-formed list prices',
+      'the billing hints (when given) are well formed',
+      'every capability the definition declares is implemented by its client',
+    ]);
+    // Every other case says why it did not run.
+    expect(report.passed.length + report.skipped.length).toBe(providerConformanceCases().length);
+    for (const { reason } of report.skipped) expect(reason).not.toBe('');
   });
 
   it('is a well-formed definition with the documented capabilities', async () => {

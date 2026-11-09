@@ -15,11 +15,17 @@ import {
   check,
   checkEqual,
   checkRejects,
+  skip,
   type ConformanceCase,
+  type ConformanceSkip,
 } from '@better-compute/core/conformance';
 
 // providerConformance (PLAN.md §5.6 walkthrough 2): behavioural cases every ProviderImpl must pass,
 // run from any test runner against a live account, a record/replay transport or an emulator.
+//
+// A case that has nothing to check (the provider lacks the capability, the subject names nothing to run
+// it on) returns `skip(reason)`: `runConformance` reports it as skipped, never as passed. A capability the
+// definition declares is a promise: a case whose client lacks the method then fails instead.
 //
 // Every call on a machine (`get`, `delete`, `power`, `reinstall`) carries the idempotency key the machine
 // was created under, as the reconciler's calls do: a provider whose only record of ownership is that key
@@ -286,6 +292,47 @@ function regionOf(subject: ProviderConformanceSubject, machine: ExternalMachine)
   return region;
 }
 
+/**
+ * The members of a client that each capability of a definition promises. A capability that is not listed here
+ * (`spot-offers`, a provider's own) promises no member the cases can look for.
+ */
+const capabilityMembers: Readonly<Record<string, readonly (keyof ProviderImpl)[]>> = {
+  power: ['power'],
+  rescue: ['rescue'],
+  identify: ['identify'],
+  bootstrap: ['bootstrap'],
+  reinstall: ['reinstall'],
+  list: ['list'],
+  discover: ['discover'],
+  claim: ['claim', 'release'],
+  reservations: ['listReservations'],
+  networks: ['networks'],
+  volumes: ['volumes'],
+  addresses: ['addresses'],
+  kubernetes: ['kubernetes'],
+  resources: ['resources'],
+  loadBalancers: ['loadBalancers'],
+  dns: ['dns'],
+  certificates: ['certificates'],
+};
+
+/**
+ * What a case answers when the provider's client lacks `what`: a skip, since nothing was checked. When the
+ * definition declares the capability that promises it, the client broke that promise: a failure.
+ */
+function absent(
+  subject: ProviderConformanceSubject,
+  capability: string | readonly string[],
+  what: string,
+): ConformanceSkip {
+  for (const name of typeof capability === 'string' ? [capability] : capability)
+    check(
+      !(subject.provider.capabilities ?? []).includes(name),
+      `the definition declares the ${name} capability, but its client has no ${what}`,
+    );
+  return skip(`the provider has no ${what}`);
+}
+
 /** The ProviderImpl contract (§5.4) as conformance cases. */
 export function providerConformanceCases(): ConformanceCase<ProviderConformanceSubject>[] {
   const key = (subject: ProviderConformanceSubject, name: string) =>
@@ -373,10 +420,11 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
     {
       name: 'power (when offered) stops and starts the machine',
       async run(subject) {
+        if (!(await client(subject)).impl.power) return absent(subject, 'power', 'power');
         const name = key(subject, 'power');
         const { impl, call, machine } = await create(subject, name);
         try {
-          if (!impl.power) return;
+          check(impl.power !== undefined, 'every client of the provider has power');
           const observable = subject.powerObservable !== false;
           await impl.power(machine.id, 'off', call(name));
           const off = await impl.get(machine.id, call(name));
@@ -405,7 +453,9 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       // before the options existed.
       name: 'reinstall (when offered) needs no options: the catalog-image identity is optional',
       async run(subject) {
-        if (!subject.reinstallable) return;
+        if (!subject.reinstallable) return skip('the subject does not set reinstallable');
+        if (!(await client(subject)).impl.reinstall)
+          return absent(subject, 'reinstall', 'reinstall');
         check(
           !subject.image.includes('@'),
           'the subject image is a provider image, not a catalog ref (a host sends catalogImage only for those)',
@@ -413,7 +463,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
         const name = key(subject, 'reinstall');
         const { impl, call, machine } = await create(subject, name);
         try {
-          if (!impl.reinstall) return;
+          check(impl.reinstall !== undefined, 'every client of the provider has reinstall');
           await impl.reinstall(machine.id, subject.image, call(name));
           await impl.reinstall(machine.id, subject.image, call(name), {});
           checkMachine(await impl.get(machine.id, call(name)), 'get after reinstall');
@@ -427,7 +477,8 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       async run(subject) {
         const id = subject.attachable;
         const { impl, call } = await client(subject);
-        if (!impl.claim || !impl.release || id === undefined) return;
+        if (!impl.claim || !impl.release) return absent(subject, 'claim', 'claim and release');
+        if (id === undefined) return skip('the subject names no attachable machine');
         const instanceId = key(subject, 'claim');
         try {
           const claimed = await impl.claim(id, instanceId, call('claim'));
@@ -453,7 +504,8 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       async run(subject) {
         const id = subject.attachable;
         const { impl, call } = await client(subject);
-        if (!impl.discover || id === undefined) return;
+        if (!impl.discover) return absent(subject, 'discover', 'discover');
+        if (id === undefined) return skip('the subject names no attachable machine');
         let found: ExternalMachine | undefined;
         for await (const machine of impl.discover(call('discover'))) {
           checkMachine(machine, 'discover');
@@ -466,7 +518,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       name: 'volumes (when offered): ensure by name, attach, grow-only resize, delete',
       async run(subject) {
         const probe = await client(subject);
-        if (!probe.impl.volumes) return;
+        if (!probe.impl.volumes) return absent(subject, 'volumes', 'volumes');
         const { impl, call, machine } = await create(subject, key(subject, 'volume-host'));
         const volumes = impl.volumes!;
         let volumeId: string | undefined;
@@ -556,7 +608,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       name: 'volume snapshots (when offered): snapshot by name, delete idempotently',
       async run(subject) {
         const probe = await client(subject);
-        if (!probe.impl.volumes) return;
+        if (!probe.impl.volumes) return absent(subject, 'volumes', 'volumes');
         const { impl, call, machine } = await create(subject, key(subject, 'snapshot-host'));
         const volumes = impl.volumes!;
         let volumeId: string | undefined;
@@ -613,7 +665,9 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
           subject.sharedVolumes === true &&
           probe.impl.networks !== undefined &&
           (probe.impl.volumes?.kinds ?? []).includes('shared');
-        if (!offered) return;
+        if (subject.sharedVolumes !== true)
+          return skip('the subject does not opt in (sharedVolumes)');
+        if (!offered) return skip('the provider has no shared volumes on tenant networks');
         const { impl, call } = probe;
         const volumes = impl.volumes!;
         const networks = impl.networks!;
@@ -750,7 +804,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       async run(subject) {
         const probe = await client(subject);
         const offered = probe.impl.volumes ?? probe.impl.addresses;
-        if (!offered) return;
+        if (!offered) return absent(subject, ['volumes', 'addresses'], 'volumes or addresses');
         const { impl, call, machine } = await create(subject, key(subject, 'conflict-host'));
         const other = await impl.create(
           { offerId: subject.offerId, image: subject.image, userData: '#cloud-config\n', name: key(subject, 'conflict-other') },
@@ -849,7 +903,9 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       async run(subject) {
         const probe = await client(subject);
         const offered = probe.impl.volumes ?? probe.impl.addresses;
-        if (!offered || subject.otherRegionOfferId === undefined) return;
+        if (!offered) return absent(subject, ['volumes', 'addresses'], 'volumes or addresses');
+        if (subject.otherRegionOfferId === undefined)
+          return skip('the subject names no otherRegionOfferId');
         const { impl, call, machine } = await create(subject, key(subject, 'region-host'));
         const foreign = await impl.create(
           {
@@ -931,9 +987,13 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
         const { impl, call } = await client(subject);
         const volumes = impl.volumes;
         const addresses = impl.addresses;
-        if (!volumes && !addresses) return;
+        if (!volumes && !addresses)
+          return absent(subject, ['volumes', 'addresses'], 'volumes or addresses');
         const foreign = subject.foreign ?? {};
+        // What this case got to check: with nothing foreign named and no address to make, nothing.
+        let checked = 0;
         if (volumes && foreign.volumeId !== undefined) {
+          checked++;
           const id = foreign.volumeId;
           checkResource(await volumes.getVolume(id, call('foreign-vol-get')), "the subject's foreign volume");
           await checkRejects(
@@ -948,6 +1008,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
           );
         }
         if (volumes && foreign.snapshotId !== undefined) {
+          checked++;
           const id = foreign.snapshotId;
           checkResource(await volumes.getSnapshot(id, call('foreign-snap-get')), "the subject's foreign snapshot");
           await checkRejects(
@@ -961,11 +1022,16 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
             'a refused delete leaves the snapshot',
           );
         }
-        if (!addresses) return;
+        const unchecked = (why: string) =>
+          checked > 0
+            ? undefined
+            : skip(`${why}, and the subject names no foreign volume or snapshot`);
+        if (!addresses) return unchecked('the provider has no addresses');
         // An address that does not match what was recorded (here: its region) is another reservation: never released.
         const region =
           subject.region ?? (await impl.listOffers({})).find((offer) => offer.id === subject.offerId)?.region;
-        if (region === undefined) return;
+        if (region === undefined)
+          return unchecked('neither the subject nor its offer names a region to reserve an address in');
         let addressId: string | undefined;
         try {
           const address = await settle(
@@ -1004,7 +1070,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       name: 'addresses (when offered): reserve, assign, unassign, delete',
       async run(subject) {
         const probe = await client(subject);
-        if (!probe.impl.addresses) return;
+        if (!probe.impl.addresses) return absent(subject, 'addresses', 'addresses');
         const { impl, call, machine } = await create(subject, key(subject, 'address-host'));
         const addresses = impl.addresses!;
         let addressId: string | undefined;
@@ -1077,7 +1143,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       name: 'load balancers (when offered): a regional one in front of a machine, changed in place, deleted',
       async run(subject) {
         const probe = await client(subject);
-        if (!probe.impl.loadBalancers) return;
+        if (!probe.impl.loadBalancers) return absent(subject, 'loadBalancers', 'load balancers');
         const { impl, call, machine } = await create(subject, key(subject, 'lb-host'));
         const lbs = impl.loadBalancers!;
         let lbId: string | undefined;
@@ -1167,7 +1233,9 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       name: 'load balancers (when offered): a target machine in another region is INVALID_INPUT',
       async run(subject) {
         const probe = await client(subject);
-        if (!probe.impl.loadBalancers || subject.otherRegionOfferId === undefined) return;
+        if (!probe.impl.loadBalancers) return absent(subject, 'loadBalancers', 'load balancers');
+        if (subject.otherRegionOfferId === undefined)
+          return skip('the subject names no otherRegionOfferId');
         const { impl, call, machine } = await create(subject, key(subject, 'lb-region-host'));
         const lbs = impl.loadBalancers!;
         let foreign: ExternalMachine | undefined;
@@ -1214,7 +1282,8 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       name: 'dns (when offered): a zone, a record found by name, type and data, changed in place, deleted',
       async run(subject) {
         const probe = await client(subject);
-        if (!probe.impl.dns || subject.dnsZone === undefined) return;
+        if (!probe.impl.dns) return absent(subject, 'dns', 'dns');
+        if (subject.dnsZone === undefined) return skip('the subject names no dnsZone');
         const { impl, call } = probe;
         const dns = impl.dns!;
         const zoneName = subject.dnsZone;
@@ -1318,7 +1387,8 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       async run(subject) {
         const probe = await client(subject);
         const networks = probe.impl.networks;
-        if (!networks?.ensureNatGateway || !networks.deleteNatGateway) return;
+        if (!networks?.ensureNatGateway || !networks.deleteNatGateway)
+          return skip('the provider has no NAT gateways');
         const { impl, call } = probe;
         const region =
           subject.region ??
@@ -1403,7 +1473,8 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       async run(subject) {
         const probe = await client(subject);
         const networks = probe.impl.networks;
-        if (!networks?.ensurePeering || !networks.deletePeering) return;
+        if (!networks?.ensurePeering || !networks.deletePeering)
+          return skip('the provider has no peerings');
         const { impl, call } = probe;
         const region =
           subject.region ??
@@ -1479,7 +1550,8 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       async run(subject) {
         const probe = await client(subject);
         const networks = probe.impl.networks;
-        if (!networks?.ensureRoute || !networks.deleteRoute) return;
+        if (!networks?.ensureRoute || !networks.deleteRoute)
+          return skip('the provider has no routes');
         const { impl, call } = probe;
         const region =
           subject.region ??
@@ -1566,7 +1638,8 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       name: 'certificates (when offered): a custom certificate by name, deleted idempotently',
       async run(subject) {
         const probe = await client(subject);
-        if (!probe.impl.certificates || subject.certificate === undefined) return;
+        if (!probe.impl.certificates) return absent(subject, 'certificates', 'certificates');
+        if (subject.certificate === undefined) return skip('the subject names no certificate');
         const { impl, call } = probe;
         const certificates = impl.certificates!;
         const spec = {
@@ -1622,7 +1695,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       async run(subject) {
         const seen: string[] = [];
         const { impl, call } = await client(subject, seen);
-        if (!impl.listPrices) return;
+        if (!impl.listPrices) return skip('the provider has no listPrices');
         const prices = await impl.listPrices({}, call('list-prices'));
         check(Array.isArray(prices), 'listPrices returns a list');
         for (const price of prices) {
@@ -1657,7 +1730,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       async run(subject) {
         const seen: string[] = [];
         const { impl } = await client(subject, seen);
-        if (!impl.readMetrics) return;
+        if (!impl.readMetrics) return skip('the provider has no readMetrics');
         const asked = [
           {
             instance: 'bc-conformance-inst-1',
@@ -1683,7 +1756,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
     {
       name: 'probeAccount (when offered) answers a well-formed probe that holds no secret',
       async run(subject) {
-        if (!subject.provider.probeAccount) return;
+        if (!subject.provider.probeAccount) return skip('the provider has no probeAccount');
         const seen: string[] = [];
         const probe = await subject.provider.probeAccount(await configOf(subject), {
           ...contextOf(subject, seen),
@@ -1711,7 +1784,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
     {
       name: 'findings (when offered) are well formed, uniquely named and hold no secret',
       async run(subject) {
-        if (!subject.provider.findings) return;
+        if (!subject.provider.findings) return skip('the provider has no findings');
         const seen: string[] = [];
         const findings = await subject.provider.findings(await configOf(subject), {
           ...contextOf(subject, seen),
@@ -1735,7 +1808,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
     {
       name: 'billingSummary (when offered) answers integer amounts in a currency and holds no secret',
       async run(subject) {
-        if (!subject.provider.billingSummary) return;
+        if (!subject.provider.billingSummary) return skip('the provider has no billingSummary');
         const seen: string[] = [];
         const bill = await subject.provider.billingSummary(await configOf(subject), {
           ...contextOf(subject, seen),
@@ -1771,7 +1844,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       name: 'connect (when offered) refuses a redirect URI the platform did not register',
       async run(subject) {
         const connect = subject.provider.connect;
-        if (!connect) return;
+        if (!connect) return skip('the provider has no connect');
         check(typeof connect.field === 'string' && connect.field !== '', 'connect.field is set');
         const redirectUri = 'https://bc-conformance.invalid/not-registered';
         const refused = (error: unknown) => isComputeError(error, 'INVALID_INPUT');
@@ -1802,7 +1875,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
       name: 'the billing hints (when given) are well formed',
       async run(subject) {
         const billing = subject.provider.billing;
-        if (!billing) return;
+        if (!billing) return skip('the provider gives no billing hints');
         const probe = { service: '', sku: 'bc-conformance-unknown-sku', skuDescription: '' };
         for (const key of ['computeSku', 'meteredSku'] as const) {
           const matcher = billing[key];
@@ -1813,6 +1886,23 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
         for (const key of ['periodRows', 'billsStopped'] as const)
           if (billing[key] !== undefined)
             check(typeof billing[key] === 'boolean', `billing.${key} is a boolean`);
+      },
+    },
+    {
+      // Last, so the cases before it keep their places for callers that pick one by position. vps and the
+      // other modules decide what to ask of a provider by its capabilities: a declared one the client lacks is
+      // found only when a tenant's call fails.
+      name: 'every capability the definition declares is implemented by its client',
+      async run(subject) {
+        const declared = subject.provider.capabilities ?? [];
+        if (declared.length === 0) return skip('the definition declares no capabilities');
+        const { impl } = await client(subject);
+        for (const capability of declared)
+          for (const member of capabilityMembers[capability] ?? [])
+            check(
+              impl[member] !== undefined,
+              `the definition declares the ${capability} capability, but its client has no ${member}`,
+            );
       },
     },
   ];

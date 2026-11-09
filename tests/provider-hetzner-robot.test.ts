@@ -180,6 +180,18 @@ describe('hetznerRobot: providerConformance', () => {
       powerObservable: false,
     }));
     expect(report.failed.map(({ name, error }) => `${name}: ${String(error)}`)).toEqual([]);
+    // The cases Robot has something to run: claims and power.
+    expect(report.passed).toEqual([
+      'the definition is well formed and builds a client from a valid config',
+      'listOffers returns well-formed offers, including the subject offer',
+      'create is idempotent by idempotencyKey: a retried create returns the same machine',
+      'get follows the machine; delete removes it; deleting again counts as deleted',
+      'power (when offered) stops and starts the machine',
+      'every capability the definition declares is implemented by its client',
+    ]);
+    // Every other case says why it did not run.
+    expect(report.passed.length + report.skipped.length).toBe(providerConformanceCases().length);
+    for (const { reason } of report.skipped) expect(reason).not.toBe('');
   });
 
   it('declares metal and demands secret references', async () => {

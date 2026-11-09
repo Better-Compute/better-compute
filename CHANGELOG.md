@@ -194,6 +194,22 @@ All notable changes to the better-compute packages are documented here. The form
   create with a subnet named `regions/us-south1-ai1b/subnetworks/…`, which Compute Engine refuses. The region is
   now the zone without its last segment (`us-south1`), and the provider answers `ProviderImpl.zoneRegion` with it, so
   vps places a tenant network's subnet in that region.
+- **Conformance cases that checked nothing were reported as passed** (`@better-compute/core`, `vps`, `testing`). A
+  case that returned early because the provider lacks a capability, or the subject names nothing to run it on, counted
+  as passed: a provider offering only machines and power "passed" all of `providerConformanceCases()`, and the
+  Kubernetes role and revoke cases passed without a `can` to check access with. A case now returns (or throws)
+  `skip(reason)` from `@better-compute/core/conformance`, and `runConformance` reports it under the new
+  `ConformanceReport.skipped` (`{ name, reason }`), never under `passed` (new exports `skip`, `ConformanceSkip`,
+  `isConformanceSkip`; `ConformanceCase.run` may resolve to a skip). **A test that asserted
+  `report.passed.length === cases.length` now counts fewer passes**: assert `report.failed` is empty and what
+  `report.skipped` may hold. `providerConformanceCases()` skips with a reason wherever a capability or a subject
+  option is absent, fails a case whose capability the definition declares but whose client lacks the method, and
+  ends with a new case, "every capability the definition declares is implemented by its client".
+  `kubernetesProviderConformanceCases()` skips the role, revoke, unknown-cluster and adopt cases the subject cannot
+  run, and fails the revoke case when the subject sets `revoke` without `can`.
+- **Kubernetes conformance left failed clusters running** (`@better-compute/testing`). The cases took a cluster's id
+  only once it was ready, so a cluster that went to `error` (or never got ready) was not deleted at the end of the
+  case and stayed running, and billed, on a live account. The id now comes from the first `ensureCluster` answer.
 
 ## 0.3.0 (2026-10-20)
 
