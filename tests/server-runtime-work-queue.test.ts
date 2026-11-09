@@ -165,6 +165,38 @@ describe('claim and complete', () => {
     expect(await compute.jobs.slow!.tick()).toBe(1);
     expect(seen).toEqual(['k1']);
   });
+
+  it('a worker whose claim ran out never deletes a fresh row nobody processed', async () => {
+    const { compute, database, advance } = await computeFixture();
+    const enqueue = () => database.transaction((tx) => compute.context.work.enqueue(tx, 'late.kind', 'k'));
+    const claim = () => database.transaction((tx) => claimWork(tx, 'late.kind', undefined, 10, 30_000));
+    for (const settle of ['complete', 'settle'] as const) {
+      await enqueue();
+      // Worker A claims the key (gen 1) and is slow: its claim runs out.
+      const [a] = await claim();
+      expect(a).toMatchObject({ key: 'k', gen: 1 });
+      await advance(30_001);
+      // Worker B takes the key over, finishes it, and the row is gone.
+      const [b] = await claim();
+      await database.transaction((tx) => completeClaim(tx, 'late.kind', b!));
+      expect(await workRows(database, 'late.kind')).toEqual([]);
+      // The key is dirtied again: a fresh row, at gen 1 once more, that nobody has processed.
+      await enqueue();
+      // A finally reports DONE for its gen 1. It used to delete the fresh row: the wake-up was lost.
+      await database.transaction((tx) =>
+        settle === 'complete'
+          ? completeClaim(tx, 'late.kind', a!)
+          : settleClaims(tx, 'late.kind', [{ item: a!, delayMs: null, always: false }]),
+      );
+      const rows = await workRows(database, 'late.kind');
+      expect(rows).toHaveLength(1);
+      // Still due: the next claim takes it.
+      const [next] = await claim();
+      expect(next).toMatchObject({ key: 'k', gen: 1 });
+      await database.transaction((tx) => completeClaim(tx, 'late.kind', next!));
+      expect(await workRows(database, 'late.kind')).toEqual([]);
+    }
+  });
 });
 
 describe('settleClaims', () => {

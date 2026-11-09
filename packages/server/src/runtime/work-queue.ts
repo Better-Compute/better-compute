@@ -58,9 +58,17 @@ const claimAll = `WITH picked AS (
     FROM picked WHERE w.kind = picked.kind AND w.key = picked.key
   RETURNING w.key, w.gen, w.shard, picked.not_before`;
 
-/** DONE: gone at the claimed gen; re-dirtied meanwhile: unclaimed, due as the enqueue left it. */
+/**
+ * DONE: gone at the claimed gen; re-dirtied meanwhile: unclaimed, due as the enqueue left it.
+ *
+ * Only a claimed row is deleted. `gen` starts again at 1 when a key is enqueued after its row was deleted,
+ * so a worker whose claim ran out (another worker took the key over, finished it and deleted the row)
+ * could come back with DONE for gen 1 and delete a fresh, unclaimed row nobody had processed: that
+ * wake-up was lost until the next resync. A row nobody holds is never a finished claim.
+ */
 const completeWork = `WITH done AS (
-    DELETE FROM work_queue WHERE kind = $1 AND key = $2 AND gen = $3 RETURNING key)
+    DELETE FROM work_queue WHERE kind = $1 AND key = $2 AND gen = $3 AND claimed_until IS NOT NULL
+    RETURNING key)
   UPDATE work_queue SET claimed_until = NULL WHERE kind = $1 AND key = $2 AND gen <> $3`;
 
 /**
@@ -81,11 +89,13 @@ const settleWork = `WITH v AS (
     SELECT * FROM unnest($2::text[], $3::bigint[], $4::float8[], $5::boolean[]) AS v(key, gen, delay, always)),
   done AS (
     DELETE FROM work_queue w USING v
-     WHERE w.kind = $1 AND w.key = v.key AND v.delay IS NULL AND w.gen = v.gen RETURNING w.key)
+     WHERE w.kind = $1 AND w.key = v.key AND v.delay IS NULL AND w.gen = v.gen
+       AND w.claimed_until IS NOT NULL RETURNING w.key)
   UPDATE work_queue w SET claimed_until = NULL,
     not_before = CASE WHEN v.delay IS NOT NULL AND (w.gen = v.gen OR v.always)
       THEN compute_now() + make_interval(secs => v.delay) ELSE w.not_before END
-    FROM v WHERE w.kind = $1 AND w.key = v.key AND NOT (v.delay IS NULL AND w.gen = v.gen)`;
+    FROM v WHERE w.kind = $1 AND w.key = v.key
+     AND NOT (v.delay IS NULL AND w.gen = v.gen AND w.claimed_until IS NOT NULL)`;
 
 /** One claimed row. */
 export interface ClaimedWork {
