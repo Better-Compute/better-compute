@@ -287,8 +287,12 @@ func (c *CloudHypervisor) begin(r *chRecord) error {
 }
 
 // sweep removes what a killed bcd left behind: the instances an Ensure never finished (nothing ever
-// ran from them) and the directories new instances are born in. The caller holds the lock.
+// ran from them), the directories new instances are born in, half-written image downloads
+// (images/.pull-*) and snapshots' work directories (instances/<id>/.snapshot-*; a VM a killed
+// snapshot left paused is resumed by the next pass that wants it running). The caller holds the
+// lock, so none of it is in use.
 func (c *CloudHypervisor) sweep() {
+	sweepPulls(c.Dir)
 	instances := filepath.Join(c.Dir, "instances")
 	entries, _ := os.ReadDir(instances)
 	for _, e := range entries {
@@ -303,8 +307,16 @@ func (c *CloudHypervisor) sweep() {
 		if !instanceID.MatchString(name) {
 			continue
 		}
-		if r, err := c.read(name); err == nil && r.Creating {
+		r, err := c.read(name)
+		if err != nil {
+			continue // not bcd's
+		}
+		if r.Creating {
 			_ = os.RemoveAll(filepath.Join(instances, name))
+			continue
+		}
+		for _, work := range snapshotWorkDirs(filepath.Join(instances, name)) {
+			_ = os.RemoveAll(work)
 		}
 	}
 }

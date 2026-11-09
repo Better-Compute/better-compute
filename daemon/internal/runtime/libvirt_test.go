@@ -37,6 +37,8 @@ type fakeVirt struct {
 type fakeDomain struct {
 	xml   []byte
 	state string // "running", "paused", "shut off"
+	// reason is why it is in that state ("saved" after virsh save), for domstate --reason.
+	reason string
 }
 
 func (f *fakeVirt) exec(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -104,6 +106,9 @@ func (f *fakeVirt) virsh(args []string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		if len(args) > 2 && args[2] == "--reason" && dom.reason != "" {
+			return []byte(dom.state + " (" + dom.reason + ")\n"), nil
+		}
 		return []byte(dom.state + "\n"), nil
 	case "dumpxml":
 		dom, err := d(args[1])
@@ -129,6 +134,7 @@ func (f *fakeVirt) virsh(args []string) ([]byte, error) {
 			return nil, err
 		}
 		dom.state = map[string]string{"start": "running", "resume": "running", "suspend": "paused", "shutdown": "shut off", "destroy": "shut off"}[args[0]]
+		dom.reason = ""
 		if args[0] == "start" && len(args) > 2 && args[2] == "--paused" {
 			dom.state = "paused"
 		}
@@ -141,7 +147,7 @@ func (f *fakeVirt) virsh(args []string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		dom.state = "shut off"
+		dom.state, dom.reason = "shut off", "saved"
 		return nil, os.WriteFile(args[2], []byte("memory of "+args[1]), 0o600)
 	case "restore":
 		raw, err := os.ReadFile(args[1])
@@ -168,7 +174,7 @@ func (f *fakeVirt) virsh(args []string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		dom.state = state
+		dom.state, dom.reason = state, ""
 		return nil, nil
 	case "blockresize":
 		return nil, nil

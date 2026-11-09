@@ -452,6 +452,13 @@ events. It never drops a hold on its own.
   written: `did not carry on from its saved memory` (the state is kept as
   `instances/<id>/memory.state`, and the domain's next start restores from it) or
   `stayed paused` (the next pass resumes it).
+- *Leftovers.* At its first pass after a start, each runtime removes what a killed bcd left in its
+  directory: half-written downloads (`images/.pull-*`), snapshots' work directories
+  (`instances/<id>/.snapshot-*`) and instances whose creation never finished. One exception keeps
+  a guest's memory: a libvirt memory snapshot killed between its `virsh save` and its restore left
+  the domain `shut off (saved)` with its state in the work directory; that file becomes
+  `instances/<id>/memory.state` and the domain's next start restores from it. While libvirt does not
+  answer, what needs its word stays and the next pass looks again.
 - *Stopping.* On SIGTERM (and before a self-update's exec) the converger pass under way is cancelled
   and bcd waits up to 20 s for it to return, so a download or an instance being created undoes itself.
 - *Admission.* bcd admits a start only when the host has memory for it:

@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
@@ -63,6 +64,8 @@ type Libvirt struct {
 	MaxImageBytes int64
 	// pullIdle is the window a download must move transfer.MinBytes in (default transfer.Idle; tests).
 	pullIdle time.Duration
+	// swept: what a killed bcd left behind was removed (sweep, at the first List that can).
+	swept atomic.Bool
 	// ShutdownTimeout bounds a graceful shutdown before the domain is destroyed (default 60 s).
 	ShutdownTimeout time.Duration
 	// GPUPersistence sets a passthrough GPU's persistence mode around starts and stops (persistence.go;
@@ -425,8 +428,83 @@ func stateOf(domstate string) string {
 	return StateStopped
 }
 
+// sweepPulls removes the downloads a killed bcd left half-written in images/ (.pull-*). Downloads
+// run with the runtime's lock held, which the caller holds: none is under way.
+func sweepPulls(dir string) {
+	images := filepath.Join(dir, "images")
+	entries, _ := os.ReadDir(images)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".pull-") {
+			_ = os.Remove(filepath.Join(images, e.Name()))
+		}
+	}
+}
+
+// snapshotWorkDirs are the work directories snapshots of the instance in dir left (.snapshot-*).
+func snapshotWorkDirs(dir string) []string {
+	var out []string
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), ".snapshot-") {
+			out = append(out, filepath.Join(dir, e.Name()))
+		}
+	}
+	return out
+}
+
+// sweep removes what a bcd killed mid-operation left behind (the caller holds the lock, so nothing
+// of it is in use): half-written image downloads, snapshots' work directories and the instances an
+// Ensure never finished. A memory snapshot killed between its `virsh save` and its restore left the
+// guest off with its memory in the work directory: when libvirt says the domain is shut off because
+// it was saved, that state becomes the instance's memory.state, which its next start restores from.
+// It reports false when libvirt did not answer for something: the next List tries again.
+func (l *Libvirt) sweep(ctx context.Context) bool {
+	sweepPulls(l.Dir)
+	done := true
+	instances := filepath.Join(l.Dir, "instances")
+	entries, _ := os.ReadDir(instances)
+	for _, e := range entries {
+		id := e.Name()
+		if !e.IsDir() || !instanceID.MatchString(id) {
+			continue
+		}
+		dir := filepath.Join(instances, id)
+		if _, err := os.Lstat(filepath.Join(dir, creatingMarker)); err == nil {
+			// An unfinished creation nobody may ask for again: gone, unless its domain was defined.
+			if exists, _, _, err := l.managed(ctx, id); err != nil {
+				done = false
+			} else if !exists {
+				_ = os.RemoveAll(dir)
+			}
+			continue
+		}
+		for _, work := range snapshotWorkDirs(dir) {
+			saved, kept := filepath.Join(work, "memory.state"), filepath.Join(dir, "memory.state")
+			if fileExists(saved) && !fileExists(kept) {
+				st, err := l.virsh(ctx, "domstate", id, "--reason")
+				if err != nil {
+					done = false
+					continue // not removed until libvirt says whether the guest's memory is in it
+				}
+				if strings.Contains(string(st), "(saved)") {
+					_ = os.Rename(saved, kept)
+				}
+			}
+			_ = os.RemoveAll(work)
+		}
+	}
+	return done
+}
+
 // List returns every domain of the connection, bcd's (Managed, with their metadata) and any other.
 func (l *Libvirt) List(ctx context.Context) ([]Domain, error) {
+	// The first List of a process comes before anything else it does to an instance.
+	if !l.swept.Load() && l.mu.TryLock() {
+		if !l.swept.Load() && l.sweep(ctx) {
+			l.swept.Store(true)
+		}
+		l.mu.Unlock()
+	}
 	out, err := l.virsh(ctx, "list", "--all", "--name")
 	if err != nil {
 		return nil, err
