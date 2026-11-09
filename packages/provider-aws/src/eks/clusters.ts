@@ -171,7 +171,8 @@ function outputsOf(cluster: EksCluster, region: string): Record<string, string> 
     location: region,
     ...(cluster.version ? { version: cluster.version, nodeVersion: cluster.version } : {}),
     ...(cluster.platformVersion ? { platformVersion: cluster.platformVersion } : {}),
-    ...(cluster.arn ? { arn: cluster.arn } : {}),
+    // The ARN is also the provider-global id: one cluster reached through two accounts' credentials is one cluster.
+    ...(cluster.arn ? { arn: cluster.arn, globalId: cluster.arn } : {}),
   };
 }
 

@@ -15,13 +15,14 @@ import {
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
-import { endNodeReservations, rebuildPoolRollup } from '@better-compute/capacity';
+import { capacityLabel, endNodeReservations, rebuildPoolRollup, spotCapacity } from '@better-compute/capacity';
 import { readAccount } from '@better-compute/vps';
 import { clusterNetwork, markDeleted, reopen } from './clusters.js';
 import { canonical, sha256Hex } from './input.js';
 import {
   accountKubernetes,
   clustersWork,
+  deleteRetryDue,
   json,
   providerClusterName,
   publish as publishCluster,
@@ -51,6 +52,9 @@ import {
 //      bcd (the injected `SubstrateAgent`: provider-kubernetes' DaemonSet, device plugin only);
 //   3. keeps a hosted `kubernetes` join token (and its Secret) only while Nodes outnumber the substrate's joined
 //      nodes, with exactly that many uses; once every node joined, the token is revoked and the Secret deleted.
+// Steps 2 and 3 also run while the substrate is in `error` for a reason that leaves the control plane usable (a
+// refused node pool, a policy that cannot be converged): an error is reported, never a reason to stop retiring gone
+// nodes or admitting replacements.
 // The substrate owns only the pool nodes its own hosted tokens admitted (`learnOwnership`): machines joined into the
 // pool some other way are never counted, drained for, cordoned or retired by it.
 // Rows are read in one transaction, the provider and the cluster API are called with none open, and each result is
@@ -111,6 +115,12 @@ export interface SubstrateClusterApi {
   /** The object's metadata, or undefined when it does not exist. */
   get(object: SubstrateObjectRef): Promise<SubstrateObjectMeta | undefined>;
   apply(object: SubstrateObject): Promise<void>;
+  /**
+   * Creates the object only when none of that name exists: false when one does (it is never changed). The claim is
+   * made with it, so of two substrates exactly one holds a cluster; an agent without it claims with `apply` after
+   * `get` found nothing (not atomic).
+   */
+  create?(object: SubstrateObject): Promise<boolean>;
   remove(object: SubstrateObjectRef): Promise<void>;
   nodes(labelSelector?: string): Promise<SubstrateNode[]>;
 }
@@ -181,12 +191,14 @@ export interface SubstrateRow {
   /** `upgrades: 'drain'`: the version being drained for (or pushed after a drain, until the cluster runs it). */
   upgrade_version: string | null;
   upgrade_since: Date | string | null;
+  /** Since when Nodes are listed without a joined bcd and none has joined (NULL: none waits). */
+  join_wait_since: Date | string | null;
   version: string | number;
 }
 
 const substrateColumns = `pool_id, tenant_id, provider_account_id, mode, adopt_id, identity, cluster_id, create_spec,
   state, desired_state, message, join_token_id, token_applied, manifests_sha256, applied_at, nodes_listed,
-  nodes_joined, pool_version, upgrade_version, upgrade_since, version`;
+  nodes_joined, pool_version, upgrade_version, upgrade_since, join_wait_since, version`;
 
 interface PoolRow {
   id: string;
@@ -212,6 +224,11 @@ export interface SubstrateView {
   nodesJoined?: number;
   /** `upgrades: 'drain'`: the version drained for, and since when, until the cluster runs it. */
   upgrade?: { version: string; since: number };
+  /**
+   * Nodes the cluster lists whose bcd has not joined the pool, and since when none has joined (it starts over when
+   * one joins or more Nodes appear). After `substrateJoinStallSeconds` the `message` says what to check.
+   */
+  waitingToJoin?: { nodes: number; since: number };
 }
 
 export function substrateView(row: SubstrateRow): SubstrateView {
@@ -227,6 +244,14 @@ export function substrateView(row: SubstrateRow): SubstrateView {
     ...(row.nodes_joined !== null ? { nodesJoined: Number(row.nodes_joined) } : {}),
     ...(row.upgrade_version !== null && row.upgrade_since !== null
       ? { upgrade: { version: row.upgrade_version, since: new Date(row.upgrade_since).getTime() } }
+      : {}),
+    ...(row.join_wait_since !== null && Number(row.nodes_listed ?? 0) > Number(row.nodes_joined ?? 0)
+      ? {
+          waitingToJoin: {
+            nodes: Number(row.nodes_listed) - Number(row.nodes_joined ?? 0),
+            since: new Date(row.join_wait_since).getTime(),
+          },
+        }
       : {}),
   };
 }
@@ -486,7 +511,10 @@ export function adoptedRegion(location: string, provider: { regions: readonly st
 /**
  * `cluster: { adopt }`: an `adopted` cluster row for the provider's cluster (the cluster reconciler reads it with
  * `getCluster`, never creates, changes or deletes it) and a node pool row per flavor (created in it under a name of
- * its own, `substrateNodePoolName`, and deleted with the substrate). One substrate per adopted cluster.
+ * its own, `substrateNodePoolName`, and deleted with the substrate). One substrate per adopted cluster: the row
+ * claims `account:<account>/<adopted id>` (`claim_key`, unique among live rows: two pools racing cannot both
+ * insert), and the cluster reconciler replaces that with the cluster's provider-global id before it makes any node
+ * pool, so the same cluster reached through another account is refused too.
  */
 async function establishAdopted(
   deps: SubstrateDeps,
@@ -517,14 +545,17 @@ async function establishAdopted(
   const clusterId = newId('kcl');
   const location = adoptedLocation(adoptId, provider);
   const region = adoptedRegion(location, provider);
-  await tx.query(
+  // ON CONFLICT: the claim (the unique `claim_key`) another pool's transaction took first is a refusal, not an
+  // error that aborts this one.
+  const inserted = await tx.query(
     `INSERT INTO kubernetes_clusters (id, tenant_id, project_id, pool_id, provider_account_id, network_id, subnet_id,
                                       name, description, mode, location, region, release_channel, requested_version,
                                       authorized_networks, private_nodes, provider_name, provider_id, state,
                                       desired_state, created_by, idempotency_key, request_hash, version, adopted,
-                                      substrate_pool_id)
+                                      substrate_pool_id, claim_key)
      VALUES ($1, $2, NULL, $3, $4, NULL, NULL, $5, $6, 'standard', $7, $8, 'regular', NULL, '[]'::jsonb, false, $9,
-             $10, 'pending', 'present', $11, $12, decode($13, 'hex'), 1, true, $3)`,
+             $10, 'pending', 'present', $11, $12, decode($13, 'hex'), 1, true, $3, $14)
+     ON CONFLICT DO NOTHING RETURNING id`,
     [
       clusterId,
       pool.owner_tenant_id,
@@ -539,8 +570,11 @@ async function establishAdopted(
       substrateCreator,
       `substrate:${clusterId}`,
       await sha256Hex(substrateIdentity(substrate)),
+      `account:${account.id}/${adoptId}`,
     ],
   );
+  if (inserted.rows.length === 0)
+    throw new Refused(`Cluster ${adoptId} is already another pool's substrate: one cluster backs one pool`);
   for (const flavor of substrate.flavors)
     await insertFlavorPool(tx, {
       clusterId,
@@ -790,10 +824,17 @@ async function finishUpgrade(
 interface Plan {
   row: SubstrateRow;
   pool: PoolRow;
-  substrate: PoolSubstrate;
+  /** Whether the substrate's Nodes are the ones carrying its label (it has flavors), or every Node of the cluster. */
+  labelled: boolean;
   cluster?: ClusterRow;
   /** An `upgrades: 'drain'` version bump still waiting for bookings to end. */
   drain?: { version: string; bookings: number };
+  /**
+   * Why the substrate is in `error` although its cluster is still tended: a policy that cannot be converged (it no
+   * longer parses, names another account or cluster, changes a flavor's shape) or a cluster in error (a refused node
+   * pool). The nodes that joined live on: gone ones are retired, new Nodes get a token, bcd stays applied.
+   */
+  problem?: string;
 }
 
 /** Writes the substrate's state (guarded by the version decided on) and publishes the transitions. */
@@ -806,20 +847,25 @@ async function setState(
     message?: string | null;
     fields?: Partial<
       Pick<SubstrateRow, 'manifests_sha256' | 'nodes_listed' | 'nodes_joined' | 'join_token_id' | 'token_applied'>
-    > & { applied?: boolean };
+    > & {
+      applied?: boolean;
+      /** Epoch ms since when Nodes wait to join, null when none does; left as it is when absent. */
+      joinWaitSince?: number | null;
+    };
   },
 ): Promise<boolean> {
   return sql.transaction(async (tx) => {
     const fields = update.fields ?? {};
     const { rows } = await tx.query<{ pool_id: string }>(
       `UPDATE kubernetes_pool_substrates
-          SET state = $3, message = $4, updated_at = compute_now(),
+          SET state = $3, message = $4, updated_at = compute_now(), retried_at = NULL,
               manifests_sha256 = CASE WHEN $5 THEN $6 ELSE manifests_sha256 END,
               applied_at = CASE WHEN $5 THEN compute_now() ELSE applied_at END,
               nodes_listed = coalesce($7, nodes_listed),
               nodes_joined = coalesce($8, nodes_joined),
               join_token_id = CASE WHEN $9 THEN $10 ELSE join_token_id END,
-              token_applied = coalesce($11, token_applied)
+              token_applied = coalesce($11, token_applied),
+              join_wait_since = CASE WHEN $12 THEN $13::timestamptz ELSE join_wait_since END
         WHERE pool_id = $1 AND version = $2
         RETURNING pool_id`,
       [
@@ -834,6 +880,8 @@ async function setState(
         'join_token_id' in fields,
         fields.join_token_id ?? null,
         fields.token_applied ?? null,
+        fields.joinWaitSince !== undefined,
+        typeof fields.joinWaitSince === 'number' ? new Date(fields.joinWaitSince).toISOString() : null,
       ],
     );
     if (rows.length === 0) return false;
@@ -876,6 +924,23 @@ async function prepare(
     }
     const wanted = pool !== undefined && !pool.archived && (substrate !== undefined || parseError !== undefined);
     if (!wanted) return row && row.state !== 'deleted' ? { teardown: row } : {};
+    // The substrate stays in error, and the nodes that already joined its cluster are still tended (`Plan.problem`):
+    // the row as it is now, its cluster, and whether it has flavors (from its node pool rows: the policy cannot say).
+    const tended = async (problem: string): Promise<{ plan?: Plan }> => {
+      const current = await readSubstrate(tx, poolId, { lock: true });
+      if (!current || current.cluster_id === null || current.desired_state !== 'present') return {};
+      const { rows: clusters } = await tx.query<ClusterRow>(
+        `SELECT ${clusterColumns} FROM kubernetes_clusters WHERE id = $1`,
+        [current.cluster_id],
+      );
+      if (!clusters[0]) return {};
+      const { rows: flavors } = await tx.query(
+        `SELECT 1 FROM kubernetes_node_pools
+          WHERE cluster_id = $1 AND substrate_pool_id = $2 AND state <> 'deleted' AND desired_state = 'present' LIMIT 1`,
+        [current.cluster_id, poolId],
+      );
+      return { plan: { row: current, pool: pool!, labelled: flavors.length > 0, cluster: clusters[0], problem } };
+    };
     // An error settles the row on the pool's version: the 30 s sweep leaves it until the pool changes (the 2 minute
     // refresh retries it).
     const settle = async () => {
@@ -886,6 +951,8 @@ async function prepare(
       );
     };
     if (parseError !== undefined || !substrate) {
+      // Being torn down already: finish that, whatever the policy says now.
+      if (row && row.desired_state === 'deleted' && row.state !== 'deleted') return { teardown: row };
       if (row && row.state !== 'deleted' && (row.state !== 'error' || row.message !== parseError)) {
         await tx.query(
           `UPDATE kubernetes_pool_substrates SET state = 'error', message = $2, updated_at = compute_now(),
@@ -894,8 +961,9 @@ async function prepare(
         );
         await publishSubstrate(deps, tx, row, 'kubernetes.substrate.error', { message: parseError ?? '' });
       }
-      if (row && row.state !== 'deleted') await settle();
-      return {};
+      if (!row || row.state === 'deleted') return {};
+      await settle();
+      return tended(parseError ?? 'The pool policy has no substrate');
     }
     const identity = substrateIdentity(substrate);
     if (row && row.desired_state === 'deleted' && row.state !== 'deleted')
@@ -913,7 +981,7 @@ async function prepare(
                   create_spec = NULL, state = 'pending', desired_state = 'present', message = NULL,
                   join_token_id = NULL, token_applied = false, manifests_sha256 = NULL, applied_at = NULL,
                   nodes_listed = NULL, nodes_joined = NULL, upgrade_version = NULL, upgrade_since = NULL,
-                  deleted_at = NULL, updated_at = compute_now(),
+                  join_wait_since = NULL, deleted_at = NULL, updated_at = compute_now(),
                   version = version + 1
             WHERE pool_id = $1`,
           [poolId, pool!.owner_tenant_id, substrate.account, fresh.mode, fresh.adopt, identity],
@@ -942,8 +1010,9 @@ async function prepare(
         await publishSubstrate(deps, tx, row, 'kubernetes.substrate.error', { message });
       }
       await settle();
-      return {};
+      return tended(message);
     }
+    let problem: string | undefined;
     if (row.cluster_id === null) {
       try {
         const established = await establishCluster(deps, tx, pool!, substrate);
@@ -989,8 +1058,8 @@ async function prepare(
           );
           await publishSubstrate(deps, tx, row, 'kubernetes.substrate.error', { message });
         }
-        await settle();
-        return {};
+        // The flavors that could be synced were; the cluster's nodes are tended with the problem reported.
+        problem = message;
       }
       row = (await readSubstrate(tx, poolId, { lock: true }))!;
     }
@@ -1013,13 +1082,25 @@ async function prepare(
         clusters[0],
       );
     return {
-      plan: { row, pool: pool!, substrate, ...(clusters[0] ? { cluster: clusters[0] } : {}), ...(drain ? { drain } : {}) },
+      plan: {
+        row,
+        pool: pool!,
+        labelled: substrate.flavors.length > 0,
+        ...(clusters[0] ? { cluster: clusters[0] } : {}),
+        ...(drain ? { drain } : {}),
+        ...(problem !== undefined ? { problem } : {}),
+      },
     };
   });
 }
 
 /** A node that joined but never connected counts as joined this long after its join (its bcd is still starting). */
 export const substrateFirstConnectGraceSeconds = 600;
+/**
+ * How long Nodes may be listed without a joined bcd, with none joining, before the substrate says they are not
+ * joining (longer than a GPU node takes to pull bcd's image and start).
+ */
+export const substrateJoinStallSeconds = 900;
 
 /** SQL: node `alias` is one the substrate owns (`learnOwnership`); `$1` is the pool id. */
 const ownedNode = (alias: string) =>
@@ -1132,10 +1213,10 @@ const nodesPerRun = 500;
 const relearnAfter = '1 hour';
 
 /**
- * The Kubernetes Node a pool node's bcd says it runs on: inventory `kubernetes.nodeName` (the DaemonSet's
- * NODE_NAME), else the OS hostname (`os.hostname`), which is the Node name on GKE and DOKS but not always on EKS
- * (Node `ip-10-0-1-2.<region>.compute.internal`, a short kernel hostname on some AMIs). Undefined when neither is
- * reported.
+ * The Kubernetes Node a pool node's bcd says it runs on: inventory `os.kubernetesNodeName` (the DaemonSet's
+ * NODE_NAME, which bcd reports in its `os` section; `kubernetes.nodeName` is read too, for a section of that name),
+ * else the OS hostname (`os.hostname`), which is the Node name on GKE and DOKS but not always on EKS (Node
+ * `ip-10-0-1-2.<region>.compute.internal`, a short kernel hostname on some AMIs). Undefined when none is reported.
  */
 function reportedNodeName(sections: Readonly<Record<string, Json>> | undefined): string | undefined {
   const field = (section: string, key: string) => {
@@ -1144,7 +1225,7 @@ function reportedNodeName(sections: Readonly<Record<string, Json>> | undefined):
     const found = (value as Record<string, Json>)[key];
     return typeof found === 'string' && found.length > 0 && found.length <= 253 ? found : undefined;
   };
-  return field('kubernetes', 'nodeName') ?? field('os', 'hostname');
+  return field('os', 'kubernetesNodeName') ?? field('kubernetes', 'nodeName') ?? field('os', 'hostname');
 }
 
 /**
@@ -1189,6 +1270,36 @@ async function retireNode(
   await tx.query(`DELETE FROM kubernetes_substrate_nodes WHERE node_id = $1`, [input.nodeId]);
   await rebuildPoolRollup(tx, { id: input.poolId, ownerTenantId: input.ownerTenantId });
   return true;
+}
+
+/**
+ * Tells capacity which of the substrate's pool nodes are provider Spot capacity. The `better-compute.dev/capacity=spot`
+ * label of a Spot flavor exists on the Kubernetes Node only; capacity places by the pool node. So every owned pool
+ * node matched to a listed Node carries the system label `bc.dev/capacity=spot` exactly when its Node is Spot: set when
+ * the Node is learned (and for nodes learned before this label existed), removed if the Node is not (a Node
+ * re-created under the name in another node pool). Capacity then keeps non-spot reservations off the node and ends
+ * what it holds as `preempted` when the Node is reclaimed. A node not matched yet carries no label: for the moment
+ * between its join and its first inventory it can take a non-spot booking, which still ends as `preempted`.
+ */
+async function markSpotNodes(sql: SqlExecutor, poolId: string, nodes: readonly SubstrateNode[]): Promise<void> {
+  const spot = nodes.filter((node) => node.labels[substrateCapacityLabel] === spotCapacity).map((node) => node.name);
+  const plain = nodes.filter((node) => node.labels[substrateCapacityLabel] !== spotCapacity).map((node) => node.name);
+  if (spot.length > 0)
+    await sql.query(
+      `INSERT INTO node_labels (node_id, key, value, source)
+       SELECT m.node_id, $3, $4, 'system' FROM kubernetes_substrate_nodes m
+        WHERE m.pool_id = $1 AND m.owned AND m.kubernetes_node = ANY($2)
+       ON CONFLICT (node_id, key) DO UPDATE SET value = EXCLUDED.value, source = 'system'
+         WHERE node_labels.value <> EXCLUDED.value OR node_labels.source <> 'system'`,
+      [poolId, spot, capacityLabel, spotCapacity],
+    );
+  if (plain.length > 0)
+    await sql.query(
+      `DELETE FROM node_labels l USING kubernetes_substrate_nodes m
+        WHERE l.node_id = m.node_id AND m.pool_id = $1 AND m.owned AND m.kubernetes_node = ANY($2)
+          AND l.key = $3 AND l.source = 'system'`,
+      [poolId, plain, capacityLabel],
+    );
 }
 
 /**
@@ -1252,6 +1363,7 @@ async function removeGoneNodes(
     await sql.query(`UPDATE kubernetes_substrate_nodes SET checked_at = compute_now() WHERE node_id = ANY($1)`, [
       unreported,
     ]);
+  await markSpotNodes(sql, row.pool_id, selected.nodes);
   // A connected node's Node re-created under its name: the new uid.
   const { rows: matched } = await sql.query<{ node_id: string; kubernetes_node: string; kubernetes_uid: string | null }>(
     `SELECT m.node_id, m.kubernetes_node, m.kubernetes_uid
@@ -1373,6 +1485,57 @@ async function removeOwned(api: SubstrateClusterApi, poolId: string, object: Sub
   return true;
 }
 
+/**
+ * The in-cluster claim: the ConfigMap that says whose substrate a cluster is, labelled with the pool id like every
+ * object the substrate owns. The database refuses a second row for one cluster (`claim_key`); this refuses a second
+ * DEPLOYMENT (another control plane with its own database adopting the same cluster), which would otherwise add
+ * node pools, fight over bcd's objects and, on its teardown, revoke the shared `bc-substrate` identity under the
+ * first. It lives in `kube-system`, which every cluster has and no teardown deletes.
+ */
+export const substrateClaim: SubstrateObjectRef = Object.freeze({
+  apiVersion: 'v1',
+  kind: 'ConfigMap',
+  metadata: Object.freeze({ name: 'better-compute-substrate', namespace: 'kube-system' }),
+});
+
+const claimObject = (row: SubstrateRow): SubstrateObject => ({
+  apiVersion: substrateClaim.apiVersion,
+  kind: substrateClaim.kind,
+  metadata: {
+    ...substrateClaim.metadata,
+    labels: { 'app.kubernetes.io/part-of': 'better-compute', [substratePoolLabel]: row.pool_id },
+  },
+  data: {
+    poolId: row.pool_id,
+    clusterId: row.cluster_id ?? '',
+    note: 'This cluster is the substrate of this better-compute pool: no other pool or deployment adopts it while this object exists. It is deleted when the substrate is torn down.',
+  },
+});
+
+/** Who holds a claim that is there: the pool id on its label (a ConfigMap of that name without one is not ours). */
+const claimHolder = (found: SubstrateObjectMeta): string => found.metadata.labels[substratePoolLabel] ?? 'an unknown owner';
+
+/**
+ * Makes sure this substrate holds its cluster's claim: undefined when it does (made now, or before), else who does.
+ * A claim that exists is never replaced.
+ */
+async function claimCluster(api: SubstrateClusterApi, row: SubstrateRow): Promise<string | undefined> {
+  const found = await api.get(refOf(substrateClaim));
+  if (found) return claimHolder(found) === row.pool_id ? undefined : claimHolder(found);
+  if (typeof api.create !== 'function') {
+    await api.apply(claimObject(row));
+    return undefined;
+  }
+  if (await api.create(claimObject(row))) return undefined;
+  // Made by someone else between the two calls.
+  const now = await api.get(refOf(substrateClaim));
+  if (!now) throw new ComputeError('UNAVAILABLE', 'The substrate claim changed while it was being made');
+  return claimHolder(now) === row.pool_id ? undefined : claimHolder(now);
+}
+
+const claimRefusal = (holder: string) =>
+  `The cluster is already the substrate of ${holder.startsWith('pool_') ? `pool ${holder}` : holder} (ConfigMap ${substrateClaim.metadata.namespace}/${substrateClaim.metadata.name}), in this deployment or another: one cluster backs one pool. Nothing was applied to it`;
+
 /** Whether a token id is still usable for `uses` more joins and lives past the next few runs. */
 async function tokenLive(sql: SqlExecutor, tokenId: string, uses: number): Promise<boolean> {
   const { rows } = await sql.query<{ ok: boolean }>(
@@ -1388,6 +1551,20 @@ async function revokeToken(tx: SqlTx, tokenId: string | null): Promise<void> {
   await tx.query(`UPDATE join_tokens SET revoked_at = compute_now() WHERE id = $1 AND revoked_at IS NULL`, [tokenId]);
 }
 
+/**
+ * Whether a cluster in error (or whose substrate is) still has a control plane to tend nodes on: the provider has it,
+ * it answered once (it was ready, or its endpoint is known: a cluster whose first node pool was refused never was
+ * `ready`), and it is not being deleted.
+ */
+function clusterUsable(cluster: ClusterRow): boolean {
+  return (
+    cluster.provider_id !== null &&
+    (cluster.ready_at !== null || cluster.endpoint !== null) &&
+    cluster.desired_state === 'present' &&
+    !['deleting', 'deleted'].includes(cluster.state)
+  );
+}
+
 /** One step of one pool's substrate. Returns the next wake-up, or undefined when settled. */
 export async function reconcileSubstrate(
   deps: SubstrateDeps,
@@ -1401,12 +1578,31 @@ export async function reconcileSubstrate(
   const plan = prepared.plan;
   if (!plan) return undefined;
   const { row, cluster } = plan;
-  if (!cluster) return now() + substratePollMs;
-  if (cluster.state === 'error') {
-    await setState(deps, sql, row, { state: 'error', message: `cluster: ${cluster.message ?? 'in error'}` });
-    return undefined;
+  if (!cluster) return plan.problem !== undefined ? undefined : now() + substratePollMs;
+  const problem =
+    plan.problem ?? (cluster.state === 'error' ? `cluster: ${cluster.message ?? 'in error'}` : undefined);
+  if (problem !== undefined) {
+    // An error never halts node lifecycle on a control plane that works: a refused node pool (quota, a stockout) or
+    // a policy that cannot be converged leaves the nodes that joined where they are, so gone ones must still be
+    // retired (their bookings and quota released) and replacement Nodes must still get a join token. Only a control
+    // plane that never answered, or one being deleted, is left alone.
+    if (!clusterUsable(cluster) || !deps.substrate || !deps.pki) {
+      if (plan.problem === undefined) await setState(deps, sql, row, { state: 'error', message: problem });
+      return undefined;
+    }
+    return applyBcd(deps, sql, { ...plan, problem }, cluster, signal);
   }
   if (cluster.provider_id === null || !['ready', 'updating'].includes(cluster.state)) {
+    // A newly adopted cluster waits for the in-cluster claim before its node pools are made (the cluster reconciler
+    // holds them back): applyBcd makes the claim and stops there.
+    const awaitsClaim =
+      cluster.adopted &&
+      cluster.claimed_at === null &&
+      cluster.provider_id !== null &&
+      cluster.endpoint !== null &&
+      cluster.state === 'provisioning' &&
+      cluster.desired_state === 'present';
+    if (awaitsClaim && deps.substrate) return applyBcd(deps, sql, plan, cluster, signal);
     await setState(deps, sql, row, { state: row.state === 'ready' ? 'updating' : 'provisioning' });
     return now() + substratePollMs;
   }
@@ -1442,17 +1638,24 @@ async function applyBcd(
   cluster: ClusterRow,
   signal: AbortSignal,
 ): Promise<number | undefined> {
-  const { row, pool, substrate } = plan;
+  const { row, pool } = plan;
   const agent = deps.substrate!.agent;
   const retry = () => deps.clock.now() + substrateRetryMs;
+  /** A step failed for good: `error`, after the problem the substrate already has (if any). */
+  const fail = async (message: string): Promise<undefined> => {
+    await setState(deps, sql, row, {
+      state: 'error',
+      message: (plan.problem !== undefined ? `${plan.problem}; ${message}` : message).slice(0, 500),
+    });
+    return undefined;
+  };
   let kubernetes: ProviderKubernetes;
   try {
     const account = await sql.transaction((tx) => readAccount(tx, row.provider_account_id, row.tenant_id));
     if (!account) throw new ComputeError('NOT_FOUND', `Provider account ${row.provider_account_id} not found`);
     kubernetes = (await accountKubernetes(deps, account)).kubernetes;
   } catch (error) {
-    await setState(deps, sql, row, { state: 'error', message: text(error) });
-    return undefined;
+    return fail(text(error));
   }
   const call: CallContext = {
     idempotencyKey: `substrate:${row.pool_id}`,
@@ -1469,20 +1672,33 @@ async function applyBcd(
     ),
   );
   if (!minted) return retry();
-  if ('error' in minted) {
-    await setState(deps, sql, row, { state: 'error', message: `credentials: ${minted.error}` });
-    return undefined;
-  }
+  if ('error' in minted) return fail(`credentials: ${minted.error}`);
   const api = agent.connect(minted.value, { signal });
-  const selector = substrate.flavors.length > 0 ? { [substratePoolLabel]: row.pool_id } : undefined;
+  // One cluster backs one pool: the claim comes before anything is listed, applied or joined.
+  const claim = await attempt(deps, row.pool_id, signal, () => claimCluster(api, row));
+  if (!claim) return retry();
+  if ('error' in claim) return fail(`claim: ${claim.error}`);
+  if (claim.value !== undefined) return fail(claimRefusal(claim.value));
+  if (cluster.claimed_at === null) {
+    const waiting = cluster.adopted && cluster.ready_at === null;
+    await sql.transaction(async (tx) => {
+      await tx.query(`UPDATE kubernetes_clusters SET claimed_at = compute_now() WHERE id = $1 AND claimed_at IS NULL`, [
+        cluster.id,
+      ]);
+      // The cluster reconciler held the node pools back for this.
+      if (waiting) await deps.work.enqueue(tx, clustersWork, cluster.id);
+    });
+  }
+  if (!['ready', 'updating', 'error'].includes(cluster.state)) {
+    await setState(deps, sql, row, { state: row.state === 'ready' ? 'updating' : 'provisioning' });
+    return deps.clock.now() + substratePollMs;
+  }
+  const selector = plan.labelled ? { [substratePoolLabel]: row.pool_id } : undefined;
   const listed = await attempt(deps, row.pool_id, signal, () =>
     api.nodes(selector ? `${substratePoolLabel}=${row.pool_id}` : undefined),
   );
   if (!listed) return retry();
-  if ('error' in listed) {
-    await setState(deps, sql, row, { state: 'error', message: `nodes: ${listed.error}` });
-    return undefined;
-  }
+  if ('error' in listed) return fail(`nodes: ${listed.error}`);
   const nodes = listed.value;
   // Which pool nodes are the substrate's; those that never connected within the grace window are retired.
   await learnOwnership(sql, row.pool_id);
@@ -1506,10 +1722,7 @@ async function applyBcd(
       // (drift) is restored with a new token now, not when the old one nears its expiry.
       const secret = await attempt(deps, row.pool_id, signal, () => api.get(refOf(agent.tokenSecret)));
       if (!secret) return retry();
-      if ('error' in secret) {
-        await setState(deps, sql, row, { state: 'error', message: `token Secret: ${secret.error}` });
-        return undefined;
-      }
+      if ('error' in secret) return fail(`token Secret: ${secret.error}`);
       usable = secret.value !== undefined && secret.value.metadata.labels[substratePoolLabel] === row.pool_id;
     }
     if (!usable) {
@@ -1576,37 +1789,22 @@ async function applyBcd(
         foreignObjects(api, row.pool_id, joinToken !== undefined ? objects : [...objects, agent.tokenSecret]),
       );
       if (!foreign) return retry();
-      if ('error' in foreign) {
-        await setState(deps, sql, row, { state: 'error', message: `apply: ${foreign.error}` });
-        return undefined;
-      }
-      if (foreign.value.length > 0) {
-        await setState(deps, sql, row, {
-          state: 'error',
-          message: `The adopted cluster already has ${foreign.value.join(', ')}, not made by this substrate: better-compute never takes over or deletes objects it did not create. Remove them (or install bcd under another namespace) and the substrate applies bcd`.slice(
-            0,
-            500,
-          ),
-        });
-        return undefined;
-      }
+      if ('error' in foreign) return fail(`apply: ${foreign.error}`);
+      if (foreign.value.length > 0)
+        return fail(
+          `The adopted cluster already has ${foreign.value.join(', ')}, not made by this substrate: better-compute never takes over or deletes objects it did not create. Remove them (or install bcd under another namespace) and the substrate applies bcd`,
+        );
     }
     for (const object of objects) {
       const applied = await attempt(deps, row.pool_id, signal, () => api.apply(object));
       if (!applied) return retry();
-      if ('error' in applied) {
-        await setState(deps, sql, row, { state: 'error', message: `apply: ${applied.error}` });
-        return undefined;
-      }
+      if ('error' in applied) return fail(`apply: ${applied.error}`);
     }
   }
   if (revoke) {
     const removed = await attempt(deps, row.pool_id, signal, () => removeOwned(api, row.pool_id, agent.tokenSecret));
     if (!removed) return retry();
-    if ('error' in removed) {
-      await setState(deps, sql, row, { state: 'error', message: `token Secret: ${removed.error}` });
-      return undefined;
-    }
+    if ('error' in removed) return fail(`token Secret: ${removed.error}`);
     await sql.transaction(async (tx) => {
       await revokeToken(tx, tokenId);
       await publishSubstrate(deps, tx, row, 'kubernetes.substrate.token-revoked', {
@@ -1616,15 +1814,35 @@ async function applyBcd(
     });
   }
   const drain = plan.drain;
+  // Nodes that never join: a token and a DaemonSet do not make bcd start (the image does not pull, the gateway is
+  // not reachable from the cluster, a pin is wrong, the GPU runtime class is missing). The wait is counted from the
+  // first run that listed Nodes without a joined bcd, and starts over when one joins or more Nodes appear; past
+  // `substrateJoinStallSeconds` the substrate says so (it stays `ready`: the cluster is) and leaves the 10 s poll
+  // to the 2 minute refresh, which keeps the token alive for them.
+  const nowJoined = Math.min(joined, nodes.length);
+  const progressed =
+    row.join_wait_since === null ||
+    nowJoined > Number(row.nodes_joined ?? 0) ||
+    nodes.length > Number(row.nodes_listed ?? 0);
+  const waitingSince =
+    gap === 0 ? null : progressed ? deps.clock.now() : new Date(row.join_wait_since!).getTime();
+  const stalled = waitingSince !== null && deps.clock.now() - waitingSince >= substrateJoinStallSeconds * 1000;
+  const notJoining = stalled
+    ? `${gap} of ${nodes.length} Node(s) have not joined since ${new Date(waitingSince).toISOString()}: bcd is not starting on them. Check the pods of DaemonSet ${describeObject(manifests.find((object) => object.kind === 'DaemonSet') ?? agent.tokenSecret)} (image pull, the gateway URL and pins, the GPU runtime class); the join token is kept for them`
+    : null;
+  // With a problem the substrate stays in error (its message says why); its nodes were tended all the same.
   const written = await setState(deps, sql, row, {
-    state: drain ? 'updating' : 'ready',
-    message: drain
-      ? `Draining before the upgrade to ${drain.version}: waiting for ${drain.bookings} booking(s) on the substrate's nodes to end (no new bookings meanwhile)`
-      : null,
+    state: plan.problem !== undefined ? 'error' : drain ? 'updating' : 'ready',
+    message:
+      plan.problem ??
+      (drain
+        ? `Draining before the upgrade to ${drain.version}: waiting for ${drain.bookings} booking(s) on the substrate's nodes to end (no new bookings meanwhile)`
+        : notJoining),
     fields: {
       ...(due ? { applied: true, manifests_sha256: hash } : {}),
+      joinWaitSince: waitingSince,
       nodes_listed: nodes.length,
-      nodes_joined: Math.min(joined, nodes.length),
+      nodes_joined: nowJoined,
       ...(revoke ? { join_token_id: null, token_applied: false } : {}),
       ...(joinToken !== undefined ? { token_applied: true } : {}),
     },
@@ -1632,8 +1850,10 @@ async function applyBcd(
   if (!written) return deps.clock.now();
   // Nodes still joining, or the cluster still converging (a resize, an upgrade): look again soon. A drain looks
   // again for its bookings now and then; a drained upgrade until the cluster runs the version. Otherwise the
-  // periodic refresh comes back.
-  if (gap > 0 || cluster.state !== 'ready') return deps.clock.now() + substratePollMs;
+  // periodic refresh comes back (as it does to a substrate in error, every 2 minutes).
+  if (gap > 0 && !stalled) return deps.clock.now() + substratePollMs;
+  if (plan.problem !== undefined) return drain ? deps.clock.now() + substrateUpgradeRecheckMs : undefined;
+  if (cluster.state !== 'ready') return deps.clock.now() + substratePollMs;
   if (drain) return deps.clock.now() + substrateUpgradeRecheckMs;
   return row.upgrade_version !== null ? deps.clock.now() + substratePollMs : undefined;
 }
@@ -1708,8 +1928,16 @@ async function teardown(
           ])
         ).rows[0];
   if (cluster && cluster.desired_state !== 'deleted') {
-    // bcd leaves the cluster first (what matters on an adopted one, which stays).
-    if (cluster.provider_id !== null && deps.substrate && ['ready', 'updating', 'error'].includes(cluster.state)) {
+    // bcd leaves the cluster first (what matters on an adopted one, which stays). An adopted cluster this substrate
+    // never reached (refused before the provider answered: it is another pool's) has nothing of ours, and its
+    // `bc-substrate` identity is the other pool's: no credential is minted for it and nothing is revoked.
+    const untouched = cluster.adopted && cluster.claimed_at === null && cluster.endpoint === null;
+    if (
+      cluster.provider_id !== null &&
+      deps.substrate &&
+      !untouched &&
+      ['provisioning', 'ready', 'updating', 'error'].includes(cluster.state)
+    ) {
       const removed = await removeBcd(deps, sql, row, cluster, signal);
       if (removed === 'retry') return deps.clock.now() + substrateRetryMs;
       if (removed !== 'done' && 'error' in removed) {
@@ -1744,7 +1972,22 @@ async function teardown(
     });
     return poll();
   }
-  if (cluster && cluster.state !== 'deleted') return poll();
+  if (cluster && cluster.state === 'error') {
+    // The provider refused the delete (a permanent error, as far as anyone can tell): the substrate says so and
+    // stops polling. The cluster reconciler retries with backoff and wakes this one when the cluster's state
+    // changes; the refresh comes back with the same backoff (`deleteRetryDue`) in case that wake is lost.
+    const message = `cluster: ${cluster.message ?? 'the provider refused the delete'}`.slice(0, 500);
+    if (row.state !== 'error' || row.message !== message) await setState(deps, sql, row, { state: 'error', message });
+    else
+      await sql.query(`UPDATE kubernetes_pool_substrates SET retried_at = compute_now() WHERE pool_id = $1`, [
+        row.pool_id,
+      ]);
+    return undefined;
+  }
+  if (cluster && cluster.state !== 'deleted') {
+    if (row.state === 'error') await setState(deps, sql, row, { state: 'deleting' });
+    return poll();
+  }
   // bcd is gone from the cluster (or the cluster is): the substrate's nodes are machines that left for good.
   const retired = await retireTornDownNodes(deps, sql, row);
   if (retired === undefined) return poll();
@@ -1816,6 +2059,8 @@ export const credentialsLeftMessage = `The provider cannot revoke credentials: K
  * delete or a revoke that fails is an error teardown retries, since bcd left running there keeps a privileged
  * DaemonSet on the tenant's nodes; only a cluster the provider no longer has counts as nothing to delete. A driver
  * without `revokeCredentials` answers `left`: teardown goes on and the substrate reports the identity that stays.
+ * An adopted cluster whose claim (`substrateClaim`) another pool holds is that pool's: nothing is deleted from it and
+ * the identity, which that pool uses, is not revoked. This substrate's own claim goes after bcd, before the revoke.
  */
 async function removeBcd(
   deps: SubstrateDeps,
@@ -1868,6 +2113,17 @@ async function removeBcd(
     return failed(`credentials: ${minted.error}`);
   }
   const api = agent.connect(minted.value, { signal });
+  if (cluster.adopted) {
+    const claim = await attempt(deps, row.pool_id, signal, () => api.get(refOf(substrateClaim)));
+    if (!claim) return 'retry';
+    if ('error' in claim) return failed(`claim: ${claim.error}`);
+    if (claim.value !== undefined && claimHolder(claim.value) !== row.pool_id) {
+      deps.log.info('kubernetes: the adopted cluster is claimed by another substrate; nothing is removed from it', {
+        poolId: row.pool_id,
+      });
+      return 'done';
+    }
+  }
   const objects = [...agent.manifests({ siteId: 'site_teardown' }), agent.tokenSecret];
   // DaemonSet first, the Namespace last (it takes anything left in it).
   const order = (kind: string) => (kind === 'DaemonSet' ? 0 : kind === 'Namespace' ? 2 : 1);
@@ -1880,6 +2136,10 @@ async function removeBcd(
     }
   }
   if (!cluster.adopted) return 'done';
+  // The claim goes while the credential still works: the cluster is free for another pool from here.
+  const unclaimed = await attempt(deps, row.pool_id, signal, () => removeOwned(api, row.pool_id, substrateClaim));
+  if (!unclaimed) return 'retry';
+  if ('error' in unclaimed) return { error: `${describeObject(substrateClaim)}: ${unclaimed.error}` };
   if (typeof kubernetes.revokeCredentials !== 'function') return { left: credentialsLeftMessage };
   const revoked = await attempt(deps, row.pool_id, signal, () =>
     kubernetes.revokeCredentials!(cluster.provider_id!, substrateSubject, call),
@@ -1896,10 +2156,15 @@ async function enqueueAll(context: ModuleContext, tx: SqlTx, ids: readonly strin
   else for (const id of ids) await context.work.enqueue(tx, substratesWork, id);
 }
 
+/** How long after a teardown stopped at a refused delete it is looked at again; each later wait doubles. */
+export const substrateDeleteRetryMinutes = 2;
+
 /**
  * The `kubernetes.substrates` reconciler (key: a pool id). `all` (every 30 s) queues pools whose policy has a
  * substrate and that have no settled row, and every substrate being torn down; `refresh` (every 2 minutes) queues
- * the settled ones (ready, error), so drift is repaired, an error retried and new Nodes get a token.
+ * the settled ones (ready, error), so drift is repaired, an error retried and new Nodes get a token. A teardown
+ * stopped by a delete the provider refused (`error` with `desired_state = 'deleted'`) leaves the 30 s sweep: the
+ * refresh queues it with exponential backoff (`deleteRetryDue`: 2, 4, 8 minutes, ... at most every 6 hours).
  */
 export function substratesReconciler(depsOf: (context: ModuleContext) => SubstrateDeps): Reconciler {
   return {
@@ -1917,12 +2182,18 @@ export function substratesReconciler(depsOf: (context: ModuleContext) => Substra
               ? `SELECT p.id FROM pools p
                    LEFT JOIN kubernetes_pool_substrates s ON s.pool_id = p.id
                   WHERE (p.policy ? 'substrate' AND p.archived_at IS NULL
-                         AND (s.pool_id IS NULL OR s.state NOT IN ('ready', 'error')
-                              OR s.pool_version IS DISTINCT FROM p.version))
+                         AND (s.pool_id IS NULL
+                              OR ((s.state NOT IN ('ready', 'error') OR s.pool_version IS DISTINCT FROM p.version)
+                                  AND NOT (s.state = 'error' AND s.desired_state = 'deleted'))))
                      OR (s.state IS NOT NULL AND s.state <> 'deleted'
+                         AND NOT (s.state = 'error' AND s.desired_state = 'deleted')
                          AND (s.desired_state = 'deleted' OR p.archived_at IS NOT NULL OR NOT p.policy ? 'substrate'))
                   ORDER BY p.id`
-              : `SELECT pool_id AS id FROM kubernetes_pool_substrates WHERE state IN ('ready', 'error') ORDER BY pool_id`,
+              : `SELECT s.pool_id AS id FROM kubernetes_pool_substrates s
+                  WHERE s.state = 'ready'
+                     OR (s.state = 'error'
+                         AND (s.desired_state <> 'deleted' OR ${deleteRetryDue('s', substrateDeleteRetryMinutes)}))
+                  ORDER BY s.pool_id`,
           );
           await enqueueAll(
             context,

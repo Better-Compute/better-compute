@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { create, toBinary } from '@bufbuild/protobuf';
 import { newId } from '@better-compute/core';
+import { sectionJson } from '@better-compute/inventory';
+import { decodeInventorySection, OsSectionSchema } from '@better-compute/protocol';
 import {
   substrateCapacityLabel,
   substrateFirstConnectGraceSeconds,
+  substrateJoinStallSeconds,
   substratePoolLabel,
   substrateSubject,
 } from '@better-compute/kubernetes';
@@ -208,6 +212,8 @@ describe('substrate: create', () => {
       state: 'ready',
       nodesListed: 2,
       nodesJoined: 1,
+      // One Node has no joined bcd yet, since the substrate first listed it.
+      waitingToJoin: { nodes: 1, since: expect.any(Number) },
     });
     // Nothing secret in it: no token id, no credential.
     expect(JSON.stringify(view)).not.toMatch(/token|jtk_/i);
@@ -270,6 +276,57 @@ describe('substrate: create', () => {
     expect(cluster).toMatchObject({ requestedVersion: '1.34', state: 'ready' });
     expect(cluster.kubernetesVersion).toMatch(/^1\.34/);
     expect(row.state).toBe('ready');
+  });
+});
+
+describe('substrate: Nodes that never join', () => {
+  it('says so after 15 minutes without a join, in the view and to doctor, and stops polling every 10 s', async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(createSpec());
+    await world.converge(pool.id, 6);
+    const get = () => world!.api.kubernetesSubstrates.get(world!.root, { tenantId: world!.rootTenant, poolId: pool.id });
+    const findings = async () =>
+      ((await world!.module.selfCheck!({ sql: world!.fixture.database } as never)) as any[]).filter(
+        (entry) => entry.check === 'kubernetes.substrate-nodes-not-joining',
+      );
+    // Just applied: three Nodes wait for their bcd to join. Nothing is wrong yet.
+    const fresh = await get();
+    expect(fresh).toMatchObject({ state: 'ready', nodesListed: 3, nodesJoined: 0, waitingToJoin: { nodes: 3 } });
+    expect(fresh.message).toBeUndefined();
+    expect(await findings()).toEqual([]);
+
+    // A quarter of an hour later still none joined (the image does not pull, the gateway cannot be reached, …).
+    await world.fixture.advance(substrateJoinStallSeconds * 1000);
+    await world.converge(pool.id, 6);
+    const stalled = await get();
+    expect(stalled).toMatchObject({ state: 'ready', nodesJoined: 0, waitingToJoin: { nodes: 3, since: fresh.waitingToJoin.since } });
+    expect(stalled.message).toMatch(/^3 of 3 Node\(s\) have not joined/);
+    expect(stalled.message).toMatch(/DaemonSet/);
+    expect(await findings()).toEqual([
+      expect.objectContaining({ severity: 'warning', count: 1, message: expect.stringContaining(pool.id) }),
+    ]);
+    // The token is still there for them, and the substrate no longer looks every 10 seconds: only the refresh does.
+    expect(await world.substrate(pool.id)).toMatchObject({ token_applied: true });
+    const credentials = world.cloud.credentials.length;
+    await world.converge(pool.id, 6); // two minutes of ticks
+    expect(world.cloud.credentials.length - credentials).toBeLessThanOrEqual(2);
+
+    // One joins: that is progress, the wait starts over for the other two.
+    await world.joinNodes(pool.id, 1);
+    await world.fixture.advance(2 * 60_000);
+    await world.converge(pool.id, 3);
+    const progressed = await get();
+    expect(progressed).toMatchObject({ nodesJoined: 1, waitingToJoin: { nodes: 2 } });
+    expect(progressed.waitingToJoin.since).toBeGreaterThan(fresh.waitingToJoin.since);
+    expect(progressed.message).toBeUndefined();
+    expect(await findings()).toEqual([]);
+    // The rest join: nothing waits.
+    await world.joinNodes(pool.id, 2);
+    await world.converge(pool.id, 3);
+    const done = await get();
+    expect(done).toMatchObject({ state: 'ready', nodesJoined: 3 });
+    expect(done.waitingToJoin).toBeUndefined();
+    expect(done.message).toBeUndefined();
   });
 });
 
@@ -523,6 +580,40 @@ describe('substrate: replaced nodes', () => {
   });
 });
 
+describe('substrate: provider Spot nodes', () => {
+  it('marks the pool nodes of a Spot flavor for capacity (bc.dev/capacity=spot), and only those', async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(createSpec([{ ...gpu, nodes: 1 }, spot], { allowSpot: true }));
+    await world.converge(pool.id, 6);
+    const server = await world.server(pool.id);
+    const listed = world.kube.nodeList(server);
+    const spotName = listed.find((node) => node.labels[substrateCapacityLabel] === 'spot')!.name;
+    const plainName = listed.find((node) => node.labels[substrateCapacityLabel] === undefined)!.name;
+    // A node is matched to its Node by the name bcd reports; one that reports nothing yet is not marked.
+    const [onSpot, onDemand] = await world.joinNodes(pool.id, 2, [spotName, plainName]);
+    const [unreported] = await world.joinNodes(pool.id, 1);
+    // Spot nodes that joined before this label existed are marked too (their Node was learned already).
+    const labels = async () =>
+      (
+        await world!.fixture.database.query<{ node_id: string; key: string; value: string; source: string }>(
+          `SELECT node_id, key, value, source FROM node_labels WHERE node_id = ANY($1) ORDER BY node_id`,
+          [[onSpot, onDemand, unreported]],
+        )
+      ).rows;
+    await world.converge(pool.id, 3);
+    expect(await labels()).toEqual([{ node_id: onSpot, key: 'bc.dev/capacity', value: 'spot', source: 'system' }]);
+    // Removed by hand in the database, it comes back on the next run; one set on an on-demand node goes.
+    await world.fixture.database.query(`DELETE FROM node_labels WHERE node_id = $1`, [onSpot]);
+    await world.fixture.database.query(
+      `INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, 'bc.dev/capacity', 'spot', 'system')`,
+      [onDemand],
+    );
+    await world.fixture.advance(2 * 60_000);
+    await world.converge(pool.id, 3);
+    expect(await labels()).toEqual([{ node_id: onSpot, key: 'bc.dev/capacity', value: 'spot', source: 'system' }]);
+  });
+});
+
 describe('substrate: which Kubernetes Node a pool node is', () => {
   const nodeRows = async (poolId: string) =>
     new Map(
@@ -569,6 +660,41 @@ describe('substrate: which Kubernetes Node a pool node is', () => {
     const rows = await nodeRows(pool.id);
     expect(rows.get(joined[1]!)).toMatchObject({ provision_state: 'retired' });
     expect(rows.get(joined[1]!)!.no_schedule_reasons).toContain('substrate-node-removed');
+    expect(rows.get(joined[0]!)).toMatchObject({ provision_state: 'adopted', no_schedule_reasons: [] });
+  });
+
+  it("matches by the Node name bcd reports in its os section (os.kubernetesNodeName), whatever the hostname", async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(createSpec([gpu]));
+    await world.converge(pool.id, 6);
+    const names = (await world.nodeNames(pool.id)).sort();
+    // What bcd sends from a DaemonSet pod on an EKS AMI with a short kernel hostname: NODE_NAME as
+    // os.kubernetesNodeName. The second node's hostname is even another Node's name: the reported Node wins.
+    const section = (hostname: string, node: string) => {
+      const bytes = toBinary(OsSectionSchema, create(OsSectionSchema, { hostname, kubernetesNodeName: node }));
+      return { os: sectionJson(decodeInventorySection('os', bytes)) as Record<string, unknown> };
+    };
+    const first = section('ip-10-0-1-2', names[0]!);
+    expect(first.os).toMatchObject({ hostname: 'ip-10-0-1-2', kubernetesNodeName: names[0] });
+    const joined = await world.joinNodes(pool.id, 2, undefined, [first, section(names[0]!, names[1]!)]);
+    await world.converge(pool.id, 3);
+    const { rows: matched } = await world.fixture.database.query<{ node_id: string; kubernetes_node: string | null }>(
+      `SELECT node_id, kubernetes_node FROM kubernetes_substrate_nodes WHERE node_id = ANY($1)`,
+      [joined],
+    );
+    expect(new Map(matched.map((row) => [row.node_id, row.kubernetes_node]))).toEqual(
+      new Map([
+        [joined[0], names[0]],
+        [joined[1], names[1]],
+      ]),
+    );
+    // So a Node that goes is noticed: its node is retired, the other one only disconnected.
+    world.reclaimed.add(names[1]!);
+    await world.fixture.database.query(`UPDATE nodes SET connectivity = 'disconnected' WHERE id = ANY($1)`, [joined]);
+    await world.fixture.advance(2 * 60_000);
+    await world.converge(pool.id, 3);
+    const rows = await nodeRows(pool.id);
+    expect(rows.get(joined[1]!)).toMatchObject({ provision_state: 'retired' });
     expect(rows.get(joined[0]!)).toMatchObject({ provision_state: 'adopted', no_schedule_reasons: [] });
   });
 

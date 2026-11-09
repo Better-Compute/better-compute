@@ -414,6 +414,9 @@ describe('kubernetes()', () => {
       'kubernetes/0002_substrates',
       'kubernetes/0003_substrate_nodes',
       'kubernetes/0004_substrate_ownership',
+      'kubernetes/0005_cluster_claims',
+      'kubernetes/0006_delete_backoff',
+      'kubernetes/0007_substrate_join_wait',
     ]);
     expect(module.reconcilers!.map((reconciler) => reconciler.name)).toEqual([
       'kubernetes.clusters',

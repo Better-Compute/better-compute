@@ -311,6 +311,75 @@ All notable changes to the better-compute packages are documented here. The form
   hour (the hourly window's reset). It now prefers `retry-after` (seconds or an HTTP date), falls back to
   `ratelimit-reset`, then to a minute, and is always between 1 second and 5 minutes (`minRetryAfterMs`,
   `maxRetryAfterMs`, `rateLimitWaitMs`).
+- **A fleet pool says when its Nodes are not joining** (`@better-compute/kubernetes`). A substrate whose Nodes never
+  ran bcd (the image does not pull, the gateway is unreachable from the cluster, a pin is wrong) stayed `ready` with
+  0 joined, polled every 10 s and minted a new token every hour, with nothing to say why. `kubernetesSubstrates.get`
+  now returns `waitingToJoin: { nodes, since }` while listed Nodes have no joined bcd (`since` starts over when one
+  joins or more Nodes appear). After 15 minutes without a join the substrate, still `ready`, carries a `message`
+  naming how many Nodes wait and what to check, `selfCheck` reports `kubernetes.substrate-nodes-not-joining`, and
+  the substrate leaves the 10 s poll to the 2 minute refresh (the join token is kept for the Nodes). Migration
+  `kubernetes/0007_substrate_join_wait` adds `kubernetes_pool_substrates.join_wait_since`.
+- **bcd reports the Kubernetes Node it runs on** (`proto`, `@better-compute/protocol`, `bcd`,
+  `@better-compute/kubernetes`). A fleet pool matches each pool node to its Kubernetes Node by the Node name bcd
+  reports, but bcd never reported one: `NODE_NAME` only reached its Kubernetes manager, so matching fell back to the
+  kernel hostname, which is not the Node's name on EKS AMIs with a short hostname. Such a node was never matched,
+  so its Node going away was never noticed. `OsSection` gains `kubernetes_node_name` (field 9, additive): bcd's
+  inventory collector fills it from `NODE_NAME` (the DaemonSet sets it from `spec.nodeName`) when the value can be
+  a Node name, and reports nothing outside a pod, so other machines' `os` section hashes do not change. The
+  substrate reads `os.kubernetesNodeName` first, then the hostname. The Node's uid is not reported (a pod cannot
+  read it without the API); the substrate still records it from the Node list when it makes the match.
+- **Provider Spot nodes are Spot to capacity** (`@better-compute/capacity`, `@better-compute/kubernetes`). A fleet
+  pool's Spot flavor was marked only on the Kubernetes Node (`better-compute.dev/capacity=spot`), so a non-spot
+  reservation could land on a machine the provider may take back, and a reclaim ended what the node held as
+  `node-removed`. The substrate now writes the system label `bc.dev/capacity=spot` on every pool node whose Node is
+  Spot, when it learns the Node (nodes learned earlier are marked on the next run). Capacity places only
+  `spot: true` reservations on such a node (`capacity.preview` too; the request's `nodeLabels` carries
+  `bc.dev/capacity: '!spot'`, and a `nodeLabels` value starting with `!` now means the node must not carry that
+  value), and `endNodeReservations` ends whatever a Spot node held as `preempted`, whatever the reservation asked
+  for. A node can still take a non-spot booking in the moment between its join and its first inventory, before it
+  is matched to its Node; that booking ends as `preempted` as well.
+- **A refused delete backs off** (`@better-compute/kubernetes`). A cluster whose delete the provider refuses for
+  good was asked for again every 30 s forever (the fast sweep queued every row still to delete, the one in `error`
+  included), and a substrate tearing down polled that cluster every 10 s. A cluster in `error` with a pending
+  delete now leaves the 30 s sweep; the 5 minute refresh retries it 5, 10, 20, 40 minutes after the last try and so
+  on, at most every 6 hours, counted from when it went to that error (migration `kubernetes/0006_delete_backoff`:
+  `kubernetes_clusters.updated_at` and `retried_at`, `kubernetes_pool_substrates.retried_at`).
+  `kubernetesClusters.delete` on such a cluster tries at once. The substrate of such a cluster goes to `error`
+  (`cluster: …`, `desired_state` still `deleted`), stops polling, is looked at with the same backoff from 2 minutes,
+  and is woken when the cluster is deleted, which now finishes its teardown.
+- **`fleet.apply` without `prune` no longer deletes a cluster** (`@better-compute/fleet`). A document that dropped
+  `policy.substrate` from a pool it kept planned as a plain `pool update (policy)`, and the substrate reconciler
+  then tore the pool's cluster down. It is a delete now: with `prune` the plan carries a `delete` change on the pool
+  (`fields: ['policy.substrate']`, with a note that the substrate is torn down); without `prune` the substrate
+  stays in the policy that is sent, other policy changes are still made, and the pool's change notes
+  `policy.substrate is kept`.
+- **One cluster backs one pool, whoever reaches it** (`@better-compute/kubernetes`, `provider-kubernetes`,
+  `provider-gcp`, `provider-aws`, `provider-digitalocean`). Adopting a cluster (`cluster: { adopt }`) was checked
+  per provider account with an unlocked read, so two accounts on one project, or two pools at the same moment, both
+  adopted it: the second added node pools, and its teardown revoked the shared `bc-substrate` identity under the
+  first. Three things refuse it now. Migration `kubernetes/0005_cluster_claims` adds `kubernetes_clusters.claim_key`
+  with a unique index over live rows: an adopted row claims its account and cluster id when it is inserted (the
+  second pool's substrate goes to `error`: "already another pool's substrate"). The cluster reconciler then replaces
+  that with the cluster's provider-global id, which the GKE, EKS and DOKS drivers now report as
+  `outputs.globalId` (the selfLink, the ARN, `do:kubernetes:<uuid>`), before it makes any node pool; a second row
+  for the same cluster is `CONFLICT` and its cluster goes to `error`. A cluster better-compute created records its
+  global id too, so it cannot be adopted through another account. Last, the substrate claims the cluster itself:
+  a ConfigMap `kube-system/better-compute-substrate` labelled with the pool id, created (never applied over) before
+  anything else is listed, applied or joined, and before a newly adopted cluster gets its node pools
+  (`kubernetes_clusters.claimed_at`). A cluster another pool or another deployment claimed is refused with nothing
+  made in it, and tearing the refused substrate down deletes nothing there and does not revoke the identity. An
+  adopted cluster's claim is deleted on teardown. `KubernetesApiClient` gains `create` (POST; false on 409), and
+  `SubstrateClusterApi` an optional `create`. A third-party driver without `outputs.globalId` keeps the per-account
+  check.
+- **A fleet pool in error keeps tending its nodes** (`@better-compute/kubernetes`). A pool substrate whose cluster
+  went to `error` (one flavor's node pool refused: quota, a stockout), or whose policy could not be converged (a
+  flavor's shape changed, the account or cluster changed, the substrate no longer parsed), stopped before it looked
+  at the cluster: gone or Spot-reclaimed nodes were never retired, their bookings and quota stayed held, and
+  replacement Nodes got no join token. The substrate now stays in `error` with the reason as its message and still
+  lists the Nodes, retires gone nodes, keeps the join token and re-applies bcd, as long as the cluster's control
+  plane answered once and is not being deleted. A step that then fails is appended to the message
+  (`cluster: …; credentials: …`).
+
 - **Scripts on images without cloud-init** (`@better-compute/provider-gcp`). Compute Engine's Debian, Rocky,
   CentOS, RHEL, AlmaLinux and SUSE images do not run cloud-init, so a shell-script `userData` (`#!…`) never ran on
   them. Create now also writes it as `startup-script` metadata, wrapped to run once on the first boot as cloud-init

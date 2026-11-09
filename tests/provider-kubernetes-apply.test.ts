@@ -111,6 +111,34 @@ describe('kubernetesApiClient', () => {
     ]);
   });
 
+  it('creates only what does not exist: a taken name is false and nothing is replaced', async () => {
+    const taken = new Set<string>();
+    const kube = recorder((request) => {
+      const name = (request.body as { metadata: { name: string } }).metadata.name;
+      if (taken.has(name)) return { status: 409, body: { kind: 'Status', reason: 'AlreadyExists' } };
+      taken.add(name);
+      return { status: 201, body: request.body };
+    });
+    const client = kubernetesApiClient(access, { transport: kube.transport });
+    const claim = {
+      apiVersion: 'v1',
+      kind: 'ConfigMap',
+      metadata: { name: 'better-compute-substrate', namespace: 'kube-system', labels: { pool: 'pool_1' } },
+      data: { poolId: 'pool_1' },
+    };
+    expect(await client.create(claim)).toBe(true);
+    expect(await client.create({ ...claim, data: { poolId: 'pool_2' } })).toBe(false);
+    // A POST to the collection (never a forced apply), as JSON, with the field manager.
+    expect(kube.calls.map((call) => `${call.method} ${new URL(call.url).pathname}${new URL(call.url).search}`)).toEqual([
+      'POST /api/v1/namespaces/kube-system/configmaps?fieldManager=better-compute',
+      'POST /api/v1/namespaces/kube-system/configmaps?fieldManager=better-compute',
+    ]);
+    expect(kube.calls[0]!.contentType).toBe('application/json');
+    const refused = recorder(() => ({ status: 403, body: { kind: 'Status', reason: 'Forbidden', message: 'no' } }));
+    const error = await rejection(kubernetesApiClient(access, { transport: refused.transport }).create(claim));
+    expect(isComputeError(error, 'ACCESS_DENIED')).toBe(true);
+  });
+
   it("reads an object's metadata only (never a Secret's data), and a missing one is undefined", async () => {
     const kube = recorder((request) =>
       request.url.endsWith('/configmaps/gone')

@@ -2,9 +2,14 @@ import type { KubeApiRequest, KubeApiResponse, KubeApiTransport } from '@better-
 
 // An in-memory Kubernetes API for the pool substrate's tests, as provider-kubernetes' KubeApiTransport: one object
 // store per API server (origin), server-side apply (PATCH apply-patch+yaml: create or replace, with the field
-// manager recorded), DELETE, and the Node list (from `nodes`, e.g. a FakeKubernetes cloud's node pools), with label
+// manager recorded), create (POST to the collection: 409 when the name is taken), DELETE, and the Node list (from `nodes`, e.g. a FakeKubernetes cloud's node pools), with label
 // selectors of the `k=v[,k=v]` form. Only tokens `accepts` vouches for authenticate: a test proves the substrate uses
 // the credential the provider minted. The log keeps method, path and field manager, never the token.
+
+/** Namespaces every cluster has. */
+const builtinNamespaces = new Set(['kube-system', 'default']);
+/** Where the substrate's claim lives. */
+const claimPath = '/api/v1/namespaces/kube-system/configmaps/better-compute-substrate';
 
 export interface FakeKubeNode {
   name: string;
@@ -63,9 +68,20 @@ export class FakeKubeApi {
     return this.store(server).get(path);
   }
 
-  /** `Kind/name` of every object on a server, in path order. */
+  /**
+   * `Kind/name` of every object on a server, in path order, without the substrate's claim (a ConfigMap in
+   * `kube-system`: see `claim`), so the lists read as what bcd's manifests put there.
+   */
   kinds(server: string): string[] {
-    return [...this.store(server).values()].map((object) => `${object.kind}/${object.metadata.name}`).sort();
+    return [...this.store(server).entries()]
+      .filter(([path]) => path !== claimPath)
+      .map(([, object]) => `${object.kind}/${object.metadata.name}`)
+      .sort();
+  }
+
+  /** The substrate claim on a server (`kube-system/better-compute-substrate`), if any. */
+  claim(server: string): any {
+    return this.store(server).get(claimPath);
   }
 
   /** The Nodes a server lists now (every one, no selector). */
@@ -121,12 +137,24 @@ export class FakeKubeApi {
       const object = store.get(url.pathname);
       return object ? { status: 200, body: structuredClone(object) } : { status: 404, body: { kind: 'Status', reason: 'NotFound' } };
     }
+    if (request.method === 'POST') {
+      // Create: the collection path plus the object's name; a name that is taken is 409 and nothing changes.
+      const object = structuredClone(request.body) as any;
+      const path = `${url.pathname}/${object?.metadata?.name}`;
+      const namespace = /\/namespaces\/([^/]+)\//.exec(path)?.[1];
+      if (namespace && !builtinNamespaces.has(namespace) && !store.has(`/api/v1/namespaces/${namespace}`))
+        return { status: 404, body: { kind: 'Status', reason: 'NotFound', message: `namespaces "${namespace}" not found` } };
+      if (store.has(path))
+        return { status: 409, body: { kind: 'Status', reason: 'AlreadyExists', message: 'already exists' } };
+      store.set(path, object);
+      return { status: 201, body: object };
+    }
     if (request.method === 'PATCH') {
       if (request.contentType !== 'application/apply-patch+yaml')
         return { status: 415, body: { kind: 'Status', message: 'unsupported media type' } };
       const object = structuredClone(request.body) as any;
       const namespace = /\/namespaces\/([^/]+)\//.exec(url.pathname)?.[1];
-      if (namespace && !store.has(`/api/v1/namespaces/${namespace}`))
+      if (namespace && !builtinNamespaces.has(namespace) && !store.has(`/api/v1/namespaces/${namespace}`))
         return { status: 404, body: { kind: 'Status', reason: 'NotFound', message: `namespaces "${namespace}" not found` } };
       const existed = store.has(url.pathname);
       store.set(url.pathname, object);

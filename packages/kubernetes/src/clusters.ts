@@ -573,7 +573,8 @@ export async function updateCluster(
 
 /**
  * `kubernetesClusters.delete`: the cluster and its node pools are marked for deletion and the reconciler deletes
- * the cluster at the provider (its node pools go with it). Idempotent.
+ * the cluster at the provider (its node pools go with it). Idempotent; on a cluster whose delete the provider
+ * refused (`error`, retried with backoff) it tries again at once.
  */
 export async function deleteCluster(
   deps: KubernetesDeps,
@@ -581,7 +582,11 @@ export async function deleteCluster(
   ref: ClusterRef,
 ): Promise<KubernetesClusterView> {
   const row = await requireCluster(tx, ref, { lock: true });
-  if (row.desired_state === 'deleted') return clusterViewOf(tx, row.id);
+  if (row.desired_state === 'deleted') {
+    // A delete the provider refused waits out a backoff: asking again tries now (the row does not change).
+    if (row.state === 'error') await deps.work.enqueue(tx, clustersWork, row.id);
+    return clusterViewOf(tx, row.id);
+  }
   assertNotSubstrate(row, 'delete');
   await markDeleted(tx, row.id);
   await deps.work.enqueue(tx, clustersWork, row.id);

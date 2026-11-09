@@ -67,7 +67,7 @@ import {
   planOnIndex,
   type PlacementObserver,
 } from './placer.js';
-import { planPlacement, type NodePlan } from './pipeline.js';
+import { notLabelPrefix, planPlacement, type NodePlan } from './pipeline.js';
 import { PoolIndex, type PoolIndexCache } from './pool-index.js';
 import {
   isTenantRootPool,
@@ -1164,8 +1164,32 @@ export function requiredCapabilities(request: {
   return Object.keys(labels).length > 0 ? labels : undefined;
 }
 
+/**
+ * The system label of a node that is provider Spot capacity (`bc.dev/capacity=spot`): the provider may take the
+ * machine back at any moment. A fleet pool's substrate writes it on the nodes of its Spot flavors (source `system`;
+ * an operator cannot set or remove a `bc.dev/` label). Only spot reservations are placed on such a node, and
+ * whatever it holds when it is reclaimed ends as `preempted`.
+ */
+export const capacityLabel = 'bc.dev/capacity';
+export const spotCapacity = 'spot';
+
+/**
+ * What a reservation's node must carry, and must not: the bcd capabilities it needs
+ * (`requiredCapabilities`), and, unless it is a spot reservation, no `bc.dev/capacity=spot`: a
+ * reservation that was not sold as interruptible never lands on a machine the provider may reclaim.
+ */
+export function requiredNodeLabels(request: {
+  binding?: string;
+  resources?: Readonly<Record<string, number>>;
+  spot?: boolean;
+}): Record<string, string> | undefined {
+  const labels: Record<string, string> = { ...requiredCapabilities(request) };
+  if (request.spot !== true) labels[capacityLabel] = `${notLabelPrefix}${spotCapacity}`;
+  return Object.keys(labels).length > 0 ? labels : undefined;
+}
+
 function placementRequest(row: ReservationRow, during: TimeRange) {
-  const nodeLabels = requiredCapabilities(row.request);
+  const nodeLabels = requiredNodeLabels(row.request);
   return {
     tenantId: row.tenantId,
     poolId: row.poolId,
@@ -1908,7 +1932,8 @@ export interface NodeReservationsEnded {
  *   `pending` to be placed again, quota kept (`Unschedulable`, reason `NodeRemoved`), as a spot
  *   notice does for one that has not run;
  * - a bound one (`active`) is released, quota refunded, with a `NodeRemoved` condition and
- *   `reservation.released { reason }`: `preempted` for spot, `reason` otherwise.
+ *   `reservation.released { reason }`: `preempted` for a spot reservation and for anything on a provider
+ *   Spot node (`bc.dev/capacity=spot`), `reason` otherwise.
  * The gone node's bookings are released at once (no pod is left there to hold the devices); a
  * released reservation's bookings on other nodes follow `deferRelease` as usual. Bookings a
  * reservation that already ended left on the node are released too. Idempotent: a node with no
@@ -1931,6 +1956,16 @@ export async function endNodeReservations(
   const now = deps.clock.now();
   const message = `node ${nodeId} was removed`;
   const pools = new Set<string>();
+  // A provider Spot node that went was reclaimed: what it held was preempted, whatever the reservation asked for
+  // (a non-spot one can only be there from before the node was known to be Spot).
+  const spotNode =
+    owners.length > 0 &&
+    (
+      await tx.query(
+        `SELECT 1 FROM node_labels WHERE node_id = $1 AND key = $2 AND value = $3 AND source = 'system'`,
+        [nodeId, capacityLabel, spotCapacity],
+      )
+    ).rows.length > 0;
   // Capacity's lock order (quota_usage → pools → nodes → devices) holds across every reservation on the node, in
   // phases: 1. every reservation row, in id order; 2. every quota refund, by tenant, pool and resource; 3. the
   // bookings and node specs; 4. the state moves and their events. Ending them one after the other would take a
@@ -2008,7 +2043,7 @@ export async function endNodeReservations(
     ended.requeued.push(row.id);
   }
   for (const { row } of bound) {
-    const why = row.request.spot === true ? 'preempted' : reason;
+    const why = row.request.spot === true || spotNode ? 'preempted' : reason;
     const conditions = withCondition(
       row.conditions,
       { type: 'NodeRemoved', status: 'true', reason: 'NodeRemoved', message },

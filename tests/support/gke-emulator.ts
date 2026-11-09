@@ -276,6 +276,8 @@ export class GkeEmulator {
     const cluster: Json = {
       ...structuredClone(spec),
       location,
+      // As GKE reports it: the same URL whichever credential reads the cluster.
+      selfLink: `https://container.googleapis.com/v1/projects/p/locations/${key.replace('/', '/clusters/')}`,
       status: 'PROVISIONING',
       currentMasterVersion: version,
       currentNodeVersion: version,

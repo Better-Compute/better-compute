@@ -246,6 +246,8 @@ describe('doks clusters', () => {
       location: 'nyc3',
       version: '1.34.1-do.0',
       nodeVersion: '1.34.1-do.0',
+      // The provider-global id an adoption is claimed by.
+      globalId: `do:kubernetes:${first.id}`,
     });
     // Ready and as wanted: nothing more is sent.
     const before = mutations(s).length;

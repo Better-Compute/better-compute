@@ -3085,10 +3085,15 @@ type OsSection struct {
 	Kvm    bool          `protobuf:"varint,5,opt,name=kvm,proto3" json:"kvm,omitempty"`
 	Iommu  bool          `protobuf:"varint,6,opt,name=iommu,proto3" json:"iommu,omitempty"`
 	// Sorted, e.g. "containerd", "docker", "libvirt".
-	Runtimes      []string `protobuf:"bytes,7,rep,name=runtimes,proto3" json:"runtimes,omitempty"`
-	Hostname      string   `protobuf:"bytes,8,opt,name=hostname,proto3" json:"hostname,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Runtimes []string `protobuf:"bytes,7,rep,name=runtimes,proto3" json:"runtimes,omitempty"`
+	Hostname string   `protobuf:"bytes,8,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	// (v1.1) The Kubernetes Node this machine is, when bcd runs on it as a DaemonSet pod: the pod's
+	// spec.nodeName (NODE_NAME). Empty anywhere else. It is the Node's name whatever the kernel
+	// hostname says (some EKS AMIs keep a short hostname while the Node is the instance's DNS name),
+	// so a pool substrate matches the pool node to its Node by it.
+	KubernetesNodeName string `protobuf:"bytes,9,opt,name=kubernetes_node_name,json=kubernetesNodeName,proto3" json:"kubernetes_node_name,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *OsSection) Reset() {
@@ -3173,6 +3178,13 @@ func (x *OsSection) GetRuntimes() []string {
 func (x *OsSection) GetHostname() string {
 	if x != nil {
 		return x.Hostname
+	}
+	return ""
+}
+
+func (x *OsSection) GetKubernetesNodeName() string {
+	if x != nil {
+		return x.KubernetesNodeName
 	}
 	return ""
 }
@@ -3427,7 +3439,7 @@ const file_bettercompute_agent_v1_inventory_proto_rawDesc = "" +
 	"\x06vendor\x18\x03 \x01(\tR\x06vendor\x12)\n" +
 	"\x10firmware_version\x18\x04 \x01(\tR\x0ffirmwareVersion\x12\x18\n" +
 	"\aredfish\x18\x05 \x01(\bR\aredfish\x12\x12\n" +
-	"\x04ipmi\x18\x06 \x01(\bR\x04ipmi\"\x81\x02\n" +
+	"\x04ipmi\x18\x06 \x01(\bR\x04ipmi\"\xb3\x02\n" +
 	"\tOsSection\x12\x16\n" +
 	"\x06distro\x18\x01 \x01(\tR\x06distro\x12%\n" +
 	"\x0edistro_version\x18\x02 \x01(\tR\rdistroVersion\x12\x16\n" +
@@ -3436,7 +3448,8 @@ const file_bettercompute_agent_v1_inventory_proto_rawDesc = "" +
 	"\x03kvm\x18\x05 \x01(\bR\x03kvm\x12\x14\n" +
 	"\x05iommu\x18\x06 \x01(\bR\x05iommu\x12\x1a\n" +
 	"\bruntimes\x18\a \x03(\tR\bruntimes\x12\x1a\n" +
-	"\bhostname\x18\b \x01(\tR\bhostname*\x95\x01\n" +
+	"\bhostname\x18\b \x01(\tR\bhostname\x120\n" +
+	"\x14kubernetes_node_name\x18\t \x01(\tR\x12kubernetesNodeName*\x95\x01\n" +
 	"\x10CachedImageState\x12\"\n" +
 	"\x1eCACHED_IMAGE_STATE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18CACHED_IMAGE_STATE_READY\x10\x01\x12\x1e\n" +

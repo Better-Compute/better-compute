@@ -146,6 +146,8 @@ function outputsOf(cluster: GkeCluster, location: string): Record<string, string
     location: cluster.location ?? location,
     ...(cluster.currentMasterVersion ? { version: cluster.currentMasterVersion } : {}),
     ...(cluster.currentNodeVersion ? { nodeVersion: cluster.currentNodeVersion } : {}),
+    // The provider-global id: one cluster reached through two accounts of a project is one cluster.
+    ...(typeof cluster.selfLink === 'string' && cluster.selfLink.length > 0 ? { globalId: cluster.selfLink } : {}),
   };
 }
 

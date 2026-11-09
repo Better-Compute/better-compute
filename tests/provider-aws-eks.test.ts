@@ -206,6 +206,8 @@ describe('eks clusters', () => {
         nodeVersion: '1.33',
         platformVersion: 'eks.1',
         arn: cluster.arn,
+        // The provider-global id an adoption is claimed by.
+        globalId: cluster.arn,
       },
     });
     // As wanted: nothing more is started.

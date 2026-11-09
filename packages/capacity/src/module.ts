@@ -86,7 +86,7 @@ import {
   readReservation,
   reconcileReservation,
   releaseReservation,
-  requiredCapabilities,
+  requiredNodeLabels,
   renewReservation,
   reservationView,
   reservationWork,
@@ -1473,9 +1473,10 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
           input.binding === 'node'
             ? undefined
             : hostResources(input.resources, await perGpuShare(tx, pool, gpuEquivalent(input.devices, pool)));
-        const nodeLabels = requiredCapabilities({
+        const nodeLabels = requiredNodeLabels({
           ...(input.binding !== undefined ? { binding: input.binding } : {}),
           ...(resources ? { resources } : {}),
+          ...(input.spot === true ? { spot: true } : {}),
         });
         const request = {
           tenantId: input.tenantId,

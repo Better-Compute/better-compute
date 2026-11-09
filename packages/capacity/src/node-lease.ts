@@ -11,7 +11,7 @@ import {
 } from '@better-compute/core';
 import { dedicatedTaint, dedicatedTaintPrefix } from './eligibility.js';
 import { chooseGang, planGangs } from './gang.js';
-import type { NodePlan } from './pipeline.js';
+import { missingNodeLabel, type NodePlan } from './pipeline.js';
 import { applyRollupDelta, rollupResource } from './rollup.js';
 import { matchesSelector } from './selector.js';
 import { lockPool, readDevices, readNodeLabels, type PoolRow } from './store.js';
@@ -65,6 +65,8 @@ function fits(
   devices: readonly Device[],
   labels: Record<string, string>,
 ) {
+  // What the request asks of the node itself (a lease is never spot: no provider Spot node).
+  if (missingNodeLabel(request.nodeLabels, labels) !== undefined) return false;
   const taken = new Set<string>();
   for (const want of request.devices) {
     const candidates = devices.filter(

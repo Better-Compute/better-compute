@@ -90,14 +90,16 @@ async function candidates(
          SELECT 1 FROM node_resources nr
           WHERE nr.node_id = n.id AND nr.resource = s.key
             AND nr.allocated + s.value::numeric <= floor(nr.allocatable * nr.ratio)))`;
-  // Every requested node label, with exactly that value (only when the request names some).
+  // Every requested node label, with exactly that value, and none of the forbidden ones (`!value`:
+  // `missingNodeLabel`'s SQL twin); only when the request names some.
   const labels = Object.keys(request.nodeLabels ?? {}).length > 0;
+  const carried = (value: string) => `EXISTS (
+         SELECT 1 FROM node_labels nl WHERE nl.node_id = n.id AND nl.key = l.key AND ${value}
+                                        AND (NOT starts_with(nl.key, 'bc.dev/') OR nl.source = 'system'))`;
   const labelsOk = `NOT EXISTS (
       SELECT 1 FROM jsonb_each_text($5::jsonb) l
-       WHERE NOT EXISTS (
-         SELECT 1 FROM node_labels nl WHERE nl.node_id = n.id AND nl.key = l.key
-                                        AND (l.value = '*' OR nl.value = l.value)
-                                        AND (NOT starts_with(nl.key, 'bc.dev/') OR nl.source = 'system')))`;
+       WHERE CASE WHEN starts_with(l.value, '!') THEN ${carried('nl.value = substr(l.value, 2)')}
+                  ELSE NOT ${carried("(l.value = '*' OR nl.value = l.value)")} END)`;
   // Three single-table-driven statements rather than one: their plans stay sane without statistics.
   const nodes = await tx.query<{ node_id: string }>(
     `SELECT n.id AS node_id FROM nodes n JOIN pools p ON p.id = n.pool_id

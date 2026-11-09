@@ -57,6 +57,7 @@ import { clustersWork, type KubernetesDeps } from './store.js';
 import { substratePolicyValidator } from './substrate-policy.js';
 import {
   getSubstrate,
+  substrateJoinStallSeconds,
   substratesReconciler,
   substratesWork,
   type SubstrateDeps,
@@ -426,6 +427,24 @@ export function kubernetes(
           message: `${count} pool substrate(s) are in error: ${shown.join(', ')}${failing.length > shown.length ? ', …' : ''}`,
           fix: 'Read the substrate message (kubernetes.substrate.error events); fix policy.substrate, the provider account or the cluster, or archive the pool',
           count: Math.min(failing.length, 100),
+        });
+      }
+      // Substrates whose Nodes are listed but whose bcd never joins (the message on each says what to check).
+      const { rows: waiting } = await context.sql.query<{ pool_id: string }>(
+        `SELECT pool_id FROM kubernetes_pool_substrates
+          WHERE state IN ('ready', 'updating', 'error') AND desired_state = 'present'
+            AND join_wait_since <= compute_now() - make_interval(secs => $1)
+          ORDER BY pool_id LIMIT 101`,
+        [substrateJoinStallSeconds],
+      );
+      if (waiting.length > 0) {
+        const shown = waiting.slice(0, 5).map((row) => row.pool_id);
+        findings.push({
+          check: 'kubernetes.substrate-nodes-not-joining',
+          severity: 'warning',
+          message: `${waiting.length > 100 ? '100+' : waiting.length} pool substrate(s) list Nodes whose bcd has not joined for ${substrateJoinStallSeconds / 60} minutes: ${shown.join(', ')}${waiting.length > shown.length ? ', …' : ''}`,
+          fix: "Look at the pods of bcd's DaemonSet on the cluster (image pull, the gateway URL and pins the substrate agent was given, the GPU runtime class); kubernetesSubstrates.get says how many Nodes wait and since when",
+          count: Math.min(waiting.length, 100),
         });
       }
       // Torn-down substrates whose adopted cluster keeps the substrate's credential identity (the provider cannot

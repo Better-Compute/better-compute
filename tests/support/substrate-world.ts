@@ -20,6 +20,11 @@ export interface SubstrateWorld extends KubernetesWorld {
   kube: FakeKubeApi;
   /** Extra Nodes per API server origin (an adopted cluster's own nodes). */
   extraNodes: Map<string, FakeKubeNode[]>;
+  /**
+   * Node names the cluster no longer lists although their node pool still counts them: a Spot reclaim, a repair, a
+   * Node deleted by hand (the provider has not replaced it yet).
+   */
+  reclaimed: Set<string>;
   /** A metal-host pool on the world's site with `policy.substrate` (account defaults to the world's). */
   createPool(substrate: Record<string, unknown>, key?: string, policy?: Record<string, unknown>): Promise<any>;
   /** Runs the substrate reconciler `rounds` times, then the cluster reconciler, alternating. */
@@ -49,6 +54,7 @@ export async function substrateWorld(
   options: Omit<KubernetesOptions, 'providers'> & { withoutAgent?: boolean } = {},
 ): Promise<SubstrateWorld> {
   const extraNodes = new Map<string, FakeKubeNode[]>();
+  const reclaimed = new Set<string>();
   let cloudRef: KubernetesWorld['cloud'] | undefined;
   const kube = new FakeKubeApi({
     nodes(server) {
@@ -62,7 +68,7 @@ export async function substrateWorld(
             nodes.push({ name: `${cluster.spec.name}-${name}-${i}`, labels: { ...(pool.spec.labels ?? {}) } });
         }
       }
-      return nodes;
+      return nodes.filter((node) => !reclaimed.has(node.name));
     },
     accepts: (token) => cloudRef?.tokens.includes(token) ?? false,
   });
@@ -87,6 +93,7 @@ export async function substrateWorld(
   return Object.assign(world, {
     kube,
     extraNodes,
+    reclaimed,
     async createPool(spec: Record<string, unknown>, key = `substrate-${++keys}`, policy: Record<string, unknown> = {}) {
       return world.api.pools.create(world.root, {
         tenantId: world.rootTenant,

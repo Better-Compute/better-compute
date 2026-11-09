@@ -154,6 +154,8 @@ describe('gke clusters', () => {
         location: 'us-central1',
         version: '1.33.5-gke.1000',
         nodeVersion: '1.33.5-gke.1000',
+        // The selfLink: the provider-global id an adoption is claimed by.
+        globalId: 'https://container.googleapis.com/v1/projects/p/locations/us-central1/clusters/bc-k-one',
       },
     });
     // Again: nothing more is created or updated.

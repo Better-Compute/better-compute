@@ -175,18 +175,34 @@ identity: a plan that changes them is blocked, so create a new pool instead. Siz
    whose bcd is not connected. bcd's join container reads it, and each node joins the pool. Once every Node has
    joined, the token is revoked and the Secret deleted.
 4. **Book.** Reservations with `binding: 'kubernetes'` book the nodes' GPUs. bcd's device plugin advertises only the
-   devices a reservation holds.
+   devices a reservation holds. The nodes of a Spot flavor carry the system label `bc.dev/capacity=spot` once they
+   are matched to their Node: only reservations made with `spot: true` are placed on them, so nothing sold as
+   uninterruptible sits on a machine the provider may reclaim.
 5. **Scale.** Change a flavor's `nodes` in the document and apply. The provider removes Nodes. Each pool node is
-   matched to its Kubernetes Node by the Node name bcd reports. When a matched node is disconnected and its Node is
-   gone, its reservations end: bound ones are released with their quota refunded once, and Spot ones end as
-   `preempted`. Then the node is retired.
-6. **Teardown.** Remove the pool from the document and apply with `prune`, or archive the pool. The token is revoked
+   matched to its Kubernetes Node by the Node name bcd reports: the pod's `spec.nodeName`, in its inventory's `os`
+   section (`kubernetesNodeName`), or the hostname from a bcd that does not report one yet. When a matched node is disconnected and its Node is
+   gone, its reservations end: bound ones are released with their quota refunded once, and spot reservations and
+   anything on a Spot node end as `preempted`. Then the node is retired.
+6. **Teardown.** Remove the pool from the document and apply with `prune`, or archive the pool. Taking only
+   `policy.substrate` out of a pool that stays tears the substrate down the same way, and also needs `prune`: a
+   plain apply keeps the substrate. The token is revoked
    and the nodes are cordoned. The substrate waits for their bookings to end; nothing is force-released. Then it
    removes bcd from the cluster (only objects carrying its label), deletes a created cluster and its node pools, and
    retires the nodes. Nothing is left at the provider or in compute.
 
 Read the state with `kubernetesSubstrates.get({ tenantId, poolId })`: mode, cluster, state and message, Nodes listed
 and joined, and a drain's upgrade. It never returns a token or a credential.
+
+A substrate is `ready` once bcd is applied, whether or not its Nodes have joined yet. `waitingToJoin` says how many
+listed Nodes have no joined bcd and since when none has joined. If that lasts 15 minutes, the message says so and
+names bcd's DaemonSet: look at its pods (the image pull, the gateway URL and pins given to the substrate agent, the
+GPU runtime class). `doctor` reports the same as `kubernetes.substrate-nodes-not-joining`.
+
+An `error` does not stop the nodes that already joined from being looked after. When the provider refuses one
+flavor's node pool (quota, a stockout), or a change to the document cannot be made in place, the substrate stays in
+`error` with the reason as its message, and each run still lists the Nodes, retires the ones that are gone, keeps a
+join token for new Nodes and re-applies bcd. It only stops at a cluster whose control plane never answered or is
+being deleted.
 
 ## Adopt a cluster you already run
 
@@ -203,9 +219,23 @@ privileged DaemonSet or a cluster-admin identity behind unannounced. For the sam
 refuses an adopted cluster (`INVALID_STATE`): a kubeconfig's service account and binding would outlive the substrate
 on a cluster better-compute no longer manages. Reach your own cluster with the provider's credentials.
 
-One cluster backs one pool, checked per provider account. Adopt a cluster through one account only: two accounts
-that reach the same cluster could each adopt it, and both substrates would use the same `bc-substrate` identity, so
-one pool's teardown revokes it under the other until that substrate mints it again on its next run.
+One cluster backs one pool, whichever account or deployment reaches it. Three checks hold that:
+
+- A second pool that names the same account and cluster id is refused when its substrate is recorded.
+- Before any node pool is made, the cluster's provider-global id (the GKE selfLink, the EKS ARN, the DOKS UUID) is
+  recorded as what the pool claims. A second pool that reaches the same cluster through another provider account is
+  refused there: its cluster goes to `error`, and nothing is created in the cluster.
+- The substrate then claims the cluster itself with a ConfigMap, `kube-system/better-compute-substrate`, labelled
+  with the pool id. It is created, never applied over an existing one, so another better-compute deployment that
+  adopts the same cluster is refused before it adds node pools or applies bcd. Teardown deletes the claim, and a
+  substrate that never held it removes nothing and does not revoke the `bc-substrate` identity.
+
+If the provider refuses to delete a created cluster (it is in use, the account lost a permission), the cluster and
+its substrate go to `error` with the provider's message and the delete is retried with a growing wait: 5 minutes,
+then 10, 20, 40 and so on, at most every 6 hours. Fix the cause and the next retry finishes the teardown.
+
+To move a cluster to another pool, archive the first pool and wait for its substrate to be `deleted`. Delete the
+ConfigMap by hand only for a cluster whose deployment is gone for good.
 
 | Provider | Adopt id                    | What the cluster needs                                                                                                                                  |
 | -------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -230,6 +260,10 @@ To get the same node count everywhere, pin each flavor to one zone on GKE and EK
 its account's zone count in mind.
 
 ## Check your own provider
+
+A driver should report the cluster's provider-global id as `outputs.globalId` in the state `ensureCluster` and
+`getCluster` return: the same string whichever account reads the cluster. Without it, adoption is only checked per
+provider account and by the in-cluster claim.
 
 `@better-compute/testing` exports `kubernetesProviderConformanceCases()`: what the clusters and substrate reconcilers
 need of any `ProviderImpl.kubernetes`, as cases shaped like vps' `providerConformanceCases()`. GKE, EKS and DOKS pass

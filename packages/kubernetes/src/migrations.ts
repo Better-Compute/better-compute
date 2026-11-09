@@ -246,9 +246,82 @@ CREATE INDEX kubernetes_substrate_nodes_owned ON kubernetes_substrate_nodes (poo
 `,
 };
 
+/**
+ * One live row per provider cluster, whatever account reaches it. Adoption used to be checked per provider account
+ * with a plain SELECT: two accounts on one project (or two pools racing) could both adopt a cluster, churn each
+ * other's node pools and revoke the shared `bc-substrate` identity under each other.
+ *
+ * - `kubernetes_clusters.claim_key`: what the row claims. An adopted row is inserted with
+ *   `account:<provider account id>/<adopted id>`; once the provider was read, the cluster's provider-global id
+ *   replaces it (`ProviderResourceState.outputs.globalId`: the GKE selfLink, the EKS ARN, `do:kubernetes:<uuid>`),
+ *   before any node pool is made. A created cluster records its global id too, so it cannot be adopted through
+ *   another account. The unique index refuses the second claimant: at insert (the substrate reports why) or when the
+ *   global id is written (the cluster goes to `error` and no node pool is ensured).
+ * - `kubernetes_clusters.claimed_at`: when the substrate first held the in-cluster claim (the ConfigMap
+ *   `kube-system/better-compute-substrate`, which also stops another deployment). A newly adopted cluster gets no
+ *   node pool before it.
+ *
+ * Rows adopted before this migration keep working: the oldest of each (account, adopted id) holds the claim; a later
+ * duplicate (only a race could have made one) holds none and is refused when it next reads the provider.
+ */
+export const kubernetesClusterClaimsMigration: Migration = {
+  name: 'kubernetes/0005_cluster_claims',
+  sql: `
+ALTER TABLE kubernetes_clusters ADD COLUMN claim_key text;
+ALTER TABLE kubernetes_clusters ADD COLUMN claimed_at timestamptz;
+UPDATE kubernetes_clusters c
+   SET claim_key = 'account:' || c.provider_account_id || '/' || c.provider_id
+ WHERE c.adopted AND c.state <> 'deleted' AND c.provider_id IS NOT NULL
+   AND NOT EXISTS (
+     SELECT 1 FROM kubernetes_clusters o
+      WHERE o.adopted AND o.state <> 'deleted' AND o.id <> c.id
+        AND o.provider_account_id = c.provider_account_id AND o.provider_id = c.provider_id
+        AND (o.created_at, o.id) < (c.created_at, c.id));
+-- One live claimant per cluster (adopted rows always claim; created ones once the provider named them).
+CREATE UNIQUE INDEX kubernetes_clusters_claim ON kubernetes_clusters (claim_key)
+  WHERE claim_key IS NOT NULL AND state <> 'deleted';
+`,
+};
+
+/**
+ * A delete the provider refuses for good is retried with exponential backoff, not every 30 s forever.
+ *
+ * - `kubernetes_clusters.updated_at`: when the cluster's state or message last changed (so: since when it has been
+ *   in its current error). `retried_at`: when a delete that stayed in the same error was last tried.
+ * - `kubernetes_pool_substrates.retried_at`: the same for a substrate whose teardown waits on such a cluster (its
+ *   `updated_at` already is when its state or message last changed).
+ *
+ * A row in `error` with `desired_state = 'deleted'` leaves the 30 s sweeps; the refreshes queue it when
+ * `deleteRetryDue` says so: after the refresh interval, then each time after as long again as it has been in error
+ * (5, 10, 20, 40 minutes, ...), at most every 6 hours. Asking for the delete again tries at once.
+ */
+export const kubernetesDeleteBackoffMigration: Migration = {
+  name: 'kubernetes/0006_delete_backoff',
+  sql: `
+ALTER TABLE kubernetes_clusters ADD COLUMN updated_at timestamptz NOT NULL DEFAULT compute_now();
+ALTER TABLE kubernetes_clusters ADD COLUMN retried_at timestamptz;
+ALTER TABLE kubernetes_pool_substrates ADD COLUMN retried_at timestamptz;
+`,
+};
+
+/**
+ * Nodes that never join. `kubernetes_pool_substrates.join_wait_since`: since when the substrate has listed Nodes
+ * without a joined bcd and none has joined (NULL when every listed Node joined; it starts over when one joins or
+ * more Nodes appear). After `substrateJoinStallSeconds` the substrate says so in its message.
+ */
+export const kubernetesSubstrateJoinWaitMigration: Migration = {
+  name: 'kubernetes/0007_substrate_join_wait',
+  sql: `
+ALTER TABLE kubernetes_pool_substrates ADD COLUMN join_wait_since timestamptz;
+`,
+};
+
 export const kubernetesMigrations: readonly Migration[] = Object.freeze([
   kubernetesClustersMigration,
   kubernetesSubstratesMigration,
   kubernetesSubstrateNodesMigration,
   kubernetesSubstrateOwnershipMigration,
+  kubernetesClusterClaimsMigration,
+  kubernetesDeleteBackoffMigration,
+  kubernetesSubstrateJoinWaitMigration,
 ]);

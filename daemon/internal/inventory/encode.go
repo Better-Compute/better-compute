@@ -367,4 +367,5 @@ func (m *OsSection) encode(w *protoWriter) {
 	w.boolean(6, m.Iommu)
 	w.strs(7, m.Runtimes)
 	w.str(8, m.Hostname)
+	w.str(9, m.KubernetesNodeName)
 }

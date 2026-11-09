@@ -18,7 +18,7 @@ import {
 export interface KubeApiRequest {
   /** `https://<endpoint>/<path>[?query]`. */
   url: string;
-  method: 'GET' | 'PATCH' | 'DELETE';
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   /** The body's media type (`application/apply-patch+yaml` for server-side apply). */
   contentType?: string;
   /** JSON-encoded when present. */
@@ -77,6 +77,11 @@ export interface KubernetesApiClient {
   get(object: KubernetesObjectRef): Promise<KubernetesObjectMeta | undefined>;
   /** Server-side apply: creates the object or takes ownership of the fields it names. */
   apply(object: KubernetesObject): Promise<void>;
+  /**
+   * Creates the object only when none of that name exists (POST): false when one does (409), which is never
+   * changed. What a claim needs: of two creators exactly one is answered true.
+   */
+  create(object: KubernetesObject): Promise<boolean>;
   /** Deletes the object; one that does not exist is already gone. */
   remove(object: KubernetesObjectRef): Promise<void>;
   /** The cluster's Nodes, optionally those matching a label selector (`key=value[,…]`). */
@@ -357,6 +362,22 @@ export function kubernetesApiClient(
         body: object,
       });
       if (response.status !== 200 && response.status !== 201) throw failure(what, response, secrets);
+    },
+    async create(object) {
+      const path = kubernetesObjectPath(object);
+      const what = `Creating ${describe(object)}`;
+      const secrets = secretValues(object);
+      const query = new URLSearchParams({ fieldManager });
+      const response = await send(what, secrets, {
+        // The collection the object lives in: its own path without the name.
+        url: `${origin}${path.slice(0, path.lastIndexOf('/'))}?${query}`,
+        method: 'POST',
+        contentType: 'application/json',
+        body: object,
+      });
+      if (response.status === 409) return false;
+      if (response.status !== 200 && response.status !== 201) throw failure(what, response, secrets);
+      return true;
     },
     async remove(object) {
       const path = kubernetesObjectPath(object);

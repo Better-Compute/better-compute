@@ -889,6 +889,78 @@ describe('the reservation lifecycle', () => {
     expect(rows.map((row) => row.end_ms)).toEqual([T0 + 15 * 60_000, T0 + 15 * 60_000]);
   });
 
+  it('keeps a non-spot reservation off a provider Spot node, and ends what a reclaimed one held as preempted', async () => {
+    // The system marks na as provider Spot capacity (a fleet pool's Spot flavor); an operator's label of that name
+    // on nb does not count.
+    const spotNode = 'node_01jz00000000000000000000na';
+    const other = 'node_01jz00000000000000000000nb';
+    await db.query(
+      `INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, 'bc.dev/capacity', 'spot', 'system'),
+                                                                  ($2, 'bc.dev/capacity', 'spot', 'operator')`,
+      [spotNode, other],
+    );
+    const nodeOf = async (id: string) =>
+      (
+        await db.query<{ node_id: string }>(
+          `SELECT node_id FROM allocations WHERE owner_id = $1 AND released_at IS NULL`,
+          [id],
+        )
+      ).rows.map((row) => row.node_id);
+    // On-demand reservations fill the on-demand node and then wait: the Spot node's free GPUs are not theirs.
+    const first = (await call('reservations', 'create', create({ idempotencyKey: 'od-1' }))) as Rsv;
+    const second = (await call('reservations', 'create', create({ idempotencyKey: 'od-2' }))) as Rsv;
+    const third = (await call('reservations', 'create', create({ idempotencyKey: 'od-3' }))) as Rsv;
+    expect(await nodeOf(first.id)).toEqual([other]);
+    expect(await nodeOf(second.id)).toEqual([other]);
+    expect(third.state).toBe('pending');
+    expect(await nodeOf(third.id)).toEqual([]);
+    // A preview says the same; a spot one fits.
+    expect(
+      await call('capacity', 'preview', create({ idempotencyKey: 'preview-1' })),
+    ).toMatchObject({ fits: false });
+    expect(
+      await call('capacity', 'preview', create({ idempotencyKey: 'preview-2', spot: true })),
+    ).toMatchObject({ fits: true });
+    await call('reservations', 'cancel', { tenantId: 'acme', reservationId: third.id });
+    // A spot reservation takes the Spot node.
+    const spot = (await call('reservations', 'create', create({ idempotencyKey: 'spot-1', spot: true }))) as Rsv;
+    expect(await nodeOf(spot.id)).toEqual([spotNode]);
+    await reconcile(spot.id);
+    const { rows } = await db.query<{ id: string }>(`SELECT id FROM allocations WHERE owner_id = $1`, [spot.id]);
+    await db.transaction((tx) => markAllocationBound(tx, moduleContext(db).work, rows[0]!.id, { cdiDevices: ['a'] }));
+    await reconcile(spot.id); // → active
+    // An on-demand reservation that reached the Spot node before it was known to be one (it joined a moment ago).
+    await db.query(`DELETE FROM node_labels WHERE node_id = $1`, [spotNode]);
+    await call('reservations', 'release', { tenantId: 'acme', reservationId: second.id });
+    await db.query(`UPDATE nodes SET cordoned = true WHERE id = $1`, [other]);
+    const early = (await call('reservations', 'create', create({ idempotencyKey: 'od-early' }))) as Rsv;
+    expect(await nodeOf(early.id)).toEqual([spotNode]);
+    await reconcile(early.id);
+    const { rows: earlyRows } = await db.query<{ id: string }>(`SELECT id FROM allocations WHERE owner_id = $1`, [early.id]);
+    await db.transaction((tx) => markAllocationBound(tx, moduleContext(db).work, earlyRows[0]!.id, { cdiDevices: ['b'] }));
+    await reconcile(early.id); // → active
+    await db.query(
+      `INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, 'bc.dev/capacity', 'spot', 'system')`,
+      [spotNode],
+    );
+    const used = (await readQuotas(db, 'acme', poolId))[0]!.used;
+    recorded.events = [];
+
+    // The provider reclaims the node: both end as preempted (the node was Spot), each refunded once.
+    await db.query(`UPDATE nodes SET connectivity = 'unreachable' WHERE id = $1`, [spotNode]);
+    const ended = await db.transaction((tx) => endNodeReservations(moduleContext(db), tx, spotNode, 'node-removed'));
+    expect(ended.released.sort()).toEqual([spot.id, early.id].sort());
+    expect(
+      recorded.events.filter((event) => event.type === 'reservation.released').map((event) => (event.data as any).reason),
+    ).toEqual(['preempted', 'preempted']);
+    expect((await readQuotas(db, 'acme', poolId))[0]!.used).toBe(used - 4);
+    expect(await db.transaction((tx) => endNodeReservations(moduleContext(db), tx, spotNode))).toEqual({
+      requeued: [],
+      released: [],
+    });
+    expect((await readQuotas(db, 'acme', poolId))[0]!.used).toBe(used - 4);
+  });
+
   it('ends what a removed node held: bound ones released once, unbound ones re-placed (endNodeReservations)', async () => {
     const bound = (await call('reservations', 'create', create())) as Rsv;
     await reconcile(bound.id); // → binding

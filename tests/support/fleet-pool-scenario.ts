@@ -20,7 +20,9 @@ import { substrateBcd } from './substrate-world.js';
 // accelerator). fleet.apply creates the pool; its substrate creates the cluster and the GPU node pool at the provider
 // (the real driver over its emulator), applies bcd's DaemonSet through the cluster API with a credential the driver
 // minted; a simulated kubelet per selected Node runs bcd's join container (a FakeDaemon joining through the real
-// gateway with the hosted token from the Secret); compute books the nodes' GPUs; a scale-down in the document removes
+// gateway with the hosted token from the Secret); compute books the nodes' GPUs (the Spot flavor's only for spot
+// reservations); the provider reclaims a Spot Node (the spot reservation on it ends as preempted, refunded once, its
+// pool node is retired and the replacement Node joins with a new token); a scale-down in the document removes
 // a Node and retires its pool node (its booking released once); pruning the pool from the document tears it all down,
 // leaving no cluster, node pool, booking, token or bcd object. Adopting a cluster instead leaves the cluster, its own
 // node pool and nothing of ours.
@@ -126,8 +128,15 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
     );
     return rows[0]!;
   };
-  /** Wakes the substrate and its cluster now (their sweeps run every 30 s of wall time). */
+  /**
+   * Wakes the substrate and its cluster now (their sweeps run every 30 s of wall time), at most every 250 ms per
+   * pool: the waits below poll every 50 ms, and a run of each reconciler per poll spends a driver's own request
+   * budget within seconds (DigitalOcean's allows 75 polls a minute; past it every call waits out the minute).
+   */
+  const kicked = new Map<string, number>();
   const kick = async (poolId: string) => {
+    if (Date.now() - (kicked.get(poolId) ?? 0) < 250) return;
+    kicked.set(poolId, Date.now());
     const row = await substrate(poolId);
     await dev.compute.context.sql.transaction(async (tx: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
       await dev.compute.context.work.enqueue(tx, 'kubernetes.substrates', poolId);
@@ -165,13 +174,14 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
     pending.forEach((node, index) => kubelets.set(node.name, ids[index]!));
     return ids;
   };
-  const book = async (poolId: string, key: string) => {
+  const book = async (poolId: string, key: string, spot = false) => {
     const reservation = await api.reservations.create(dev.root, {
       tenantId: dev.rootTenantId,
       poolId,
       devices: [{ class: 'gpu', count: 8 }],
       duration: 3_600_000,
       binding: 'kubernetes',
+      ...(spot ? { spot: true } : {}),
       idempotencyKey: key,
     });
     return until(`reservation ${key} to bind`, async () => {
@@ -221,6 +231,7 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
     let server: string;
     let providerId: string;
     const reservations: string[] = [];
+    const spotReservations: string[] = [];
     // A flavor's `nodes` are per zone of its node pool (the ProviderKubernetes contract): `zones` Nodes per node.
     const z = profile.zones;
     // Two on-demand nodes and one Spot node (per zone).
@@ -292,17 +303,151 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
     }, 90_000);
 
     it("books every node's GPUs for kubernetes-bound reservations, through bcd's device plugin", async () => {
-      // One 8-GPU booking per node: every node's GPUs are booked.
-      for (let i = 0; i < 3 * z; i++) reservations.push((await book(poolId, `${profile.label}-booking-${i}`)).id);
+      // The Spot flavor's nodes are Spot to capacity: the system label, on exactly them.
+      const spotNames = kube
+        .nodeList(server)
+        .filter((node) => node.labels[substrateCapacityLabel] === 'spot')
+        .map((node) => node.name);
+      const spotIds = spotNames.map((name) => kubelets.get(name)!);
+      const { rows: marked } = await dev.database.query<{ node_id: string }>(
+        `SELECT node_id FROM node_labels WHERE key = 'bc.dev/capacity' AND value = 'spot' AND source = 'system'
+            AND node_id = ANY($1)`,
+        [[...kubelets.values()]],
+      );
+      expect(marked.map((row) => row.node_id).sort()).toEqual([...spotIds].sort());
+      // One 8-GPU booking per on-demand node: none of them lands on a Spot node, and one more finds no room
+      // although the Spot nodes are free.
+      for (let i = 0; i < 2 * z; i++) reservations.push((await book(poolId, `${profile.label}-booking-${i}`)).id);
+      const onDemand = await liveAllocations(poolId);
+      expect(onDemand).toHaveLength(2 * z);
+      expect(onDemand.filter((allocation) => spotIds.includes(allocation.node_id))).toEqual([]);
+      const refused = await api.reservations.create(dev.root, {
+        tenantId: dev.rootTenantId,
+        poolId,
+        devices: [{ class: 'gpu', count: 8 }],
+        duration: 3_600_000,
+        binding: 'kubernetes',
+        idempotencyKey: `${profile.label}-booking-no-room`,
+      });
+      expect(refused.state).toBe('pending');
+      await api.reservations.cancel(dev.root, { tenantId: dev.rootTenantId, reservationId: refused.id });
+      // Spot reservations take the Spot nodes: every node's GPUs are booked.
+      for (let i = 0; i < z; i++) {
+        const booked = await book(poolId, `${profile.label}-spot-booking-${i}`, true);
+        reservations.push(booked.id);
+        spotReservations.push(booked.id);
+      }
       const live = await liveAllocations(poolId);
       expect(live).toHaveLength(3 * z);
       expect(new Set(live.map((allocation) => allocation.node_id))).toEqual(new Set(kubelets.values()));
+      expect(
+        live.filter((allocation) => spotIds.includes(allocation.node_id)).map((allocation) => allocation.owner_id).sort(),
+      ).toEqual([...spotReservations].sort());
       for (const allocation of live) {
         const spec = JSON.parse(dev.daemons.get(allocation.node_id)!.files.get(cdiSpecPath(allocation.id))!);
         expect(spec.annotations['bcd.dev/binding']).toBe('kubernetes');
         expect(spec.devices).toHaveLength(8);
       }
     }, 60_000);
+
+    it('a Spot reclaim preempts the spot reservation (refunded once), retires the node and admits the replacement', async () => {
+      const spotNode = kube.nodeList(server).find((node) => node.labels[substrateCapacityLabel] === 'spot')!;
+      const nodeId = kubelets.get(spotNode.name)!;
+      const held = (await liveAllocations(poolId)).filter((allocation) => allocation.node_id === nodeId);
+      expect(held).toHaveLength(1);
+      const reservationId = held[0]!.owner_id;
+      expect(spotReservations).toContain(reservationId);
+      const gpuQuota = async () =>
+        (
+          await dev.database.query<{ used: string | number }>(
+            `SELECT used FROM quota_usage WHERE tenant_id = $1 AND pool_id = $2 AND resource = 'gpu'`,
+            [dev.rootTenantId, poolId],
+          )
+        ).rows.map((row) => Number(row.used));
+      const usedBefore = await gpuQuota();
+      expect(usedBefore).toEqual([3 * z * 8]);
+      const eventsOf = async (topic: string) =>
+        (
+          await dev.database.query<{ payload: { subject: string; data: Record<string, unknown> } }>(
+            `SELECT payload FROM outbox WHERE topic = $1 ORDER BY seq`,
+            [topic],
+          )
+        ).rows.map((row) => row.payload);
+      const tokensBefore = (await eventsOf('kubernetes.substrate.token-issued')).length;
+
+      // The provider takes the machine: bcd dies with it, then the Node is replaced (the node pool keeps its size).
+      dev.daemons.get(nodeId)!.crash('spot-reclaim');
+      await until('the gateway to notice the machine is gone', async () => {
+        const { rows } = await dev.database.query<{ connectivity: string }>(`SELECT connectivity FROM nodes WHERE id = $1`, [nodeId]);
+        return rows[0]!.connectivity !== 'connected';
+      });
+      profile.reclaim(spotNode.name);
+      kubelets.delete(spotNode.name);
+      const retired = await until('the reclaimed node to be retired', async () => {
+        await kick(poolId);
+        const { rows } = await dev.database.query<{ provision_state: string; no_schedule_reasons: string[] }>(
+          `SELECT provision_state, no_schedule_reasons FROM nodes WHERE id = $1`,
+          [nodeId],
+        );
+        return rows[0]!.provision_state === 'retired' ? rows[0]! : undefined;
+      }, 60_000, () => substrateState(poolId));
+      expect(retired.no_schedule_reasons).toContain('substrate-node-removed');
+      const { rows: certs } = await dev.database.query(
+        `SELECT 1 FROM node_certs WHERE node_id = $1 AND revoked_at IS NULL`,
+        [nodeId],
+      );
+      expect(certs).toEqual([]);
+
+      // The spot reservation ended as preempted, once, and its quota came back once.
+      const ended = await api.reservations.get(dev.root, { tenantId: dev.rootTenantId, reservationId });
+      expect(ended.state).toBe('released');
+      const released = (await eventsOf('reservation.released')).filter((event) => event.subject === `reservation/${reservationId}`);
+      expect(released.map((event) => event.data.reason)).toEqual(['preempted']);
+      expect(await gpuQuota()).toEqual([3 * z * 8 - 8]);
+      expect((await liveAllocations(poolId)).filter((allocation) => allocation.owner_id === reservationId)).toEqual([]);
+      const removed = (await eventsOf('kubernetes.substrate.node-removed')).filter((event) => event.data.nodeId === nodeId);
+      expect(removed.map((event) => event.data)).toEqual([expect.objectContaining({ released: 1, requeued: 0, retired: true })]);
+      // Releasing it again, as a tenant that had not noticed would, refunds nothing more.
+      await api.reservations
+        .release(dev.root, { tenantId: dev.rootTenantId, reservationId })
+        .catch(() => undefined);
+      expect(await gpuQuota()).toEqual([3 * z * 8 - 8]);
+
+      // The replacement Node gets a join token of its own (one use), joins, and is Spot to capacity too.
+      await until('a join token for the replacement Node', async () => {
+        await kick(poolId);
+        const row = await substrate(poolId);
+        return row?.join_token_id !== null && row.token_applied && kube.get(server, '/api/v1/namespaces/bcd-system/secrets/bcd-join-token')
+          ? row
+          : undefined;
+      }, 60_000, () => substrateState(poolId));
+      const issued = (await eventsOf('kubernetes.substrate.token-issued')).slice(tokensBefore);
+      expect(issued.length).toBeGreaterThan(0);
+      expect(issued.at(-1)!.data).toMatchObject({ maxUses: 1 });
+      const [replacement] = await runKubelets(poolId, server);
+      expect(replacement).toBeDefined();
+      expect(replacement).not.toBe(nodeId);
+      await dev.waitFor([replacement!], { timeoutMs: 60_000 });
+      await until('the token to be revoked again', async () => {
+        await kick(poolId);
+        const row = await substrate(poolId);
+        return row?.join_token_id === null && row.nodes_joined === 3 * z && row.nodes_listed === 3 * z ? row : undefined;
+      }, 60_000, () => substrateState(poolId));
+      await until('the replacement to be marked Spot', async () => {
+        await kick(poolId);
+        const { rows } = await dev.database.query(
+          `SELECT 1 FROM node_labels WHERE node_id = $1 AND key = 'bc.dev/capacity' AND value = 'spot' AND source = 'system'`,
+          [replacement],
+        );
+        return rows.length === 1;
+      });
+      // A new spot reservation takes it: every node's GPUs are booked again.
+      const again = await book(poolId, `${profile.label}-spot-booking-after-reclaim`, true);
+      expect((await liveAllocations(poolId)).find((allocation) => allocation.owner_id === again.id)?.node_id).toBe(replacement);
+      reservations.splice(reservations.indexOf(reservationId), 1, again.id);
+      spotReservations.splice(spotReservations.indexOf(reservationId), 1, again.id);
+      expect(await gpuQuota()).toEqual([3 * z * 8]);
+    }, 120_000);
 
     it('a scale-down in the document removes Nodes: their nodes are retired and their bookings released once', async () => {
       await apply([{ ...fleet, nodes: 1 }]);

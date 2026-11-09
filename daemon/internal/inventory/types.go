@@ -451,4 +451,9 @@ type OsSection struct {
 	// Sorted, e.g. "containerd", "docker", "libvirt".
 	Runtimes []string
 	Hostname string
+	// (v1.1) The Kubernetes Node this machine is, when bcd runs on it as a DaemonSet pod: the pod's
+	// spec.nodeName (NODE_NAME). Empty anywhere else. It is the Node's name whatever the kernel
+	// hostname says (some EKS AMIs keep a short hostname while the Node is the instance's DNS name),
+	// so a pool substrate matches the pool node to its Node by it.
+	KubernetesNodeName string
 }
