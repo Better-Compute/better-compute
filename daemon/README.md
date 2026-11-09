@@ -514,6 +514,20 @@ events. It never drops a hold on its own.
   guest's gateway and nameservers, the rebind ref, host-only SSH and placement. When bcd's tap rules
   guard an instance and a running instance's taps are missing, the instance is stopped (fail closed).
 
+**Metadata service** (`internal/imds`, `agent/imds.go`; `[imds] listen`). A request is from the
+running instance whose address the loaded anti-spoofing rules bind to its tap, and a guest decides
+how often it asks, so:
+
+- each instance has its own token buckets: 20 requests a second with a burst of 100, and 2 identity
+  tokens a second with a burst of 10. Past them the answer is `429` with `Retry-After: 1`. The
+  request budget is counted before anything is looked up, the unauthenticated `PUT
+  /latest/api/token` included;
+- the running instances' addresses are read from the runtimes at most every 5 s (an address not
+  yet known is looked for again after 500 ms, so a guest that just started is found);
+- an identity token the control plane cannot be asked for now (no session, 64 requests already
+  waiting, the outbox half full, no answer in 10 s) is `503` with `Retry-After: 1`. Refusals by the
+  control plane stay `403` (`400` for the audience).
+
 **Site boot server** (`agent/bootserver.go`, `agent/discovery.go`, `agent/sanboot.go`). While a site
 agent holds the `site:<id>:boot` lease, it answers PXE only for machines metal prepared
 (`boot.prepareRamdisk`). Their iPXE script boots the site ramdisk with a single-use discovery token
@@ -569,7 +583,9 @@ Xid lines on `/dev/kmsg` become conditions on the matching GPU.
 - The Hello resumes from the last epoch, generation and event sequence, and replays unacked events
   after the Welcome.
 - Heartbeats default to every 10 s and carry free lane credits.
-- A full outbox (4096 frames) drops the session instead of blocking.
+- A full outbox (4096 frames) drops the session instead of blocking. Frames a guest causes (the
+  metadata service's workload-token requests) never do that: they go out only while the outbox is
+  under half full, at most 64 wait for an answer, and past either bound the guest gets a 503.
 - Reconnects use full-jitter backoff up to 60 s. A `Drain` frame sets the delay, and `Revoked`
   stops the agent.
 

@@ -19,6 +19,11 @@ var ErrUnavailable = errors.New("agent: unavailable")
 
 const requestTimeout = 10 * time.Second
 
+// maxPendingWorkloads bounds the workload-token requests waiting for the control plane's answer.
+// Guests cause them (the metadata service): past the bound a request is ErrUnavailable at once
+// instead of one more frame in the host's outbox.
+const maxPendingWorkloads = 64
+
 type pendingSecret struct {
 	req *agentv1.SecretRequest
 	eph *ecdsa.PrivateKey
@@ -74,8 +79,13 @@ func (a *Agent) RequestWorkloadToken(ctx context.Context, instanceID, audience s
 	if a.workloads == nil {
 		a.workloads = map[string]*pendingWorkload{}
 	}
+	if len(a.workloads) >= maxPendingWorkloads {
+		a.mu.Unlock()
+		return "", time.Time{}, ErrUnavailable
+	}
 	a.workloads[req.GetRequestId()] = p
-	sent := a.sendLocked(&agentv1.AgentFrame{Msg: &agentv1.AgentFrame_WorkloadTokenRequest{WorkloadTokenRequest: req}})
+	// Offered, not sent: a guest's request never fills the outbox or drops the host's session.
+	sent := a.offerLocked(&agentv1.AgentFrame{Msg: &agentv1.AgentFrame_WorkloadTokenRequest{WorkloadTokenRequest: req}})
 	a.mu.Unlock()
 	defer func() {
 		a.mu.Lock()

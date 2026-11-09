@@ -175,6 +175,8 @@ type Agent struct {
 	lastFirewall atomic.Pointer[string]
 	// guarded maps the addresses the loaded rules bind to their instance's tap to that instance.
 	guarded map[string]string
+	// imdsAddresses are the running instances' addresses as the runtimes last listed them (imds.go).
+	imdsAddresses addressCache
 	// restores are the snapshot downloads running in the background (restoreFile).
 	restoresMu sync.Mutex
 	restores   map[string]*restoreFetch

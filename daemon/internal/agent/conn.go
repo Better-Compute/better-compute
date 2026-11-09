@@ -487,6 +487,23 @@ func (a *Agent) sendLocked(f *agentv1.AgentFrame) bool {
 	}
 }
 
+// offerLocked is sendLocked for a frame a guest caused (a workload-token request from the metadata
+// service): it goes out only while the outbox is under half full, and a refusal is just false. The
+// session, which is the host's, is never dropped for it, and the frames the host itself must send
+// (heartbeats, results, status) keep their room.
+func (a *Agent) offerLocked(f *agentv1.AgentFrame) bool {
+	s := a.sess
+	if s == nil || !s.welcomed || len(s.out) >= cap(s.out)/2 {
+		return false
+	}
+	select {
+	case s.out <- f:
+		return true
+	default:
+		return false
+	}
+}
+
 // ---- events ------------------------------------------------------------------------------------
 
 // emitEvent journals an event and sends it. A metric is dropped when the journal is full; results
