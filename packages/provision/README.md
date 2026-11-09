@@ -113,12 +113,13 @@ await context.workflows!.start(tx, {
 - **Expansion.** `start` pins the profile version, expands it (`expandProfile`) and persists the workflow with every step. Each `use:` resolves to a registered step or, when the profile says `on:`, to a driver operation `<concern>.<operation>` sent as a `driver.invoke` command. `fallback:` is used when `use:` does not resolve. Acceptance steps follow the main steps, and on-failure and cleanup steps are their own rows. A profile version is immutable once used.
 - **Persistence.** The `provision/0001_workflows` migration creates `profiles`, `workflows` and `workflow_steps`. Partial unique indexes allow one active workflow and one in-flight step per node, so the worker that next owns the node's shard resumes a crashed workflow.
 - **Execution.** The `workflow` reconciler (sharded by node) runs one transition per transaction, with the workflow row locked.
-  - A `control-plane` step runs in the worker between two transactions, with idempotency key `wf:<id>:<stepId>`. A crash re-runs it. It may throw `stepNotReady(ms)` to be run again later.
+  - A `control-plane` step runs in the worker between two transactions, with idempotency key `wf:<id>:<stepId>`. A crash re-runs it. It may throw `stepNotReady(ms)` to be run again later, or `stepWaiting(until)` while it waits for something outside the workflow (an operator's decision): the step's timeout does not run until `until`, and counts in full from when the step goes on.
   - Every other step is exactly one command. Its key is `wf:<id>:<stepId>`, then `#<attempt>` for retries.
   - An `await: 'rejoin'` step completes when the agent is back with a new `boot_id` or role. Its command's own fate is ignored, and only its timeout fails it.
 - **Options.**
-  - `timeout` cancels the command and fails the step.
-  - `retries` re-runs the step with the next attempt.
+  - `timeout` fails the step and cancels every command it sent that is still open (an agent step's one command, and whatever a control-plane step relayed with `awaitCommand`). An abort and a failure do the same.
+  - A command held for its batch's approvals (the quorum, §13) does not count against `timeout`: while it is held the step waits, the command lives as long as its batch does (`heldBatchNotAfter`, 24 h by default), and the step's timeout counts from the release.
+  - `retries` re-runs the step with the next attempt, under a new command key. Only a step defined `retrySafe: true` takes retries: `profiles.validate`, `profiles.render` and a workflow's start refuse `retries` on any other (`deploy.deploy`, `raid.apply`, `power.setPower`, …) and `defineStep` refuses the combination; handle a failure of such a step with `onFailure`.
   - `onFailure` takes one of: `fail` (the default: the rest of the main phase is cancelled, cleanup runs, and the workflow ends `failed`), `rescue` (the same, with `error.rescue`), `continue`, or a step that runs before the workflow fails.
   - `when:` is a small expression over the node's labels, e.g. `nvswitch && gpu.model=H100` or `!mig.capable`. A false one skips the step.
 - **Verbs.**

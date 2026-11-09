@@ -141,6 +141,32 @@ All notable changes to the better-compute packages are documented here. The form
     takes the pool's model once the pool's `gpu` row is locked, and `pools.update` locks those rows before
     changing `gpuModel`. A deleted instance refunds its recorded charge before its allocation is released.
   - `@better-compute/testing`: `computeFixture({ capacity })`.
+- **Destructive CLI commands ask before they act** (`@better-compute/cli`). `metal retire`, `metal undeploy` and
+  `metal power --action off|reset|cycle` now need `--yes`, as `nodes delete` did, or a yes at an interactive
+  terminal (a prompt on stderr when stdin and stderr are terminals); without either they stop with a usage error
+  before calling the API. Scripts that run them must add `--yes`. One helper decides for all four
+  (`confirmDestructive` and `yesFlag`, exported for project commands; embedders answer the prompt through the new
+  optional `CliIO.confirm`). `on`, `graceful-off`, `graceful-restart` and `nmi` are unchanged.
+
+### Security
+
+- **`metal.enroll` let a tenant read out another tenant's or the platform's secrets (`@better-compute/metal`).**
+  `bmc.credentials` took any secret reference and `bmc.address` any address, both from the caller, and the site
+  agent fetches the one and presents it to the other: a tenant with `compute:nodes:provision` on one of its pools
+  could enroll `secret://<other-tenant>/…`, `env://…` or `vault://…` against a host it controls and receive the
+  value as a BMC login. Now a `secret://` reference must be the enrolling tenant's own (`secret://<tenantId>/<id>`),
+  `env://` and `vault://` references are taken from root callers only, and anything else is `ACCESS_DENIED`. A
+  machine enrolled before this with another tenant's `secret://` is never sent a BMC command again (its workflows
+  and `metal.power` fail with `ACCESS_DENIED`): enroll it again with its own secret.
+
+- **The CLI sent a saved better-iam session to any `--url` (`@better-compute/cli`).** Compute's own saved profiles
+  go only to the deployment they were saved for, but the session `better-iam login` saves was used for whatever
+  `--url` (or `BETTER_COMPUTE_URL`) named: `nodes list --url https://staging…`, a typo or a repository's default
+  URL received the production session as a bearer token. Now a better-iam session issued by a remote endpoint goes
+  only to a `--url` of the same origin, and one issued in process only to an in-process deployment; otherwise it is
+  passed over (compute's own profile for that deployment is tried next, and the `MISSING_ENV` hint says which
+  credential was not used and why). Deployments that serve IAM and compute from different origins need
+  `better-compute auth login --url …` or `BETTER_COMPUTE_TOKEN`.
 
 - **Client: `paginate()` and `NETWORK_ERROR`** (`@better-compute/client`). `paginate(list, input, options?)` is an
   async iterator over every item of a list method, following each page's `cursor` and fetching a page only when the
@@ -424,6 +450,64 @@ All notable changes to the better-compute packages are documented here. The form
   stream that opens only after a load began, with no cursor to resume from (its first attempt failed, it took
   longer than the new `openWaitMs`, default 3 s, or it dropped before any event), makes the stores load once more.
   New options `openWaitMs` and `sleep`.
+- **Aborting or timing out a workflow step cancels what it relayed** (`@better-compute/provision`, `metal`). Only
+  agent steps recorded their command, so `metal.abort`, `workflows.abort` and a step timeout cancelled nothing a
+  control-plane step had sent through `awaitCommand`: a `deploy.image` or `disk.wipe` still pending for a ramdisk
+  that reconnected later ran anyway. Now a step that is aborted, fails or times out has every open command under
+  its key (`wf:<workflow>:<step>…`) cancelled, pending ones at once and in-flight ones through the gateway, and a
+  step run that outlives its step is refused any further command (`INVALID_STATE`).
+- **`retries` only on retry-safe steps** (`@better-compute/provision`). A step's `retrySafe` flag was never read, so
+  a profile's `retries: 2` on `deploy.deploy` or `raid.apply` sent it again under a new command key. Now
+  `profiles.validate`, `profiles.render` and every workflow start report `retries` on a step that is not retry-safe
+  (`steps[0].retries: deploy.deploy is not retry-safe…`), `defineStep` refuses `retries` with `retrySafe: false`,
+  and the engine never retries such a step even when its row says so (a workflow started before the check).
+  Driver operations written with `on:` (no registered step) keep their `retries`.
+- **Commands held for a quorum approval no longer expire while they wait** (`@better-compute/provision`, `metal`).
+  A destructive command of an unapproved batch kept the lifetime of an unheld one (a step's timeout, ten minutes
+  for `awaitCommand`, five for `metal.power`, the request's for `site.httpProxy`), while approvers have the batch's
+  24 hours: a slow approval found the command `expired` and the step failed. Now a held command's `notAfter` is its
+  batch's (`heldBatchNotAfter`), and a workflow step does not time out while a command of its is held; its
+  timeout counts from the release. A batch that expires still cancels its held commands.
+- **A late `metal.confirmMac` no longer finds a failed node** (`@better-compute/metal`, `provision`). Confirm-first
+  PXE discovery waited for the operator inside `metal.ensureRamdisk`'s 20-minute timeout: after that the node was
+  `failed`, and `recover` power-cycled it into discovery again. Now, once there is a candidate (or a finding only an
+  operator can settle), the step waits outside its timeout, for up to 7 days; the node keeps its state and is not
+  power-cycled again, `confirmMac` wakes the workflow, and the 20 minutes count from the confirmation. New for step
+  authors: `stepWaiting(until)` next to `stepNotReady(ms)`.
+- **`metal.ensureRamdisk` no longer trusts a ramdisk that was just powered off** (`@better-compute/metal`). After a
+  hard power-off the gateway shows the old session as connected until its ping times out (about 20 s); a workflow
+  that started in that window took it for a running ramdisk and sent its next command to a machine that was off.
+  Metal now records when it last cut a machine's power (migration `metal/0009_power_cut`,
+  `metal_nodes.power_cut_at`, set by `power.setPower`, the step's own power cycles and `metal.power`), and a ramdisk
+  session counts only if it connected since.
+- **A one-time secret is no longer minted for a file that cannot be written** (`@better-compute/cli`).
+  `webhooks rotate-secret --secret-out`, `webhooks create --secret-out`, `join-tokens create --out` and
+  `site-tokens create --out` called the API first and opened the file afterwards: with a path that already existed
+  the secret was rotated or the token minted, the command failed `ALREADY_EXISTS`, and the value was lost. They
+  now reserve the file (created exclusively, mode 0600) before the call, refuse a taken or uncreatable path while
+  nothing has changed (`ALREADY_EXISTS`, `FILE_NOT_WRITABLE`), and remove the file if the call fails.
+  `usage export --out` reserves its file the same way.
+- **An upgrade by the install script keeps the operator's top-level `config.toml` keys** (`@better-compute/cli`).
+  A script from `daemon install-script` run on an installed host rewrote `/etc/bcd/config.toml` with its own keys,
+  two pins and the sections of the old file; every other top-level key was dropped, so `gateway_server_name`,
+  `data_dir` and `socket_path` silently went back to their defaults. The script now carries over every top-level
+  key it does not set itself, as written, never a key twice. Regenerate your install scripts to get the fix.
+- **`doctor` exits non-zero on an error finding** (`@better-compute/cli`). `better-compute doctor` printed its report
+  and exited 0 whatever it found; only `--strict` failed, and then on warnings as much as on errors. A deploy step
+  running `doctor` passed over an unmigrated or unreachable database. Now any `error` finding exits 1 with
+  `DOCTOR_FINDINGS` (the report is still printed first), `--strict` adds warnings, and `info` findings never fail.
+  Scripts that ran plain `doctor` on a deployment with error findings and expected status 0 need to handle it.
+- **Unknown configuration keys are refused** (`@better-compute/cli`). The `host` export took any key: a typo such
+  as `host.gatway` was dropped and `serve` started with no gateway role. The `cli` export likewise ignored a
+  mistyped `defaults`, command name or flag. Both now answer `INVALID_CONFIG` with the nearest known name
+  (`host.gatway is not a setting of host. Did you mean host.gateway?`), at every level of `host` except the objects
+  passed through as they are (`gateway.tls`, `gateway.options`, `http.wellKnown`). A configuration that carried an
+  unused key must drop it.
+- **BMC credential rotation no longer deletes the enrollment secret** (`@better-compute/metal`).
+  `metal.rotateBmcCredential` purged every superseded credential from the secret store, including the one the
+  machine was enrolled with: two machines enrolled with one rack-wide `secret://` broke each other on the first
+  rotation. Now only secrets rotation itself made are purged, and only when no open command and no other machine
+  names them; the enrollment secret is the operator's to delete.
 
 ## 0.3.0 (2026-10-20)
 

@@ -24,7 +24,7 @@ import {
   type StepRegistry,
 } from './expand.js';
 import { releaseImagePins } from './site-cache.js';
-import { batchOf, plannedCommandKinds } from './batch.js';
+import { batchOf, heldBatchNotAfter, plannedCommandKinds } from './batch.js';
 
 // The workflow engine (PLAN.md §11.2).
 //
@@ -42,13 +42,24 @@ export const workflowPollMs = 10_000;
 
 /** Thrown by a control-plane step that cannot finish yet; it is run again after `retryAfterMs`. */
 export class StepNotReady extends Error {
-  constructor(readonly retryAfterMs = 5_000) {
+  constructor(
+    readonly retryAfterMs = 5_000,
+    /** Set by `stepWaiting`: until when (epoch ms) the step may wait without its timeout running. */
+    readonly waitingUntil?: number,
+  ) {
     super('The step is not ready yet');
     this.name = 'StepNotReady';
   }
 }
 /** A control-plane step's way of saying "not yet, look again later" (until its timeout). */
 export const stepNotReady = (retryAfterMs?: number): StepNotReady => new StepNotReady(retryAfterMs);
+/**
+ * "Not yet, and it is not mine to hurry": the step waits for something outside the workflow, such as
+ * an operator's decision, and may do so until `until` (epoch ms on the database's clock). Its timeout
+ * does not run meanwhile; it counts in full from the moment the step stops saying so. Past `until`
+ * (plus the timeout) the step times out as any other.
+ */
+export const stepWaiting = (until: number, retryAfterMs = 15_000): StepNotReady => new StepNotReady(retryAfterMs, until);
 
 /** Where profiles come from: stored ones first, then the ones modules ship. */
 export interface ProfileSource {
@@ -130,6 +141,75 @@ function assertStepVerb(from: StepState, verb: StepVerb): StepState {
 /** The command idempotency key of a step attempt: `wf:<id>:<step>`, then `#<n>` for retries. */
 export function commandKey(step: Pick<StepRow, 'idempotency_key' | 'attempt'>): string {
   return step.attempt === 0 ? step.idempotency_key : `${step.idempotency_key}#${step.attempt}`;
+}
+
+/**
+ * Cancels every live command a step sent, whatever sent it: an agent step's one command
+ * (`wf:<id>:<step>`, `…#<n>` on a retry) and the commands a control-plane step relayed with
+ * `awaitCommand` (`…#<attempt>[:<key>]`), which `workflow_steps.command_id` never names. Matching is
+ * the secret broker's step binding: the step's key, or the key followed by `#` or `:`. Pending
+ * commands are cancelled at once; in-flight ones get a cancel request the gateway delivers.
+ */
+async function cancelStepCommands(context: EngineContext, tx: SqlTx, step: Pick<StepRow, 'idempotency_key'>): Promise<number> {
+  const { rows } = await tx.query<{ id: string }>(
+    `SELECT id FROM commands
+      WHERE state IN ('pending', 'dispatched', 'acked', 'running')
+        AND (idempotency_key = $1 OR starts_with(idempotency_key, $1 || '#') OR starts_with(idempotency_key, $1 || ':'))
+      ORDER BY node_id, seq`,
+    [step.idempotency_key],
+  );
+  for (const { id } of rows) await context.commands.cancel(tx, id);
+  return rows.length;
+}
+
+/**
+ * Called when a step's deadline has passed: whether the step is really overdue. A command that waits
+ * for its batch's approvals (§13: `pending` with `not_before = infinity`) has not run yet, and
+ * approvers may take the batch's whole lifetime, so the step's timeout counts from the release:
+ * - while a command of the step is held, the deadline moves to a full timeout from now;
+ * - once released (the quorum sets `not_before` to the release time, later than `created_at`), to a
+ *   full timeout from the release.
+ * Returns the new deadline (stored), or undefined when the step is overdue. The batch cancels its held
+ * commands when it expires, which fails the step as any cancelled command does.
+ */
+async function deadlineAfterApproval(tx: SqlTx, step: StepRow, now: number): Promise<number | undefined> {
+  const { rows } = await tx.query<{ held: boolean | null; released_at: Date | null }>(
+    `SELECT bool_or(state = 'pending' AND not_before = 'infinity') AS held,
+            max(not_before) FILTER (WHERE not_before <> 'infinity' AND not_before > created_at) AS released_at
+       FROM commands
+      WHERE idempotency_key = $1 OR starts_with(idempotency_key, $1 || '#') OR starts_with(idempotency_key, $1 || ':')`,
+    [step.idempotency_key],
+  );
+  const row = rows[0];
+  const deadline = row?.held ? now + step.timeout_ms : row?.released_at ? row.released_at.getTime() + step.timeout_ms : undefined;
+  if (deadline === undefined || deadline <= now) return undefined;
+  await tx.query('UPDATE workflow_steps SET deadline = to_timestamp($3::double precision / 1000.0) WHERE workflow_id = $1 AND id = $2', [
+    step.workflow_id,
+    step.id,
+    deadline,
+  ]);
+  step.deadline = new Date(deadline);
+  return deadline;
+}
+
+/**
+ * The deadline of a control-plane step that just said "not ready". A step that waits on something
+ * outside the workflow (`stepWaiting(until)`) is good until `until` plus its timeout. Any other is
+ * good for at most one timeout from now, which only changes a step that had waited: its timeout
+ * counts from when it went on. Stores a changed deadline and returns it.
+ */
+async function notReadyDeadline(tx: SqlTx, step: StepRow, now: number, waitingUntil: number | undefined): Promise<number> {
+  const current = step.deadline?.getTime() ?? now;
+  const timeoutMs = Number(step.timeout_ms);
+  const next =
+    waitingUntil !== undefined && Number.isFinite(waitingUntil) ? Math.max(current, waitingUntil + timeoutMs) : Math.min(current, now + timeoutMs);
+  if (next !== current)
+    await tx.query('UPDATE workflow_steps SET deadline = to_timestamp($3::double precision / 1000.0) WHERE workflow_id = $1 AND id = $2', [
+      step.workflow_id,
+      step.id,
+      next,
+    ]);
+  return next;
 }
 
 /** A locked workflow row, with the transaction's clock and its node's reference read in the same statement. */
@@ -396,8 +476,11 @@ export async function abortWorkflow(
     if (step.phase === 'cleanup') continue;
     if (step.state === 'pending') await setStep(tx, step, 'cancelled', { finish: true });
     else if (step.state === 'running' || step.state === 'waiting') {
-      if (step.command_id) await context.commands.cancel(tx, step.command_id);
+      // The step is cancelled first: a run of it still in a worker is refused any further command
+      // (runControlPlaneStep), so the commands read next are all it will ever have sent.
       await setStep(tx, step, 'cancelled', { finish: true, error: { code: 'CANCELLED', message: 'aborted' } });
+      if (step.command_id) await context.commands.cancel(tx, step.command_id);
+      await cancelStepCommands(context, tx, step);
     }
   }
   await setWorkflow(tx, workflow, {
@@ -470,6 +553,9 @@ export async function retryWorkflow(
 
 // --- Advancing -------------------------------------------------------------------------------------
 
+/** The engine context while a workflow advances: with the worker's steps, for what a row does not record (`retrySafe`). */
+type Advancing = EngineContext & { steps?: StepRegistry };
+
 type Transition =
   /** Something changed; look again right away. */
   | { kind: 'continue' }
@@ -518,14 +604,21 @@ async function nodeLabels(tx: SqlTx, nodeId: string | null): Promise<Record<stri
  * on-failure step runs first, then the workflow fails.
  */
 async function failStep(
-  context: EngineContext,
+  context: Advancing,
   tx: SqlTx,
   workflow: WorkflowRow,
   step: StepRow,
   error: { code: string; message: string },
 ): Promise<void> {
   await setStep(tx, step, assertStepVerb(step.state, 'fail'), { finish: true, error });
-  if (step.attempt < step.retries) {
+  // Whatever this attempt sent and is still open must not run after it: a timed-out control-plane
+  // step leaves its relayed commands pending (for a ramdisk that reconnects later), and a retry
+  // sends its own under the next attempt's key.
+  await cancelStepCommands(context, tx, step);
+  // Profiles are refused retries on such a step (expand.ts); a row that has them anyway (a workflow
+  // started before that check) is still never sent twice.
+  const retrySafe = context.steps?.get(step.action)?.retrySafe !== false;
+  if (step.attempt < step.retries && retrySafe) {
     await setStep(tx, step, assertStepVerb('failed', 'retry'), { attempt: step.attempt + 1, error });
     await publish(context, tx, workflow, 'workflow.step.retrying', { stepId: step.id, attempt: step.attempt, error });
     return;
@@ -575,7 +668,7 @@ async function notifyOwner(context: EngineContext, tx: SqlTx, workflow: Workflow
 }
 
 async function startAgentStep(
-  context: EngineContext,
+  context: Advancing,
   tx: SqlTx,
   workflow: WorkflowRow,
   step: StepRow,
@@ -607,6 +700,7 @@ async function startAgentStep(
     'SELECT boot_id, role FROM node_sessions WHERE node_id = $1',
     [workflow.node_id],
   );
+  const batch = batchOf({ batchId: workflow.batch_id ?? undefined, registry: context.registry }, step.command_kind ?? step.action);
   const command = await context.commands.enqueue(tx, {
     nodeId: target,
     kind: step.command_kind ?? step.action,
@@ -622,8 +716,10 @@ async function startAgentStep(
         }
       : step.args) as Json,
     idempotencyKey: commandKey(step),
-    notAfter: deadline,
-    ...batchOf({ batchId: workflow.batch_id ?? undefined, registry: context.registry }, step.command_kind ?? step.action),
+    // Held for its batch's approvals (§13), the command lives as long as the batch waits; the step's
+    // own timeout then counts from the release (deadlineAfterApproval).
+    notAfter: (await heldBatchNotAfter(tx, batch.batchId)) ?? deadline,
+    ...batch,
   });
   await setStep(tx, step, assertStepVerb('running', 'wait'), {
     command_id: command.id,
@@ -654,13 +750,15 @@ export async function siteAgentFor(tx: SqlTx, nodeId: string): Promise<string | 
 }
 
 async function settleWaiting(
-  context: EngineContext,
+  context: Advancing,
   tx: SqlTx,
   workflow: WorkflowRow,
   step: StepRow,
   now: number,
 ): Promise<Transition> {
-  const deadline = step.deadline?.getTime() ?? now;
+  let deadline = step.deadline?.getTime() ?? now;
+  // Not overdue while its command waits for approvals, nor for a full timeout after its release.
+  if (now >= deadline) deadline = (await deadlineAfterApproval(tx, step, now)) ?? deadline;
   const overdue = now >= deadline;
   if (step.await === 'rejoin') {
     // Completes when the agent is back with a new boot or role, whatever the command said: a
@@ -714,7 +812,7 @@ async function settleWaiting(
 }
 
 /** One transition of one workflow, in `tx`. */
-async function transition(context: EngineContext, tx: SqlTx, workflowId: string): Promise<Transition> {
+async function transition(context: Advancing, tx: SqlTx, workflowId: string): Promise<Transition> {
   const workflow = await lockWorkflow(tx, workflowId);
   if (!workflow || !activeStates.includes(workflow.state)) return { kind: 'done' };
   if (workflow.state === 'pending') {
@@ -728,7 +826,9 @@ async function transition(context: EngineContext, tx: SqlTx, workflowId: string)
   if (inFlight) {
     if (inFlight.state === 'waiting') return settleWaiting(context, tx, workflow, inFlight, now);
     if (inFlight.runs_on === 'control-plane') {
-      const deadline = inFlight.deadline?.getTime() ?? now;
+      let deadline = inFlight.deadline?.getTime() ?? now;
+      // A command it relayed that waits for approvals (§13) does not count against its timeout.
+      if (now >= deadline) deadline = (await deadlineAfterApproval(tx, inFlight, now)) ?? deadline;
       if (now >= deadline) {
         await failStep(context, tx, workflow, inFlight, { code: 'TIMEOUT', message: `no result within ${inFlight.timeout_ms} ms` });
         return { kind: 'continue' };
@@ -792,7 +892,11 @@ async function runControlPlaneStep(
   step: StepRow,
   deadline: number,
   now: () => number,
-): Promise<{ outcome: 'succeeded'; result: Json | null } | { outcome: 'failed'; error: { code: string; message: string } } | { outcome: 'not-ready'; retryAfterMs: number }> {
+): Promise<
+  | { outcome: 'succeeded'; result: Json | null }
+  | { outcome: 'failed'; error: { code: string; message: string } }
+  | { outcome: 'not-ready'; retryAfterMs: number; waitingUntil?: number }
+> {
   const definition = options.steps.get(step.action);
   if (!definition?.run) return { outcome: 'failed', error: { code: 'INVALID_CONFIG', message: `step ${step.action} is not registered in this worker` } };
   const parsed = await definition.input['~standard'].validate(step.args);
@@ -807,17 +911,27 @@ async function runControlPlaneStep(
   // A step that declares what it relays (`sends`) may enqueue only those kinds: a batch's scope,
   // computed from the declarations, then covers everything the workflow can send.
   const sends = definition.sends;
-  const commands =
-    sends && context.commands
-      ? {
-          ...context.commands,
-          enqueue: (tx: SqlTx, command: Parameters<typeof context.commands.enqueue>[1]) => {
-            if (!sends.includes(command.kind))
-              throw new ComputeError('INVALID_CONFIG', `Step ${step.action} sends ${command.kind}, which it does not declare in sends`);
-            return context.commands.enqueue(tx, command);
-          },
-        }
-      : context.commands;
+  const commands = context.commands
+    ? {
+        ...context.commands,
+        enqueue: async (tx: SqlTx, command: Parameters<typeof context.commands.enqueue>[1]) => {
+          if (sends && !sends.includes(command.kind))
+            throw new ComputeError('INVALID_CONFIG', `Step ${step.action} sends ${command.kind}, which it does not declare in sends`);
+          const sent = await context.commands.enqueue(tx, command);
+          // A run that outlived its step (aborted, timed out or retried while it ran) sends nothing more:
+          // the step row is read after the enqueue, in its transaction, so the refusal rolls the command
+          // back, and an abort that commits later finds the command and cancels it. (After, not before:
+          // enqueue locks the target node's row, which a metal verb holds before it aborts the workflow.)
+          const { rows } = await tx.query<{ live: boolean }>(
+            `SELECT (state = 'running' AND attempt = $3) AS live FROM workflow_steps WHERE workflow_id = $1 AND id = $2 FOR SHARE`,
+            [workflow.id, step.id, step.attempt],
+          );
+          if (rows[0]?.live === false)
+            throw new ComputeError('INVALID_STATE', `Step ${step.id} of workflow ${workflow.id} is no longer running; ${command.kind} was not sent`);
+          return sent;
+        },
+      }
+    : context.commands;
   const stepContext = {
     ...(options.stepContext ?? {}),
     ...context,
@@ -840,7 +954,8 @@ async function runControlPlaneStep(
     ]);
     return { outcome: 'succeeded', result: (result ?? null) as Json | null };
   } catch (error) {
-    if (error instanceof StepNotReady) return { outcome: 'not-ready', retryAfterMs: error.retryAfterMs };
+    if (error instanceof StepNotReady)
+      return { outcome: 'not-ready', retryAfterMs: error.retryAfterMs, ...(error.waitingUntil !== undefined ? { waitingUntil: error.waitingUntil } : {}) };
     if (controller.signal.aborted && !options.signal?.aborted)
       return { outcome: 'failed', error: { code: 'TIMEOUT', message: `no result within ${step.timeout_ms} ms` } };
     if (options.signal?.aborted) throw error;
@@ -864,9 +979,10 @@ export async function advanceWorkflow(
   const max = options.maxTransitions ?? 64;
   let transitions = 0;
   const clock = () => (context.clock ? context.clock.now() : Date.now());
+  const advancing: Advancing = { ...context, steps: options.steps };
   while (transitions < max) {
     if (options.signal?.aborted) return { transitions, done: false };
-    const step = await context.sql.transaction((tx) => transition(context, tx, workflowId));
+    const step = await context.sql.transaction((tx) => transition(advancing, tx, workflowId));
     transitions++;
     if (step.kind === 'continue') continue;
     if (step.kind === 'done') return { transitions, done: true };
@@ -883,8 +999,12 @@ export async function advanceWorkflow(
       // Aborted, retried or settled by someone else meanwhile: this run's outcome is stale.
       if (!current || current.state !== 'running' || current.attempt !== step.step.attempt) return undefined;
       if (outcome.outcome === 'succeeded') await completeStep(context, tx, workflow, current, outcome.result);
-      else if (outcome.outcome === 'failed') await failStep(context, tx, workflow, current, outcome.error);
-      else return Math.min(step.deadline, workflow.lockedAt + outcome.retryAfterMs);
+      else if (outcome.outcome === 'failed') await failStep(advancing, tx, workflow, current, outcome.error);
+      else
+        return Math.min(
+          await notReadyDeadline(tx, current, workflow.lockedAt, outcome.waitingUntil),
+          workflow.lockedAt + outcome.retryAfterMs,
+        );
       return undefined;
     });
     transitions++;

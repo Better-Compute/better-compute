@@ -136,4 +136,14 @@ ALTER TABLE metal_nodes ADD COLUMN discovered_mac text CHECK (discovered_mac ~ '
 ALTER TABLE metal_nodes ADD COLUMN discovered_mac_at timestamptz;
 `,
   },
+  {
+    name: 'metal/0009_power_cut',
+    sql: `
+-- When metal last sent the machine's BMC a power action that ends whatever it was running (off,
+-- graceful-off, reset, graceful-restart, cycle). A ramdisk session counts as connected only if it
+-- connected since: after a hard power-off the gateway still shows the old session until its ping
+-- times out, and metal.ensureRamdisk must not take that for a booted ramdisk.
+ALTER TABLE metal_nodes ADD COLUMN power_cut_at timestamptz;
+`,
+  },
 ]);

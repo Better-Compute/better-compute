@@ -11,9 +11,11 @@ import {
 } from '@better-compute/core';
 import { setSimClock, useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
+import { quorumMigration } from '@better-compute/server';
 import {
   abortWorkflow,
   advanceWorkflow,
+  awaitCommand,
   defineProfile,
   defineStep,
   evaluateWhen,
@@ -27,6 +29,7 @@ import {
   batchNodeWorkflow,
   stepNotReady,
   stepRegistry,
+  stepWaiting,
   type AdvanceOptions,
   type EngineContext,
 } from '@better-compute/provision';
@@ -101,7 +104,82 @@ const kexec = defineStep({
   command: 'boot.kexec',
   input: manifest({}),
 });
-const registry = stepRegistry([record, kexec]);
+/** A control-plane step that relays two commands as metal's do (`awaitCommand`): one to the site agent, one to the machine. */
+const relayed = defineStep({
+  id: 'test.relayed',
+  runsOn: 'control-plane',
+  timeout: '1m',
+  retrySafe: true,
+  input: manifest({}),
+  async run(_input, stepContext) {
+    await stepContext.sql.transaction((tx) =>
+      stepContext.commands.enqueue(tx, {
+        nodeId: SITE_AGENT,
+        kind: 'boot.prepareRamdisk',
+        payload: {},
+        idempotencyKey: `${stepContext.idempotencyKey}#${stepContext.attempt}:entry`,
+        notAfter: Date.now() + 600_000,
+      }),
+    );
+    await awaitCommand(stepContext, { nodeId: stepContext.node!.id, kind: 'disk.wipe', key: 'wipe', payload: {} });
+    return null;
+  },
+});
+/** A control-plane step that sends its command only once the test opens `gate` (a step still running when it is aborted). */
+let gate: Promise<void> = Promise.resolve();
+let gated: (() => void) | undefined;
+let lateEnqueue: unknown;
+const late = defineStep({
+  id: 'test.late',
+  runsOn: 'control-plane',
+  timeout: '1m',
+  retrySafe: true,
+  input: manifest({}),
+  async run(_input, stepContext) {
+    gated?.();
+    await gate;
+    lateEnqueue = await stepContext.sql
+      .transaction((tx) =>
+        stepContext.commands.enqueue(tx, {
+          nodeId: stepContext.node!.id,
+          kind: 'disk.wipe',
+          payload: {},
+          idempotencyKey: `${stepContext.idempotencyKey}#${stepContext.attempt}:late`,
+          notAfter: Date.now() + 600_000,
+        }),
+      )
+      .catch((error: unknown) => error);
+    return null;
+  },
+});
+/** A step that must not be sent twice (as deploy.deploy or raid.apply): it fails every time it runs. */
+const once = defineStep({
+  id: 'test.once',
+  runsOn: 'control-plane',
+  timeout: '1m',
+  retrySafe: false,
+  input: manifest({}),
+  async run(_input, stepContext) {
+    ran.push(`once#${stepContext.attempt}`);
+    throw new Error('half done');
+  },
+});
+/** A step that waits for an operator (as metal.ensureRamdisk for metal.confirmMac) while `operatorWait` is set, then is not ready, then done. */
+let operatorWait: number | undefined;
+let afterWait: 'not-ready' | 'done' = 'done';
+const decided = defineStep({
+  id: 'test.decided',
+  runsOn: 'control-plane',
+  timeout: '1m',
+  retrySafe: true,
+  input: manifest({}),
+  async run() {
+    if (operatorWait !== undefined) throw stepWaiting(operatorWait, 15_000);
+    if (afterWait === 'not-ready') throw stepNotReady(1_000);
+    return null;
+  },
+});
+const registry = stepRegistry([record, kexec, relayed, late, once, decided]);
 
 const stored = new Map<string, ProfileDocument>();
 const options: AdvanceOptions = {
@@ -152,6 +230,14 @@ async function steps(id: string) {
   return rows;
 }
 const states = async (id: string) => Object.fromEntries((await steps(id)).map((s) => [s.id, s.state]));
+/** Every command sent under the workflow's keys: idempotency key → state. */
+async function stepCommands(id: string): Promise<Record<string, string>> {
+  const { rows } = await db.query<{ idempotency_key: string; state: string }>(
+    `SELECT idempotency_key, state FROM commands WHERE starts_with(idempotency_key, $1) ORDER BY idempotency_key`,
+    [`wf:${id}:`],
+  );
+  return Object.fromEntries(rows.map((row) => [row.idempotency_key, row.state]));
+}
 async function settleCommand(id: string, state: string, reason?: string) {
   await db.query('UPDATE commands SET state = $2, reason = $3 WHERE id = $1', [id, state, reason ?? null]);
 }
@@ -312,6 +398,31 @@ describe('expandProfile', () => {
     });
   });
 
+  it('refuses retries on a step that is not retry-safe, in a profile and in a step definition', async () => {
+    const doc = defineProfile({
+      id: 'unsafe-retries',
+      version: 1,
+      target: 'metal',
+      steps: [
+        { use: 'test.once', retries: 2 },
+        { use: 'test.record', retries: 2 },
+        { use: 'test.once', retries: 0, onFailure: { use: 'test.once', retries: 1 } },
+      ],
+      cleanup: [{ use: 'boot.kexec', retries: 1 }],
+    });
+    const { issues } = await expandProfile(doc, registry);
+    expect(issues).toEqual([
+      { path: 'steps[0].retries', message: expect.stringMatching(/test\.once is not retry-safe.*retries: 2/) },
+      { path: 'steps[2].onFailure.retries', message: expect.stringMatching(/test\.once is not retry-safe/) },
+      { path: 'cleanup[0].retries', message: expect.stringMatching(/boot\.kexec is not retry-safe/) },
+    ]);
+    stored.set('unsafe-retries@1', doc);
+    await expect(start('unsafe-retries')).rejects.toMatchObject({ code: 'INVALID_INPUT', message: expect.stringMatching(/not retry-safe/) });
+    const { extension: _stamp, ...input } = once;
+    expect(() => defineStep({ ...input, retries: 1 })).toThrow(/retries.*retrySafe/);
+    expect(() => defineStep({ ...input, retries: 0 })).not.toThrow();
+  });
+
   it('evaluates when: against node labels', () => {
     const labels = { 'gpu.model': 'H100', nvswitch: 'true', 'mig.capable': 'false' };
     expect(evaluateWhen('nvswitch', labels)).toBe(true);
@@ -409,6 +520,17 @@ describe('running a workflow', () => {
     expect(events.filter((e) => e.type.startsWith('workflow.step.')).map((e) => e.type)).toContain('workflow.step.retrying');
   });
 
+  it('never retries a step that is not retry-safe, whatever its row says (a workflow from before the check)', async () => {
+    profile({ id: 'once', steps: [{ use: 'test.once' }] });
+    const { id } = await start('once');
+    await db.query('UPDATE workflow_steps SET retries = 2 WHERE workflow_id = $1', [id]);
+    expect((await advance(id)).done).toBe(true);
+    expect(ran).toEqual(['once#0']);
+    expect(await steps(id)).toMatchObject([{ state: 'failed', attempt: 0 }]);
+    expect(await workflow(id)).toMatchObject({ state: 'failed', error: { message: expect.stringMatching(/half done/) } });
+    expect(events.map((e) => e.type)).not.toContain('workflow.step.retrying');
+  });
+
   it('continues past a failed step with onFailure: continue, and skips steps whose when: is false', async () => {
     await db.query(`INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, 'nvswitch', 'false', 'inventory')`, [node]);
     profile({
@@ -477,6 +599,27 @@ describe('timeouts and not-ready steps', () => {
     expect(await workflow(id)).toMatchObject({ state: 'failed', error: { code: 'TIMEOUT' } });
   });
 
+  it('cancels the commands a control-plane step relayed when it times out', async () => {
+    profile({ id: 'slow-relay', steps: [{ use: 'test.relayed', timeout: '1m' }] });
+    const { id } = await start('slow-relay');
+    await advance(id);
+    expect(await stepCommands(id)).toEqual({ [`wf:${id}:main.1#0:entry`]: 'pending', [`wf:${id}:main.1#0:wipe`]: 'pending' });
+    // Another step's command whose key only starts alike (main.10 is not main.1) is not this step's.
+    await db.query(
+      `INSERT INTO commands (id, node_id, seq, kind, body, state, not_after, retry_safe, self_terminating, attested, idempotency_key)
+       VALUES ($1, $2, 999, 'disk.wipe', ''::bytea, 'pending', compute_now() + interval '1 hour', false, false, false, $3)`,
+      [`cmd_other_${id}`, node, `wf:${id}:main.10#0:wipe`],
+    );
+    await tick(61_000);
+    expect((await advance(id)).done).toBe(true);
+    expect(await workflow(id)).toMatchObject({ state: 'failed', error: { code: 'TIMEOUT' } });
+    expect(await stepCommands(id)).toEqual({
+      [`wf:${id}:main.1#0:entry`]: 'cancelled',
+      [`wf:${id}:main.1#0:wipe`]: 'cancelled',
+      [`wf:${id}:main.10#0:wipe`]: 'pending',
+    });
+  });
+
   it('re-runs a not-ready control-plane step later, until it is ready', async () => {
     profile({ id: 'not-ready', steps: [{ use: 'test.record', with: { label: 'poll' } }] });
     notReadyUntil = Date.now() + 60_000;
@@ -488,6 +631,44 @@ describe('timeouts and not-ready steps', () => {
     notReadyUntil = 0;
     expect((await advance(id)).done).toBe(true);
     expect(ran).toEqual(['poll#0', 'poll#0']);
+  });
+
+  it('lets a step wait for an operator outside its timeout (stepWaiting), and times it again once it goes on', async () => {
+    profile({ id: 'operator', steps: [{ use: 'test.decided', timeout: '1m' }] });
+    const run = async () => {
+      const { id } = await start('operator', await addNode());
+      operatorWait = now + 24 * 3_600_000;
+      afterWait = 'not-ready';
+      const first = await advance(id);
+      expect(first).toMatchObject({ done: false, wakeAt: now + 15_000 });
+      // Hours later (and a worker that was away meanwhile): still waiting, not a timeout.
+      await tick(5 * 3_600_000);
+      expect((await advance(id)).done).toBe(false);
+      expect((await steps(id))[0]).toMatchObject({ state: 'running' });
+      return id;
+    };
+    // The operator decides; the step goes on and finishes.
+    let id = await run();
+    operatorWait = undefined;
+    afterWait = 'done';
+    expect((await advance(id)).done).toBe(true);
+    expect(await workflow(id)).toMatchObject({ state: 'succeeded' });
+    // Or it goes on and then hangs: its one minute counts from there.
+    id = await run();
+    operatorWait = undefined;
+    expect((await advance(id)).done).toBe(false);
+    await tick(59_000);
+    expect((await advance(id)).done).toBe(false);
+    await tick(2_000);
+    expect((await advance(id)).done).toBe(true);
+    expect(await workflow(id)).toMatchObject({ state: 'failed', error: { code: 'TIMEOUT' } });
+    // And nobody ever decides: past `until` plus the timeout it is a timeout after all.
+    id = await run();
+    await tick(19 * 3_600_000 + 61_000);
+    expect((await advance(id)).done).toBe(true);
+    expect(await workflow(id)).toMatchObject({ state: 'failed', error: { code: 'TIMEOUT' } });
+    operatorWait = undefined;
+    afterWait = 'done';
   });
 
   it('resumes a control-plane step that was running when a worker crashed', async () => {
@@ -502,6 +683,94 @@ describe('timeouts and not-ready steps', () => {
     );
     expect((await advance(id)).done).toBe(true);
     expect(ran).toEqual(['resumed#0']);
+  });
+});
+
+describe('commands held for their batch approval (§13)', () => {
+  const hold = (key: string) =>
+    db.query(`UPDATE commands SET not_before = 'infinity', not_after = compute_now() + interval '24 hours' WHERE idempotency_key = $1`, [key]);
+  const release = (key: string) => db.query(`UPDATE commands SET not_before = compute_now() WHERE idempotency_key = $1`, [key]);
+
+  it('does not time out an agent step whose command is held, and counts its timeout from the release', async () => {
+    profile({ id: 'held-agent', steps: [{ use: 'power.setPower', on: 'site', timeout: '1m' }] });
+    const { id } = await start('held-agent');
+    await advance(id);
+    const key = `wf:${id}:main.1`;
+    await hold(key);
+    // Approvers take hours: the step neither times out nor cancels the command.
+    for (const wait of [61_000, 6 * 3_600_000, 3_600_000]) {
+      await tick(wait);
+      expect((await advance(id)).done).toBe(false);
+    }
+    expect(await stepCommands(id)).toEqual({ [key]: 'pending' });
+    expect((await steps(id))[0]).toMatchObject({ state: 'waiting' });
+    // Approved just before the look-again time: the step has its whole timeout from the release.
+    await tick(59_000);
+    await release(key);
+    await tick(2_000);
+    expect((await advance(id)).done).toBe(false);
+    expect(await stepCommands(id)).toEqual({ [key]: 'pending' });
+    await tick(57_000);
+    expect((await advance(id)).done).toBe(false);
+    // One minute after the release with no result: now it is a timeout.
+    await tick(2_000);
+    expect((await advance(id)).done).toBe(true);
+    expect(await stepCommands(id)).toEqual({ [key]: 'cancelled' });
+    expect(await workflow(id)).toMatchObject({ state: 'failed', error: { code: 'TIMEOUT' } });
+  });
+
+  it('does not time out a control-plane step whose relayed command is held, and finishes once it ran', async () => {
+    profile({ id: 'held-relay', steps: [{ use: 'test.relayed', timeout: '1m' }] });
+    const { id } = await start('held-relay');
+    await advance(id);
+    const key = `wf:${id}:main.1#0:wipe`;
+    await hold(key);
+    await tick(61_000);
+    expect((await advance(id)).done).toBe(false);
+    await tick(5 * 3_600_000);
+    expect((await advance(id)).done).toBe(false);
+    expect((await stepCommands(id))[key]).toBe('pending');
+    await release(key);
+    await tick(30_000);
+    await db.query(`UPDATE commands SET state = 'succeeded' WHERE idempotency_key = $1`, [key]);
+    expect((await advance(id)).done).toBe(true);
+    expect(await workflow(id)).toMatchObject({ state: 'succeeded' });
+  });
+
+  it('gives a held command the lifetime of its batch, and an approved or absent batch the usual one', async () => {
+    await db.migrate([quorumMigration]);
+    const batch = (batchId: string, state: string, required: number) =>
+      db.query(
+        `INSERT INTO command_batches (id, tenant_id, reason, scope_root, scope_size, required, not_after, state)
+         VALUES ($1, 'ten_a', 'r', decode(repeat('00', 32), 'hex'), 1, $3, compute_now() + interval '24 hours', $2)`,
+        [batchId, state, required],
+      );
+    await batch('batch_held', 'pending', 2);
+    await batch('batch_approved', 'approved', 2);
+    await batch('batch_audit', 'pending', 0);
+    const wipe = defineStep({ id: 'disk.wipe', runsOn: 'ramdisk', command: 'disk.wipe', timeout: '5m', retrySafe: false, input: manifest({}) });
+    const own: AdvanceOptions = { ...options, steps: stepRegistry([record, relayed, wipe]) };
+    const destructive = { ...context(), registry: { commandKind: (kind: string) => ({ kind, destructive: kind === 'disk.wipe' }) } } as never as ReturnType<typeof context>;
+    profile({ id: 'held-lifetime', steps: [{ use: 'test.relayed', timeout: '1m' }, { use: 'disk.wipe' }] });
+    const lifetimes: Record<string, number[]> = {};
+    for (const batchId of ['batch_held', 'batch_approved', 'batch_audit']) {
+      const target = await addNode();
+      const { id } = await db.transaction((tx) =>
+        startWorkflow(destructive, own, tx, { tenantId: 'ten_a', profileId: 'held-lifetime', profileVersion: 1, nodeId: target, batchId }),
+      );
+      await advanceWorkflow(destructive, own, id);
+      // The relayed wipe went out (awaitCommand); let it succeed so the agent step sends its own.
+      await db.query(`UPDATE commands SET state = 'succeeded' WHERE idempotency_key = ANY($1)`, [[`wf:${id}:main.1#0:wipe`, `wf:${id}:main.1#0:entry`]]);
+      await advanceWorkflow(destructive, own, id);
+      const { rows } = await db.query<{ seconds: string }>(
+        `SELECT round(extract(epoch FROM not_after - compute_now()))::text AS seconds FROM commands
+          WHERE idempotency_key = ANY($1) ORDER BY idempotency_key`,
+        [[`wf:${id}:main.1#0:wipe`, `wf:${id}:main.2`]],
+      );
+      lifetimes[batchId] = rows.map((row) => Number(row.seconds));
+    }
+    // [awaitCommand's wipe, the agent step's wipe]: 24 h while held; else 10 min and the step's 5 min.
+    expect(lifetimes).toEqual({ batch_held: [86_400, 86_400], batch_approved: [600, 300], batch_audit: [600, 300] });
   });
 });
 
@@ -523,6 +792,37 @@ describe('operator verbs', () => {
     expect(await workflow(id)).toMatchObject({ state: 'cancelled', error: { code: 'CANCELLED', message: 'operator' } });
     // Twice is fine.
     await db.transaction((tx) => abortWorkflow(context(), tx, id));
+  });
+
+  it('aborts a control-plane step: every command it relayed is cancelled, in flight or not', async () => {
+    profile({ id: 'abort-relay', steps: [{ use: 'test.relayed' }], cleanup: [{ use: 'test.record', with: { label: 'cleanup' } }] });
+    const { id } = await start('abort-relay');
+    await advance(id);
+    expect((await steps(id))[0]).toMatchObject({ state: 'running', command_id: null });
+    // The site agent took its command; the machine (a ramdisk that is reconnecting) has not seen the wipe yet.
+    await db.query(`UPDATE commands SET state = 'dispatched' WHERE idempotency_key = $1`, [`wf:${id}:main.1#0:entry`]);
+    await db.transaction((tx) => abortWorkflow(context(), tx, id, { reason: 'operator' }));
+    expect(await stepCommands(id)).toEqual({ [`wf:${id}:main.1#0:entry`]: 'cancelled', [`wf:${id}:main.1#0:wipe`]: 'cancelled' });
+    expect((await advance(id)).done).toBe(true);
+    expect(await workflow(id)).toMatchObject({ state: 'cancelled' });
+    expect(await states(id)).toEqual({ 'main.1': 'cancelled', 'cleanup.1': 'succeeded' });
+  });
+
+  it('refuses a command from a step that was aborted while it ran', async () => {
+    profile({ id: 'abort-late', steps: [{ use: 'test.late' }] });
+    const { id } = await start('abort-late');
+    let open!: () => void;
+    gate = new Promise((resolve) => (open = resolve));
+    const running = new Promise<void>((resolve) => (gated = resolve));
+    lateEnqueue = undefined;
+    const advancing = advance(id);
+    await running;
+    await db.transaction((tx) => abortWorkflow(context(), tx, id, { reason: 'operator' }));
+    open();
+    await advancing;
+    gated = undefined;
+    expect(lateEnqueue).toMatchObject({ code: 'INVALID_STATE' });
+    expect(await stepCommands(id)).toEqual({});
   });
 
   it('pauses between steps and resumes', async () => {

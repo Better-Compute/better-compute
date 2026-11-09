@@ -1,7 +1,9 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { parseDuration } from '@better-compute/core';
 import { CliError, usageError } from '../errors.js';
+import { confirmDestructive, yesFlag } from '../confirm.js';
 import { defineCommand } from '../framework.js';
+import { writeReserved } from '../secret-file.js';
 import { newIdempotencyKey, tenantFlag } from './capacity.js';
 
 // Nodes, instances and join tokens (PLAN.md §9.3: commands mirror the API groups): the everyday operator calls,
@@ -256,12 +258,12 @@ export const nodeCommands = [
     args: nodeArg,
     flags: {
       ...changeFlags,
-      yes: { type: 'boolean', description: 'Confirm: the node is removed for good' },
+      yes: yesFlag('the node is removed for good'),
     },
     examples: ['better-compute nodes delete node_01k5w… --reason "TPM replaced" --yes'],
-    async run({ flags, args, api }) {
+    async run({ flags, args, api, io }) {
       const id = nodeId(args);
-      if (!flags.yes) throw usageError(`nodes delete removes ${id} for good; re-run with --yes`);
+      await confirmDestructive({ flags, io }, `nodes delete removes ${id} for good`);
       return (await api()).call('nodes/delete', {
         tenantId: flags.tenant,
         nodeId: id,
@@ -356,37 +358,30 @@ export const nodeCommands = [
         ...(flags['expect-mac'] ? { mac: flags['expect-mac'] } : {}),
         ...(flags['expect-gpu-uuid'] ? { gpuUuid: flags['expect-gpu-uuid'] } : {}),
       };
-      const created = await (
-        await api()
-      ).call<Record<string, unknown> & { token?: string }>('joinTokens/create', {
-        tenantId: flags.tenant,
-        poolId: flags.pool,
-        ttlSeconds,
-        ...(flags['max-uses'] !== undefined ? { maxUses: flags['max-uses'] } : {}),
-        ...(flags['allow-reclaim'] ? { allowReclaim: true } : {}),
-        ...(flags.hosted ? { hosted: flags.hosted } : {}),
-        ...(Object.keys(expect).length ? { expect } : {}),
-        idempotencyKey: flags.key ?? newIdempotencyKey(),
-      });
-      if (!flags.out) return created;
-      const { token, ...info } = created;
-      if (typeof token !== 'string')
-        throw new CliError(
-          'INVALID_STATE',
-          'The answer carries no token: this --key replays an earlier request, and a token is shown only once',
-          'Revoke that token (join-tokens revoke) and create a new one without --key.',
-        );
+      const client = await api();
+      const create = () =>
+        client.call<Record<string, unknown> & { token?: string }>('joinTokens/create', {
+          tenantId: flags.tenant,
+          poolId: flags.pool,
+          ttlSeconds,
+          ...(flags['max-uses'] !== undefined ? { maxUses: flags['max-uses'] } : {}),
+          ...(flags['allow-reclaim'] ? { allowReclaim: true } : {}),
+          ...(flags.hosted ? { hosted: flags.hosted } : {}),
+          ...(Object.keys(expect).length ? { expect } : {}),
+          idempotencyKey: flags.key ?? newIdempotencyKey(),
+        });
+      if (!flags.out) return create();
       const file = path(flags.out);
-      try {
-        await writeFile(file, `${token}\n`, { mode: 0o600, flag: 'wx' });
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'EEXIST')
+      // The file is ours before the token exists: a token minted for a path that cannot be written is lost.
+      const { token: _token, ...info } = await writeReserved(file, create, (created) => {
+        if (typeof created.token !== 'string')
           throw new CliError(
-            'ALREADY_EXISTS',
-            `${file} exists; the token is never written over a file`,
+            'INVALID_STATE',
+            'The answer carries no token: this --key replays an earlier request, and a token is shown only once',
+            'Revoke that token (join-tokens revoke) and create a new one without --key.',
           );
-        throw error;
-      }
+        return `${created.token}\n`;
+      });
       note(`Wrote the join token to ${file} (0600).`);
       return { ...info, tokenFile: file };
     },

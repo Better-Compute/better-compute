@@ -437,8 +437,10 @@ watch it through the gateway series and leases instead.
 
 ## doctor
 
-`better-compute doctor` runs `compute.selfCheck()` and adds the CLI's own findings. It only reads. `--strict` exits
-non-zero with `DOCTOR_FINDINGS` when any error or warning is found; `--pki PATH` names the PKI bundle to check.
+`better-compute doctor` runs `compute.selfCheck()` and adds the CLI's own findings. It only reads. It always prints
+the report, and exits non-zero with `DOCTOR_FINDINGS` when any finding is an error, so a deploy step that runs it
+stops on one; `--strict` exits non-zero on warnings as well, and informational findings never fail it. `--pki PATH`
+names the PKI bundle to check.
 
 ```bash
 better-compute doctor --strict --query "findings[].check"

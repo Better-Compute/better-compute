@@ -16,7 +16,10 @@ import {
 const T = Date.UTC(2026, 8, 24, 12);
 const noIam = { betterIam: null } as const;
 
-function iamProfiles(profiles: Record<string, { token: string; expiresAt?: number }>, current = 'default') {
+function iamProfiles(
+  profiles: Record<string, { token: string; expiresAt?: number; url?: string; config?: string; envConfig?: boolean }>,
+  current = 'default',
+) {
   return {
     createProfileStore: () => ({
       path: '/iam/credentials.json',
@@ -90,6 +93,82 @@ describe('credentials', () => {
     // Saved in process: never sent to a remote server.
     expect((await as('local', {}))?.token).toBe('biam_ses_local');
     expect(await as('local', { url: 'https://compute.example.com' })).toBeUndefined();
+  });
+
+  it('sends a saved better-iam session only to the deployment that issued it', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'bc-auth-'));
+    const env = { BETTER_COMPUTE_CREDENTIALS: join(dir, 'credentials.json') };
+    const betterIam = iamProfiles({
+      prod: { token: 'biam_ses_prod', url: 'https://compute.example.com/api/iam' },
+      local: { token: 'biam_ses_local', config: '/srv/app/better-iam.config.ts' },
+      'local-env': { token: 'biam_ses_env', envConfig: true },
+    });
+    const skipped: string[] = [];
+    const as = (profile: string, target: { url?: string }) =>
+      resolveToken({ ...env, BETTER_IAM_PROFILE: profile }, { betterIam, target, onSkip: (source, why) => skipped.push(`${source.kind}: ${why}`) });
+    // The deployment whose IAM issued it (one origin serves /api/iam and /api/compute).
+    expect(await as('prod', { url: 'https://compute.example.com/api/compute' })).toMatchObject({
+      token: 'biam_ses_prod',
+      source: { kind: 'better-iam', profile: 'prod' },
+    });
+    expect(skipped).toEqual([]);
+    // Any other --url (staging, a typo, a hostile repo's default), another scheme, or in process: not this session.
+    expect(await as('prod', { url: 'https://staging.example.com/api/compute' })).toBeUndefined();
+    expect(skipped.splice(0)).toEqual([expect.stringMatching(/^better-iam: .*https:\/\/compute\.example\.com.*not https:\/\/staging\.example\.com/)]);
+    expect(await as('prod', { url: 'http://compute.example.com' })).toBeUndefined();
+    expect(await as('prod', {})).toBeUndefined();
+    // Issued in process (a configuration file, or the environment-only deployment): never sent to a server.
+    expect((await as('local', {}))?.token).toBe('biam_ses_local');
+    expect((await as('local-env', {}))?.token).toBe('biam_ses_env');
+    expect(await as('local', { url: 'https://compute.example.com' })).toBeUndefined();
+    expect(await as('local-env', { url: 'https://compute.example.com' })).toBeUndefined();
+    // A session that does not fit falls through to compute's own profile for that deployment.
+    await createComputeProfileStore(env).save('default', { token: 'biam_ses_staging', url: 'https://staging.example.com', savedAt: T });
+    expect(await as('prod', { url: 'https://staging.example.com/api/compute' })).toMatchObject({
+      token: 'biam_ses_staging',
+      source: { kind: 'profile' },
+    });
+    // Without a target (auth status) nothing is filtered: it reports what is saved.
+    expect((await resolveToken({ ...env, BETTER_IAM_PROFILE: 'prod' }, { betterIam }))?.token).toBe('biam_ses_prod');
+  });
+
+  it('never puts a saved better-iam session on a request to another --url', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'bc-auth-'));
+    const iamCredentials = join(dir, 'iam-credentials.json');
+    await writeFile(
+      iamCredentials,
+      JSON.stringify({
+        version: 1,
+        current: 'default',
+        profiles: { default: { token: 'biam_ses_production', url: 'https://compute.example.com/api/iam', savedAt: T } },
+      }),
+    );
+    const requests: { url: string; authorization: string | null }[] = [];
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const request = new Request(input as RequestInfo, init);
+      requests.push({ url: request.url, authorization: request.headers.get('authorization') });
+      return Response.json({ items: [] });
+    };
+    const err: string[] = [];
+    const io: CliIO = {
+      out() {},
+      err: (line) => err.push(line),
+      cwd: dir,
+      env: { BETTER_IAM_CREDENTIALS: iamCredentials, BETTER_COMPUTE_CREDENTIALS: join(dir, 'credentials.json') },
+      fetch,
+    };
+    await expect(createCli().run(['nodes', 'list', '--tenant', 'root', '--url', 'https://staging.example.com'], io)).rejects.toMatchObject({
+      code: 'MISSING_ENV',
+      hint: expect.stringMatching(/better-iam session.*https:\/\/compute\.example\.com.*better-compute auth login --url https:\/\/staging\.example\.com/s),
+    });
+    expect(requests).toEqual([]);
+    // To its own deployment it goes as before (what this stub answers does not matter here).
+    await createCli()
+      .run(['nodes', 'list', '--tenant', 'root', '--url', 'https://compute.example.com'], io)
+      .catch(() => undefined);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ authorization: 'Bearer biam_ses_production' });
+    expect(requests[0]!.url).toMatch(/^https:\/\/compute\.example\.com\//);
   });
 
   it('refuses a file that is not a credentials file, and bad profile names', async () => {

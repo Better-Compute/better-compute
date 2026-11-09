@@ -390,7 +390,7 @@ const node = await compute.api.metal.enroll(credential, {
     poolId: { type: 'string', description: 'A pool the tenant owns; otherwise NOT_FOUND.', required: true },
     'bmc.address': { type: 'string', description: 'The BMC endpoint, at most 512 characters: a host, or an https:// URL that may name one system (/redfish/v1/Systems/<id>) of a multi-system service.', required: true },
     'bmc.driver': { type: 'string', description: 'A driver id such as redfish or ipmi.', required: true },
-    'bmc.credentials': { type: "'secret://…' | { username, password }", description: 'A secret reference, or inline credentials stored at once and never echoed.', required: true },
+    'bmc.credentials': { type: "'secret://…' | { username, password }", description: "One of the tenant's own secrets (secret://<tenantId>/<id>; another tenant's is ACCESS_DENIED, and vault:// or env:// references are for root callers only), or inline credentials stored at once and never echoed.", required: true },
     'bmc.tlsSpkiSha256': { type: 'string', description: "64 hex digits: the SHA-256 of the BMC certificate's SubjectPublicKeyInfo, pinned." },
     'bmc.driverOptions': { type: 'object', description: 'Options for the BMC driver, sent on every BMC operation: a JSON object of at most 1 KiB, never credential-like keys (e.g. bcx-ipmi { cipherSuite: 3 }). The redfish driver takes none. Stored in metal_nodes.bmc_driver_options (metal/0006).' },
     macs: { type: 'string[]', description: 'Up to 16 PXE MACs. Redfish out-of-band inspection finds them when left out; IPMI inspection does not, so an ipmi machine in a pool with an agent is UNSUPPORTED without them or a usable productUuid.' },
@@ -413,7 +413,9 @@ better-compute metal enroll --tenant root --site site_01k5w… --pool pool_01k5w
   --bmc-address 10.0.0.11 --bmc-driver redfish --bmc-username admin --bmc-password-file ./bmc-pass.txt
 ```
 
-`--bmc-credentials` must be a `secret://`, `vault://` or `env://` reference; otherwise pass `--bmc-username` with
+`--bmc-credentials` must be a `secret://<tenant>/<id>` reference of the node's own tenant (the server refuses
+another tenant's with `ACCESS_DENIED`, and takes `vault://` and `env://` references from root callers only, since
+the site agent presents the secret to the address you name); otherwise pass `--bmc-username` with
 `--bmc-password-file` (one trailing newline is dropped, and an empty file is refused), never both forms. `--legacy-bios`
 sends `uefi: false`, and `--arch`, `--product-uuid` and `--hardware-profile` map to the fields below. The command has
 no flags for `bmc.driverOptions` or `addresses` yet: enroll a machine that needs them through the API. See
@@ -494,7 +496,9 @@ returns `{ commandId }` without waiting for the BMC. It is decided as `compute:n
 destructive, so when the deployment keeps batches it first creates a batch of one leaf (subject
 `bmc:<site agent>/<BMC address>`, kind `bmc.power`, reason `power <action> <node>`) and enqueues the command in it
 (478025a); the answer then carries `batchId` and `held`. With approver keys configured the command stays held until
-approvers sign that batch (see [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)).
+approvers sign that batch (see [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)). A held command
+lives as long as its batch waits for approvals (24 hours by default), not the five minutes an unheld one has to
+reach the BMC, so a slow approval does not find it expired.
 
 ```bash
 better-compute metal power node_01k5w… --tenant root --action graceful-restart
@@ -557,8 +561,10 @@ sequenceDiagram
    turns `False` with the reason, and the step fails with `DRIVER_ERROR`.
 
 A retry of the step reuses the pending version rather than minting another password. Superseded
-secrets are deleted from the store once no pending or in-flight command still names them. A node has
-at most one current and one pending version at a time.
+secrets that rotation itself made are deleted from the store once no pending or in-flight command and
+no other machine still names them. The secret a machine was enrolled with (version 1) is never
+deleted: it is yours, and one rack-wide reference may serve many machines. A node has at most one
+current and one pending version at a time.
 
 Today the tenant-root teardown runs the rotation after every dedicated-root lease, and a failed
 rotation quarantines the machine (see [dedicated-root metal](/docs/guides/bare-metal/dedicated-root)).

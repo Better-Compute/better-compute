@@ -1,7 +1,7 @@
-import { writeFile } from 'node:fs/promises';
 import { parseDuration } from '@better-compute/core';
 import { CliError, usageError } from '../errors.js';
 import { defineCommand } from '../framework.js';
+import { writeReserved } from '../secret-file.js';
 import { newIdempotencyKey, parseTime, tenantFlag } from './capacity.js';
 
 // The tenant's catalog and bookkeeping (PLAN.md §9.3: commands mirror the API groups): sites, projects, images,
@@ -21,16 +21,6 @@ function list(value: string | undefined): string[] {
     .filter(Boolean);
 }
 
-/** Writes a one-time secret (or an export) to a new file, 0600, never over an existing one. */
-export async function writeNewFile(file: string, content: string): Promise<void> {
-  try {
-    await writeFile(file, content, { mode: 0o600, flag: 'wx' });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST')
-      throw new CliError('ALREADY_EXISTS', `${file} exists; it is never written over`);
-    throw error;
-  }
-}
 
 /** A usage time: ISO 8601, epoch ms, +DURATION from now, or -DURATION before now (`-7d`). */
 function usageTime(value: string, now: number, flag: string): number {
@@ -124,19 +114,23 @@ function flavorBody(flags: {
   };
 }
 
-/** Prints a revealed webhook secret, or writes it to --secret-out and leaves it out of the output. */
+/**
+ * Runs a call that reveals a webhook's signing secret and prints it, or with --secret-out writes it to
+ * that file and leaves it out of the output. The file is reserved before the call (`writeReserved`):
+ * a rotation whose new secret could not be written would leave nobody holding it.
+ */
 async function revealSecret(
-  result: { secret?: unknown } & Record<string, unknown>,
+  call: () => Promise<{ secret?: unknown } & Record<string, unknown>>,
   out: string | undefined,
   path: (value: string) => string,
   note: (message: string) => void,
 ) {
-  if (!out) return result;
-  const { secret, ...rest } = result;
-  if (typeof secret !== 'string')
-    throw new CliError('INVALID_RESPONSE', 'The answer carries no signing secret');
+  if (!out) return call();
   const file = path(out);
-  await writeNewFile(file, `${secret}\n`);
+  const { secret: _secret, ...rest } = await writeReserved(file, call, (result) => {
+    if (typeof result.secret !== 'string') throw new CliError('INVALID_RESPONSE', 'The answer carries no signing secret');
+    return `${result.secret}\n`;
+  });
   note(`Wrote the signing secret to ${file} (0600).`);
   return { ...rest, secretFile: file };
 }
@@ -681,20 +675,20 @@ export const catalogCommands = [
       const from = usageTime(flags.from!, now, 'from');
       const to = usageTime(flags.to!, now, 'to');
       if (to <= from) throw usageError('--to must be after --from');
-      const exported = await (
-        await api()
-      ).call<{ data: string } & Record<string, unknown>>('usage/export', {
-        tenantId: flags.tenant,
-        from,
-        to,
-        ...(flags.project ? { projectId: flags.project } : {}),
-        ...(flags.meter ? { meter: flags.meter } : {}),
-        ...(flags['export-format'] ? { format: flags['export-format'] } : {}),
-      });
-      if (!flags.out) return exported;
-      const { data, ...summary } = exported;
+      const client = await api();
+      const exportUsage = () =>
+        client.call<{ data: string } & Record<string, unknown>>('usage/export', {
+          tenantId: flags.tenant,
+          from,
+          to,
+          ...(flags.project ? { projectId: flags.project } : {}),
+          ...(flags.meter ? { meter: flags.meter } : {}),
+          ...(flags['export-format'] ? { format: flags['export-format'] } : {}),
+        });
+      if (!flags.out) return exportUsage();
       const file = path(flags.out);
-      await writeNewFile(file, data);
+      // The file is reserved first, as for a secret: a long export is not thrown away for a taken path.
+      const { data: _data, ...summary } = await writeReserved(file, exportUsage, (exported) => exported.data);
       note(`Wrote ${String(summary.count)} window(s) to ${file}.`);
       if (summary.truncated) note('Truncated: narrow the range or the meter for the rest.');
       return { ...summary, file };
@@ -758,15 +752,19 @@ export const catalogCommands = [
     async run({ flags, path, api, note }) {
       const events = list(flags.events);
       if (!events.length) throw usageError('--events needs at least one pattern');
-      const created = await (
-        await api()
-      ).call<{ secret?: unknown } & Record<string, unknown>>('webhooks/create', {
-        tenantId: flags.tenant,
-        url: flags.endpoint,
-        events,
-        ...(flags.description ? { description: flags.description } : {}),
-      });
-      return revealSecret(created, flags['secret-out'], path, note);
+      const client = await api();
+      return revealSecret(
+        () =>
+          client.call<{ secret?: unknown } & Record<string, unknown>>('webhooks/create', {
+            tenantId: flags.tenant,
+            url: flags.endpoint,
+            events,
+            ...(flags.description ? { description: flags.description } : {}),
+          }),
+        flags['secret-out'],
+        path,
+        note,
+      );
     },
   }),
   defineCommand({
@@ -864,14 +862,19 @@ export const catalogCommands = [
           throw usageError('--keep-previous must be whole seconds up to 24h');
         keep = ms / 1000;
       }
-      const rotated = await (
-        await api()
-      ).call<{ secret?: unknown } & Record<string, unknown>>('webhooks/rotateSecret', {
-        tenantId: flags.tenant,
-        webhookId: id(args, 'whk', 'webhook'),
-        ...(keep !== undefined ? { keepPreviousSeconds: keep } : {}),
-      });
-      return revealSecret(rotated, flags['secret-out'], path, note);
+      const webhookId = id(args, 'whk', 'webhook');
+      const client = await api();
+      return revealSecret(
+        () =>
+          client.call<{ secret?: unknown } & Record<string, unknown>>('webhooks/rotateSecret', {
+            tenantId: flags.tenant,
+            webhookId,
+            ...(keep !== undefined ? { keepPreviousSeconds: keep } : {}),
+          }),
+        flags['secret-out'],
+        path,
+        note,
+      );
     },
   }),
   defineCommand({

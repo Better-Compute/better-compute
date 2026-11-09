@@ -48,6 +48,7 @@ export {
   type InstallScriptOptions,
 } from './install-script.js';
 export { CliError, errorCode, RemoteExitError, usageCodes, usageError } from './errors.js';
+export { confirmDestructive, yesFlag } from './confirm.js';
 export {
   commandHelp,
   createCliProgram,
@@ -176,6 +177,20 @@ export function processIO(): CliIO {
       return Buffer.concat(chunks).toString('utf8');
     },
     terminal: processTerminal(),
+    // Only a person at a terminal is asked; a pipe or a CI job gets the "re-run with --yes" refusal.
+    ...(process.stdin.isTTY && process.stderr.isTTY
+      ? {
+          async confirm(question: string) {
+            const { createInterface } = await import('node:readline/promises');
+            const prompt = createInterface({ input: process.stdin, output: process.stderr });
+            try {
+              return /^(y|yes)$/i.test((await prompt.question(`${terminalSafe(question)} [y/N] `)).trim());
+            } finally {
+              prompt.close();
+            }
+          },
+        }
+      : {}),
     spawn: (command, args) =>
       new Promise<number>((resolve, reject) => {
         const child = spawnProcess(command, [...args], { stdio: 'inherit' });

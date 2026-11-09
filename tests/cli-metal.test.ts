@@ -114,8 +114,9 @@ describe('metal', () => {
   });
 
   it('runs lifecycle verbs, power actions and a bulk batch', async () => {
+    // retire, undeploy and a hard power action destroy something: they need --yes (tests/cli-confirm.test.ts).
     for (const verb of ['manage', 'inspect', 'provide', 'rescue', 'unrescue', 'recover', 'retire'])
-      expect((await run(['metal', verb, NODE])).calls[0]).toEqual({
+      expect((await run(['metal', verb, NODE, ...(verb === 'retire' ? ['--yes'] : [])])).calls[0]).toEqual({
         path: `metal/${verb}`,
         body: { tenantId: 'org_acme', nodeId: NODE },
       });
@@ -129,9 +130,9 @@ describe('metal', () => {
       profileVersion: 3,
     });
     expect(
-      (await run(['metal', 'undeploy', NODE, '--wipe', 'secure-erase'])).calls[0]!.body,
-    ).toMatchObject({ wipe: 'secure-erase' });
-    expect((await run(['metal', 'power', NODE, '--action', 'cycle'])).calls[0]!.body).toMatchObject(
+      (await run(['metal', 'undeploy', NODE, '--wipe', 'secure-erase', '--yes'])).calls[0]!.body,
+    ).toEqual({ tenantId: 'org_acme', nodeId: NODE, wipe: 'secure-erase' });
+    expect((await run(['metal', 'power', NODE, '--action', 'cycle', '--yes'])).calls[0]!.body).toMatchObject(
       { action: 'cycle' },
     );
     const dir = await mkdtemp(join(tmpdir(), 'bc-bulk-'));

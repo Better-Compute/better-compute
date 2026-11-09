@@ -9,7 +9,8 @@ import type { Json, SqlTx } from '@better-compute/core';
 //    result;
 // 3. flips pending → current only on a node-signed (role site) `verified: true`. Otherwise the
 //    version fails, the old one stays current, and the node gets `BmcCredentialRotated=False`.
-// Superseded secrets are deleted once no open command names them.
+// Superseded secrets that rotation made are deleted once no open command and no other machine names
+// them; the enrollment secret (version 1) is the operator's and is never deleted here.
 
 /** A password most BMC vendors accept: 20 characters, every class, no quotes or backslashes. */
 export function generateBmcPassword(length = 20): string {
@@ -126,16 +127,23 @@ export async function failCredential(tx: SqlTx, nodeId: string, pending: Credent
 }
 
 /**
- * Superseded versions whose secret may go: not purged yet, and named by no open command (a queued
- * BMC operation still carries the old ref). The caller deletes each from the store, then marks it.
+ * Superseded versions whose secret may go. Only a secret rotation itself made: version 1 is the
+ * credential the machine was enrolled with, an operator's secret that may be rack-wide (many machines
+ * enrolled with one ref), and deleting it would lock the others out. And only one nothing else uses:
+ * not purged yet, named by no open command (a queued BMC operation still carries the old ref), and
+ * not the credential, current or in rotation, of another machine. The caller deletes each from the
+ * store, then marks it.
  */
 export async function purgeableCredentials(tx: SqlTx, nodeId: string): Promise<CredentialVersion[]> {
   const { rows } = await tx.query<CredentialVersion>(
     `SELECT v.version, v.ref, v.state FROM bmc_credential_versions v
-      WHERE v.node_id = $1 AND v.state = 'superseded' AND v.purged_at IS NULL
+      WHERE v.node_id = $1 AND v.state = 'superseded' AND v.purged_at IS NULL AND v.version > 1
         AND NOT EXISTS (SELECT 1 FROM commands c
                          WHERE c.state IN ('pending', 'dispatched', 'acked', 'running')
                            AND position(convert_to(v.ref, 'UTF8') IN c.body) > 0)
+        AND NOT EXISTS (SELECT 1 FROM metal_nodes other WHERE other.node_id <> v.node_id AND other.bmc_credentials = v.ref)
+        AND NOT EXISTS (SELECT 1 FROM bmc_credential_versions other
+                         WHERE other.node_id <> v.node_id AND other.ref = v.ref AND other.state IN ('current', 'pending', 'failed'))
       ORDER BY v.version`,
     [nodeId],
   );

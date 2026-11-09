@@ -46,7 +46,7 @@ const bmc = strictObject(
       required: ['username', 'password'],
       additionalProperties: false,
       description:
-        'A secret:// (or vault://, env://) reference, or inline { username, password } stored in the secret broker at once and never echoed',
+        "One of the tenant's own secrets (secret://<tenantId>/<id>; any other tenant's is refused with ACCESS_DENIED, and vault:// or env:// references are for root callers only), or inline { username, password } stored in the secret broker at once and never echoed",
     },
     tlsSpkiSha256: {
       type: 'string',

@@ -20,6 +20,7 @@ import {
   stepCommandKey,
   stepNotReady,
   StepNotReady,
+  stepWaiting,
   verifyImageForUse,
   workflowProfile,
   type CommandOutcome,
@@ -50,6 +51,7 @@ import { isMatchableUuid, matchDiscoveredMachine, verifyMachineIdentity } from '
 import { invalidateSiteProxyTargets } from './proxy-targets.js';
 import { newIdentityGeneration, tenantRootPolicy } from './tenant-root.js';
 import { bmcResult, dcgmResult, deployResult, inventoryRefreshResult, wipeResult } from './results.js';
+import { assertStoredCredentialRef } from './secret-refs.js';
 import type { HardwareProfile } from './module-types.js';
 import { readMetalNode, type MetalNodeRow } from './store.js';
 
@@ -113,15 +115,44 @@ async function bmc(
 ): Promise<Json> {
   const node = known ?? (await metalNode(context));
   if (!node.bmc_credentials) throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no BMC credentials`);
-  const outcome = await awaitCommand(context, {
-    nodeId: await siteAgent(context, node.node_id),
-    kind,
-    payload: bmcOperationJson(node, operation, args),
-    ...(key ? { key } : {}),
-    // Any site agent can reach the BMC: after a failover, what the old agent did stands (§8.5).
-    reroutable: true,
-  });
-  return bmcResult(outcome).result;
+  assertStoredCredentialRef(node);
+  const cutsPower = kind === 'bmc.power' && operation === 'power.setPower' && endsRunningSystem(args.action);
+  try {
+    const outcome = await awaitCommand(context, {
+      nodeId: await siteAgent(context, node.node_id),
+      kind,
+      payload: bmcOperationJson(node, operation, args),
+      ...(key ? { key } : {}),
+      // Any site agent can reach the BMC: after a failover, what the old agent did stands (§8.5).
+      reroutable: true,
+    });
+    return bmcResult(outcome).result;
+  } finally {
+    // Whatever became of the command (still on its way, done, lost): from when it was sent, a session
+    // the machine had before is not proof of a running ramdisk (ramdiskConnected).
+    if (cutsPower) await recordPowerCut(context.sql, node, stepCommandKey(context, key));
+  }
+}
+
+/** BMC power actions that end whatever the machine is running. */
+export function endsRunningSystem(action: unknown): boolean {
+  return action === 'off' || action === 'graceful-off' || action === 'reset' || action === 'graceful-restart' || action === 'cycle';
+}
+
+/**
+ * Records when a power-cutting command of this key was sent to one of the site's agents
+ * (`metal_nodes.power_cut_at`): its enqueue time, or its release time if it waited for a batch
+ * approval. Nothing if no such command exists yet.
+ */
+async function recordPowerCut(sql: SqlTx, node: Pick<MetalNodeRow, 'node_id' | 'site_id'>, commandKey: string): Promise<void> {
+  await sql.query(
+    `UPDATE metal_nodes m SET power_cut_at = GREATEST(COALESCE(m.power_cut_at, sent.at), sent.at)
+       FROM (SELECT max(GREATEST(c.created_at, CASE WHEN c.not_before = 'infinity' THEN c.created_at ELSE c.not_before END)) AS at
+               FROM commands c JOIN nodes agent ON agent.id = c.node_id
+              WHERE agent.site_id = $2 AND c.idempotency_key = $3) sent
+      WHERE m.node_id = $1 AND sent.at IS NOT NULL AND (m.power_cut_at IS NULL OR m.power_cut_at < sent.at)`,
+    [node.node_id, node.site_id, commandKey],
+  );
 }
 
 // Payloads are the proto3 JSON of each kind's message (`metalPayloads`): the runtime packs them.
@@ -185,6 +216,13 @@ const compressionNames: Readonly<Record<string, string>> = {
   zstd: 'IMAGE_COMPRESSION_ZSTD',
   gzip: 'IMAGE_COMPRESSION_GZIP',
 };
+
+/**
+ * How long `metal.ensureRamdisk` waits for an operator to settle a machine's PXE MAC (`metal.confirmMac`)
+ * once discovery has done what it can, counted from metal's discovery power cycle: outside the step's
+ * own timeout, which is for the machine, not for people.
+ */
+export const pxeConfirmationWaitMs = 7 * 24 * 3_600_000;
 
 /** How long a ramdisk's discovery token is good for: the boot it was minted for, no more. */
 export const discoveryTokenTtlSeconds = 900;
@@ -255,11 +293,16 @@ async function sanbootActive(context: StepContext): Promise<boolean> {
 
 const powerActions = ['on', 'off', 'graceful-off', 'reset', 'graceful-restart', 'cycle', 'nmi'] as const;
 
-/** Is the machine's ramdisk connected right now? */
+/**
+ * Is the machine's ramdisk connected right now? A session counts only if it connected since metal
+ * last cut the machine's power (`metal_nodes.power_cut_at`): after a hard power-off the gateway keeps
+ * showing the old session until its ping times out (about 20 s), and that ramdisk is gone.
+ */
 async function ramdiskConnected(context: StepContext, nodeId: string): Promise<boolean> {
   const { rows } = await context.sql.query<{ ok: boolean }>(
-    `SELECT (role = 'ramdisk' AND connected_at IS NOT NULL AND (disconnected_at IS NULL OR connected_at > disconnected_at)) AS ok
-       FROM node_sessions WHERE node_id = $1`,
+    `SELECT (s.role = 'ramdisk' AND s.connected_at IS NOT NULL AND (s.disconnected_at IS NULL OR s.connected_at > s.disconnected_at)
+             AND (m.power_cut_at IS NULL OR s.connected_at >= m.power_cut_at)) AS ok
+       FROM node_sessions s LEFT JOIN metal_nodes m ON m.node_id = s.node_id WHERE s.node_id = $1`,
     [nodeId],
   );
   return rows[0]?.ok === true;
@@ -434,7 +477,10 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
    * A machine known only by its product UUID is PXE-booted once without an entry first. Its site agent
    * lists it (StatusReport.discovered), and a MAC first seen after that power cycle under its UUID becomes
    * a candidate (discovery.ts). The step waits until an operator confirms it (`metal.confirmMac`), or binds
-   * it at once on a pool with `trustProvisioningNetwork: true`.
+   * it at once on a pool with `trustProvisioningNetwork: true`. That wait is an operator's, so it is parked
+   * outside the step's 20 minutes (`stepWaiting`, up to `pxeConfirmationWaitMs`): the node stays where it is,
+   * with its candidate in `discoveredMac`, instead of failing and being power-cycled again on `recover`. The
+   * timeout runs again from the confirmation. A machine discovery never saw still fails after 20 minutes.
    */
   const ensureRamdisk = defineStep({
     id: 'metal.ensureRamdisk',
@@ -466,6 +512,10 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
               ? `PXE discovery found ${found.mac}: waiting for metal.confirmMac`
               : `waiting for PXE discovery (${found.reason ?? 'not-seen'}); metal.confirmMac binds a MAC by hand`,
           });
+          // A candidate to confirm, or a finding only an operator can settle (several MACs, a UUID or MAC
+          // another machine has): the machine has done its part, so the wait is not the step's to time.
+          const operators = found.mac !== undefined || node.discovered_mac !== null || (found.reason !== undefined && found.reason !== 'not-seen');
+          if (operators && rows[0]?.sent) throw stepWaiting(rows[0].sent.getTime() + pxeConfirmationWaitMs);
           throw stepNotReady(5_000);
         }
         node = await metalNode(context);
@@ -912,6 +962,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       const previousRef = node.bmc_credentials;
       if (!previousRef) throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no BMC credentials`);
       if (!context.secrets) throw new ComputeError('INVALID_CONFIG', 'metal.rotateBmcCredential needs the secret broker');
+      assertStoredCredentialRef(node);
       // A retry picks up the pending version, whose password the BMC may already have.
       let pending = await pendingCredential(context.sql, node.node_id);
       if (!pending) {
@@ -953,7 +1004,8 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       if (!(await verifySite(context.sql, outcome, context)))
         return fail(new ComputeError('DRIVER_ERROR', 'The rotation result is not signed by the site agent'));
       await context.sql.transaction((tx) => promoteCredential(tx, node.node_id, pending!, previousRef));
-      // The old secrets go once nothing queued still names them.
+      // Old secrets that rotation made go once nothing queued and no other machine still names them;
+      // the enrollment secret stays (it is the operator's, and may be rack-wide).
       const purgeable = await purgeableCredentials(context.sql, node.node_id);
       let purged = 0;
       if (context.secrets.delete)

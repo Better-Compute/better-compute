@@ -198,8 +198,11 @@ script before anything is installed.
 
 It creates `/etc/bcd` and `/var/lib/bcd` with mode 0700 and `/etc/cdi` with mode 0755 (and, with `--plugins`,
 `/usr/local/lib/bcd/plugins` with mode 0755). Each file is written next to its target as `*.new` and renamed over
-it, so a replacement is atomic even while bcd runs. When a `config.toml` already exists, every section of it
-(`[plugins]`, `[boot]`, `[imds]`, ...) is carried over below the freshly written top-level keys; with `--plugins`, a
+it, so a replacement is atomic even while bcd runs. When a `config.toml` already exists, the script writes the
+top-level keys it sets itself (`gateway_url`, `site`, the three pins, and `approver_set_sha256` and
+`command_root_sha256` when it has them), then carries over every other top-level key of the existing file as it is
+written there (`gateway_server_name`, `data_dir`, `socket_path`, a pin of an earlier install the new script has no
+flag for), never a key twice, and then every section of it (`[plugins]`, `[boot]`, `[imds]`, ...); with `--plugins`, a
 `[plugins]` section is appended unless the file already has one, and with `--unprivileged` a `[helper]` section
 likewise. After the unit, it installs or removes the [plugin drop-in](#the-plugin-drop-in) according to whether
 `config.toml` has a `[plugins]` section, and the [helper mode](#running-bcd-node-unprivileged) (the `bcd` account,

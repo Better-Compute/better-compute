@@ -55,11 +55,11 @@ Check the database, schema, clock, method registry and IAM wiring
 better-compute doctor [--strict] [--pki PATH] [--config PATH]
 ```
 
-doctor runs compute.selfCheck() (applied migrations, btree_gist, compute_now() against the database clock, the method → action registry, and each module's own checks) and adds the CLI's findings, such as a deployment with no IAM configured, the PKI bundle, and the configuration's host export (whether the gateway role can authenticate daemons by node certificate, reach the api's pokes, tunnels and revocations, and whether host routes fit beside the API). It only reads. --strict exits non-zero (DOCTOR_FINDINGS) when any error or warning is found.
+doctor runs compute.selfCheck() (applied migrations, btree_gist, compute_now() against the database clock, the method → action registry, and each module's own checks) and adds the CLI's findings, such as a deployment with no IAM configured, the PKI bundle, and the configuration's host export (whether the gateway role can authenticate daemons by node certificate, reach the api's pokes, tunnels and revocations, and whether host routes fit beside the API). It only reads. It prints the report, then exits non-zero (DOCTOR_FINDINGS) when any finding is an error; --strict also exits non-zero on a warning. Informational findings never fail it.
 
 | Flag              | Description                                                                              | Default                    | Environment             |
 | ----------------- | ---------------------------------------------------------------------------------------- | -------------------------- | ----------------------- |
-| `--strict`        | Exit non-zero when any error or warning is found                                         |                            |                         |
+| `--strict`        | Also exit non-zero on warnings (errors always do)                                        |                            |                         |
 | `--pki PATH`      | The PKI bundle written by pki init                                                       | `.better-compute/pki.json` | `BETTER_COMPUTE_PKI`    |
 | `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}       |                            | `BETTER_COMPUTE_CONFIG` |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                         |                            |                         |
@@ -3198,7 +3198,7 @@ Enroll a machine by its BMC into a pool (metal.enroll)
 better-compute metal enroll --tenant ID --site ID --pool ID --bmc-address HOST|URL --bmc-driver DRIVER [--bmc-credentials REF] [--bmc-username USER] [--bmc-password-file PATH] [--bmc-tls-spki HEX] [--macs MAC,…] [--product-uuid UUID] [--arch ARCH] [--legacy-bios] [--hardware-profile NAME] [--config PATH] [--url URL]
 ```
 
-metal enroll creates a node in --pool of --site from its BMC (--bmc-address, --bmc-driver) and queues BMC verification, inspection and commissioning. The BMC credentials are a reference (--bmc-credentials secret://…, vault://… or env://…), or --bmc-username with --bmc-password-file, which the server stores in its secret broker at once and never echoes. --bmc-tls-spki pins the BMC certificate. Decided as compute:nodes:provision.
+metal enroll creates a node in --pool of --site from its BMC (--bmc-address, --bmc-driver) and queues BMC verification, inspection and commissioning. The BMC credentials are a reference to a secret of the tenant itself (--bmc-credentials secret://\<tenant>/\<id>; vault://… and env://… only as the root tenant), or --bmc-username with --bmc-password-file, which the server stores in its secret broker at once and never echoes. --bmc-tls-spki pins the BMC certificate. Decided as compute:nodes:provision.
 
 | Flag                       | Description                                                                                                   | Default         | Environment             |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------- | --------------- | ----------------------- | --- |
@@ -3207,7 +3207,7 @@ metal enroll creates a node in --pool of --site from its BMC (--bmc-address, --b
 | `--pool ID`                | The pool it joins                                                                                             |                 |                         |
 | `--bmc-address HOST        | URL`                                                                                                          | The BMC address |                         |     |
 | `--bmc-driver DRIVER`      | The BMC driver, e.g. redfish                                                                                  |                 |                         |
-| `--bmc-credentials REF`    | secret://, vault:// or env:// reference                                                                       |                 |                         |
+| `--bmc-credentials REF`    | secret://\<tenant>/\<id>, a secret of the node's tenant (vault:// or env:// as root only)                     |                 |                         |
 | `--bmc-username USER`      | With --bmc-password-file, instead of a reference                                                              |                 |                         |
 | `--bmc-password-file PATH` | A file holding the BMC password                                                                               |                 |                         |
 | `--bmc-tls-spki HEX`       | SHA-256 of the BMC certificate’s public key                                                                   |                 |                         |
@@ -3362,21 +3362,22 @@ better-compute metal recover node_01k5w…
 Retire a node: its retiring workflow erases its disks and powers it off (metal.retire)
 
 ```sh
-better-compute metal retire NODE --tenant ID [--config PATH] [--url URL]
+better-compute metal retire NODE --tenant ID [--yes] [--config PATH] [--url URL]
 ```
 
-Retire a node: its retiring workflow erases its disks and powers it off (metal.retire)
+metal retire starts the retiring workflow: a crypto-erase of the disks, power off, and the end of the node’s identity (certificates revoked, BMC credentials forgotten). A retired node does not come back; the machine has to be enrolled again. It needs --yes, or a yes at an interactive terminal. Decided as compute:nodes:provision.
 
 | Flag              | Description                                                                                                   | Default | Environment             |
 | ----------------- | ------------------------------------------------------------------------------------------------------------- | ------- | ----------------------- |
 | `--tenant ID`     | The tenant acting (the caller’s organization)                                                                 |         | `BETTER_COMPUTE_TENANT` |
+| `--yes`           | Confirm: the disks are erased and the node is retired for good                                                |         |                         |
 | `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                         |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |         |                         |
 
 ```sh
-better-compute metal retire node_01k5w…
+better-compute metal retire node_01k5w… --yes
 ```
 
 ### metal deploy
@@ -3408,22 +3409,23 @@ better-compute metal deploy node_01k5w… --profile ubuntu-gpu --profile-version
 Release a deployed node: wipe its disks and power it off (metal.undeploy)
 
 ```sh
-better-compute metal undeploy NODE --tenant ID [--wipe MODE] [--config PATH] [--url URL]
+better-compute metal undeploy NODE --tenant ID [--wipe MODE] [--yes] [--config PATH] [--url URL]
 ```
 
-Release a deployed node: wipe its disks and power it off (metal.undeploy)
+metal undeploy releases a deployed node: the installed system is gone, the disks are wiped as --wipe says (quick by default) and the machine is powered off, back to ready. It needs --yes, or a yes at an interactive terminal. Decided as compute:nodes:provision.
 
 | Flag              | Description                                                                                                   | Default | Environment             |
 | ----------------- | ------------------------------------------------------------------------------------------------------------- | ------- | ----------------------- |
 | `--tenant ID`     | The tenant acting (the caller’s organization)                                                                 |         | `BETTER_COMPUTE_TENANT` |
 | `--wipe MODE`     | How the disks are wiped (default quick)                                                                       |         |                         |
+| `--yes`           | Confirm: the installed system and its disks are wiped                                                         |         |                         |
 | `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                         |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |         |                         |
 
 ```sh
-better-compute metal undeploy node_01k5w… --wipe secure-erase
+better-compute metal undeploy node_01k5w… --wipe secure-erase --yes
 ```
 
 ### metal abort
@@ -3500,15 +3502,16 @@ better-compute metal confirm-mac node_01k5w… --mac 3c:ec:ef:12:34:56
 Send a BMC power action through the site agent (metal.power)
 
 ```sh
-better-compute metal power NODE --tenant ID --action ACTION [--config PATH] [--url URL]
+better-compute metal power NODE --tenant ID --action ACTION [--yes] [--config PATH] [--url URL]
 ```
 
-Send a BMC power action through the site agent (metal.power)
+metal power sends one BMC power action through the site agent and returns without waiting for the BMC. The actions that cut power under a running system without asking it (off, reset, cycle) need --yes, or a yes at an interactive terminal; on, graceful-off, graceful-restart and nmi do not. Decided as compute:nodes:power.
 
 | Flag              | Description                                                                                                   | Default | Environment             |
 | ----------------- | ------------------------------------------------------------------------------------------------------------- | ------- | ----------------------- |
 | `--tenant ID`     | The tenant acting (the caller’s organization)                                                                 |         | `BETTER_COMPUTE_TENANT` |
 | `--action ACTION` | The power action                                                                                              |         |                         |
+| `--yes`           | Confirm: off, reset and cycle cut power without asking the running system                                     |         |                         |
 | `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                         |
@@ -3516,6 +3519,7 @@ Send a BMC power action through the site agent (metal.power)
 
 ```sh
 better-compute metal power node_01k5w… --action graceful-restart
+better-compute metal power node_01k5w… --action off --yes
 ```
 
 ### metal bulk

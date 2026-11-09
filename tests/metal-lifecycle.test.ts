@@ -389,7 +389,10 @@ describe('enroll → ready (§3.5)', () => {
   it('refuses a pool in another site, another tenant, or credentials that are neither a ref nor a pair', async () => {
     const bmc = { address: 'x', driver: 'redfish', credentials: 'secret://root/1' };
     await expect(call('enroll', { tenantId: 'root', siteId: 'site_b', poolId: 'pool_metal', bmc })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
-    await expect(call('enroll', { tenantId: 'ten_other', siteId: 'site_a', poolId: 'pool_metal', bmc })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    // Another tenant with its own secret: the pool is not its. (With root's secret it is refused earlier, ACCESS_DENIED.)
+    const own = { ...bmc, credentials: 'secret://ten_other/1' };
+    await expect(call('enroll', { tenantId: 'ten_other', siteId: 'site_a', poolId: 'pool_metal', bmc: own })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(call('enroll', { tenantId: 'ten_other', siteId: 'site_a', poolId: 'pool_metal', bmc })).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
     await expect(
       call('enroll', { tenantId: 'root', siteId: 'site_a', poolId: 'pool_metal', bmc: { ...bmc, credentials: 'hunter2' } }),
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' });

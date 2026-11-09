@@ -47,7 +47,7 @@ The module is executable code and is trusted as such. It can export four things:
 | `default` | `defineConfig(options)` or `defineConfig(factory)`: the options of `betterCompute()` |
 | `host` | `defineHost(config)` or `defineHost(factory)`: routes, metrics, tunnels, IAM handlers and the gateway role for `serve` |
 | `commands` | Project commands made with `defineCommand`, run as `better-compute <name>` |
-| `cli` | `{ defaults: { [command]: { flag: value } } }`, keyed by command name or `'*'` for every command: flag defaults, used when neither the flag nor its environment variable is set |
+| `cli` | `{ defaults: { [command]: { flag: value } } }`, keyed by command name or `'*'` for every command: flag defaults, used when neither the flag nor its environment variable is set. A key other than `defaults`, a scope that names no command, or a flag its command does not have (under `'*'`: that no command has) is `INVALID_CONFIG`, with the nearest name |
 
 Prefer the factory form. Importing the module then opens nothing; the CLI calls the factory with
 `{ command, env, cwd }`, and your own server calls it through `configOptions(config)`:
@@ -245,7 +245,11 @@ export const host = defineHost(async ({ compute, env }) => ({
 | `gateway.ws` | `{ publicHost, listen? }`: the v0.4 WebSocket fallback (default port 443) |
 | `gateway.options` | Anything else `createGateway()` takes (`maxStreams`, rates, extra `reports`) |
 
-`serve` checks the shape and refuses a bad one with `INVALID_CONFIG`; `doctor` checks the wiring.
+`serve` checks the shape and refuses a bad one with `INVALID_CONFIG`; `doctor` checks the wiring. A key the table
+does not list is refused too, at every level, with the nearest known one (`host.gatway is not a setting of host.
+Did you mean host.gateway?`): a mistyped key is never dropped, since `serve` would then start without what it was
+meant to configure. Objects handed on as they are (`gateway.tls`, `gateway.options`, `http.wellKnown`) take
+whatever their consumer takes.
 
 ## Modules and their options
 

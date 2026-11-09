@@ -19,7 +19,7 @@ import {
   type SqlTx,
   type WipeMode,
 } from '@better-compute/core';
-import { builtinSteps, siteAgentFor, stepRegistry, type StepRegistry } from '@better-compute/provision';
+import { builtinSteps, heldBatchNotAfter, siteAgentFor, stepRegistry, workflowWorkKind, type StepRegistry } from '@better-compute/provision';
 import { encodeMessageJson } from '@better-compute/protocol';
 import { batchSubject, stateChain, verbBatchScope } from './batch.js';
 import {
@@ -38,7 +38,8 @@ import { invalidateSiteProxyTargets } from './proxy-targets.js';
 import { stateProfile, unrescueProfile } from './profiles.js';
 import { metalWorkKind, unrescuePhase } from './reconcile.js';
 import { schemas } from './schemas.js';
-import { bmcOperationJson, metalSteps } from './steps.js';
+import { assertCredentialRef, assertStoredCredentialRef } from './secret-refs.js';
+import { bmcOperationJson, endsRunningSystem, metalSteps } from './steps.js';
 import { applyProvisionVerb, readMetalNode, resolveDriverBindings, setMetalWorkflow, type MetalNodeRow } from './store.js';
 
 // The `metal` group of PLAN.md §9.2 (v0.2 rows). Every verb checks the move against core's
@@ -334,8 +335,13 @@ async function enroll(context: MethodContext, caps: Capabilities, input: EnrollI
   const { hardwareProfiles } = caps;
   // Inline credentials go to the secret broker before anything else, so they never reach a row.
   let credentials: SecretRef;
-  if (typeof input.bmc.credentials === 'string') credentials = input.bmc.credentials;
-  else {
+  if (typeof input.bmc.credentials === 'string') {
+    // The site agent presents this secret to bmc.address, which the caller also chooses: a tenant names
+    // only its own secrets. Root is the deployment's root tenant calling (the envelope sets the caller).
+    const root = context.iam?.rootTenantId;
+    assertCredentialRef(input.bmc.credentials, input.tenantId, Boolean(root) && (context.caller?.tenantId ?? input.tenantId) === root);
+    credentials = input.bmc.credentials;
+  } else {
     if (!context.secrets)
       throw new ComputeError('INVALID_CONFIG', 'No secret broker is configured; pass bmc.credentials as a secret:// reference');
     credentials = await context.secrets.put(input.tenantId, JSON.stringify(input.bmc.credentials));
@@ -620,6 +626,7 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
           context.sql.transaction(async (tx) => {
             const node = await readMetalNode(tx, input.nodeId, { tenantId: input.tenantId });
             if (!node.bmc_credentials) throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no BMC credentials`);
+            assertStoredCredentialRef(node);
             if (servesBmcOperation(node.bmc_driver, 'power.setPower', caps.bmcDrivers, await siteDriverKinds(tx, node.site_id, node.bmc_driver)) === false)
               throw bmcDriverUnsupported(node.bmc_driver, [{ profile: 'metal.power', step: 'power.setPower', operations: ['power.setPower'] }]);
             if (['deploying', 'releasing', 'commissioning', 'inspecting'].includes(node.provision_state))
@@ -648,9 +655,13 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
               kind: 'bmc.power',
               payload,
               idempotencyKey: `metal:power:${context.requestId}`,
-              notAfter: rows[0]!.now.getTime() + 5 * 60_000,
+              // Five minutes to reach the BMC; held for approvals (§13), as long as its batch waits for them.
+              notAfter: (batch?.held ? await heldBatchNotAfter(tx, batch.batchId) : undefined) ?? rows[0]!.now.getTime() + 5 * 60_000,
               ...(batch ? { batchId: batch.batchId } : {}),
             });
+            // A ramdisk session from before this is no proof of a running ramdisk any more (metal.ensureRamdisk).
+            if (endsRunningSystem(input.action))
+              await tx.query('UPDATE metal_nodes SET power_cut_at = compute_now() WHERE node_id = $1', [node.node_id]);
             return { commandId: command.id, ...(batch ? { batchId: batch.batchId, held: batch.held } : {}) };
           }),
       }),
@@ -696,6 +707,8 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
               [node.node_id, input.mac],
             );
             await context.work.enqueue(tx, metalWorkKind, node.node_id);
+            // The workflow waiting for this decision (metal.ensureRamdisk) goes on now, not at its next look.
+            if (node.workflow_id) await context.work.enqueue(tx, workflowWorkKind, node.node_id);
             // Audited: who bound which MAC, and whether it was the one discovery proposed.
             await context.events.publish(tx, {
               type: 'node.pxe-mac.confirmed',

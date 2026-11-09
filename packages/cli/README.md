@@ -26,7 +26,7 @@ for PGlite databases, and `@better-compute/testing` is an optional peer for `sim
 better-compute help                 # every command; help <command> for one; help --json for tools
 better-compute init                 # writes better-compute.config.ts (PGlite in development)
 better-compute migrate              # finds the nearest better-compute.config.* (or --config PATH)
-better-compute doctor --strict      # selfCheck findings; exits 1 (DOCTOR_FINDINGS) on any warning
+better-compute doctor --strict      # selfCheck findings; exits 1 (DOCTOR_FINDINGS) on an error, with --strict on a warning too
 better-compute serve                # the API and every worker role in one process
 better-compute api --list           # every route, whether it needs a token, its IAM action
 better-compute api system.version
@@ -100,7 +100,9 @@ Configuration commands find the deployment in this order:
 The module's default export is `defineConfig(options)` or `defineConfig(factory)` from
 `better-compute/server`. A factory receives `{ command, env, cwd }`. Two named exports are
 optional: `commands` (project commands built with `defineCommand`) and `cli.defaults`
-(flag defaults, per command or `'*'`). The module is trusted, executable code.
+(flag defaults, per command or `'*'`). The module is trusted, executable code. Unknown keys of the
+`cli` and `host` exports (a mistyped command, flag or setting) are refused with `INVALID_CONFIG` and
+the nearest known name, not ignored.
 
 **Environment-only mode** (`configFromEnv`) reads three variables:
 
@@ -140,6 +142,8 @@ better-compute api GROUP.METHOD [key=value ...] [--data JSON|@FILE|-] [--list [G
   one rate-limit retry. `https` is required except for localhost.
 - **Token.** Token commands use `BETTER_COMPUTE_TOKEN`, else a session saved by `better-iam login`
   (when `@better-iam/cli` is installed), else a profile saved with `better-compute auth login`.
+  A saved session or profile is used only for the deployment that issued it or it was saved for (the
+  same origin as `--url`, or in process): another `--url` never receives it.
   Public methods need none; `system.whoami` carries the token when one is set.
 
 ## Capacity shortcuts
