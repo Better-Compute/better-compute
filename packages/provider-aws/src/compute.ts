@@ -28,6 +28,7 @@ import type {
 } from '@better-compute/aws-core';
 import type { AccountCredentials } from './account.js';
 import { parseDiscoverTag, type AwsConfig, type AwsProviderOptions } from './config.js';
+import { ReadConsistency } from './consistency.js';
 import { clientToken, offerId, parseInstanceId, parseOfferId, tags, tagValue } from './ids.js';
 import {
   defaultEventSources,
@@ -184,6 +185,16 @@ function transitional(id: string, state?: string): ComputeError {
   );
 }
 
+/** No EC2 read shows the instance, and it may only be lagging: the delete is retried, never done. */
+function notVisible(id: string): ComputeError {
+  return new ComputeError(
+    'UNAVAILABLE',
+    `EC2 does not show instance ${id} (yet); the delete is retried until it shows or has been missing for the consistency window`,
+    undefined,
+    { provider: 'aws', reason: 'eventual-consistency' },
+  );
+}
+
 /** EC2 tag writes are eventually consistent: a read right after CreateTags may not show them. */
 function tagPropagation(id: string): ComputeError {
   return new ComputeError(
@@ -234,7 +245,14 @@ export class AwsCompute implements ProviderImpl {
   /** Managed Kubernetes (EKS clusters and node groups); the provider sets it. */
   kubernetes?: ProviderKubernetes;
   #offerings: { pairs: [string, string][]; at: number } | undefined;
+  /** Instance id → when this client launched it. Only a hint: another process may have launched it. */
   readonly #created = new Map<string, number>();
+  /**
+   * By-id instance reads that missed. Which process launched an instance is no test of whether EC2
+   * may still not show it (another replica, or this one before a restart, may have), so a first
+   * miss opens the consistency window for any id.
+   */
+  readonly #lag: ReadConsistency;
   /** Instance id → when this client last claimed it with `managed` (tags lag behind writes). */
   readonly #managedClaims = new Map<string, number>();
   /** Instance id → when this client last wrote or saw its own ownership tag on it in `claim`. */
@@ -281,6 +299,7 @@ export class AwsCompute implements ProviderImpl {
   ) {
     this.#ssmPrefixes = ssmImagePrefixes(options.ssmImagePrefixes);
     this.#imageOwners = imageOwnersOf(options.imageOwners);
+    this.#lag = new ReadConsistency(context.clock, () => this.consistencyWindowMs);
     this.networks = new AwsNetworks({
       config,
       context,
@@ -354,6 +373,15 @@ export class AwsCompute implements ProviderImpl {
     }
     const at = map.get(id);
     return at !== undefined && now - at < this.consistencyWindowMs;
+  }
+
+  /**
+   * Whether no read finding instance `id` may still be EC2's eventual consistency: launched by this
+   * client inside the window, or first missed by this process less than the window ago (it may be
+   * another process's launch). False once it has been missing for the whole window: gone.
+   */
+  #mayLag(id: string): boolean {
+    return this.#lag.mayLag(id, this.recent(this.#created, id) ? this.#created.get(id) : undefined);
   }
 
   /** Records `id` at the current time (moving it to the end, so the map stays in time order). */
@@ -1556,9 +1584,12 @@ export class AwsCompute implements ProviderImpl {
     // EC2 is eventually consistent right after RunInstances: the ClientToken finds it sooner.
     instance ??= await this.#byClientToken(id, context);
     if (!instance) {
-      if (this.recent(this.#created, id)) return { id, state: 'pending', addresses: [] };
-      return undefined;
+      // Not visible: pending while that may be lag (also for an instance another replica, or this
+      // process before a restart, just launched), and gone only after a whole window of misses. vps
+      // marks a machine that reads `undefined` lost and stops billing it.
+      return this.#mayLag(id) ? { id, state: 'pending', addresses: [] } : undefined;
     }
+    this.#lag.seen(id);
     // Just claimed by this client: a lagging read may not show the ownership tag yet. vps would take
     // the missing label as lost ownership, so that is a retryable UNAVAILABLE inside the window.
     if (
@@ -1568,6 +1599,8 @@ export class AwsCompute implements ProviderImpl {
       throw tagPropagation(id);
     const machine = await this.machine(instance, context.signal);
     if (instance.child('instanceState')?.textOf('name') === 'terminated') {
+      // EC2 drops a terminated instance from reads after a while: that miss is final.
+      this.#lag.gone(id);
       const failure = terminatedFailure(instance.child('stateReason')?.textOf('code'));
       if (failure instanceof ComputeError) throw failure;
       if (failure === 'error') return { ...machine, state: 'error' };
@@ -1605,14 +1638,25 @@ export class AwsCompute implements ProviderImpl {
     const instance =
       (await this.describe(id, context.signal)) ?? (await this.#byClientToken(id, context));
     if (!instance) {
-      // Never seen and not ours recently: gone. Ours and not yet visible: RunInstances tagged it
-      // managed, so terminate it rather than report a delete that leaves it running.
-      if (!this.recent(this.#created, id)) return;
-      await this.#terminate(id, context);
-      return;
+      const ours = this.recent(this.#created, id);
+      // Missing for the whole consistency window (or known terminated): gone.
+      if (!this.#mayLag(id)) return;
+      // Launched by this client and not visible yet: RunInstances tagged it managed, so terminate
+      // it rather than report a delete that leaves it running.
+      if (ours) {
+        await this.#terminate(id, context);
+        return;
+      }
+      // Never seen by this process: it may be an instance another replica (or this one before a
+      // restart) just launched. Its managed tag cannot be checked yet, so nothing is terminated
+      // blind and nothing is reported deleted: the delete is retried until EC2 shows the instance
+      // or the window has passed.
+      throw notVisible(id);
     }
+    this.#lag.seen(id);
     const state = instance.child('instanceState')?.textOf('name');
     if (state === 'terminated' || state === 'shutting-down') {
+      this.#lag.gone(id);
       this.volumes.forgetInstance(id);
       return;
     }
@@ -1638,22 +1682,18 @@ export class AwsCompute implements ProviderImpl {
   }
 
   /**
-   * TerminateInstances. NOT_FOUND is success (already gone), except for an instance this client
-   * launched inside the consistency window: EC2 may simply not show it yet, so that is a retryable
-   * UNAVAILABLE (vps treats NOT_FOUND and success alike: deleted).
+   * TerminateInstances. NOT_FOUND is success (already gone) only once the instance has been missing
+   * for the whole consistency window. Before that EC2 may simply not show it yet (this client just
+   * launched it, or a read just found it and this call reached a lagging replica), so it is a
+   * retryable UNAVAILABLE (vps treats NOT_FOUND and success alike: deleted).
    */
   async #terminate(id: string, context: CallContext): Promise<void> {
     try {
       await this.call('TerminateInstances', { InstanceId: [id] }, context.signal);
     } catch (error) {
       if (isComputeError(error, 'NOT_FOUND')) {
-        if (!this.recent(this.#created, id)) return;
-        throw new ComputeError(
-          'UNAVAILABLE',
-          `instance ${id} was just launched and EC2 does not show it yet; retry the delete`,
-          undefined,
-          { provider: 'aws', reason: 'eventual-consistency' },
-        );
+        if (!this.#mayLag(id)) return;
+        throw notVisible(id);
       }
       if (isComputeError(error, 'INVALID_STATE') && error.details?.code === 'OperationNotPermitted')
         throw new ComputeError(

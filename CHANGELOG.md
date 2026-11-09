@@ -156,6 +156,14 @@ All notable changes to the better-compute packages are documented here. The form
   GPU machine type (and so `TERMINATE`) when `machineTypes.get` fails now knows the `a4x-` and `g4-` families.
 - **GB200 and RTX PRO 6000 GPUs** (`@better-compute/provider-gcp`). `nvidia-gb200` and `nvidia-rtx-pro-6000`
   accelerators report the `GB200` and `RTX-PRO-6000` GPU families (and meters) instead of `other`.
+- **An EC2 instance another process just launched is never lost or leaked** (`@better-compute/provider-aws`).
+  Whether EC2 may still not show an instance was decided from one process's memory of its own launches, so
+  another replica (or the same one after a restart) read a just-launched instance as gone: `get` returned
+  `undefined` (vps marked it `lost` and stopped billing it) and `delete` reported success without terminating it.
+  A first miss by id now opens the consistency window for any instance: `get` answers `pending` and `delete` a
+  retryable `UNAVAILABLE` (`eventual-consistency`) until EC2 shows the instance or it has been missing for the
+  whole window. `TerminateInstances` not finding an instance a read just found is retried the same way. Volumes,
+  networks and instances share one consistency helper.
 
 ## 0.3.0 (2026-10-20)
 

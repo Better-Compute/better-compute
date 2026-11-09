@@ -11,6 +11,7 @@ import {
 } from '@better-compute/core';
 import type { QueryParams, XmlElement } from '@better-compute/aws-core';
 import type { AwsConfig } from './config.js';
+import { ReadConsistency } from './consistency.js';
 import { clientToken, tags, tagValue } from './ids.js';
 
 // AWS A5: EBS volumes and snapshots behind the generic ProviderVolumes contract (program plan
@@ -38,8 +39,7 @@ const throughputTypes: ReadonlySet<string> = new Set(['gp3']);
 
 /** EBS allows 50 tags per resource; ours take 3, the rest is for tenant labels. */
 const maxLabels = 40;
-/** How long this process remembers a volume or snapshot it knows is gone (never lagging, so never pending). */
-const goneMemoMs = 24 * 3_600_000;
+
 /** After a modification starts, EBS refuses the next one on that volume for six hours. */
 export const ebsModificationCooldownMs = 6 * 3_600_000;
 
@@ -312,24 +312,23 @@ export class AwsVolumes implements ProviderVolumes {
    */
   readonly #devices = new Map<string, Map<string, { volumeId: string; at: number }>>();
   /**
-   * id (volume, snapshot or instance) → when a by-id read in this process first missed it. EC2 reads
-   * are eventually consistent: a resource another process (a restart, another replica) just made can
-   * read NotFound by id for a while, so one miss never ends its life. A miss that lasts the whole
-   * consistency window is gone.
+   * By-id reads (volume, snapshot or instance) that missed. EC2 reads are eventually consistent: a
+   * resource another process (a restart, another replica) just made can read NotFound by id for a
+   * while, so one miss never ends its life. A miss that lasts the whole consistency window is gone.
    */
-  readonly #missing = new Map<string, number>();
-  /** id → when this process learned the resource is gone (it deleted it, saw it deleted, or missed it for the window). */
-  readonly #gone = new Map<string, number>();
+  readonly #lag: ReadConsistency;
 
   constructor(
     readonly config: AwsConfig,
     readonly context: ProviderContext,
     readonly deps: AwsVolumesDeps,
     readonly consistencyWindowMs = 120_000,
-  ) {}
+  ) {
+    this.#lag = new ReadConsistency(context.clock, consistencyWindowMs);
+  }
 
   #recent(at: number | undefined): boolean {
-    return at !== undefined && this.context.clock.now() - at < this.consistencyWindowMs;
+    return this.#lag.recent(at);
   }
 
   #remember(name: string, id: string): void {
@@ -354,15 +353,12 @@ export class AwsVolumes implements ProviderVolumes {
 
   /** A volume or snapshot known to be gone: a later by-id miss is final at once. */
   #markGone(id: string): void {
-    const now = this.context.clock.now();
-    for (const [key, at] of this.#gone) if (now - at >= goneMemoMs) this.#gone.delete(key);
-    this.#gone.set(id, now);
-    this.#missing.delete(id);
+    this.#lag.gone(id);
   }
 
   /** A by-id read found `id`: a later miss starts a new window. */
   #seen(id: string): void {
-    this.#missing.delete(id);
+    this.#lag.seen(id);
   }
 
   /**
@@ -371,18 +367,7 @@ export class AwsVolumes implements ProviderVolumes {
    * gone, or missed for the whole window: gone (and remembered so).
    */
   #mayLag(id: string, made?: number): boolean {
-    if (this.#recent(made)) return true;
-    if (this.#gone.has(id)) return false;
-    const now = this.context.clock.now();
-    for (const [key, at] of this.#missing) if (now - at >= goneMemoMs) this.#missing.delete(key);
-    const first = this.#missing.get(id);
-    if (first === undefined) {
-      this.#missing.set(id, now);
-      return true;
-    }
-    if (now - first < this.consistencyWindowMs) return true;
-    this.#markGone(id);
-    return false;
+    return this.#lag.mayLag(id, made);
   }
 
   #rememberSnapshot(name: string, id: string): void {
