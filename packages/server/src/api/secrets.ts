@@ -8,7 +8,7 @@ import {
   type SecretStore,
   type SqlTx,
 } from '@better-compute/core';
-import { admittedOf, fields, int, ms, notFound } from './common.js';
+import { admittedOf, fields, int, keyReused, ms, notFound, sameSecret } from './common.js';
 import { parser, v } from './input.js';
 
 // `secrets` (PLAN.md §6 "Secrets", §9.2, §13, module server, v0.2): write-only secret storage.
@@ -150,7 +150,19 @@ export function secretsApi(source?: SecretStoreSource): SecretsApi {
           if (existing) checkExistingScope(existing, input);
           // A retry of the put that wrote the current version answers with it and writes nothing.
           // Unlike derived-id creates, the key is not scoped to the caller, so replays are decided too.
-          if (existing?.last_idempotency_key === input.idempotencyKey) return toInfo(existing);
+          // It is a retry only if it carries the value that version holds: the same key with another
+          // value used to be answered as a success at the old version, silently dropping a rotation.
+          // The stored value is compared in memory (in constant time) and goes nowhere; only whoever
+          // knows the key that wrote the current version can ask, which is its writer.
+          if (existing?.last_idempotency_key === input.idempotencyKey) {
+            if (existing.store === store.id) {
+              const stored = await store.resolve(existing.ref as SecretRef, {
+                tenantId: input.tenantId,
+              });
+              if (!sameSecret(stored, input.value)) throw keyReused();
+            }
+            return toInfo(existing);
+          }
           if (existing && existing.store !== store.id)
             throw new ComputeError(
               'INVALID_STATE',

@@ -17,6 +17,7 @@ import {
   ms,
   notFound,
   page,
+  requestFingerprint,
   visibleIn,
   type Page,
 } from './common.js';
@@ -303,6 +304,10 @@ export function commandsApi(bundles?: SupportBundlesOptions): CommandsApi {
           );
           if (existing[0] && existing[0].kind !== input.kind) throw keyReused();
           const upload = existing[0] ? undefined : await uploadFor(input, idempotencyKey);
+          // What the caller asked the node to do: a retry carries the same fingerprint, and the same key
+          // with another payload or batch is CONFLICT, never the first command. The deadline stays out:
+          // a client that retries with the time it has left is still retrying.
+          const { idempotencyKey: _key, notAfterSeconds: _deadline, ...asked } = input;
           const { id } = await context.commands.enqueue(context.sql, {
             nodeId: input.nodeId,
             kind: input.kind,
@@ -310,6 +315,7 @@ export function commandsApi(bundles?: SupportBundlesOptions): CommandsApi {
             idempotencyKey,
             notAfter: context.clock.now() + (input.notAfterSeconds ?? 600) * 1000,
             ...(input.batchId ? { batchId: input.batchId } : {}),
+            requestHash: requestFingerprint(asked),
           });
           const { rows } = await context.sql.query<CommandRow>(
             `SELECT ${columns} FROM commands c WHERE c.id = $1`,

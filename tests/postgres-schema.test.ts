@@ -94,6 +94,7 @@ describe('migrate', () => {
       'core/0032_admission_flavors',
       'core/0044_usage_resource_kinds',
       'core/0060_usage_load_balancer_kind',
+      'core/0061_command_request_hash',
     ]);
     expect(await db.migrate()).toEqual({ applied: names, skipped: [] });
     expect(await db.migrate()).toEqual({ applied: [], skipped: names });

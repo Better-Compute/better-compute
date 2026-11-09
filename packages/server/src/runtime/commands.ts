@@ -258,6 +258,11 @@ function checkCommand(command: EnqueueCommand): void {
     throw new ComputeError('INVALID_INPUT', 'minGeneration is a non-negative integer');
   if (command.traceparent !== undefined && !traceparentPattern.test(command.traceparent))
     throw new ComputeError('INVALID_INPUT', 'traceparent must be a W3C trace context');
+  if (
+    command.requestHash !== undefined &&
+    (typeof command.requestHash !== 'string' || !/^(?:[0-9a-f]{2}){8,64}$/.test(command.requestHash))
+  )
+    throw new ComputeError('INVALID_INPUT', 'requestHash is 8 to 64 bytes of lower-case hex');
 }
 
 /**
@@ -365,17 +370,30 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
 
   const existing = async (tx: SqlTx, nodeId: string, key: string) =>
     (
-      await tx.query<{ id: string; seq: number | bigint; kind: string }>(
-        'SELECT id, seq, kind FROM commands WHERE node_id = $1 AND idempotency_key = $2',
+      await tx.query<{ id: string; seq: number | bigint; kind: string; request_hash: string | null }>(
+        `SELECT id, seq, kind, encode(request_hash, 'hex') AS request_hash
+           FROM commands WHERE node_id = $1 AND idempotency_key = $2`,
         [nodeId, key],
       )
     ).rows[0];
 
-  const replay = (row: { id: string; seq: number | bigint; kind: string }, kind: string) => {
-    if (row.kind !== kind)
+  const replay = (
+    row: { id: string; seq: number | bigint; kind: string; request_hash: string | null },
+    command: EnqueueCommand,
+  ) => {
+    if (row.kind !== command.kind)
       throw new ComputeError(
         'CONFLICT',
         'The idempotency key is already used on this node by another kind of command',
+      );
+    // Same kind, another request: answering with the first command would tell the caller its second
+    // request was queued. Compared only when both sides carry a fingerprint (core/0061).
+    if (row.request_hash && command.requestHash && row.request_hash !== command.requestHash)
+      throw new ComputeError(
+        'CONFLICT',
+        'The idempotency key was already used on this node for a different request',
+        undefined,
+        { reason: 'idempotency-key-reused' },
       );
     return { id: row.id, seq: Number(row.seq) };
   };
@@ -385,7 +403,7 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
       checkCommand(command);
       const spec = commandKindSpec(registry, command.kind);
       const found = await existing(tx, command.nodeId, command.idempotencyKey);
-      if (found) return replay(found, command.kind);
+      if (found) return replay(found, command);
       // (v1.0 §13) With a quorum and no break-glass allowance, daemons refuse unbatched destructive
       // commands (UNBATCHED_LIMIT): say so now instead of failing on the node. An early warning
       // only; the daemon stays the judge.
@@ -469,9 +487,10 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
       });
       const inserted = await tx.query<{ id: string; seq: number | bigint }>(
         `INSERT INTO commands (id, node_id, seq, kind, body, state, not_before, not_after,
-           min_generation, retry_safe, self_terminating, attested, idempotency_key, signature)
+           min_generation, retry_safe, self_terminating, attested, idempotency_key, signature,
+           request_hash)
          VALUES ($1, $2, $3, $4, $5, 'pending', COALESCE($6::timestamptz, compute_now()), $7, $8,
-           $9, $10, $11, $12, $13)
+           $9, $10, $11, $12, $13, decode($14, 'hex'))
          ON CONFLICT (node_id, idempotency_key) DO NOTHING
          RETURNING id, seq`,
         [
@@ -491,13 +510,14 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
           // Signed intent (§13): every command, when a worker signer is configured; daemons require
           // it for the kinds their own table marks destructive.
           input.signer ? input.signer.sign(body) : null,
+          command.requestHash ?? null,
         ],
       );
       if (!inserted.rows[0]) {
         // A concurrent enqueue with the same key committed first (its seq is the one that counts).
         const winner = await existing(tx, command.nodeId, command.idempotencyKey);
         if (!winner) throw new ComputeError('CONFLICT', 'The command changed meanwhile; retry');
-        return replay(winner, command.kind);
+        return replay(winner, command);
       }
       if (batch)
         await tx.query(

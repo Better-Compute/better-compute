@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
 import {
   ComputeError,
   draftId,
@@ -84,6 +85,34 @@ export function derivedId<P extends string>(
 /** The refusal of a key reused for a different request: no body, nothing about the first one. */
 export const keyReused = () =>
   new ComputeError('CONFLICT', 'The idempotency key was already used for a different request');
+
+const canonicalJson = (value: unknown): string =>
+  value === null || typeof value !== 'object'
+    ? (JSON.stringify(value) ?? 'null')
+    : Array.isArray(value)
+      ? `[${value.map(canonicalJson).join(',')}]`
+      : `{${Object.entries(value as Record<string, unknown>)
+          .filter(([, item]) => item !== undefined)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+          .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+          .join(',')}}`;
+
+/**
+ * A fingerprint of a validated request (SHA-256 of its canonical JSON, lower-case hex): what a create stores
+ * beside its idempotency key so a retry (same key, same request) is told apart from another request reusing
+ * the key, which is `keyReused()`. Key order and absent optional fields do not change it. Leave the key
+ * itself out, and never fingerprint a secret value this way: an unsalted hash of one can be guessed offline.
+ */
+export function requestFingerprint(request: unknown): string {
+  return createHash('sha256').update(canonicalJson(request)).digest('hex');
+}
+
+/** Whether two secret strings are equal, in time that does not depend on where they differ. */
+export function sameSecret(a: string, b: string): boolean {
+  const left = createHash('sha256').update(a).digest();
+  const right = createHash('sha256').update(b).digest();
+  return timingSafeEqual(left, right);
+}
 
 /** Epoch milliseconds of a `timestamptz` (drivers return `Date`), or `undefined` for NULL. */
 export function ms(value: unknown): number | undefined {

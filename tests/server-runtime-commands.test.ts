@@ -115,6 +115,37 @@ describe('CommandQueue.enqueue', () => {
     );
   });
 
+  it('tells a retry from another request under the same key by the request fingerprint', async () => {
+    const { fixture, node, enqueue } = await setup();
+    const a = 'a1'.repeat(32);
+    const b = 'b2'.repeat(32);
+    const first = await enqueue({ idempotencyKey: 'fp', requestHash: a });
+    // The same request again is the same command.
+    expect(await enqueue({ idempotencyKey: 'fp', requestHash: a })).toEqual(first);
+    // Same key and kind, another request: never answered with the first command.
+    await expect(enqueue({ idempotencyKey: 'fp', requestHash: b })).rejects.toSatisfy(
+      (error: unknown) =>
+        isComputeError(error, 'CONFLICT') && error.details?.reason === 'idempotency-key-reused',
+    );
+    // A caller that passes no fingerprint, and a command queued without one, compare by kind as before.
+    expect(await enqueue({ idempotencyKey: 'fp' })).toEqual(first);
+    const plain = await enqueue({ idempotencyKey: 'plain' });
+    expect(await enqueue({ idempotencyKey: 'plain', requestHash: a })).toEqual(plain);
+    const { rows } = await fixture.database.query<{ key: string; hash: string | null }>(
+      `SELECT idempotency_key AS key, encode(request_hash, 'hex') AS hash FROM commands
+        WHERE node_id = $1 ORDER BY seq`,
+      [node.id],
+    );
+    expect(rows).toEqual([
+      { key: 'fp', hash: a },
+      { key: 'plain', hash: null },
+    ]);
+    for (const requestHash of ['xyz', 'A1'.repeat(32), 'a1'.repeat(4), 'a'.repeat(15), 'a1'.repeat(65)])
+      await expect(enqueue({ idempotencyKey: 'bad', requestHash })).rejects.toSatisfy((error: unknown) =>
+        isComputeError(error, 'INVALID_INPUT'),
+      );
+  });
+
   it('encodes a CommandBody the daemon can read, with the payload packed as Any', async () => {
     const { fixture, node, enqueue } = await setup();
     const notAfter = fixture.clock.now() + HOUR + 250;

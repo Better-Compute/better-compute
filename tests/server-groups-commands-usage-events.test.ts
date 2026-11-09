@@ -57,8 +57,10 @@ describe('commands', () => {
         },
         idempotencyKey: `api:${key}`,
         notAfter: Date.UTC(2026, 0, 1) + 120_000,
+        requestHash: expect.stringMatching(/^[0-9a-f]{64}$/),
       },
     ]);
+    const fingerprint = (h.ports.commands.enqueued[0] as { requestHash: string }).requestHash;
     expect(h.ports.events.published).toEqual([
       {
         type: 'node.command.queued',
@@ -77,6 +79,15 @@ describe('commands', () => {
       }),
     ).toEqual(command);
     expect(h.ports.events.published).toEqual([]);
+    // The retry (even with another deadline) carries the fingerprint of the first request; another
+    // payload under the same key carries a different one, which the queue refuses as CONFLICT.
+    const sent = () => (h.ports.commands.enqueued.at(-1) as { requestHash: string }).requestHash;
+    expect(sent()).toBe(fingerprint);
+    await run({ kind: 'inventory.refresh', payload: { sections: ['disks'] }, idempotencyKey: 'refresh-1' }).catch(
+      () => undefined,
+    );
+    expect(sent()).toMatch(/^[0-9a-f]{64}$/);
+    expect(sent()).not.toBe(fingerprint);
     expect(
       (
         await h.failure('commands/run', USER, {

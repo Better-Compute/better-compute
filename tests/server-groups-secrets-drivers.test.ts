@@ -89,6 +89,19 @@ describe('secrets.put', () => {
     expect(h.ports.events.published).toEqual([]);
     expect(h.iam.count('require')).toBe(1); // replays are still decided
     expect(await store.resolve(first.ref)).toBe('v2');
+    // The same key with another value is not a retry: it used to answer with version 2 as if the new
+    // value had been stored, dropping a rotation. Nothing is written, and nothing about the value shows.
+    h.reset();
+    const reused = await h.failure('secrets/put', USER, { tenantId: ACME, name: 'rotating', value: 'v3', idempotencyKey: 'r2' });
+    expect(reused.code).toBe('CONFLICT');
+    expect(JSON.stringify(reused)).not.toMatch(/v2|v3/);
+    expect(h.ports.events.published).toEqual([]);
+    expect(await store.resolve(first.ref)).toBe('v2');
+    // A new key rotates as before.
+    expect(await h.call<SecretInfo>('secrets/put', USER, { tenantId: ACME, name: 'rotating', value: 'v3', idempotencyKey: 'r3' })).toMatchObject({
+      version: 3,
+    });
+    expect(await store.resolve(first.ref)).toBe('v3');
   });
 
   it('puts platform secrets under the fleet, from the root tenant only', async () => {

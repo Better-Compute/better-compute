@@ -33,6 +33,7 @@ import { usageWindowClaimsMigration } from './0031_usage_window_claims.js';
 import { admissionFlavorsMigration } from './0032_admission_flavors.js';
 import { usageResourceKindsMigration } from './0044_usage_resource_kinds.js';
 import { usageLoadBalancerKindMigration } from './0060_usage_load_balancer_kind.js';
+import { commandRequestHashMigration } from './0061_command_request_hash.js';
 
 /**
  * Every table the base schema creates, in creation order. Partitions of the history tables
@@ -79,6 +80,7 @@ export const baseMigrations: readonly Migration[] = Object.freeze([
   admissionFlavorsMigration,
   usageResourceKindsMigration,
   usageLoadBalancerKindMigration,
+  commandRequestHashMigration,
 ]);
 
 /** `compute_schema_version.version` after the base schema is applied: one per base migration. */

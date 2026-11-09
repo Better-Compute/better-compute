@@ -2467,6 +2467,13 @@ export interface EnqueueCommand<P = unknown> {
    * its approvals the command stays pending. The daemon then requires the approval and proof.
    */
   batchId?: string;
+  /**
+   * A fingerprint of the caller's request (lower-case hex, e.g. a SHA-256 of its canonical input). When
+   * the idempotency key already names a command on the node, a retry carrying the same fingerprint gets
+   * that command back and one carrying another is `CONFLICT`: the key was reused for a different request.
+   * Without it (or against a command queued without one) only the kind is compared.
+   */
+  requestHash?: string;
 }
 
 /** A destructive-batch scope: the (subject, kind) leaves approvers sign (§13). */
