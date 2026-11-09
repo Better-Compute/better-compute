@@ -802,7 +802,7 @@ export async function markDeleted(
      )
      UPDATE cloud_resources r
         SET desired_state = 'deleted', state = 'deleting', message = NULL, version = version + 1,
-            updated_at = compute_now()
+            attempts = 0, next_attempt_at = NULL, updated_at = compute_now()
        FROM tree
       WHERE r.id = tree.id AND r.state NOT IN ('deleted', 'released')
         AND (r.desired_state = 'present' OR ($2::bool AND r.id = $1 AND r.desired_state = 'released'))

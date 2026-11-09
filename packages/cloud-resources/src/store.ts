@@ -92,12 +92,16 @@ export interface ResourceRow {
   ensure_sent_at: Date | string | null;
   /** The better-compute networks the spec names (cloud-resources/0005). */
   network_ids: string[];
+  /** Passes in a row that ended in an error the provider will not get over by itself (cloud-resources/0006). */
+  attempts: number;
+  /** The sweeps leave the row alone until then (cloud-resources/0006); null: no wait. */
+  next_attempt_at: Date | string | null;
 }
 
 export const resourceColumns = `id, tenant_id, project_id, pool_id, provider_account_id, provider, kind, family, name,
   description, region, parent_id, spec, provider_name, provider_id, state, desired_state, message, outputs,
   secret_outputs, adopted, spec_changed, identity, created_by, encode(request_hash, 'hex') AS request_hash, version, created_at, updated_at,
-  provisioned_at, ready_at, deleted_at, ensure_sent_at, network_ids`;
+  provisioned_at, ready_at, deleted_at, ensure_sent_at, network_ids, attempts, next_attempt_at`;
 
 export const json = <T>(value: T | string): T =>
   typeof value === 'string' ? (JSON.parse(value) as T) : value;

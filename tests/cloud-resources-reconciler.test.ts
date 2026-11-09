@@ -624,6 +624,118 @@ describe('cloud.resources: a child the parent’s delete did not see', () => {
   });
 });
 
+describe('cloud.resources: retries back off', () => {
+  const retry = async (resourceId: string) =>
+    (
+      await world.fixture.database.query<{ attempts: number; waits: boolean }>(
+        `SELECT attempts, next_attempt_at > compute_now() AS waits FROM cloud_resources WHERE id = $1`,
+        [resourceId],
+      )
+    ).rows[0]!;
+
+  it('a delete the provider refuses for good is asked again at growing intervals, not on every sweep', async () => {
+    const created = await create({ name: 'refused-delete' });
+    await settled(created.id, 'ready');
+    const providerId = (await get(created.id)).providerId!;
+    const line = `delete fake.database ${providerId}`;
+    const asked = () => world.cloud.calls.filter((call) => call === line).length;
+    // Another deployment took it: every delete is refused (not managed here).
+    world.cloud.resources.get(providerId)!.owner = 'other';
+    await world.api.cloudResources.delete(world.acme, {
+      tenantId: world.acmeTenant,
+      resourceId: created.id,
+    });
+    await settled(created.id, 'error');
+    expect(asked()).toBe(1);
+    expect(await retry(created.id)).toMatchObject({ attempts: 1, waits: true });
+    // Twenty minutes of 30 s sweeps (and four 5 min refreshes): 30 s, 1, 2, 4 and 8 minutes apart, not forty times.
+    await world.tick('cloud.resources', 40, 30_000);
+    expect(asked()).toBeGreaterThanOrEqual(4);
+    expect(asked()).toBeLessThanOrEqual(7);
+    expect((await retry(created.id)).attempts).toBe(asked());
+    expect(await stateOf(created.id)).toBe('error');
+    // The wait never grows past an hour: once the cause is gone, the delete goes through at the next attempt.
+    const before = asked();
+    world.cloud.resources.get(providerId)!.owner = 'this';
+    await world.tick('cloud.resources', 3, 30 * 60_000);
+    await settled(created.id, 'deleted');
+    expect(asked()).toBeGreaterThan(before);
+    expect(world.cloud.resources.get(providerId)!.deleted).toBe(true);
+  });
+
+  it('marking the resource again starts the count over, and does not wait', async () => {
+    const created = await create({ name: 'refused-then-fixed' });
+    await settled(created.id, 'ready');
+    const providerId = (await get(created.id)).providerId!;
+    world.cloud.resources.get(providerId)!.owner = 'other';
+    await world.api.cloudResources.delete(world.acme, {
+      tenantId: world.acmeTenant,
+      resourceId: created.id,
+    });
+    await settled(created.id, 'error');
+    await world.tick('cloud.resources', 10, 30_000);
+    expect((await retry(created.id)).attempts).toBeGreaterThan(1);
+    // Wanted again, then deleted again (as after a release that was withdrawn): the count starts over.
+    await world.fixture.database.query(
+      `UPDATE cloud_resources SET desired_state = 'present', state = 'error' WHERE id = $1`,
+      [created.id],
+    );
+    world.cloud.resources.get(providerId)!.owner = 'this';
+    await world.api.cloudResources.delete(world.acme, {
+      tenantId: world.acmeTenant,
+      resourceId: created.id,
+    });
+    expect(await retry(created.id)).toMatchObject({ attempts: 0, waits: null });
+    await settled(created.id, 'deleted');
+  });
+
+  it('a busy provider is asked again when it says (retryAfterMs), not after the fixed 30 s, and not by the sweep', async () => {
+    const created = await create({ name: 'told-to-wait' });
+    // The provider accepts the create and answers 429 with its own wait.
+    world.cloud.loseAnswer.set(
+      created.providerName,
+      new ComputeError('RATE_LIMITED', 'slow down', undefined, { retryAfterMs: 120_000 }),
+    );
+    const line = `ensure fake.database ${created.providerName}`;
+    const asked = () => world.cloud.calls.filter((call) => call === line).length;
+    await world.tick();
+    expect(asked()).toBe(1);
+    expect(await stateOf(created.id)).toBe('pending');
+    // 100 s of sweeps: the provider said two minutes.
+    await world.tick('cloud.resources', 10, 10_000);
+    expect(asked()).toBe(1);
+    await world.tick('cloud.resources', 3, 10_000);
+    expect(asked()).toBeGreaterThan(1);
+    await settled(created.id, 'ready');
+    expect(await retry(created.id)).toMatchObject({ attempts: 0, waits: null });
+  });
+
+  it('a wait the provider names is kept between 30 s and an hour', async () => {
+    for (const [said, low, high] of [
+      [0, 20_000, 40_000],
+      [86_400_000, 3_590_000, 3_610_000],
+    ] as const) {
+      const created = await create({ name: `wait-${said}` });
+      world.cloud.loseAnswer.set(
+        created.providerName,
+        new ComputeError('UNAVAILABLE', 'later', undefined, { retryAfterMs: said }),
+      );
+      await world.tick();
+      const { rows } = await world.fixture.database.query<{ wait: string }>(
+        `SELECT (extract(epoch FROM next_attempt_at - compute_now()) * 1000)::bigint::text AS wait
+           FROM cloud_resources WHERE id = $1`,
+        [created.id],
+      );
+      expect(Number(rows[0]!.wait)).toBeGreaterThanOrEqual(low);
+      expect(Number(rows[0]!.wait)).toBeLessThanOrEqual(high);
+      await world.api.cloudResources.delete(world.acme, {
+        tenantId: world.acmeTenant,
+        resourceId: created.id,
+      });
+    }
+  });
+});
+
 describe('cloud-resources tenantDeleted', () => {
   it('marks at most 100 of a deleted tenant’s resources per call, SYNC_AGAIN until all are gone', async () => {
     const seed = await world.api.cloudResources.create(world.other, {

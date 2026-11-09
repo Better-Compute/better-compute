@@ -381,7 +381,8 @@ export async function markReleased(
 ): Promise<void> {
   await tx.query(
     `UPDATE cloud_resources
-        SET desired_state = 'released', message = NULL, version = version + 1, updated_at = compute_now()
+        SET desired_state = 'released', message = NULL, version = version + 1,
+            attempts = 0, next_attempt_at = NULL, updated_at = compute_now()
       WHERE id = $1`,
     [row.id],
   );

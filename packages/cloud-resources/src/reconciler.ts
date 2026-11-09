@@ -43,8 +43,22 @@ import { meterRates } from './usage.js';
 
 /** How soon a provider operation in flight is looked at again. */
 export const resourcePollMs = 10_000;
-/** How soon a rate-limited or unavailable provider is tried again. */
+/** How soon a rate-limited or unavailable provider is tried again, unless it names a longer wait (`retryAfterMs`). */
 export const resourceRetryMs = 30_000;
+/**
+ * The longest a resource waits between attempts: a delete or release the provider keeps refusing is asked again
+ * 30 s, 1 min, 2 min, … and then every hour, and a provider's own `retryAfterMs` is honoured up to this.
+ */
+export const resourceMaxBackoffMs = 3_600_000;
+
+/** The wait a busy provider named (`details.retryAfterMs`), kept between `resourceRetryMs` and `resourceMaxBackoffMs`. */
+function retryAfterOf(error: unknown): number {
+  const said = isComputeError(error)
+    ? (error.details as { retryAfterMs?: unknown } | undefined)?.retryAfterMs
+    : undefined;
+  const wait = typeof said === 'number' && Number.isFinite(said) ? said : 0;
+  return Math.min(resourceMaxBackoffMs, Math.max(resourceRetryMs, Math.ceil(wait)));
+}
 
 const transientCodes = ['RATE_LIMITED', 'UNAVAILABLE'];
 const text = (error: unknown) => String((error as Error)?.message ?? error).slice(0, 500);
@@ -131,7 +145,8 @@ type Outcome = {
 
 class ResourceWorker {
   #inFlight = false;
-  #backoff = false;
+  /** The provider was busy: how long until it is asked again. */
+  #backoff: number | undefined;
   #again = false;
 
   constructor(
@@ -147,7 +162,7 @@ class ResourceWorker {
 
   #next(): number | undefined {
     const now = this.deps.clock.now();
-    if (this.#backoff) return now + resourceRetryMs;
+    if (this.#backoff !== undefined) return now + this.#backoff;
     if (this.#again) return now;
     return this.#inFlight ? now + resourcePollMs : undefined;
   }
@@ -193,15 +208,33 @@ class ResourceWorker {
       };
     } catch (error) {
       if (this.signal.aborted || (isComputeError(error) && transientCodes.includes(error.code))) {
+        const wait = retryAfterOf(error);
         this.deps.log.warn('cloud-resources: provider busy, retrying', {
           resourceId: this.#row.id,
           error: text(error),
+          retryInMs: wait,
         });
-        this.#backoff = true;
+        this.#backoff = wait;
+        // (Not on shutdown: the abort says nothing about the provider.)
+        if (!this.signal.aborted) await this.#waitUntil(wait);
         return undefined;
       }
       return { state: 'error', message: text(error) };
     }
+  }
+
+  /**
+   * Keeps the periodic sweeps off the row while a busy provider's wait runs (they would ask again within 30 s,
+   * whatever the provider said). Not guarded by the version: it says nothing about the resource, only when to look.
+   */
+  async #waitUntil(waitMs: number): Promise<void> {
+    await this.sql.transaction((tx) =>
+      tx.query(
+        `UPDATE cloud_resources SET next_attempt_at = compute_now() + $2 * interval '1 millisecond'
+          WHERE id = $1 AND state NOT IN ('deleted', 'released')`,
+        [this.#row.id, waitMs],
+      ),
+    );
   }
 
   /**
@@ -236,6 +269,7 @@ class ResourceWorker {
           `UPDATE cloud_resources
               SET provider_id = $2, provisioned_at = coalesce(provisioned_at, compute_now()),
                   desired_state = 'deleted', state = 'deleting', deleted_at = NULL, message = NULL,
+                  attempts = 0, next_attempt_at = NULL,
                   version = version + 1, updated_at = compute_now()
             WHERE id = $1`,
           [row.id, id],
@@ -490,6 +524,11 @@ class ResourceWorker {
     settle?: Readonly<Record<string, number>>;
   }): Promise<boolean> {
     const row = this.#row;
+    // A delete or release that ended in error will not get over it by itself (the provider refuses it: not managed
+    // here, a registry that still holds images): the sweeps ask again at growing intervals, 30 s doubling to an hour,
+    // instead of every 30 s for good. Any other write clears the wait. (A resource still wanted that is in error is
+    // retried by the 5 min refresh, as before.)
+    const failing = update.state === 'error' && row.desired_state !== 'present';
     const written = await this.sql.transaction(async (tx) => {
       const { rows } = await tx.query(
         `UPDATE cloud_resources
@@ -500,7 +539,11 @@ class ResourceWorker {
                 meter_rates = coalesce($8::jsonb, meter_rates),
                 network_ids = coalesce($9::text[], network_ids),
                 updated_at = compute_now(),
-                ready_at = CASE WHEN $3 = 'ready' THEN coalesce(ready_at, compute_now()) ELSE ready_at END
+                ready_at = CASE WHEN $3 = 'ready' THEN coalesce(ready_at, compute_now()) ELSE ready_at END,
+                next_attempt_at = CASE WHEN $10::bool
+                  THEN compute_now() + least($11::float8 * power(2, least(attempts, 30)), $12::float8) * interval '1 millisecond'
+                  ELSE NULL END,
+                attempts = CASE WHEN $10::bool THEN attempts + 1 ELSE 0 END
           WHERE id = $1 AND version = $2
           RETURNING id`,
         [
@@ -513,6 +556,9 @@ class ResourceWorker {
           update.spec ? JSON.stringify(update.spec) : null,
           update.rates ? JSON.stringify(update.rates) : null,
           update.networkIds ? [...update.networkIds] : null,
+          failing,
+          resourceRetryMs,
+          resourceMaxBackoffMs,
         ],
       );
       if (rows.length === 0) return false;
@@ -823,7 +869,7 @@ class ResourceWorker {
       const { rows } = await tx.query(
         `UPDATE cloud_resources
             SET desired_state = 'present', state = 'error', message = $3, version = version + 1,
-                updated_at = compute_now()
+                attempts = 0, next_attempt_at = NULL, updated_at = compute_now()
           WHERE id = $1 AND version = $2 AND desired_state = 'released' RETURNING id`,
         [row.id, row.version, message],
       );
@@ -884,7 +930,9 @@ async function enqueueAll(
 /**
  * The `cloud.resources` reconciler (key: a resource id). `all` (every 30 s) queues the resources still converging,
  * being deleted or released; `refresh` (every 5 minutes) queues the settled ones, `ready` and `error`, so an error is
- * retried and what changed at the provider is seen.
+ * retried and what changed at the provider is seen. Neither queues a row whose `next_attempt_at` is still ahead: one
+ * whose delete or release keeps failing (it backs off, to an hour), or whose provider said when to come back. A
+ * change through the API queues the row itself, at once.
  */
 export function resourcesReconciler(
   depsOf: (context: ModuleContext) => CloudResourcesDeps,
@@ -902,10 +950,14 @@ export function resourcesReconciler(
           const { rows } = await tx.query<{ id: string }>(
             key === 'all'
               ? `SELECT id FROM cloud_resources
-                  WHERE state IN ('pending', 'provisioning', 'updating', 'deleting')
-                     OR (desired_state <> 'present' AND state NOT IN ('deleted', 'released'))
+                  WHERE (state IN ('pending', 'provisioning', 'updating', 'deleting')
+                         OR (desired_state <> 'present' AND state NOT IN ('deleted', 'released')))
+                    AND (next_attempt_at IS NULL OR next_attempt_at <= compute_now())
                   ORDER BY id`
-              : `SELECT id FROM cloud_resources WHERE state IN ('ready', 'error') ORDER BY id`,
+              : `SELECT id FROM cloud_resources
+                  WHERE state IN ('ready', 'error')
+                    AND (next_attempt_at IS NULL OR next_attempt_at <= compute_now())
+                  ORDER BY id`,
           );
           await enqueueAll(
             context,

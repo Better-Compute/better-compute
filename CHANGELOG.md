@@ -176,6 +176,12 @@ All notable changes to the better-compute packages are documented here. The form
   source change was ever applied and no new job started. A failed job is still reported, but a source change (or a
   job still owed) is now applied and starts a new job; only a job still running, or a database that is not online,
   holds a change back.
+- **Stuck deletes and releases back off** (`@better-compute/cloud-resources`). A cloud resource whose delete or
+  release the provider refuses for good was queued by the 30 s sweep forever, one provider call per row per pass.
+  Such a row is now asked again 30 s, 1 min, 2 min, … apart, up to once an hour (`resourceMaxBackoffMs`), and a busy
+  provider's own `retryAfterMs` is honoured (30 s to an hour) instead of a fixed 30 s. New migration
+  `cloud-resources/0006_retry_backoff` (`attempts`, `next_attempt_at` on `cloud_resources`); a change through the
+  API still wakes the resource at once.
 - **Scripts on images without cloud-init** (`@better-compute/provider-gcp`). Compute Engine's Debian, Rocky,
   CentOS, RHEL, AlmaLinux and SUSE images do not run cloud-init, so a shell-script `userData` (`#!…`) never ran on
   them. Create now also writes it as `startup-script` metadata, wrapped to run once on the first boot as cloud-init

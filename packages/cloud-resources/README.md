@@ -94,6 +94,14 @@ betterCompute({
   inside an adopted one (a user of an adopted database) are deleted first, then the adopted one is released. An
   adopted resource of a kind the provider cannot release is let go all the same (its labels stay): it is never
   deleted. The hook answers `DONE` once every resource of the tenant is `deleted` or `released`.
+- **Retries back off.** A resource still converging is polled every 10 s; a busy provider (`RATE_LIMITED`,
+  `UNAVAILABLE`) is asked again after 30 s, or after the wait it names (`details.retryAfterMs`, kept between 30 s
+  and an hour). A delete or release the provider refuses for good (a resource it says is not managed here, a
+  registry that still holds images) is asked again 30 s, 1 min, 2 min, … apart, then every hour, instead of on
+  every 30 s sweep: a dozen stuck rows no longer spend the account's request budget. The wait is kept on the row
+  (`next_attempt_at`, `attempts`); the periodic sweeps skip a row until then, and a change through the API wakes
+  it at once whatever the wait, and a delete or release starts the count over. A resource still wanted that is in
+  `error` is retried by the 5 minute refresh, as before.
 - **Whose account.** Every `ensure` says `accountScope: 'tenant'` on the tenant's own (BYO) account and
   `'shared'` on a hosted pool. A kind names the spec fields that reach account-wide objects (a VPC, a registry,
   linked repositories, another resource by name) through its pure `accountWide(spec)`: on a shared account
@@ -130,8 +138,8 @@ betterCompute({
 - **Migrations** `cloud-resources/0001_resources` (one `cloud_resources` table), `0002_metering` (the
   watermark, the rates, and `cloud-resource` appended to the usage source CHECK; selfCheck
   `cloud-resources.usage-source` reports a later migration that dropped it) and `0003_identity` (`identity`, its
-  unique index under a parent, and `spec_changed`), `0004_ensure_sent` (`ensure_sent_at`) and `0005_network_ids`
-  (`network_ids`, GIN-indexed).
+  unique index under a parent, and `spec_changed`), `0004_ensure_sent` (`ensure_sent_at`), `0005_network_ids`
+  (`network_ids`, GIN-indexed) and `0006_retry_backoff` (`attempts`, `next_attempt_at`).
 
 ## Conformance
 

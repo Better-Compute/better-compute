@@ -189,7 +189,8 @@
         "cloud-resources/0002_metering",
         "cloud-resources/0003_identity",
         "cloud-resources/0004_ensure_sent",
-        "cloud-resources/0005_network_ids"
+        "cloud-resources/0005_network_ids",
+        "cloud-resources/0006_retry_backoff"
       ]
     },
     {
