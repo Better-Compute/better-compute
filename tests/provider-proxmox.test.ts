@@ -58,6 +58,11 @@ class PveEmulator {
   beforeClone?: (newid: number) => void;
   /** The next task's exit status. */
   failNextTask?: string;
+  /** The storages and resource pools the cluster has: a clone naming another is refused, as PVE does. */
+  storages = new Set(['local-lvm', 'ceph']);
+  pools = new Set(['tenants']);
+  /** VMIDs held by LXC containers: listed as `lxc`, never as `qemu`, and no VM can take their id. */
+  containers = new Set<number>();
   private upids = 0;
 
   constructor() {
@@ -109,8 +114,15 @@ class PveEmulator {
     if (method === 'GET' && path === '/cluster/resources') {
       const type = url.searchParams.get('type');
       if (type === 'node') return this.ok(this.nodes.map((node) => ({ type: 'node', ...node })));
-      return this.ok(
-        [...this.vms.values()].map((vm) => ({
+      return this.ok([
+        ...[...this.containers].map((vmid) => ({
+          type: 'lxc',
+          vmid,
+          name: `ct-${vmid}`,
+          node: 'pve1',
+          status: 'running',
+        })),
+        ...[...this.vms.values()].map((vm) => ({
           type: 'qemu',
           vmid: vm.vmid,
           name: vm.name,
@@ -120,7 +132,7 @@ class PveEmulator {
           ...(vm.tags ? { tags: vm.tags } : {}),
           ...(vm.lock ? { lock: vm.lock } : {}),
         })),
-      );
+      ]);
     }
     let match = /^\/nodes\/([^/]+)\/tasks\/([^/]+)\/status$/.exec(path);
     if (match && method === 'GET') {
@@ -143,6 +155,12 @@ class PveEmulator {
     if (rest === 'clone' && method === 'POST') {
       const newid = Number(body.newid);
       this.beforeClone?.(newid);
+      if (body.storage !== undefined && !this.storages.has(body.storage))
+        return this.fail(500, `storage '${body.storage}' does not exist`);
+      if (body.pool !== undefined && !this.pools.has(body.pool))
+        return this.fail(500, `pool '${body.pool}' does not exist`);
+      if (this.containers.has(newid))
+        return this.fail(500, `unable to create VM ${newid} - CT ${newid} already exists`);
       if (this.vms.has(newid))
         return this.fail(500, `unable to create VM ${newid}: config file already exists`);
       const clone = this.vm({
@@ -490,6 +508,44 @@ describe('proxmox specifics', () => {
       storage: 'ceph',
     });
     expect(api.vms.get(Number(machine.id))!.node).toBe('pve2');
+  });
+
+  it('fails a create whose storage or pool the cluster lacks, instead of returning an uncloned machine', async () => {
+    for (const [config, pattern] of [
+      [{ storage: 'nope' }, /storage 'nope' does not exist/],
+      [{ pool: 'nobody' }, /pool 'nobody' does not exist/],
+    ] as const) {
+      const api = new PveEmulator();
+      const impl = await client(api, config);
+      await expect(impl.create(request('inst_17'), call('inst_17'))).rejects.toSatisfy(
+        (error: unknown) =>
+          isComputeError(error, 'PROVIDER_ERROR') && pattern.test((error as Error).message),
+      );
+      expect(api.vms.size).toBe(3);
+      // Nothing was configured or started on a VM that does not exist.
+      expect(api.requests.filter((entry) => entry.method !== 'GET')).toHaveLength(1);
+    }
+  });
+
+  it('fails when the clone vanishes before it is configured, and a power call on a vanished VM is NOT_FOUND', async () => {
+    const api = new PveEmulator();
+    const vanishing: typeof fetch = async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const vmid = Number(/\/qemu\/(\d+)\/(?:config|status\/stop)$/.exec(path)?.[1]);
+      if (init?.method === 'PUT' || path.endsWith('/status/stop')) api.vms.delete(vmid);
+      return api.fetch(input, init);
+    };
+    const impl = await client(api, {}, { fetch: vanishing });
+    await expect(impl.create(request('inst_18'), call('inst_18'))).rejects.toSatisfy(
+      (error: unknown) =>
+        isComputeError(error, 'PROVIDER_ERROR') && /does not exist/.test((error as Error).message),
+    );
+    const steady = await client(api);
+    const { id } = await steady.create(request('inst_19'), call('inst_19'));
+    api.settle();
+    await expect(impl.power!(id, 'off', call('off'))).rejects.toSatisfy((error: unknown) =>
+      isComputeError(error, 'NOT_FOUND'),
+    );
   });
 
   it('refuses to delete or power VMs it did not create, and deletes its own after stopping them', async () => {

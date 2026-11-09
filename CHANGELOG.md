@@ -156,6 +156,11 @@ All notable changes to the better-compute packages are documented here. The form
   GPU machine type (and so `TERMINATE`) when `machineTypes.get` fails now knows the `a4x-` and `g4-` families.
 - **GB200 and RTX PRO 6000 GPUs** (`@better-compute/provider-gcp`). `nvidia-gb200` and `nvidia-rtx-pro-6000`
   accelerators report the `GB200` and `RTX-PRO-6000` GPU families (and meters) instead of `other`.
+- **A Proxmox VE create that was never cloned** (`@better-compute/provider-proxmox`). Any PVE error containing
+  "does not exist" was read as "no such VM", so an account whose `storage` or `pool` the cluster lacks had its clone
+  refused and `create` still returned a `pending` machine. Only a read or a delete of a VM's own path now answers
+  "missing"; a clone, a config write, a resize or a start that fails is a `PROVIDER_ERROR` carrying PVE's message, and
+  a power call on a VM deleted meanwhile is still `NOT_FOUND`.
 
 ## 0.3.0 (2026-10-20)
 
