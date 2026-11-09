@@ -512,17 +512,27 @@ class ProxmoxClient implements ProviderImpl {
     const { vmidMin: min, vmidMax: max } = this.#config;
     const probes = Math.min(64, max - min + 1);
     let slot = await vmidFor(key, min, max);
+    // The slot whose clone PVE refused as taken, to be looked at once more.
+    let refused: number | undefined;
     for (let probe = 0; probe < probes; ) {
       const vm = (await this.#vms(signal)).find((candidate) => candidate.vmid === slot);
+      if (!vm && refused === slot) {
+        // PVE holds the VMID for something the listing does not show (a container, a VM this token
+        // cannot audit): it is another's slot like any other.
+        slot = slot >= max ? min : slot + 1;
+        probe++;
+        continue;
+      }
       if (!vm) {
         const template = await this.#template(request.image, signal);
         const node = this.#config.node ?? template.node;
         try {
           await this.#clone(template, slot, node, vmName(request.name), key, signal);
         } catch (error) {
-          // Someone cloned into the slot first: look again at who holds it.
-          if (/already exists/i.test((error as Error).message)) continue;
-          throw error;
+          // Someone cloned into the slot first: look once more at who holds it.
+          if (!/already exists/i.test((error as Error).message)) throw error;
+          refused = slot;
+          continue;
         }
         const cicustom = await this.#snippet(slot, request.userData, context);
         return this.#finish(slot, node, vmName(request.name), size, cicustom, context);

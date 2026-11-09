@@ -161,6 +161,10 @@ All notable changes to the better-compute packages are documented here. The form
   refused and `create` still returned a `pending` machine. Only a read or a delete of a VM's own path now answers
   "missing"; a clone, a config write, a resize or a start that fails is a `PROVIDER_ERROR` carrying PVE's message, and
   a power call on a VM deleted meanwhile is still `NOT_FOUND`.
+- **A Proxmox VE create that never returned** (`@better-compute/provider-proxmox`). When the key's VMID was held by
+  something the VM listing does not show (an LXC container, a VM the token cannot audit), the clone was refused as
+  "already exists" and retried against the same VMID until the call was aborted. Such a VMID now counts as taken and
+  the create probes the next one, ending in `CAPACITY_UNAVAILABLE` when the range has no free VMID nearby.
 
 ## 0.3.0 (2026-10-20)
 

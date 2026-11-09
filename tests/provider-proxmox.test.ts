@@ -445,6 +445,28 @@ describe('proxmox specifics', () => {
     expect(api.vms.size).toBe(4);
   });
 
+  it('probes past a VMID that PVE refuses but the VM listing does not show (a container)', async () => {
+    const api = new PveEmulator();
+    const impl = await client(api, { vmidMin: 5000, vmidMax: 5001 });
+    const slot = await vmidFor('inst_20', 5000, 5001);
+    api.containers.add(slot);
+    let clones = 0;
+    api.beforeClone = () => {
+      if (++clones > 4) throw new Error('cloned into the same VMID again and again');
+    };
+    const machine = await impl.create(request('inst_20'), call('inst_20'));
+    expect(machine.id).toBe(String(slot === 5000 ? 5001 : 5000));
+    expect(clones).toBe(2);
+    // A range made only of ids the listing cannot show runs out instead of spinning.
+    api.containers.add(5000).add(5001);
+    api.vms.delete(Number(machine.id));
+    clones = 0;
+    await expect(impl.create(request('inst_21'), call('inst_21'))).rejects.toSatisfy(
+      (error: unknown) => isComputeError(error, 'CAPACITY_UNAVAILABLE'),
+    );
+    expect(clones).toBe(2);
+  });
+
   it('finishes a clone that was interrupted before configuration', async () => {
     const api = new PveEmulator();
     const impl = await client(api);
