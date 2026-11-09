@@ -80,6 +80,7 @@ export const awsErrorCodes: Readonly<Partial<Record<ErrorCode, readonly string[]
   UNAUTHENTICATED: [
     'AuthFailure',
     'InvalidClientTokenId',
+    'UnrecognizedClientException',
     'SignatureDoesNotMatch',
     'IncompleteSignature',
     'MissingAuthenticationToken',

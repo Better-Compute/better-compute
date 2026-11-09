@@ -20,7 +20,10 @@ export interface CredentialContext {
   clock: Clock;
 }
 
-/** Where credentials come from. `invalidate` drops cached credentials (after `ExpiredToken`). */
+/**
+ * Where credentials come from. `invalidate` drops cached credentials: after `ExpiredToken`, and
+ * after a refused key (`AuthFailure`), so a secret rotated in place is read again.
+ */
 export interface CredentialSource {
   readonly kind: string;
   credentials(context: CredentialContext): Promise<AwsCredentials>;

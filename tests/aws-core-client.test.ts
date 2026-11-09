@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ComputeError, manualClock, type ErrorCode } from '@better-compute/core';
 import {
+  cachedCredentials,
   ec2Client,
   jsonClient,
   mapAwsError,
@@ -9,6 +10,7 @@ import {
   queryClient,
   redactAws,
   restClient,
+  staticCredentials,
   type CredentialSource,
 } from '@better-compute/aws-core';
 import { AwsEmulator } from './support/aws-emulator/index.js';
@@ -214,6 +216,72 @@ describe('aws-core clients', () => {
     const error = await failure(() => client.call('DescribeInstances', {}, { signal }));
     expect(error.code).toBe('UNAUTHENTICATED');
     expect(invalidate).toHaveBeenCalledTimes(2);
+  });
+
+  /** An EC2 endpoint that accepts one access key id and answers `code` to any other. */
+  function keyed(code: string) {
+    const state = { active: '', requests: 0 };
+    const fetchImpl = (async (_url: unknown, init: { headers: Record<string, string> }) => {
+      state.requests += 1;
+      const accepted = (init.headers.authorization ?? '').includes(state.active);
+      return new Response(
+        accepted
+          ? '<DescribeRegionsResponse><requestId>r</requestId></DescribeRegionsResponse>'
+          : `<?xml version="1.0"?><Response><Errors><Error><Code>${code}</Code><Message>no</Message></Error></Errors><RequestID>r</RequestID></Response>`,
+        { status: accepted ? 200 : 401, headers: { date: new Date().toUTCString() } },
+      );
+    }) as unknown as typeof fetch;
+    return { state, fetchImpl };
+  }
+
+  it.each(['AuthFailure', 'InvalidClientTokenId', 'UnrecognizedClientException'])(
+    'reads a static key rotated in place again on %s, once',
+    async (code) => {
+      let secret = { accessKeyId: 'AKIAOLDOLDOLDOLDOLD1', secretAccessKey: 'old' };
+      let loads = 0;
+      const source = cachedCredentials(
+        staticCredentials(async () => {
+          loads += 1;
+          return JSON.stringify(secret);
+        }),
+      );
+      const { state, fetchImpl } = keyed(code);
+      state.active = secret.accessKeyId;
+      const ec2 = ec2Client({ region: 'us-east-1', credentials: source, fetch: fetchImpl });
+      await ec2.call('DescribeRegions', {}, { signal });
+      expect([loads, state.requests]).toEqual([1, 1]);
+      // The operator rotates the secret in place and deactivates the old key.
+      secret = { accessKeyId: 'AKIANEWNEWNEWNEWNEW1', secretAccessKey: 'new' };
+      state.active = secret.accessKeyId;
+      await ec2.call('DescribeRegions', {}, { signal });
+      await ec2.call('DescribeRegions', {}, { signal });
+      // One refused request, one re-read, then the new key for good.
+      expect([loads, state.requests]).toEqual([2, 4]);
+      // A key that is simply wrong is re-read once per call and not sent again.
+      state.active = 'AKIAOTHEROTHEROTHER1';
+      const error = await failure(() => ec2.call('DescribeRegions', {}, { signal }));
+      expect(error.code).toBe('UNAUTHENTICATED');
+      expect([loads, state.requests]).toEqual([3, 5]);
+    },
+  );
+
+  it('a refused key is retried once even when every read gives another key', async () => {
+    let minted = 0;
+    const source = cachedCredentials({
+      kind: 'test',
+      credentials: async () => ({
+        accessKeyId: `AKIAMINTED${String((minted += 1)).padStart(10, '0')}`,
+        secretAccessKey: 'secret',
+      }),
+    });
+    const { state, fetchImpl } = keyed('AuthFailure');
+    state.active = 'AKIANEVERNEVERNEVER1';
+    const ec2 = ec2Client({ region: 'us-east-1', credentials: source, fetch: fetchImpl });
+    const error = await failure(() => ec2.call('DescribeRegions', {}, { signal }));
+    expect(error.code).toBe('UNAUTHENTICATED');
+    expect([minted, state.requests]).toEqual([2, 2]);
+    // Nothing of the key reaches the error.
+    expect(JSON.stringify([error.message, error.details])).not.toMatch(/AKIA|secret/);
   });
 
   it('times out as UNAVAILABLE with reason timeout', async () => {

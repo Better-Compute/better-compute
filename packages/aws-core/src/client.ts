@@ -5,7 +5,7 @@ import {
   type Clock,
   type Logger,
 } from '@better-compute/core';
-import type { CredentialSource } from './credentials.js';
+import type { AwsCredentials, CredentialSource } from './credentials.js';
 import { endpointFor, signingRegionFor, type AwsService } from './endpoints.js';
 import { mapAwsError, parseAwsError } from './errors.js';
 import { serializeAwsQuery, serializeEc2Query, type QueryParams } from './query.js';
@@ -14,8 +14,9 @@ import { signRequest } from './sigv4.js';
 import { parseXml, type XmlElement } from './xml.js';
 
 // The protocol clients every AWS integration shares: plain fetch, SigV4, and AWS errors mapped to
-// ComputeError. No retry loops besides exactly one for clock skew and one for an expired session
-// token; the reconciler that called owns backoff.
+// ComputeError. No retry loops besides exactly one for clock skew and one with re-read credentials
+// (an expired session token, or a key that was refused and has been rotated since); the reconciler
+// that called owns backoff.
 
 export interface ServiceClientOptions {
   service: AwsService;
@@ -156,6 +157,24 @@ interface WireResponse {
 
 const skewCodes: ReadonlySet<string> = new Set(['RequestTimeTooSkewed', 'RequestExpired']);
 const expiredTokenCodes: ReadonlySet<string> = new Set(['ExpiredToken', 'ExpiredTokenException']);
+/**
+ * The key itself was refused. A long-term key is cached until `invalidate()`, so after an operator
+ * rotates the secret in place every call answers one of these until the secret is read again.
+ */
+const rejectedKeyCodes: ReadonlySet<string> = new Set([
+  'AuthFailure',
+  'InvalidClientTokenId',
+  'UnrecognizedClientException',
+]);
+
+/** Whether two resolutions gave the same key (a retry with it would be refused again). */
+function sameCredentials(a: AwsCredentials, b: AwsCredentials): boolean {
+  return (
+    a.accessKeyId === b.accessKeyId &&
+    a.secretAccessKey === b.secretAccessKey &&
+    a.sessionToken === b.sessionToken
+  );
+}
 
 /** The shared transport: limiter, credentials, signing, timeout, and the two retries. */
 class Transport {
@@ -193,9 +212,11 @@ class Transport {
   async send(request: WireRequest, signal: AbortSignal): Promise<WireResponse> {
     await this.#limiter.take(signal);
     let skewRetried = false;
+    // One credential refresh per call, whatever the code that asked for it: never a loop.
     let tokenRetried = false;
+    const source = this.options.credentials;
     for (;;) {
-      const response = await this.#once(request, signal);
+      const { response, credentials } = await this.#once(request, signal);
       if (response.status < 300 && response.status >= 200) return response;
       const text = new TextDecoder().decode(response.body);
       const parsed = parseAwsError(request.protocol, response.status, response.headers, text);
@@ -211,16 +232,27 @@ class Transport {
           continue;
         }
       }
-      if (expiredTokenCodes.has(code) && !tokenRetried && this.options.credentials.invalidate) {
+      if (expiredTokenCodes.has(code) && !tokenRetried && source.invalidate) {
         tokenRetried = true;
-        this.options.credentials.invalidate();
+        source.invalidate();
         continue;
+      }
+      if (rejectedKeyCodes.has(code) && !tokenRetried && source.invalidate) {
+        tokenRetried = true;
+        source.invalidate();
+        // Retried only with a key the source did not give before (a rotated secret): the same key
+        // would be refused again.
+        const fresh = await source.credentials({ signal, clock: this.clock });
+        if (!sameCredentials(fresh, credentials)) continue;
       }
       throw mapAwsError({ ...parsed, service: this.options.service });
     }
   }
 
-  async #once(request: WireRequest, signal: AbortSignal): Promise<WireResponse> {
+  async #once(
+    request: WireRequest,
+    signal: AbortSignal,
+  ): Promise<{ response: WireResponse; credentials: AwsCredentials }> {
     if (signal.aborted) throw abortError(signal);
     const credentials = await this.options.credentials.credentials({ signal, clock: this.clock });
     const headers = { ...request.headers };
@@ -268,7 +300,10 @@ class Transport {
           undefined,
         ms: Date.now() - started,
       });
-      return { status: response.status, headers: response.headers, body };
+      return {
+        response: { status: response.status, headers: response.headers, body },
+        credentials,
+      };
     } catch (error) {
       if (isComputeError(error)) throw error;
       if (signal.aborted) throw abortError(signal);

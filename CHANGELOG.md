@@ -164,6 +164,11 @@ All notable changes to the better-compute packages are documented here. The form
   retryable `UNAVAILABLE` (`eventual-consistency`) until EC2 shows the instance or it has been missing for the
   whole window. `TerminateInstances` not finding an instance a read just found is retried the same way. Volumes,
   networks and instances share one consistency helper.
+- **A static AWS access key rotated in place is picked up without a restart** (`@better-compute/aws-core`). A
+  long-term key is cached until it is invalidated, and only `ExpiredToken` invalidated it, so after an operator
+  rotated the secret every call answered `AuthFailure` until the process restarted. `AuthFailure`,
+  `InvalidClientTokenId` and `UnrecognizedClientException` (now `UNAUTHENTICATED`) re-read the credentials and
+  retry once, and only when the source then gives a different key.
 
 ## 0.3.0 (2026-10-20)
 
