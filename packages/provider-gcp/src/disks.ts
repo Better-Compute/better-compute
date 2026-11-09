@@ -44,6 +44,13 @@ const gvnicOnly = [
   'z3',
 ];
 
+/**
+ * Families that cannot live-migrate whatever their accelerators: host maintenance stops them
+ * (`onHostMaintenance: TERMINATE`). TERMINATE is accepted by every machine type, so a family
+ * listed here by mistake only loses live migration; one missing from it is refused at create.
+ */
+const noLiveMigration = ['h3', 'h4d', 'x4'];
+
 /** The boot disk type when nothing else is known: works on every Persistent Disk family. */
 export const defaultBootDiskType = 'pd-balanced';
 /** The only Hyperdisk type a boot disk can be. */
@@ -55,9 +62,14 @@ function inFamily(machineType: string, families: readonly string[]): boolean {
   return families.some((family) => name === family || name.startsWith(`${family}-`));
 }
 
-/** The boot disk types `machineType` takes, best first. */
+/** Whether `machineType` is a bare metal type (`c3-standard-192-metal`, `x4-megamem-960-metal`). */
+export function isMetal(machineType: string): boolean {
+  return lastSegment(machineType).endsWith('-metal');
+}
+
+/** The boot disk types `machineType` takes, best first. Bare metal takes Hyperdisk only. */
 export function bootDiskTypes(machineType: string): string[] {
-  return inFamily(machineType, hyperdiskOnly)
+  return inFamily(machineType, hyperdiskOnly) || isMetal(machineType)
     ? [hyperdiskBootType]
     : [defaultBootDiskType, hyperdiskBootType];
 }
@@ -65,6 +77,17 @@ export function bootDiskTypes(machineType: string): string[] {
 /** Whether `machineType` needs a gVNIC interface. */
 export function needsGvnic(machineType: string): boolean {
   return inFamily(machineType, gvnicOnly);
+}
+
+/** The `nicType` a create must ask for: IDPF on bare metal, gVNIC on gVNIC-only families, else the default. */
+export function nicTypeOf(machineType: string): 'IDPF' | 'GVNIC' | undefined {
+  if (isMetal(machineType)) return 'IDPF';
+  return needsGvnic(machineType) ? 'GVNIC' : undefined;
+}
+
+/** Whether `machineType` cannot live-migrate for its family or bare metal (accelerators are checked apart). */
+export function cannotLiveMigrate(machineType: string): boolean {
+  return isMetal(machineType) || inFamily(machineType, noLiveMigration);
 }
 
 /** Whether a GCE create error is the refusal of a boot disk type by the machine type. */

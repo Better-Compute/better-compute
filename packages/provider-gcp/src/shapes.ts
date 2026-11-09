@@ -81,9 +81,11 @@ export function gpuModel(acceleratorType: string): string {
   if (type === 'nvidia-h100-80gb' || type === 'nvidia-h100-mega-80gb') return 'H100';
   if (type === 'nvidia-h200-141gb') return 'H200';
   if (type === 'nvidia-b200') return 'B200';
+  if (type === 'nvidia-gb200') return 'GB200';
   if (type === 'nvidia-a100-80gb' || type === 'nvidia-tesla-a100') return 'A100';
   if (type === 'nvidia-l4') return 'L4';
   if (type === 'nvidia-l40s') return 'L40S';
+  if (type === 'nvidia-rtx-pro-6000') return 'RTX-PRO-6000';
   return 'other';
 }
 
