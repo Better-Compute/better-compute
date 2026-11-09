@@ -31,8 +31,12 @@ const cert = '0f8a2d6e-3b1c-4a5d-9e7f-1a2b3c4d5e6f';
 
 const tenantA = { 'better-compute-tenant': 'ten_a', 'better-compute-resource': 'crs_cdn_a' };
 const tenantB = { 'better-compute-tenant': 'ten_b', 'better-compute-resource': 'crs_cdn_b' };
-/** Tenant A's request: its endpoint lives in its own bucket row. */
-const asA = { parent: `nyc3/${own}tenant-a-assets`, labels: tenantA };
+/** Tenant A's request, on its own account: its endpoint lives in its own bucket row. */
+const asA = {
+  parent: `nyc3/${own}tenant-a-assets`,
+  labels: tenantA,
+  accountScope: 'tenant' as const,
+};
 
 async function world(): Promise<StorageWorld> {
   const w = await storageWorld(undefined, undefined, ({ emu }) => registerCdn(emu));
@@ -124,6 +128,7 @@ describe('do.cdn-endpoint', () => {
         w.ensure('do.cdn-endpoint', 'bc-cdn-b', spec, w.ctx(), {
           parent: `nyc3/${own}tenant-a-assets`,
           labels: tenantB,
+          accountScope: 'tenant',
         }),
       );
       expect([refused.code, refused.details?.reason]).toEqual(['ACCESS_DENIED', 'otherTenant']);
@@ -165,6 +170,38 @@ describe('do.cdn-endpoint', () => {
     expect(cdnPurges(w.emu)).toHaveLength(0);
     // Tenant B (the bucket's own tenant) may adopt its endpoint.
     expect((await w.resources.adopt('do.cdn-endpoint', theirs.id, tenantB, w.ctx())).id).toBe(theirs.id);
+  });
+
+  it('names a certificate (and so a custom domain) only on the tenant’s own account', async () => {
+    const w = await world();
+    const kind = w.kinds.find((entry) => entry.definition.kind === 'do.cdn-endpoint')!;
+    const custom = { origin, customDomain: 'assets.example.com', certificateId: cert };
+    // The module asks the definition before it records anything.
+    expect(kind.definition.accountWide?.(custom)).toEqual(['certificateId', 'customDomain']);
+    expect(kind.definition.accountWide?.({ origin })).toEqual([]);
+    const before = w.emu.requests.length;
+    for (const accountScope of [undefined, 'shared'] as const) {
+      const refused = await failure(
+        w.ensure('do.cdn-endpoint', 'bc-cdn1', custom, w.ctx(), {
+          parent: asA.parent,
+          labels: tenantA,
+          ...(accountScope ? { accountScope } : {}),
+        }),
+      );
+      expect([refused.code, refused.details?.reason, refused.details?.fields]).toEqual([
+        'INVALID_INPUT',
+        'accountWide',
+        ['certificateId', 'customDomain'],
+      ]);
+    }
+    expect(w.emu.requests.length).toBe(before);
+    // Without a custom domain a shared account is fine.
+    const plain = await w.ensure('do.cdn-endpoint', 'bc-cdn1', { origin }, w.ctx(), {
+      parent: asA.parent,
+      labels: tenantA,
+      accountScope: 'shared',
+    });
+    expect(plain.state).toBe('ready');
   });
 
   it('validates ttl, custom domain and origin', async () => {

@@ -21,6 +21,13 @@ import { found, type DoKind, type DoKindEnv } from '../kind.js';
 // A model access key is an account-wide bearer: it reaches every model and every Dedicated Inference endpoint of the
 // account, and a tenant that reads it can call DigitalOcean directly, past the proxy, on the account's bill. So only
 // the tenant's own account may have one (`accountScope: 'tenant'`); on a shared account it is refused before any call.
+//
+// A regenerate and its rename are two writes. When the rename fails after the regenerate answered, the new secret is
+// returned (to be sealed) with the name still behind. DigitalOcean keeps nothing that tells such a key from one whose
+// regenerate answer was lost, so the kind remembers it (in memory, per key): while the caller holds the key sealed and
+// asks for that same rotation, the next runs retry the rename alone. Without that, every 10 s poll would see the old
+// rotation in the name and regenerate again, invalidating the key the tenant just received for as long as the rename
+// fails. A restart forgets it and regenerates once more, which is safe (the new secret is returned and sealed).
 
 export const inferenceKeyKindName = 'do.inference-key';
 /** Tokens a key's inference uses (input and output), counted by the operator proxy or reported by billing. */
@@ -137,17 +144,47 @@ function state(key: DoModelKey, endpoint: string, secret?: string | null): Provi
 }
 
 export function inferenceKeyKind(endpoint: string = defaultInferenceEndpoint): DoKind {
-  async function regenerate(
+  /** Keys regenerated here whose rename has not gone through yet: key uuid → the rotation its new secret is for. */
+  const renameOwed = new Map<string, number>();
+
+  /** The rename alone, for a key whose new secret is already out and sealed: `updating` until it is applied. */
+  async function rename(
     env: DoKindEnv,
     key: DoModelKey,
     name: string,
     context: CallContext,
   ): Promise<ProviderResourceState> {
+    try {
+      await env.client.request('PUT', path(key.uuid), {
+        body: { name },
+        signal: context.signal,
+        budget: 'mutate',
+      });
+    } catch (error) {
+      context.log?.warn('digitalocean: a regenerated model access key still could not be renamed', {
+        key: key.uuid,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { ...state(key, endpoint), state: 'updating' };
+    }
+    renameOwed.delete(key.uuid);
+    return state({ ...key, name }, endpoint);
+  }
+
+  async function regenerate(
+    env: DoKindEnv,
+    key: DoModelKey,
+    name: string,
+    rotation: number,
+    context: CallContext,
+  ): Promise<ProviderResourceState> {
     // The secret first, the name (the applied rotation) after. A lost regenerate answer leaves the name behind, so the
     // next run regenerates again and no secret that was never sealed stays live. Once the new secret is in hand it is
     // always returned, to be sealed: a failed rename (DigitalOcean may have applied it and lost the answer) answers
-    // `updating` with the rotation the name had, so the next run reads the name again and renames (or regenerates
-    // and renames) until it is applied; the secret is never dropped while the old one already stopped working.
+    // `updating` with the rotation the name had, so the next run reads the name again and renames alone (see
+    // `renameOwed`; after a restart it regenerates and renames) until it is applied; the secret is never dropped
+    // while the old one already stopped working.
+    renameOwed.delete(key.uuid);
     const reply = await env.client.request<{ api_key_info: DoModelKey }>(
       'PUT',
       `${path(key.uuid)}/regenerate`,
@@ -166,6 +203,8 @@ export function inferenceKeyKind(endpoint: string = defaultInferenceEndpoint): D
           key: key.uuid,
           error: error instanceof Error ? error.message : String(error),
         });
+        // Only when the secret is in hand: a key without one (a malformed answer) is regenerated again.
+        if (typeof secret === 'string' && secret.length > 0) renameOwed.set(key.uuid, rotation);
         const behind = state({ ...reply.api_key_info, name: key.name }, endpoint, secret);
         return { ...behind, state: 'updating' };
       }
@@ -216,12 +255,19 @@ export function inferenceKeyKind(endpoint: string = defaultInferenceEndpoint): D
         // The applied rotation, and a key the caller holds sealed: nothing to do. A sealed key that is missing (its
         // seal failed, so the secret DigitalOcean answered is lost) is minted again: the old one stops working.
         const sealed = request.secretOutputs === undefined || request.secretOutputs.includes('key');
-        if (parse(key.name)?.rotation === wanted.rotation && sealed) return state(key, endpoint);
-        return regenerate(env, key, name, context);
+        if (parse(key.name)?.rotation === wanted.rotation && sealed) {
+          renameOwed.delete(key.uuid);
+          return state(key, endpoint);
+        }
+        // The secret of this rotation is already out and the caller holds it sealed; only the name is behind (its
+        // rename failed): the rename is retried alone, so the key the tenant has keeps working.
+        if (sealed && renameOwed.get(key.uuid) === wanted.rotation)
+          return rename(env, key, name, context);
+        return regenerate(env, key, name, wanted.rotation, context);
       }
       const existing = await byName(env, request.name, context.signal);
       // The answer of an earlier create was lost: its secret was never sealed, so it is replaced.
-      if (existing) return regenerate(env, existing, name, context);
+      if (existing) return regenerate(env, existing, name, wanted.rotation, context);
       const created = await env.client.request<{ api_key_info: DoModelKey }>('POST', base, {
         body: { name },
         signal: context.signal,
@@ -244,6 +290,7 @@ export function inferenceKeyKind(endpoint: string = defaultInferenceEndpoint): D
     },
 
     async delete(env, id, context) {
+      renameOwed.delete(id);
       const key = await byId(env, id, context.signal);
       if (!key) return { id, state: 'deleted' };
       assertOwned(env, key);

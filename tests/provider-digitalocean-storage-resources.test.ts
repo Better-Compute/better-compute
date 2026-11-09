@@ -8,13 +8,22 @@ import {
 import {
   bucketMarkerKey,
   deploymentTag,
+  digitaloceanProvider,
   managedNamePrefix,
   resetBudgets,
+  type DoConfig,
+  type DoResources,
 } from '@better-compute/provider-digitalocean';
+import { noopLog, platformAccount } from './support/do-harness.js';
 import { registerCdn, seedCdnEndpoint } from './support/do-emulator/cdn.js';
 import { registerRegistry, seedRegistry } from './support/do-emulator/registry.js';
 import { registerSpacesKeys, seedSpacesKey } from './support/do-emulator/spaces-keys.js';
-import { storageWorld, type StorageWorld } from './support/do-storage-harness.js';
+import {
+  storageAccount,
+  storageSecrets,
+  storageWorld,
+  type StorageWorld,
+} from './support/do-storage-harness.js';
 
 // The DigitalOcean storage kinds as the cloud-resources `ProviderResources` contract asks for them:
 // request-shaped `ensure` (a known provider id wins over the name), `adopt`/`release` through the
@@ -189,11 +198,14 @@ describe('doStorageKinds, for the provider-wide dispatcher', () => {
         regional: k.regional,
         updatable: k.updatable,
         ...(k.parent ? { parent: k.parent } : {}),
+        ...(k.accountWide ? { accountWide: expect.any(Function) } : {}),
       })),
     );
-    // Only metadata in a definition: no calls, no kind-specific helpers (purge, repositories).
+    // Only metadata in a definition (and the contract's pure `accountWide`): no calls, no kind-specific helpers
+    // (purge, repositories).
     for (const { definition } of kinds)
-      for (const value of Object.values(definition)) expect(typeof value).not.toBe('function');
+      for (const [name, value] of Object.entries(definition))
+        if (name !== 'accountWide') expect(typeof value).not.toBe('function');
 
     const env: LaneKindEnv = { client: {}, deploymentTag: 'ignored', previews: false };
     const bucketKind = kinds.find((k) => k.definition.kind === 'do.spaces-bucket')!;
@@ -218,6 +230,127 @@ describe('doStorageKinds, for the provider-wide dispatcher', () => {
         .code,
     ).toBe('INVALID_INPUT');
     expect(kinds.find((k) => k.definition.kind === 'do.spaces-key')!.adopt).toBeUndefined();
+  });
+});
+
+describe('digitaloceanProvider serves the storage kinds through its one resources', () => {
+  // The provider as vps and cloud-resources build it: one `resources` for the long tail and storage alike.
+  async function provider(options: Record<string, unknown> = {}) {
+    const w = await world();
+    const definition = digitaloceanProvider({
+      fetch: w.emu.fetch,
+      spacesFetch: w.spaces.fetch,
+      ...options,
+    });
+    const parsed = await definition.config['~standard'].validate(storageAccount);
+    if ('issues' in parsed && parsed.issues) throw new Error(parsed.issues[0]!.message);
+    const impl = await definition.create((parsed as { value: DoConfig }).value, {
+      clock: w.clock,
+      secrets: storageSecrets,
+      log: noopLog,
+      account: platformAccount,
+    });
+    return { w, resources: impl.resources as DoResources };
+  }
+  const bucket = { kind: 'do.spaces-bucket', name: 'bc-r-assets01', spec: { region: 'nyc3' }, labels };
+
+  it('lists them after the long-tail kinds; the Spaces options reach them', async () => {
+    const { w, resources } = await provider();
+    const kinds = resources.kinds().map((kind) => kind.kind);
+    expect(kinds).toEqual(
+      expect.arrayContaining([
+        'do.database.pg',
+        'do.spaces-key',
+        'do.spaces-bucket',
+        'do.cdn-endpoint',
+        'do.container-registry',
+        'do.registry-garbage-collection',
+      ]),
+    );
+    expect(new Set(kinds).size).toBe(kinds.length);
+    // A bucket through the provider-wide dispatcher: the Spaces (S3) emulator got the requests (`spacesFetch`).
+    const made = await resources.ensure(bucket, w.ctx());
+    expect(made).toMatchObject({ id: `nyc3/${own}r-assets01`, state: 'ready' });
+    expect(w.spaces.buckets.has(`${own}r-assets01`)).toBe(true);
+    // And a key granted on it: its secret comes back once, as a secret output.
+    const key = await resources.ensure(
+      { kind: 'do.spaces-key', name: 'bc-r-key01', spec: { grants: [`${made.id}:read`] }, labels },
+      w.ctx(),
+    );
+    expect(key.state).toBe('ready');
+    expect(key.secretOutputs?.secretKey).toEqual(expect.any(String));
+    // Which of them can be released: only a bucket (an adopted one; its marker is taken off).
+    expect(resources.releasable('do.spaces-bucket')).toBe(true);
+    for (const kind of ['do.spaces-key', 'do.cdn-endpoint', 'do.container-registry'])
+      expect(resources.releasable(kind)).toBe(false);
+  });
+
+  it('the operator options pass through: full-access key grants stay off unless turned on', async () => {
+    const off = await provider();
+    const full = { kind: 'do.spaces-key', name: 'bc-r-full', spec: { grants: ['*:fullaccess'] }, labels };
+    expect((await failure(off.resources.ensure(full, off.w.ctx()))).details?.reason).toBe(
+      'fullAccess',
+    );
+    const on = await provider({ spacesKeyFullAccess: true });
+    expect((await on.resources.ensure(full, on.w.ctx())).state).toBe('ready');
+  });
+
+  it('find answers what a create whose answer was lost made, for every storage kind, and sends no write', async () => {
+    const { w, resources } = await provider();
+    const registry = { kind: 'do.container-registry', name: 'bc-r-reg01', spec: { region: 'nyc3' }, labels };
+    // Nothing made yet: nothing found.
+    expect(await resources.find(bucket, w.ctx())).toBeUndefined();
+    expect(await resources.find(registry, w.ctx())).toBeUndefined();
+    const madeBucket = await resources.ensure(bucket, w.ctx());
+    const key = { kind: 'do.spaces-key', name: 'bc-r-key01', spec: { grants: [`${madeBucket.id}:read`] }, labels };
+    expect(await resources.find(key, w.ctx())).toBeUndefined();
+    const madeKey = await resources.ensure(key, w.ctx());
+    const madeRegistry = await resources.ensure(registry, w.ctx());
+    const endpoint = {
+      kind: 'do.cdn-endpoint',
+      name: 'bc-r-cdn01',
+      spec: { origin: `${own}r-assets01.nyc3.digitaloceanspaces.com` },
+      parent: madeBucket.id,
+      labels,
+    };
+    expect(await resources.find(endpoint, w.ctx())).toBeUndefined();
+    const madeEndpoint = await resources.ensure(endpoint, w.ctx());
+    const gc = {
+      kind: 'do.registry-garbage-collection',
+      name: 'bc-r-gc01',
+      spec: { registry: madeRegistry.id },
+      parent: madeRegistry.id,
+      labels,
+    };
+    expect(await resources.find(gc, w.ctx())).toBeUndefined();
+    const madeGc = await resources.ensure(gc, w.ctx());
+
+    const apiWrites = w.emu.requests.filter((r) => r.method !== 'GET').length;
+    const s3Writes = w.spaces.requests.filter((r) => r.method !== 'GET' && r.method !== 'HEAD').length;
+    // The requests carry no id, as the row of a create that was never answered.
+    expect(await resources.find(bucket, w.ctx())).toBe(madeBucket.id);
+    expect(await resources.find(key, w.ctx())).toBe(madeKey.id);
+    expect(await resources.find(registry, w.ctx())).toBe(madeRegistry.id);
+    expect(await resources.find(endpoint, w.ctx())).toBe(madeEndpoint.id);
+    expect(await resources.find(gc, w.ctx())).toBe(madeGc.id);
+    expect(w.emu.requests.filter((r) => r.method !== 'GET').length).toBe(apiWrites);
+    expect(
+      w.spaces.requests.filter((r) => r.method !== 'GET' && r.method !== 'HEAD').length,
+    ).toBe(s3Writes);
+  });
+
+  it('a Spaces key whose secret the caller never sealed is an error, not ready', async () => {
+    const { w, resources } = await provider();
+    const madeBucket = await resources.ensure(bucket, w.ctx());
+    const key = { kind: 'do.spaces-key', name: 'bc-r-key01', spec: { grants: [`${madeBucket.id}:read`] }, labels };
+    const made = await resources.ensure(key, w.ctx());
+    // Sealed: nothing to do, and no secret is answered again.
+    const held = await resources.ensure({ ...key, id: made.id, secretOutputs: ['secretKey'] }, w.ctx());
+    expect([held.state, held.secretOutputs]).toEqual(['ready', undefined]);
+    // The seal failed in the run that got the secret: DigitalOcean never shows it again.
+    const lost = await resources.ensure({ ...key, id: made.id, secretOutputs: [] }, w.ctx());
+    expect(lost).toMatchObject({ id: made.id, state: 'error' });
+    expect(lost.message).toMatch(/never sealed/);
   });
 });
 

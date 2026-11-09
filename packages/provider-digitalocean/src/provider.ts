@@ -9,6 +9,7 @@ import { accountBilling, billingSummary } from './ops/billing.js';
 import { doBilling, readInvoiceCosts } from './ops/costs.js';
 import { doConnect } from './ops/oauth.js';
 import { withTenantProjects } from './ops/projects.js';
+import { doStorageKinds } from './resources/storage/index.js';
 import { readFindings } from './ops/security.js';
 import { doMetricsSource } from './ops/monitoring.js';
 import { checkReport, probeAccount } from './probe.js';
@@ -106,6 +107,9 @@ export function digitaloceanProvider(
           deployment,
           inCallWaitMs,
           ...(options.catalogImages ? { catalogImages: options.catalogImages } : {}),
+          // The storage kinds (Spaces buckets and keys, CDN endpoints, the Container Registry) join the long tail on
+          // the same client, token and request budget; the Spaces options pass through. No request is made here.
+          resourceKinds: doStorageKinds(config, context, options, client),
         },
         client,
       );

@@ -132,6 +132,13 @@ export function containerRegistryKind(
       return registryState(created.registry);
     },
 
+    // A create whose answer was lost: the registry under the derived name (this deployment's
+    // prefix and the resource's own name), read-only.
+    async find(request, ctx) {
+      const name = names.provider(request.name, 'A registry');
+      return (await readRegistry(client, name, ctx.signal)) ? name : undefined;
+    },
+
     async get(id, ctx) {
       const registry = await readRegistry(client, id, ctx.signal);
       return registry
@@ -322,6 +329,15 @@ export function registryGcKind(
         if (!running) throw error;
         return gcState(running);
       }
+    },
+
+    // A start whose answer was lost: the collection still running in the request's own registry
+    // (a registry runs one at a time), read-only. A finished one needs nothing deleted.
+    async find({ spec, parent }, ctx) {
+      if (parent === undefined || parent !== spec.registry) return undefined;
+      if (names.owner(spec.registry) !== 'this') return undefined;
+      const running = await find(spec.registry, ctx.signal, (gc) => !finished.has(gc.status));
+      return running ? `${running.registry_name}/${running.uuid}` : undefined;
     },
 
     async get(id, ctx) {

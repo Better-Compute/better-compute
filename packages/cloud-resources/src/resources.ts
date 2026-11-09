@@ -765,7 +765,9 @@ export async function updateResource(
 
 /**
  * `cloudResources.delete`: the resource (and every resource living in it) is marked for deletion and the reconciler
- * deletes it at the provider, children first. Idempotent.
+ * deletes it at the provider, children first. Idempotent. A release still pending (or one that cannot complete) is
+ * overridden: the resource is deleted instead. Should the provider already have let it go, its delete is refused
+ * there as not managed, and nothing is destroyed.
  */
 export async function deleteResource(
   deps: CloudResourcesDeps,
@@ -773,18 +775,25 @@ export async function deleteResource(
   ref: ResourceRef,
 ): Promise<CloudResourceView> {
   const row = await requireResource(tx, ref, { lock: true });
-  if (row.desired_state !== 'present' || row.state === 'deleted' || row.state === 'released')
+  if (row.desired_state === 'deleted' || row.state === 'deleted' || row.state === 'released')
     return resourceView(row);
-  await markDeleted(deps, tx, row, 'requested');
+  await markDeleted(deps, tx, row, 'requested', {
+    overrideRelease: row.desired_state === 'released',
+  });
   return resourceViewOf(tx, row.id);
 }
 
-/** Marks a resource and its live descendants for deletion and wakes the reconciler for each. */
+/**
+ * Marks a resource and its live descendants for deletion and wakes the reconciler for each. With `overrideRelease`
+ * the resource itself is marked even while it is being released (its descendants never are: a release is refused
+ * while any is live).
+ */
 export async function markDeleted(
   deps: CloudResourcesDeps,
   tx: SqlTx,
   row: Pick<ResourceRow, 'id' | 'tenant_id' | 'kind'>,
   reason: string,
+  options: { overrideRelease?: boolean } = {},
 ): Promise<void> {
   const { rows } = await tx.query<{ id: string; tenant_id: string; kind: string }>(
     `WITH RECURSIVE tree AS (
@@ -793,11 +802,12 @@ export async function markDeleted(
      )
      UPDATE cloud_resources r
         SET desired_state = 'deleted', state = 'deleting', message = NULL, version = version + 1,
-            updated_at = compute_now()
+            attempts = 0, next_attempt_at = NULL, updated_at = compute_now()
        FROM tree
-      WHERE r.id = tree.id AND r.desired_state = 'present' AND r.state NOT IN ('deleted', 'released')
+      WHERE r.id = tree.id AND r.state NOT IN ('deleted', 'released')
+        AND (r.desired_state = 'present' OR ($2::bool AND r.id = $1 AND r.desired_state = 'released'))
       RETURNING r.id, r.tenant_id, r.kind`,
-    [row.id],
+    [row.id, options.overrideRelease === true],
   );
   for (const marked of rows) {
     await deps.work.enqueue(tx, resourcesWork, marked.id);

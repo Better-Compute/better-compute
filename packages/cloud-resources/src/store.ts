@@ -92,12 +92,16 @@ export interface ResourceRow {
   ensure_sent_at: Date | string | null;
   /** The better-compute networks the spec names (cloud-resources/0005). */
   network_ids: string[];
+  /** Passes in a row that ended in an error the provider will not get over by itself (cloud-resources/0006). */
+  attempts: number;
+  /** The sweeps leave the row alone until then (cloud-resources/0006); null: no wait. */
+  next_attempt_at: Date | string | null;
 }
 
 export const resourceColumns = `id, tenant_id, project_id, pool_id, provider_account_id, provider, kind, family, name,
   description, region, parent_id, spec, provider_name, provider_id, state, desired_state, message, outputs,
   secret_outputs, adopted, spec_changed, identity, created_by, encode(request_hash, 'hex') AS request_hash, version, created_at, updated_at,
-  provisioned_at, ready_at, deleted_at, ensure_sent_at, network_ids`;
+  provisioned_at, ready_at, deleted_at, ensure_sent_at, network_ids, attempts, next_attempt_at`;
 
 export const json = <T>(value: T | string): T =>
   typeof value === 'string' ? (JSON.parse(value) as T) : value;
@@ -270,6 +274,18 @@ export async function poolResources(
   const account = await readAccount(tx, pool.providerAccountId, pool.ownerTenantId);
   if (!account) throw new ComputeError('UNSUPPORTED', `Pool ${poolId} has no provider account`);
   return { ...(await accountResources(deps, account)), poolOwnerTenantId: pool.ownerTenantId };
+}
+
+/**
+ * Whether the provider can release a resource of the kind (take its ownership labels off and leave it running): it
+ * implements `release`, and does not say otherwise for the kind. A provider whose kinds differ (a kind owned by its
+ * name has no labels to take off) says so through an optional, pure `releasable(kind)` next to `release`; without
+ * it, every kind counts as releasable and a refusal shows only when the reconciler calls `release`.
+ */
+export function canRelease(resources: ProviderResources, kind: string): boolean {
+  if (typeof resources.release !== 'function') return false;
+  const releasable = (resources as { releasable?: (kind: string) => boolean }).releasable;
+  return typeof releasable !== 'function' || releasable.call(resources, kind) !== false;
 }
 
 /** The kind the provider serves, or UNSUPPORTED naming the ones it does. */

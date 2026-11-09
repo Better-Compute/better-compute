@@ -144,6 +144,54 @@ All notable changes to the better-compute packages are documented here. The form
 
 ### Fixed
 
+- **Deleting a tenant no longer destroys what it adopted** (`@better-compute/cloud-resources`). The tenant teardown
+  marked every live cloud resource for deletion, so a resource the tenant had adopted on its own provider account (a
+  production database that existed before better-compute) was deleted at the provider. Adopted resources are now
+  released (ownership labels removed, left running; `cloud.resource.releasing` with `reason: 'tenant-deleted'`);
+  resources better-compute created are deleted as before, those created inside an adopted resource first.
+- **A release that cannot complete no longer strands the resource** (`@better-compute/cloud-resources`,
+  `@better-compute/provider-digitalocean`). `cloudResources.release` was accepted for kinds the provider cannot
+  release (a DigitalOcean Functions namespace, a model access key): the row went to `error` still wanting to be
+  released, and `cloudResources.delete` then did nothing, so it kept its name, its quota slot and its hourly fee for
+  good. Release is now refused up front for such a kind (`UNSUPPORTED`, `details.reason: 'release'`; the provider
+  says which kinds through `releasable(kind)`, which the DigitalOcean provider implements), and `delete` overrides a
+  release that is still pending. A row already stranded recovers on the next sweep: the release of a resource
+  better-compute created is withdrawn, an adopted one is let go without the provider call.
+- **The DigitalOcean storage kinds are served** (`@better-compute/provider-digitalocean`). `do.spaces-bucket`,
+  `do.spaces-key`, `do.cdn-endpoint`, `do.container-registry` and `do.registry-garbage-collection` were documented
+  but never reached the provider's `resources`, so `cloudResources.kinds` did not list them and a create was
+  `UNSUPPORTED`. `digitaloceanProvider()` now appends them to its long-tail kinds (same API client and request
+  budget), and `spacesFetch`, `spacesEndpoint`, `spacesKeyFullAccess` and `spacesTenantBucketAdopt` are provider
+  options (`DoStorageOptions` is now an alias of `DoProviderOptions`). The storage kinds use core's contract types
+  (the `Do…` request, state and definition types are aliases), implement `find`, and get the request's
+  `accountScope` and `secretOutputs`: a CDN endpoint's `certificateId`/`customDomain` are refused on a shared
+  account (`accountWide`), and a Spaces key whose secret was never sealed answers `error` instead of `ready`.
+- **A DNS zone whose marker write failed is no longer orphaned** (`@better-compute/provider-digitalocean`). When
+  `POST /domains` succeeded and the marker TXT write then failed (a 429, say), the zone was left unmarked: every
+  later `ensureZone` was `CONFLICT` (`zoneExists`) and `deleteZone` `INVALID_STATE` (`notManaged`). `ensureZone`
+  now deletes the empty domain it just made when the marker cannot be written; if that fails too, the same client
+  marks (or deletes) the zone on a later call while it still holds only DigitalOcean's apex NS and SOA records.
+- **A failed indexing job no longer locks a knowledge base** (`@better-compute/provider-digitalocean`). After a
+  `do.knowledge-base` indexing job ended failed, `ensure` returned `error` before it looked at the sources, so no
+  source change was ever applied and no new job started. A failed job is still reported, but a source change (or a
+  job still owed) is now applied and starts a new job; only a job still running, or a database that is not online,
+  holds a change back.
+- **Stuck deletes and releases back off** (`@better-compute/cloud-resources`). A cloud resource whose delete or
+  release the provider refuses for good was queued by the 30 s sweep forever, one provider call per row per pass.
+  Such a row is now asked again 30 s, 1 min, 2 min, … apart, up to once an hour (`resourceMaxBackoffMs`), and a busy
+  provider's own `retryAfterMs` is honoured (30 s to an hour) instead of a fixed 30 s. New migration
+  `cloud-resources/0006_retry_backoff` (`attempts`, `next_attempt_at` on `cloud_resources`); a change through the
+  API still wakes the resource at once.
+- **A model access key is not regenerated on every poll while its rename fails**
+  (`@better-compute/provider-digitalocean`). A `do.inference-key` rotation regenerates the secret and then renames
+  the key (the name records the rotation). When the rename kept failing, each 10 s pass saw the old rotation in the
+  name and regenerated again, invalidating the key the tenant had just been given. The following passes now retry
+  the rename alone while the caller holds that key sealed.
+- **The wait of a DigitalOcean 429** (`@better-compute/provider-digitalocean`). `retryAfterMs` came only from
+  `ratelimit-reset`, floored at 0: with clock skew that was a hot loop, and for a burst limit it could be most of an
+  hour (the hourly window's reset). It now prefers `retry-after` (seconds or an HTTP date), falls back to
+  `ratelimit-reset`, then to a minute, and is always between 1 second and 5 minutes (`minRetryAfterMs`,
+  `maxRetryAfterMs`, `rateLimitWaitMs`).
 - **Scripts on images without cloud-init** (`@better-compute/provider-gcp`). Compute Engine's Debian, Rocky,
   CentOS, RHEL, AlmaLinux and SUSE images do not run cloud-init, so a shell-script `userData` (`#!…`) never ran on
   them. Create now also writes it as `startup-script` metadata, wrapped to run once on the first boot as cloud-init

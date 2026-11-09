@@ -6,74 +6,60 @@ import {
   type ErrorCode,
   type CallContext,
   type Manifest,
+  type ProviderDiscoveredResource,
+  type ProviderResourceFamily,
+  type ProviderResourceKind,
+  type ProviderResourceRequest,
   type ProviderResourceState,
 } from '@better-compute/core';
+import type { DoKind } from '../kind.js';
 
 // The DigitalOcean storage kinds (Spaces buckets and keys, CDN endpoints, Container Registry) as
-// desired-state handlers. The shapes are those of core's cloud-resources `ProviderResources`
-// contract (kinds, a request-shaped `ensure`, `get`, `delete`, `discover`, `adopt`, `release`),
-// restated here until that contract is on this base, so `doStorageResources(...)` plugs into the
-// cloud-resources dispatcher as it is. Every `ensure`/`delete` is idempotent and non-blocking,
-// like `ProviderNetworks`.
+// desired-state handlers of core's cloud-resources `ProviderResources` contract. The request, state,
+// discovery and definition types are core's own (the names below are aliases kept for callers);
+// what is particular to storage is the handler shape, `DoResourceKind`: a kind that carries its own
+// clients (the API and the account's Spaces keys) and takes its spec already validated.
+// `asDoKind` turns one into an entry of the provider-wide dispatcher (`DoKind`, `DoResources`),
+// which is how the provider serves them; `storageDispatcher` serves them on their own. Every
+// `ensure`/`delete` is idempotent and non-blocking, like `ProviderNetworks`.
 //
 // Refusals follow the contract: a resource this deployment does not manage is `INVALID_STATE`
 // with reason `notManaged` (nothing is sent), one another deployment manages is `managedByAnother`,
-// and a spec change ensure cannot make in place is `replaceRequired`.
+// a spec change ensure cannot make in place is `replaceRequired`, and a spec that reaches an
+// account-wide object on an account that is not the tenant's own is `INVALID_INPUT`, `accountWide`.
 
-export type DoResourceFamily =
-  | 'storage'
-  | 'network'
-  | 'edge'
-  | 'data'
-  | 'platform'
-  | 'ai'
-  | 'observability';
+export type DoResourceFamily = ProviderResourceFamily;
 
 /**
- * A resource's state. `secretOutputs` carries values the caller must seal into its SecretStore in
- * the same run and never store or log in plain (a Spaces secret key): they are returned once, by
- * the `ensure` that created them. `spec` is the spec as DigitalOcean reports it (from `get`,
- * `adopt` and discovery), in the kind's spec shape, where it can be read back.
+ * A resource's state (core's `ProviderResourceState`). `secretOutputs` carries values the caller
+ * must seal into its SecretStore in the same run and never store or log in plain (a Spaces secret
+ * key): they are returned once, by the `ensure` that created them. `spec` is the spec as
+ * DigitalOcean reports it (from `get`, `adopt` and discovery), where it can be read back.
  */
-export interface DoResourceState extends ProviderResourceState {
-  secretOutputs?: Readonly<Record<string, string>>;
-  spec?: Readonly<Record<string, unknown>>;
-}
+export type DoResourceState = ProviderResourceState;
 
 /** What `ensure` is asked for (core's `ProviderResourceRequest`). */
-export interface DoResourceRequest {
-  kind: string;
-  /** The provider-side name the caller derives (`bc-r-…`); stable across calls. */
-  name: string;
-  /** The spec; the dispatcher validates it with the kind's manifest. */
-  spec: unknown;
-  /** The provider id an earlier `ensure` (or an adopt) answered: it wins over `name`. */
-  id?: string;
-  /** For a kind with a `parent`: the provider id of the resource it lives in. */
-  parent?: string;
-  /** Ownership labels (`better-compute-managed`, `-resource`, `-tenant`). */
-  labels?: Readonly<Record<string, string>>;
-}
+export type DoResourceRequest = ProviderResourceRequest;
 
-/** What one kind's `ensure` gets: the request with its spec validated. */
+/** What one kind's `ensure` (and `find`) gets: the request with its spec validated. */
 export interface DoKindRequest<Spec> {
   name: string;
   spec: Spec;
   id?: string;
   parent?: string;
   labels?: Readonly<Record<string, string>>;
+  /** Whose account it is (`ProviderResourceRequest.accountScope`); absent counts as `shared`. */
+  accountScope?: 'tenant' | 'shared';
+  /**
+   * With `id`: the names of the secret outputs the caller holds sealed. A kind whose secret
+   * DigitalOcean answers only once says so when its name is missing here, instead of reporting a
+   * resource `ready` that nobody holds the secret of.
+   */
+  secretOutputs?: readonly string[];
 }
 
-/** A resource the account can see, managed by better-compute or not. */
-export interface DoDiscoveredResource {
-  id: string;
-  name: string;
-  region?: string;
-  /** `this`: this deployment manages it; `other`: another deployment does; absent: no one does. */
-  managedBy?: 'this' | 'other';
-  outputs?: Readonly<Record<string, string>>;
-  spec?: Readonly<Record<string, unknown>>;
-}
+/** A resource the account can see, managed by better-compute or not (core's own type). */
+export type DoDiscoveredResource = ProviderDiscoveredResource;
 
 export interface DoResourceKind<Spec = any> {
   /** Provider-prefixed, `[a-z0-9.-]`: `do.spaces-bucket`. */
@@ -91,7 +77,19 @@ export interface DoResourceKind<Spec = any> {
   readonly preview?: boolean;
   /** Another kind this one lives in. */
   readonly parent?: string;
+  /**
+   * (Pure.) The spec's fields that reach account-wide objects (`ProviderResourceKind.accountWide`):
+   * the dispatcher refuses such a spec, before the kind is called, unless the account is the
+   * tenant's own.
+   */
+  accountWide?(spec: Spec): readonly string[];
   ensure(request: DoKindRequest<Spec>, context: CallContext): Promise<DoResourceState>;
+  /**
+   * The id of what an earlier `ensure` of the request made, found as `ensure` finds it; read-only
+   * (`ProviderResources.find`). The caller asks before it forgets a resource whose create was sent
+   * but never answered.
+   */
+  find?(request: DoKindRequest<Spec>, context: CallContext): Promise<string | undefined>;
   get(id: string, context: CallContext): Promise<DoResourceState | undefined>;
   delete(id: string, context: CallContext): Promise<DoResourceState>;
   /** Resources of this kind in the account, managed or not (for adopt). */
@@ -113,6 +111,9 @@ export interface DoResourceKind<Spec = any> {
 export interface DoStorageResources {
   kinds(): readonly DoResourceKind[];
   ensure(request: DoResourceRequest, context: CallContext): Promise<DoResourceState>;
+  find(request: DoResourceRequest, context: CallContext): Promise<string | undefined>;
+  /** Whether `release` works for the kind (it has one), with nothing sent. */
+  releasable(kind: string): boolean;
   get(kind: string, id: string, context: CallContext): Promise<DoResourceState | undefined>;
   delete(kind: string, id: string, context: CallContext): Promise<DoResourceState>;
   discover(kind: string, context: CallContext): AsyncIterable<DoDiscoveredResource>;
@@ -208,63 +209,58 @@ export function managedNames(prefix: string): ManagedNames {
   };
 }
 
+/**
+ * The request as a kind takes it: the spec validated (and defaulted) by the kind's manifest. A spec
+ * that reaches account-wide objects is refused here, with nothing sent, unless the account is the
+ * tenant's own (`find` is read-only and part of a teardown, so it does not refuse).
+ */
+async function kindRequest(
+  handler: DoResourceKind,
+  request: DoResourceRequest,
+  use: 'ensure' | 'find',
+): Promise<DoKindRequest<unknown>> {
+  const spec: unknown = await validateManifest(handler.spec, request.spec);
+  const reaching = use === 'ensure' ? (handler.accountWide?.(spec) ?? []) : [];
+  if (reaching.length > 0 && request.accountScope !== 'tenant')
+    throw storageError(
+      'INVALID_INPUT',
+      `${handler.kind}: ${reaching[0]} is account-wide; only a resource on the tenant's own account may name it`,
+      'accountWide',
+      { fields: [...reaching] },
+    );
+  return {
+    name: request.name,
+    spec,
+    ...(request.id !== undefined ? { id: request.id } : {}),
+    ...(request.parent !== undefined ? { parent: request.parent } : {}),
+    ...(request.labels !== undefined ? { labels: request.labels } : {}),
+    ...(request.accountScope !== undefined ? { accountScope: request.accountScope } : {}),
+    ...(request.secretOutputs !== undefined ? { secretOutputs: request.secretOutputs } : {}),
+  };
+}
+
 /** Validates (and defaults) the request's spec with the kind's manifest, then ensures. */
 async function ensureValidated(
   handler: DoResourceKind,
   request: DoResourceRequest,
   context: CallContext,
 ): Promise<DoResourceState> {
-  const spec: unknown = await validateManifest(handler.spec, request.spec);
-  return handler.ensure(
-    {
-      name: request.name,
-      spec,
-      ...(request.id !== undefined ? { id: request.id } : {}),
-      ...(request.parent !== undefined ? { parent: request.parent } : {}),
-      ...(request.labels !== undefined ? { labels: request.labels } : {}),
-    },
-    context,
-  );
+  return handler.ensure(await kindRequest(handler, request, 'ensure'), context);
 }
 
 /** A kind's definition: core's `ProviderResourceKind` (the metadata, without the calls). */
-export interface DoStorageKindDefinition {
-  kind: string;
-  family: DoResourceFamily;
-  description?: string;
-  spec: Manifest<unknown>;
-  outputs: readonly string[];
-  secretOutputs?: readonly string[];
-  regional: boolean;
-  updatable: readonly string[];
-  meters?: readonly { meter: string; unit: string }[];
-  preview?: boolean;
-  parent?: string;
-}
+export type DoStorageKindDefinition = ProviderResourceKind;
 
 /**
- * A storage kind in the shape of the provider-wide DigitalOcean kind (`DoKind`, served by the
- * provider's `DoResources` dispatcher from lane do-cloud-resources): its definition, and calls
- * that take the dispatcher's env first. Storage kinds carry their own clients (the API and the
- * account's Spaces keys), so they ignore the env.
+ * A storage kind as an entry of the provider-wide DigitalOcean dispatcher (`DoKind`, served by
+ * `DoResources`): its definition, and calls that take the dispatcher's env first. Storage kinds
+ * carry their own clients (the API and the account's Spaces keys), so they ignore the env.
  */
-export interface DoStorageKindEntry {
-  readonly definition: DoStorageKindDefinition;
-  ensure(env: unknown, request: DoResourceRequest, context: CallContext): Promise<DoResourceState>;
-  get(env: unknown, id: string, context: CallContext): Promise<DoResourceState | undefined>;
-  delete(env: unknown, id: string, context: CallContext): Promise<DoResourceState>;
-  discover?(env: unknown, context: CallContext): AsyncIterable<DoDiscoveredResource>;
-  adopt?(
-    env: unknown,
-    id: string,
-    labels: Readonly<Record<string, string>>,
-    context: CallContext,
-  ): Promise<DoResourceState>;
-  release?(env: unknown, id: string, context: CallContext): Promise<void>;
-}
+export type DoStorageKindEntry = DoKind;
 
-/** The definition of a kind: its metadata, without its calls or extra helpers. */
+/** The definition of a kind: its metadata (and its pure `accountWide`), without its calls or extra helpers. */
 export function kindDefinition(handler: DoResourceKind): DoStorageKindDefinition {
+  const accountWide = handler.accountWide?.bind(handler);
   return {
     kind: handler.kind,
     family: handler.family,
@@ -277,6 +273,7 @@ export function kindDefinition(handler: DoResourceKind): DoStorageKindDefinition
     ...(handler.meters ? { meters: handler.meters } : {}),
     ...(handler.preview !== undefined ? { preview: handler.preview } : {}),
     ...(handler.parent ? { parent: handler.parent } : {}),
+    ...(accountWide ? { accountWide: (spec: unknown) => accountWide(spec) } : {}),
   };
 }
 
@@ -285,9 +282,16 @@ export function asDoKind(handler: DoResourceKind): DoStorageKindEntry {
   const handlerAdopt = handler.adopt?.bind(handler);
   const handlerRelease = handler.release?.bind(handler);
   const handlerDiscover = handler.discover?.bind(handler);
+  const handlerFind = handler.find?.bind(handler);
   return {
     definition: kindDefinition(handler),
     ensure: (_env, request, context) => ensureValidated(handler, request, context),
+    ...(handlerFind
+      ? {
+          find: async (_env: unknown, request: DoResourceRequest, context: CallContext) =>
+            handlerFind(await kindRequest(handler, request, 'find'), context),
+        }
+      : {}),
     get: (_env, id, context) => handler.get(id, context),
     delete: (_env, id, context) => handler.delete(id, context),
     ...(handlerDiscover ? { discover: (_env: unknown, context: CallContext) => handlerDiscover(context) } : {}),
@@ -318,6 +322,13 @@ export function storageDispatcher(kinds: readonly DoResourceKind[]): DoStorageRe
   return {
     kinds: () => kinds,
     ensure: async (request, context) => ensureValidated(find(request.kind), request, context),
+    async find(request, context) {
+      const handler = find(request.kind);
+      if (!handler.find)
+        throw storageError('UNSUPPORTED', `${request.kind} cannot be looked up`, 'find');
+      return handler.find(await kindRequest(handler, request, 'find'), context);
+    },
+    releasable: (kind) => typeof byKind.get(kind)?.release === 'function',
     get: async (kind, id, context) => find(kind).get(id, context),
     delete: async (kind, id, context) => find(kind).delete(id, context),
     discover(kind, context) {

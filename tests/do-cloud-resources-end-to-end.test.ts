@@ -95,6 +95,15 @@ describe('DigitalOcean Managed Databases through cloudResources', () => {
       poolId: w.poolId,
     });
     expect(kinds.items.map((kind: { kind: string }) => kind.kind)).toContain('do.database.pg');
+    // The storage kinds are served by the same provider resources.
+    expect(kinds.items.map((kind: { kind: string }) => kind.kind)).toEqual(
+      expect.arrayContaining([
+        'do.spaces-bucket',
+        'do.spaces-key',
+        'do.cdn-endpoint',
+        'do.container-registry',
+      ]),
+    );
     // The 1-Click catalog: Droplet images and DOKS add-ons, installed through those surfaces.
     const catalog = await w.api.cloudResources.catalog(w.acme, {
       tenantId: w.acmeTenant,

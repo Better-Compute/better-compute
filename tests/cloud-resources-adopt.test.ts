@@ -323,3 +323,197 @@ describe('cloudResources.adopt: finding the resource', () => {
     expect((await app(mine.id, 'legacy-app')).state).toBe('pending');
   });
 });
+
+describe('cloudResources.release: a kind the provider cannot release', () => {
+  const row = async (resourceId: string) =>
+    (
+      await world.fixture.database.query<{
+        state: string;
+        desired_state: string;
+        message: string | null;
+      }>(`SELECT state, desired_state, message FROM cloud_resources WHERE id = $1`, [resourceId])
+    ).rows[0]!;
+  const app = async (name: string, key = name) => {
+    const created = await world.api.cloudResources.create(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: world.acmePoolId,
+      kind: 'fake.app',
+      name,
+      spec: { image: 'nginx' },
+      idempotencyKey: key,
+    });
+    await world.until(async () => (await get(created.id)).state === 'ready');
+    return get(created.id);
+  };
+  const release = (resourceId: string) =>
+    world.api.cloudResources.release(world.acme, { tenantId: world.acmeTenant, resourceId });
+  const remove = (resourceId: string) =>
+    world.api.cloudResources.delete(world.acme, { tenantId: world.acmeTenant, resourceId });
+
+  it('is refused up front (UNSUPPORTED, release): nothing is recorded and the provider is not called', async () => {
+    const created = await app('no-release');
+    world.cloud.unreleasable.add('fake.app');
+    const before = world.cloud.calls.length;
+    expect(await failure(release(created.id))).toMatchObject({
+      code: 'UNSUPPORTED',
+      details: { reason: 'release', kind: 'fake.app' },
+    });
+    expect(await row(created.id)).toMatchObject({ state: 'ready', desired_state: 'present' });
+    await world.tick();
+    expect(world.cloud.calls.slice(before).filter((line) => line.startsWith('release'))).toEqual(
+      [],
+    );
+    // It is still managed: it can be deleted, which frees its name and its quota slot.
+    await remove(created.id);
+    await world.until(async () => (await get(created.id)).state === 'deleted');
+    expect(world.cloud.resources.get(created.providerId!)!.deleted).toBe(true);
+  });
+
+  it('delete overrides a release that is pending and can never complete', async () => {
+    const created = await app('stuck-release');
+    // A row from before the refusal: its release was accepted and the provider refuses it on every pass.
+    await world.fixture.database.query(
+      `UPDATE cloud_resources
+          SET desired_state = 'released', state = 'error', message = 'fake.app cannot be released',
+              version = version + 1
+        WHERE id = $1`,
+      [created.id],
+    );
+    const deleting = await remove(created.id);
+    expect(deleting.state).toBe('deleting');
+    expect((await row(created.id)).desired_state).toBe('deleted');
+    await world.until(async () => (await get(created.id)).state === 'deleted');
+    expect(world.cloud.resources.get(created.providerId!)!.deleted).toBe(true);
+    // The name is free again.
+    expect((await app('stuck-release', 'stuck-release-again')).state).toBe('ready');
+  });
+
+  it('a release the provider refuses only when asked is withdrawn: the resource stays managed', async () => {
+    // A provider that does not say which kinds it can release: the reconciler finds out.
+    world.cloud.declaresReleasable = false;
+    const created = await app('late-refusal');
+    expect((await release(created.id)).state).toBe('ready');
+    await world.until(async () => (await row(created.id)).desired_state === 'present');
+    expect(world.cloud.calls).toContain(`release fake.app ${created.providerId}`);
+    const withdrawn = await row(created.id);
+    expect(withdrawn.state).toBe('error');
+    expect(withdrawn.message).toMatch(/cannot be released; the release was withdrawn/);
+    // Not asked again by the sweep, and still there at the provider.
+    const calls = world.cloud.calls.length;
+    await world.tick('cloud.resources', 3);
+    expect(world.cloud.calls.slice(calls).filter((line) => line.startsWith('release'))).toEqual(
+      [],
+    );
+    expect(world.cloud.resources.get(created.providerId!)!.deleted).toBe(false);
+    // The refresh converges it again, and it can be updated like any other.
+    await world.tick('cloud.resources', 1, 5 * 60_000);
+    await world.until(async () => (await get(created.id)).state === 'ready');
+    await world.api.cloudResources.update(world.acme, {
+      tenantId: world.acmeTenant,
+      resourceId: created.id,
+      spec: { instances: 2 },
+    });
+    await world.until(async () => (await get(created.id)).state === 'ready');
+    expect(world.cloud.resources.get(created.providerId!)!.spec.instances).toBe(2);
+    world.cloud.declaresReleasable = true;
+  });
+});
+
+// Last: it tears down everything acme has.
+describe('cloud-resources tenantDeleted: adopted resources', () => {
+  it('releases what the tenant adopted (left running at the provider) and deletes what it created', async () => {
+    const legacy = world.cloud.seed({
+      kind: 'fake.database',
+      name: 'production',
+      spec,
+      owner: 'none',
+      password: 'pw-production-abcdefgh',
+    });
+    const adopted = await adopt(legacy.id, { name: 'production', idempotencyKey: 'production' });
+    await world.until(async () => (await get(adopted.id)).state === 'ready');
+    // A user made through better-compute in the adopted database, and an app of its own: both created here.
+    const user = await world.api.cloudResources.create(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: world.acmePoolId,
+      kind: 'fake.database-user',
+      name: 'production-user',
+      spec: { user: 'app' },
+      parentId: adopted.id,
+      idempotencyKey: 'production-user',
+    });
+    const app = await world.api.cloudResources.create(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: world.acmePoolId,
+      kind: 'fake.app',
+      name: 'teardown-app',
+      spec: { image: 'nginx' },
+      idempotencyKey: 'teardown-app',
+    });
+    // An adopted resource of a kind the provider cannot release (fake.app, since the cases above).
+    expect(world.cloud.unreleasable.has('fake.app')).toBe(true);
+    const byHand = world.cloud.seed({
+      kind: 'fake.app',
+      name: 'by-hand-app',
+      spec: { image: 'nginx', instances: 1 },
+      owner: 'none',
+    });
+    const adoptedApp = await world.api.cloudResources.adopt(world.acme, {
+      tenantId: world.acmeTenant,
+      poolId: world.acmePoolId,
+      kind: 'fake.app',
+      providerId: byHand.id,
+      name: 'by-hand-app',
+      idempotencyKey: 'by-hand-app',
+    });
+    await world.until(
+      async () =>
+        (await get(user.id)).state === 'ready' &&
+        (await get(app.id)).state === 'ready' &&
+        (await get(adoptedApp.id)).state === 'ready',
+    );
+    const userProviderId = (await get(user.id)).providerId!;
+    const appProviderId = (await get(app.id)).providerId!;
+
+    const hook = world.module.tenantDeleted!;
+    const context = world.fixture.compute.context;
+    let answer = await hook(context, world.acmeTenant);
+    expect(answer).toBe('SYNC_AGAIN');
+    for (let round = 0; round < 20 && answer !== 'DONE'; round++) {
+      await world.tick();
+      answer = await hook(context, world.acmeTenant);
+    }
+    expect(answer).toBe('DONE');
+
+    // The adopted database is let go: never deleted, its ownership labels taken off, still running.
+    expect((await get(adopted.id)).state).toBe('released');
+    expect(world.cloud.calls).not.toContain(`delete fake.database ${legacy.id}`);
+    expect(world.cloud.calls).toContain(`release fake.database ${legacy.id}`);
+    expect(legacy.deleted).toBe(false);
+    expect(legacy.owner).toBe('none');
+    expect(Object.keys(legacy.labels).some((label) => label.startsWith('better-compute-'))).toBe(
+      false,
+    );
+    // What better-compute created is deleted, the user inside the adopted database included (before the release).
+    expect((await get(user.id)).state).toBe('deleted');
+    expect((await get(app.id)).state).toBe('deleted');
+    expect(world.cloud.resources.get(userProviderId)!.deleted).toBe(true);
+    expect(world.cloud.resources.get(appProviderId)!.deleted).toBe(true);
+    expect(world.cloud.calls.indexOf(`delete fake.database-user ${userProviderId}`)).toBeLessThan(
+      world.cloud.calls.indexOf(`release fake.database ${legacy.id}`),
+    );
+    // The adopted app cannot be released at the provider: it is let go here all the same, and never deleted.
+    expect((await get(adoptedApp.id)).state).toBe('released');
+    expect(world.cloud.calls).not.toContain(`delete fake.app ${byHand.id}`);
+    expect(byHand.deleted).toBe(false);
+    const releasing = (await world.events('cloud.resource.releasing')).filter(
+      (event) => event.data.resourceId === adopted.id,
+    );
+    expect(releasing.map((event) => event.data.reason)).toEqual(['tenant-deleted']);
+    // The release never showed as a failure while the user was still being deleted.
+    expect(
+      (await world.events('cloud.resource.failed')).filter(
+        (event) => event.data.resourceId === adopted.id,
+      ),
+    ).toEqual([]);
+  });
+});

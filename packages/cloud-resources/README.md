@@ -80,6 +80,28 @@ betterCompute({
   does not count); its spec stays the provider's (observed) until the tenant changes it. A spec change before the
   takeover is `INVALID_STATE` (`adopting`). One deleted or released before the takeover completed (or after it
   failed) is let go here (`released`) with no provider call. An adopted resource bills from its first `ready`.
+- **Release** lets a resource go: its ownership labels are taken off and it keeps running. A kind the provider
+  cannot release is refused up front (`UNSUPPORTED`, `reason 'release'`), so no release is recorded that could never
+  complete. A provider says which kinds it can release through an optional, pure `releasable(kind)` next to
+  `ProviderResources.release`; one that does not is asked by the reconciler, and when it refuses (`UNSUPPORTED`)
+  the release of a resource better-compute created is withdrawn (`desired_state` back to `present`; `error` with
+  the reason until the next refresh), while an adopted resource is let go here without the provider call.
+  `delete` overrides a release that is still pending: the resource is deleted instead.
+- **Tenant teardown** (`tenantDeleted`). When a tenant is deleted, what better-compute created for it is deleted at
+  the provider, children first. What the tenant adopted is **released**, never deleted: it existed before
+  better-compute (a production database on the tenant's own account), so its ownership labels are taken off and it
+  keeps running there, unmanaged (`cloud.resource.releasing` with `reason: 'tenant-deleted'`). Resources created
+  inside an adopted one (a user of an adopted database) are deleted first, then the adopted one is released. An
+  adopted resource of a kind the provider cannot release is let go all the same (its labels stay): it is never
+  deleted. The hook answers `DONE` once every resource of the tenant is `deleted` or `released`.
+- **Retries back off.** A resource still converging is polled every 10 s; a busy provider (`RATE_LIMITED`,
+  `UNAVAILABLE`) is asked again after 30 s, or after the wait it names (`details.retryAfterMs`, kept between 30 s
+  and an hour). A delete or release the provider refuses for good (a resource it says is not managed here, a
+  registry that still holds images) is asked again 30 s, 1 min, 2 min, … apart, then every hour, instead of on
+  every 30 s sweep: a dozen stuck rows no longer spend the account's request budget. The wait is kept on the row
+  (`next_attempt_at`, `attempts`); the periodic sweeps skip a row until then, and a change through the API wakes
+  it at once whatever the wait, and a delete or release starts the count over. A resource still wanted that is in
+  `error` is retried by the 5 minute refresh, as before.
 - **Whose account.** Every `ensure` says `accountScope: 'tenant'` on the tenant's own (BYO) account and
   `'shared'` on a hosted pool. A kind names the spec fields that reach account-wide objects (a VPC, a registry,
   linked repositories, another resource by name) through its pure `accountWide(spec)`: on a shared account
@@ -116,8 +138,8 @@ betterCompute({
 - **Migrations** `cloud-resources/0001_resources` (one `cloud_resources` table), `0002_metering` (the
   watermark, the rates, and `cloud-resource` appended to the usage source CHECK; selfCheck
   `cloud-resources.usage-source` reports a later migration that dropped it) and `0003_identity` (`identity`, its
-  unique index under a parent, and `spec_changed`), `0004_ensure_sent` (`ensure_sent_at`) and `0005_network_ids`
-  (`network_ids`, GIN-indexed).
+  unique index under a parent, and `spec_changed`), `0004_ensure_sent` (`ensure_sent_at`), `0005_network_ids`
+  (`network_ids`, GIN-indexed) and `0006_retry_backoff` (`attempts`, `next_attempt_at`).
 
 ## Conformance
 

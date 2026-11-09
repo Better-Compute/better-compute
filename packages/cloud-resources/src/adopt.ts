@@ -8,8 +8,11 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { canonical, sha256Hex } from './input.js';
+import { readAccount } from '@better-compute/vps';
 import { assertAllowance, authzRow } from './resources.js';
 import {
+  accountResources,
+  canRelease,
   kindOf,
   poolResources,
   providerResourceName,
@@ -321,7 +324,9 @@ export async function adoptResource(
 
 /**
  * `cloudResources.release`: better-compute lets the resource go (the reconciler removes its ownership labels and
- * leaves it running at the provider); the row ends `released`. Refused while resources still live in it.
+ * leaves it running at the provider); the row ends `released`. Refused while resources still live in it, and
+ * (`UNSUPPORTED`, `reason 'release'`) for a kind the provider cannot release, before anything is recorded: such a
+ * release could never complete.
  */
 export async function releaseResource(
   deps: CloudResourcesDeps,
@@ -351,13 +356,36 @@ export async function releaseResource(
       'INVALID_STATE',
       `Resources still live in ${row.id}; delete them before releasing it`,
     );
+  const account = await readAccount(tx, row.provider_account_id);
+  const provider = account ? await accountResources(deps, account) : undefined;
+  if (!provider || !canRelease(provider.resources, row.kind))
+    throw new ComputeError(
+      'UNSUPPORTED',
+      `${row.kind} cannot be released: the provider has no way to hand it over unmanaged. Keep it, or delete it`,
+      undefined,
+      { reason: 'release', kind: row.kind },
+    );
+  await markReleased(deps, tx, row);
+  return resourceViewOf(tx, row.id);
+}
+
+/**
+ * Marks a resource to be released and wakes the reconciler; the caller holds the row's lock and has checked that
+ * nothing lives in it. `reason` (`tenant-deleted`) goes on the `releasing` event.
+ */
+export async function markReleased(
+  deps: CloudResourcesDeps,
+  tx: SqlTx,
+  row: { id: string; tenant_id: string; kind: string },
+  reason?: string,
+): Promise<void> {
   await tx.query(
     `UPDATE cloud_resources
-        SET desired_state = 'released', message = NULL, version = version + 1, updated_at = compute_now()
+        SET desired_state = 'released', message = NULL, version = version + 1,
+            attempts = 0, next_attempt_at = NULL, updated_at = compute_now()
       WHERE id = $1`,
     [row.id],
   );
   await deps.work.enqueue(tx, resourcesWork, row.id);
-  await publish(deps, tx, row, 'releasing');
-  return resourceViewOf(tx, row.id);
+  await publish(deps, tx, row, 'releasing', reason !== undefined ? { reason } : {});
 }

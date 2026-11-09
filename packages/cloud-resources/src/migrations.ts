@@ -163,10 +163,27 @@ CREATE INDEX cloud_resources_network_ids ON cloud_resources USING gin (network_i
 `,
 };
 
+/**
+ * Retry backoff. `next_attempt_at`: the periodic sweeps leave the row alone until then (NULL: no wait); `attempts`:
+ * how many passes in a row ended in an error the provider will not get over by itself, which is what the wait grows
+ * with. Written by the reconciler when a delete or release fails for good (30 s doubling to an hour) and when a busy
+ * provider names its own wait (`retryAfterMs`); cleared by the next write that is not such a failure, and when what
+ * is wanted of the resource changes (a delete, a release). A change through the API wakes the row at once whatever
+ * the wait.
+ */
+export const cloudResourcesRetryMigration: Migration = {
+  name: 'cloud-resources/0006_retry_backoff',
+  sql: `
+ALTER TABLE cloud_resources ADD COLUMN attempts int NOT NULL DEFAULT 0;
+ALTER TABLE cloud_resources ADD COLUMN next_attempt_at timestamptz;
+`,
+};
+
 export const cloudResourcesMigrations: readonly Migration[] = Object.freeze([
   cloudResourcesMigration,
   cloudResourcesMeteringMigration,
   cloudResourcesIdentityMigration,
   cloudResourcesEnsureSentMigration,
   cloudResourcesNetworksMigration,
+  cloudResourcesRetryMigration,
 ]);

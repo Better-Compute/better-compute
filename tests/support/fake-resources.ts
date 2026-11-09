@@ -68,6 +68,10 @@ export interface FakeResourcesCloud {
   signals?: ProviderResourceSignal[];
   /** Extra `usage` entries every fake.database reports (to check the module drops what it should). */
   usageExtra?: Record<string, number>;
+  /** Kinds `release` refuses (`UNSUPPORTED`), as a kind owned by its name does. */
+  unreleasable: Set<string>;
+  /** Whether the provider says so up front through `releasable(kind)` (default); false: only `release` throws. */
+  declaresReleasable: boolean;
   reset(): void;
   /** A resource made outside better-compute (or by another deployment). */
   seed(
@@ -92,6 +96,8 @@ export function fakeResourcesCloud(): FakeResourcesCloud {
     networks: new Map(),
     sealedNames: new Map(),
     resolved: new Map(),
+    unreleasable: new Set(),
+    declaresReleasable: true,
     reset() {
       this.resources.clear();
       this.calls.length = 0;
@@ -106,6 +112,8 @@ export function fakeResourcesCloud(): FakeResourcesCloud {
       this.networks.clear();
       this.sealedNames.clear();
       this.resolved.clear();
+      this.unreleasable.clear();
+      this.declaresReleasable = true;
       delete this.usageExtra;
       delete this.catalogExtra;
       delete this.signals;
@@ -265,7 +273,7 @@ function outputs(resource: FakeResource, cloud: FakeResourcesCloud): ProviderRes
 export function fakeProviderResources(
   cloud: FakeResourcesCloud,
   options: { previews?: boolean } = {},
-): ProviderResources {
+): ProviderResources & { releasable(kind: string): boolean } {
   let counter = 1000;
   const call = (line: string) => {
     cloud.calls.push(line);
@@ -454,8 +462,14 @@ export function fakeProviderResources(
       resource.labels = { ...resource.labels, ...labels };
       return outputs(resource, cloud);
     },
+    // Optional, next to `release`: which kinds it works for. A provider that does not say answers yes to all.
+    releasable: (kind) => !cloud.declaresReleasable || !cloud.unreleasable.has(kind),
     async release(kind, id) {
       call(`release ${kind} ${id}`);
+      if (cloud.unreleasable.has(kind))
+        throw new ComputeError('UNSUPPORTED', `${kind} cannot be released`, undefined, {
+          reason: 'release',
+        });
       const resource = live(kind, id);
       if (!resource) return;
       resource.owner = 'none';

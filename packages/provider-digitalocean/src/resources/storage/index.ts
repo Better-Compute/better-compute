@@ -1,5 +1,6 @@
 import { ComputeError, type ProviderContext } from '@better-compute/core';
 import { clientFor } from '../../client/build.js';
+import type { DoClient } from '../../client/http.js';
 import type { DoConfig, DoProviderOptions } from '../../config.js';
 import { deploymentTag, managedNamePrefix } from '../../ids.js';
 import { spacesClient, type SpacesClient } from '../../spaces/s3.js';
@@ -22,23 +23,12 @@ export * from './kind.js';
 export * from './spaces-bucket.js';
 export * from './spaces-key.js';
 
-export interface DoStorageOptions extends DoProviderOptions {
-  /** The fetch for Spaces (S3) requests; default `fetch`. Tests pass an emulating one. */
-  spacesFetch?: typeof fetch;
-  /** The Spaces endpoint of a region; default `https://<region>.digitaloceanspaces.com`. */
-  spacesEndpoint?: (region: string) => string;
-  /**
-   * Allows `do.spaces-key` grants of `*:fullaccess` (every bucket of the account). Off by
-   * default: tenant keys are granted bucket by bucket. An operator-only code option.
-   */
-  spacesKeyFullAccess?: boolean;
-  /**
-   * Lets a tenant (an `adopt` carrying `better-compute-tenant`) adopt an unmarked Spaces bucket.
-   * Off by default: unmarked buckets are the operator's (its spacesBlobStore bucket among them),
-   * so only operator calls adopt them. An operator-only code option.
-   */
-  spacesTenantBucketAdopt?: boolean;
-}
+/**
+ * The options of the storage kinds: the provider's own (`spacesFetch`, `spacesEndpoint`,
+ * `spacesKeyFullAccess` and `spacesTenantBucketAdopt` are `DoProviderOptions`, so
+ * `digitaloceanProvider(options)` hands them to the kinds it serves).
+ */
+export type DoStorageOptions = DoProviderOptions;
 
 /**
  * The account's S3 clients, one per region, over its Spaces key pair. Without the pair every call
@@ -81,12 +71,14 @@ function spacesFor(
 /**
  * The storage kind handlers of one DigitalOcean account (Spaces keys and buckets, CDN endpoints,
  * the Container Registry). Like the provider's `create`, they make no request and resolve no
- * secret until the first call.
+ * secret until the first call. `client`: the account's API client when the caller already built
+ * one (the provider shares its own, and so its request budget).
  */
 export function storageKindHandlers(
   config: DoConfig,
   context: ProviderContext,
   options: DoStorageOptions = {},
+  client: DoClient = clientFor(config, context, options),
 ): DoResourceKind[] {
   if (!config.spacesAccessKey !== !config.spacesSecretKey)
     throw new ComputeError(
@@ -95,7 +87,6 @@ export function storageKindHandlers(
       undefined,
       { provider: 'digitalocean', reason: 'spacesKeys' },
     );
-  const client = clientFor(config, context, options);
   const deployment = options.deployment ?? 'default';
   const tag = deploymentTag(deployment);
   const names = managedNames(managedNamePrefix(deployment));
@@ -131,14 +122,15 @@ export function doStorageResources(
 }
 
 /**
- * The account's storage kinds as entries of the provider-wide DigitalOcean dispatcher
- * (`new DoResources(client, config, deployment, [...doResourceKinds(), ...doStorageKinds(...)])`
- * once lane do-cloud-resources is merged), so one `resources` serves databases and storage alike.
+ * The account's storage kinds as entries of the provider-wide DigitalOcean dispatcher: the provider
+ * appends them to `doResourceKinds()`, so its one `resources` (`DoResources`) serves databases and
+ * storage alike, and `cloudResources.kinds` lists them.
  */
 export function doStorageKinds(
   config: DoConfig,
   context: ProviderContext,
   options: DoStorageOptions = {},
+  client?: DoClient,
 ): DoStorageKindEntry[] {
-  return storageKindHandlers(config, context, options).map(asDoKind);
+  return storageKindHandlers(config, context, options, client).map(asDoKind);
 }

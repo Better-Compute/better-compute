@@ -17,6 +17,7 @@ export {
 export {
   reconcileResource,
   resourcesReconciler,
+  resourceMaxBackoffMs,
   resourcePollMs,
   resourceRetryMs,
 } from './reconciler.js';
