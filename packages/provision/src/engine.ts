@@ -492,6 +492,9 @@ export async function retryWorkflow(
 
 // --- Advancing -------------------------------------------------------------------------------------
 
+/** The engine context while a workflow advances: with the worker's steps, for what a row does not record (`retrySafe`). */
+type Advancing = EngineContext & { steps?: StepRegistry };
+
 type Transition =
   /** Something changed; look again right away. */
   | { kind: 'continue' }
@@ -540,7 +543,7 @@ async function nodeLabels(tx: SqlTx, nodeId: string | null): Promise<Record<stri
  * on-failure step runs first, then the workflow fails.
  */
 async function failStep(
-  context: EngineContext,
+  context: Advancing,
   tx: SqlTx,
   workflow: WorkflowRow,
   step: StepRow,
@@ -551,7 +554,10 @@ async function failStep(
   // step leaves its relayed commands pending (for a ramdisk that reconnects later), and a retry
   // sends its own under the next attempt's key.
   await cancelStepCommands(context, tx, step);
-  if (step.attempt < step.retries) {
+  // Profiles are refused retries on such a step (expand.ts); a row that has them anyway (a workflow
+  // started before that check) is still never sent twice.
+  const retrySafe = context.steps?.get(step.action)?.retrySafe !== false;
+  if (step.attempt < step.retries && retrySafe) {
     await setStep(tx, step, assertStepVerb('failed', 'retry'), { attempt: step.attempt + 1, error });
     await publish(context, tx, workflow, 'workflow.step.retrying', { stepId: step.id, attempt: step.attempt, error });
     return;
@@ -601,7 +607,7 @@ async function notifyOwner(context: EngineContext, tx: SqlTx, workflow: Workflow
 }
 
 async function startAgentStep(
-  context: EngineContext,
+  context: Advancing,
   tx: SqlTx,
   workflow: WorkflowRow,
   step: StepRow,
@@ -680,7 +686,7 @@ export async function siteAgentFor(tx: SqlTx, nodeId: string): Promise<string | 
 }
 
 async function settleWaiting(
-  context: EngineContext,
+  context: Advancing,
   tx: SqlTx,
   workflow: WorkflowRow,
   step: StepRow,
@@ -740,7 +746,7 @@ async function settleWaiting(
 }
 
 /** One transition of one workflow, in `tx`. */
-async function transition(context: EngineContext, tx: SqlTx, workflowId: string): Promise<Transition> {
+async function transition(context: Advancing, tx: SqlTx, workflowId: string): Promise<Transition> {
   const workflow = await lockWorkflow(tx, workflowId);
   if (!workflow || !activeStates.includes(workflow.state)) return { kind: 'done' };
   if (workflow.state === 'pending') {
@@ -900,9 +906,10 @@ export async function advanceWorkflow(
   const max = options.maxTransitions ?? 64;
   let transitions = 0;
   const clock = () => (context.clock ? context.clock.now() : Date.now());
+  const advancing: Advancing = { ...context, steps: options.steps };
   while (transitions < max) {
     if (options.signal?.aborted) return { transitions, done: false };
-    const step = await context.sql.transaction((tx) => transition(context, tx, workflowId));
+    const step = await context.sql.transaction((tx) => transition(advancing, tx, workflowId));
     transitions++;
     if (step.kind === 'continue') continue;
     if (step.kind === 'done') return { transitions, done: true };
@@ -919,7 +926,7 @@ export async function advanceWorkflow(
       // Aborted, retried or settled by someone else meanwhile: this run's outcome is stale.
       if (!current || current.state !== 'running' || current.attempt !== step.step.attempt) return undefined;
       if (outcome.outcome === 'succeeded') await completeStep(context, tx, workflow, current, outcome.result);
-      else if (outcome.outcome === 'failed') await failStep(context, tx, workflow, current, outcome.error);
+      else if (outcome.outcome === 'failed') await failStep(advancing, tx, workflow, current, outcome.error);
       else return Math.min(step.deadline, workflow.lockedAt + outcome.retryAfterMs);
       return undefined;
     });

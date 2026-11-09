@@ -133,11 +133,20 @@ async function resolve(
         issues.push({ path: `${path}.on`, message: `${use} runs on ${definition.runsOn}, not ${step.on}` });
         return undefined;
       }
+      // A retry sends the step again under a new idempotency key: only a retry-safe step may have any.
+      let retries = step.retries ?? definition.retries ?? 0;
+      if (retries > 0 && !definition.retrySafe) {
+        issues.push({
+          path: `${path}.retries`,
+          message: `${use} is not retry-safe: a retry would run it again under a new command key, so it takes no retries (retries: ${retries}); remove retries, or handle a failure with onFailure`,
+        });
+        retries = 0;
+      }
       const resolved: Resolved = {
         action: use,
         runsOn: definition.runsOn,
         args: await validateArgs(definition, args, path, issues),
-        retries: step.retries ?? definition.retries ?? 0,
+        retries,
         timeoutMs: parseDuration(step.timeout ?? definition.timeout),
         definition,
       };

@@ -173,6 +173,12 @@ All notable changes to the better-compute packages are documented here. The form
   that reconnected later ran anyway. Now a step that is aborted, fails or times out has every open command under
   its key (`wf:<workflow>:<step>…`) cancelled, pending ones at once and in-flight ones through the gateway, and a
   step run that outlives its step is refused any further command (`INVALID_STATE`).
+- **`retries` only on retry-safe steps** (`@better-compute/provision`). A step's `retrySafe` flag was never read, so
+  a profile's `retries: 2` on `deploy.deploy` or `raid.apply` sent it again under a new command key. Now
+  `profiles.validate`, `profiles.render` and every workflow start report `retries` on a step that is not retry-safe
+  (`steps[0].retries: deploy.deploy is not retry-safe…`), `defineStep` refuses `retries` with `retrySafe: false`,
+  and the engine never retries such a step even when its row says so (a workflow started before the check).
+  Driver operations written with `on:` (no registered step) keep their `retries`.
 
 ## 0.3.0 (2026-10-20)
 

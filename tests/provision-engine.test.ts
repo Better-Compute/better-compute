@@ -150,7 +150,19 @@ const late = defineStep({
     return null;
   },
 });
-const registry = stepRegistry([record, kexec, relayed, late]);
+/** A step that must not be sent twice (as deploy.deploy or raid.apply): it fails every time it runs. */
+const once = defineStep({
+  id: 'test.once',
+  runsOn: 'control-plane',
+  timeout: '1m',
+  retrySafe: false,
+  input: manifest({}),
+  async run(_input, stepContext) {
+    ran.push(`once#${stepContext.attempt}`);
+    throw new Error('half done');
+  },
+});
+const registry = stepRegistry([record, kexec, relayed, late, once]);
 
 const stored = new Map<string, ProfileDocument>();
 const options: AdvanceOptions = {
@@ -369,6 +381,31 @@ describe('expandProfile', () => {
     });
   });
 
+  it('refuses retries on a step that is not retry-safe, in a profile and in a step definition', async () => {
+    const doc = defineProfile({
+      id: 'unsafe-retries',
+      version: 1,
+      target: 'metal',
+      steps: [
+        { use: 'test.once', retries: 2 },
+        { use: 'test.record', retries: 2 },
+        { use: 'test.once', retries: 0, onFailure: { use: 'test.once', retries: 1 } },
+      ],
+      cleanup: [{ use: 'boot.kexec', retries: 1 }],
+    });
+    const { issues } = await expandProfile(doc, registry);
+    expect(issues).toEqual([
+      { path: 'steps[0].retries', message: expect.stringMatching(/test\.once is not retry-safe.*retries: 2/) },
+      { path: 'steps[2].onFailure.retries', message: expect.stringMatching(/test\.once is not retry-safe/) },
+      { path: 'cleanup[0].retries', message: expect.stringMatching(/boot\.kexec is not retry-safe/) },
+    ]);
+    stored.set('unsafe-retries@1', doc);
+    await expect(start('unsafe-retries')).rejects.toMatchObject({ code: 'INVALID_INPUT', message: expect.stringMatching(/not retry-safe/) });
+    const { extension: _stamp, ...input } = once;
+    expect(() => defineStep({ ...input, retries: 1 })).toThrow(/retries.*retrySafe/);
+    expect(() => defineStep({ ...input, retries: 0 })).not.toThrow();
+  });
+
   it('evaluates when: against node labels', () => {
     const labels = { 'gpu.model': 'H100', nvswitch: 'true', 'mig.capable': 'false' };
     expect(evaluateWhen('nvswitch', labels)).toBe(true);
@@ -464,6 +501,17 @@ describe('running a workflow', () => {
       error: { code: 'COMMAND_FAILED', message: 'main.1 (power.setPower): BMC unreachable' },
     });
     expect(events.filter((e) => e.type.startsWith('workflow.step.')).map((e) => e.type)).toContain('workflow.step.retrying');
+  });
+
+  it('never retries a step that is not retry-safe, whatever its row says (a workflow from before the check)', async () => {
+    profile({ id: 'once', steps: [{ use: 'test.once' }] });
+    const { id } = await start('once');
+    await db.query('UPDATE workflow_steps SET retries = 2 WHERE workflow_id = $1', [id]);
+    expect((await advance(id)).done).toBe(true);
+    expect(ran).toEqual(['once#0']);
+    expect(await steps(id)).toMatchObject([{ state: 'failed', attempt: 0 }]);
+    expect(await workflow(id)).toMatchObject({ state: 'failed', error: { message: expect.stringMatching(/half done/) } });
+    expect(events.map((e) => e.type)).not.toContain('workflow.step.retrying');
   });
 
   it('continues past a failed step with onFailure: continue, and skips steps whose when: is false', async () => {

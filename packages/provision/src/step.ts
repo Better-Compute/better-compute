@@ -68,6 +68,8 @@ export function defineStep<I>(step: StepInputWithRelays<I>): RelayingStepDefinit
   checkTimeout(candidate.timeout, 'timeout', fail);
   if (candidate.retries !== undefined) checkRetries(candidate.retries, 'retries', fail);
   if (typeof candidate.retrySafe !== 'boolean') fail('retrySafe', 'must be true or false');
+  if (!candidate.retrySafe && typeof candidate.retries === 'number' && candidate.retries > 0)
+    fail('retries', 'needs retrySafe: true; a step that is not retry-safe is never sent twice');
   if (!isStandardSchema(candidate.input))
     fail('input', 'must be a manifest or another Standard Schema');
   if (candidate.runsOn === 'control-plane') {
