@@ -181,6 +181,8 @@ describe('commandBatches (v1.0 quorum, §13)', () => {
     const page = await s.api.scope(s.cred, { tenantId: ACME, batchId: created.batchId, limit: 2 });
     expect(page.items.map((item: { leafIndex: number }) => item.leafIndex)).toEqual([0, 1]);
     expect(page.next).toBe(2);
+    // Every list names what to pass back `cursor`; `next` is the older name for the same value.
+    expect(page.cursor).toBe(2);
     // A one-leaf batch falls in the tier that needs one approval.
     expect((await s.create([{ subject: 'node_b', kind: 'node.reboot' }])).required).toBe(1);
   });

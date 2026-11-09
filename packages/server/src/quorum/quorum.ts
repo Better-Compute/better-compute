@@ -585,6 +585,23 @@ function limitOf(value: unknown, max: number, fallback: number): number {
   return value as number;
 }
 
+/**
+ * A page of a batch list. `cursor` is present when more rows may follow, as in every other list (`Page`):
+ * pass it back as the next call's `cursor`. `next` holds the same value under the name these three
+ * methods first used.
+ */
+export interface BatchPage<T, C extends string | number> {
+  items: T[];
+  cursor?: C;
+  /** @deprecated Read `cursor`. */
+  next?: C;
+}
+const batchPage = <T, C extends string | number>(items: T[], cursor: C): BatchPage<T, C> => ({
+  items,
+  cursor,
+  next: cursor,
+});
+
 export interface BatchRef {
   tenantId: string;
   batchId: string;
@@ -596,7 +613,7 @@ export interface ListBatchesInput {
   cursor?: string;
 }
 export interface BatchScopeInput extends BatchRef {
-  /** Leaf index to start from (the previous page's `next`). */
+  /** Leaf index to start from (the previous page's `cursor`). */
   cursor?: number;
   limit?: number;
 }
@@ -604,7 +621,7 @@ export interface BatchMembersInput extends BatchRef {
   state?: string;
   /** At most 500 (100 by default). */
   limit?: number;
-  /** The previous page's `next` (a command id). */
+  /** The previous page's `cursor` (a command id). */
   cursor?: string;
 }
 
@@ -785,9 +802,9 @@ export type CommandBatchesApi = {
   commandBatches: {
     create: MethodDefinition<CreateBatchRequest, CommandBatchView>;
     get: MethodDefinition<BatchRef, CommandBatchView>;
-    list: MethodDefinition<ListBatchesInput, { items: CommandBatchView[]; next?: string }>;
-    scope: MethodDefinition<BatchScopeInput, { items: BatchScopeItem[]; next?: number }>;
-    members: MethodDefinition<BatchMembersInput, { items: BatchMember[]; next?: string }>;
+    list: MethodDefinition<ListBatchesInput, BatchPage<CommandBatchView, string>>;
+    scope: MethodDefinition<BatchScopeInput, BatchPage<BatchScopeItem, number>>;
+    members: MethodDefinition<BatchMembersInput, BatchPage<BatchMember, string>>;
     approve: MethodDefinition<ApproveBatchInput, CommandBatchView>;
     cancel: MethodDefinition<BatchRef, CommandBatchView>;
   };
@@ -883,7 +900,7 @@ export function commandBatchesApi(options: {
         handler: async (context, input) =>
           batchView(context.sql, await readBatch(context.sql, input.tenantId, input.batchId), trustDomain),
       }),
-      list: defineMethod<ListBatchesInput, { items: CommandBatchView[]; next?: string }>({
+      list: defineMethod<ListBatchesInput, BatchPage<CommandBatchView, string>>({
         action: 'compute:batches:read',
         kind: 'read',
         resource: tenant,
@@ -915,10 +932,10 @@ export function commandBatchesApi(options: {
           const page = rows.slice(0, limit);
           const items = [];
           for (const row of page) items.push(await batchView(context.sql, row, trustDomain));
-          return rows.length > limit ? { items, next: page.at(-1)!.id } : { items };
+          return rows.length > limit ? batchPage(items, page.at(-1)!.id) : { items };
         },
       }),
-      scope: defineMethod<BatchScopeInput, { items: BatchScopeItem[]; next?: number }>({
+      scope: defineMethod<BatchScopeInput, BatchPage<BatchScopeItem, number>>({
         action: 'compute:batches:read',
         kind: 'read',
         resource: tenant,
@@ -966,10 +983,10 @@ export function commandBatchesApi(options: {
                 }
               : {}),
           }));
-          return rows.length > limit ? { items, next: Number(rows[limit]!.leaf_index) } : { items };
+          return rows.length > limit ? batchPage(items, Number(rows[limit]!.leaf_index)) : { items };
         },
       }),
-      members: defineMethod<BatchMembersInput, { items: BatchMember[]; next?: string }>({
+      members: defineMethod<BatchMembersInput, BatchPage<BatchMember, string>>({
         action: 'compute:batches:read',
         kind: 'read',
         resource: tenant,
@@ -1016,7 +1033,7 @@ export function commandBatchesApi(options: {
               ...(row.held ? { awaitingApproval: true as const } : {}),
             }),
           );
-          return rows.length > limit ? { items, next: items.at(-1)!.commandId } : { items };
+          return rows.length > limit ? batchPage(items, items.at(-1)!.commandId) : { items };
         },
       }),
       approve: defineMethod<ApproveBatchInput, CommandBatchView>({
