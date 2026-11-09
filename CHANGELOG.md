@@ -218,6 +218,11 @@ All notable changes to the better-compute packages are documented here. The form
   two pins and the sections of the old file; every other top-level key was dropped, so `gateway_server_name`,
   `data_dir` and `socket_path` silently went back to their defaults. The script now carries over every top-level
   key it does not set itself, as written, never a key twice. Regenerate your install scripts to get the fix.
+- **`doctor` exits non-zero on an error finding** (`@better-compute/cli`). `better-compute doctor` printed its report
+  and exited 0 whatever it found; only `--strict` failed, and then on warnings as much as on errors. A deploy step
+  running `doctor` passed over an unmigrated or unreachable database. Now any `error` finding exits 1 with
+  `DOCTOR_FINDINGS` (the report is still printed first), `--strict` adds warnings, and `info` findings never fail.
+  Scripts that ran plain `doctor` on a deployment with error findings and expected status 0 need to handle it.
 - **BMC credential rotation no longer deletes the enrollment secret** (`@better-compute/metal`).
   `metal.rotateBmcCredential` purged every superseded credential from the secret store, including the one the
   machine was enrolled with: two machines enrolled with one rack-wide `secret://` broke each other on the first

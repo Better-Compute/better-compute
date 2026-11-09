@@ -248,7 +248,9 @@ better-compute doctor --strict
 
 It runs `compute.selfCheck()` (applied migrations, `btree_gist`, `compute_now()` against the database clock, every
 method's IAM action, each module's own checks) and adds the CLI's findings, such as `iam.not-configured` when no
-Better IAM is wired in. `--strict` exits non-zero with `DOCTOR_FINDINGS` on any warning, so you can run it in CI.
+Better IAM is wired in. It prints the report and exits non-zero with `DOCTOR_FINDINGS` when any finding is an error
+(an unreachable or unmigrated database, a broken PKI bundle); `--strict` does so on any warning too, so you can run
+it in CI.
 See the [CLI reference](/docs/reference/cli).
 
 ## Next steps

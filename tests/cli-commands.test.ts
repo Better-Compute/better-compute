@@ -229,12 +229,25 @@ describe('environment-only deployments on PGlite', () => {
     expect(strict.stderr).toBe('DOCTOR_FINDINGS: 1 finding(s): iam.not-configured');
   });
 
-  it('reports an unmigrated database', async () => {
-    const report = await json(['doctor'], { env: memoryEnv });
+  it('reports an unmigrated database, and exits 1 for it: an error finding fails doctor without --strict', async () => {
+    const failing = await run(['doctor'], { env: memoryEnv });
+    // The report is printed in full; the exit status and stderr say it found errors, and which.
+    const report = JSON.parse(failing.stdout);
     expect(report.ok).toBe(false);
     expect(report.findings.map((finding: { check: string }) => finding.check)).toEqual(
       expect.arrayContaining(['migrations', 'iam.not-configured']),
     );
+    const errors = report.findings.filter((finding: { severity: string }) => finding.severity === 'error').map((finding: { check: string }) => finding.check);
+    expect(errors).toContain('migrations');
+    expect(failing.status).toBe(1);
+    expect(failing.stderr.split('\n')[0]).toBe(`DOCTOR_FINDINGS: ${errors.length} error finding(s): ${errors.join(', ')}`);
+    // A warning (no IAM) is not what failed it; --strict counts it too.
+    expect(failing.stderr.split('\n')[0]).not.toContain('iam.not-configured');
+    const strict = await run(['doctor', '--strict'], { env: memoryEnv });
+    expect(strict.status).toBe(1);
+    const serious = report.findings.filter((finding: { severity: string }) => finding.severity !== 'info').map((finding: { check: string }) => finding.check);
+    expect(serious).toContain('iam.not-configured');
+    expect(strict.stderr).toBe(`DOCTOR_FINDINGS: ${serious.length} finding(s): ${serious.join(', ')}`);
   });
 
   it.each([
@@ -264,9 +277,12 @@ describe('environment-only deployments on PGlite', () => {
 
   it('connects postgres:// URLs with the postgres executor', async () => {
     // Nothing listens on port 1: the executor is chosen and fails to connect, which doctor reports.
-    const report = await json(['doctor'], {
+    const outcome = await run(['doctor'], {
       env: { ...memoryEnv, BETTER_COMPUTE_DATABASE_URL: 'postgres://compute@127.0.0.1:1/compute' },
     });
+    expect(outcome.status).toBe(1);
+    expect(outcome.stderr).toMatch(/^DOCTOR_FINDINGS: \d+ error finding\(s\): database/);
+    const report = JSON.parse(outcome.stdout);
     expect(report.database).toBe('postgres');
     expect(report.ok).toBe(false);
     expect(report.findings[0]).toMatchObject({ check: 'database', severity: 'error' });

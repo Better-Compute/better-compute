@@ -117,10 +117,10 @@ export const setupCommands = [
     group: 'Setup',
     summary: 'Check the database, schema, clock, method registry and IAM wiring',
     description:
-      "doctor runs compute.selfCheck() (applied migrations, btree_gist, compute_now() against the database clock, the method → action registry, and each module's own checks) and adds the CLI's findings, such as a deployment with no IAM configured, the PKI bundle, and the configuration's host export (whether the gateway role can authenticate daemons by node certificate, reach the api's pokes, tunnels and revocations, and whether host routes fit beside the API). It only reads. --strict exits non-zero (DOCTOR_FINDINGS) when any error or warning is found.",
+      "doctor runs compute.selfCheck() (applied migrations, btree_gist, compute_now() against the database clock, the method → action registry, and each module's own checks) and adds the CLI's findings, such as a deployment with no IAM configured, the PKI bundle, and the configuration's host export (whether the gateway role can authenticate daemons by node certificate, reach the api's pokes, tunnels and revocations, and whether host routes fit beside the API). It only reads. It prints the report, then exits non-zero (DOCTOR_FINDINGS) when any finding is an error; --strict also exits non-zero on a warning. Informational findings never fail it.",
     target: 'config',
     flags: {
-      strict: { type: 'boolean', description: 'Exit non-zero when any error or warning is found' },
+      strict: { type: 'boolean', description: 'Also exit non-zero on warnings (errors always do)' },
       pki: pkiFlag,
     },
     examples: [
@@ -152,11 +152,16 @@ export const setupCommands = [
         ok: check.ok,
         findings,
       });
-      const serious = findings.filter((finding) => finding.severity !== 'info');
-      if (flags.strict && serious.length)
+      // The report is printed either way; the exit status says whether a script may go on. An error finding
+      // always fails (a deploy step that runs doctor must not pass over an unmigrated or unreachable
+      // database); warnings fail only with --strict.
+      const errors = findings.filter((finding) => finding.severity === 'error');
+      const failing = flags.strict ? findings.filter((finding) => finding.severity !== 'info') : errors;
+      if (failing.length)
         throw new CliError(
           'DOCTOR_FINDINGS',
-          `${serious.length} finding(s): ${serious.map((finding) => finding.check).join(', ')}`,
+          `${failing.length} ${flags.strict ? 'finding(s)' : 'error finding(s)'}: ${failing.map((finding) => finding.check).join(', ')}`,
+          flags.strict ? undefined : 'Each finding in the report above says what is wrong and how to fix it.',
         );
     },
   }),

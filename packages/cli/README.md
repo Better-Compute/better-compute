@@ -26,7 +26,7 @@ for PGlite databases, and `@better-compute/testing` is an optional peer for `sim
 better-compute help                 # every command; help <command> for one; help --json for tools
 better-compute init                 # writes better-compute.config.ts (PGlite in development)
 better-compute migrate              # finds the nearest better-compute.config.* (or --config PATH)
-better-compute doctor --strict      # selfCheck findings; exits 1 (DOCTOR_FINDINGS) on any warning
+better-compute doctor --strict      # selfCheck findings; exits 1 (DOCTOR_FINDINGS) on an error, with --strict on a warning too
 better-compute serve                # the API and every worker role in one process
 better-compute api --list           # every route, whether it needs a token, its IAM action
 better-compute api system.version

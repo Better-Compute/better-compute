@@ -244,13 +244,16 @@ describe('doctor PKI findings', () => {
       BETTER_COMPUTE_DATABASE_URL: 'pglite:memory',
       BETTER_COMPUTE_SECRET: 'wrong-secret-but-long-enough-0123456789',
     };
+    // doctor prints its report and then fails on an error finding (here also the unmigrated database).
     const result = await run(['doctor', '--query', 'findings[].check'], env);
-    expect(result.ok && JSON.parse(result.stdout)).toContain('pki.unseal');
+    expect(JSON.parse(result.stdout)).toContain('pki.unseal');
+    expect(result).toMatchObject({ ok: false, code: 'DOCTOR_FINDINGS', message: expect.stringContaining('pki.unseal') });
     const good = await run(['doctor', '--query', 'findings[].check'], {
       ...env,
       BETTER_COMPUTE_SECRET: SECRET,
     });
-    expect(good.ok && JSON.parse(good.stdout)).not.toContain('pki.unseal');
+    expect(JSON.parse(good.stdout)).not.toContain('pki.unseal');
+    expect(good.ok || !good.message.includes('pki.unseal')).toBe(true);
   });
 });
 

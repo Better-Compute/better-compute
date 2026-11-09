@@ -50,7 +50,7 @@
       "aliases": [],
       "group": "Setup",
       "summary": "Check the database, schema, clock, method registry and IAM wiring",
-      "description": "doctor runs compute.selfCheck() (applied migrations, btree_gist, compute_now() against the database clock, the method → action registry, and each module's own checks) and adds the CLI's findings, such as a deployment with no IAM configured, the PKI bundle, and the configuration's host export (whether the gateway role can authenticate daemons by node certificate, reach the api's pokes, tunnels and revocations, and whether host routes fit beside the API). It only reads. --strict exits non-zero (DOCTOR_FINDINGS) when any error or warning is found.",
+      "description": "doctor runs compute.selfCheck() (applied migrations, btree_gist, compute_now() against the database clock, the method → action registry, and each module's own checks) and adds the CLI's findings, such as a deployment with no IAM configured, the PKI bundle, and the configuration's host export (whether the gateway role can authenticate daemons by node certificate, reach the api's pokes, tunnels and revocations, and whether host routes fit beside the API). It only reads. It prints the report, then exits non-zero (DOCTOR_FINDINGS) when any finding is an error; --strict also exits non-zero on a warning. Informational findings never fail it.",
       "usage": "better-compute doctor [--strict] [--pki PATH] [--config PATH]",
       "target": "config",
       "args": [],
@@ -58,7 +58,7 @@
         {
           "flag": "--strict",
           "optional": true,
-          "description": "Exit non-zero when any error or warning is found"
+          "description": "Also exit non-zero on warnings (errors always do)"
         },
         {
           "flag": "--pki",
