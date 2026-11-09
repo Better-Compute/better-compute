@@ -113,7 +113,7 @@ await context.workflows!.start(tx, {
 - **Expansion.** `start` pins the profile version, expands it (`expandProfile`) and persists the workflow with every step. Each `use:` resolves to a registered step or, when the profile says `on:`, to a driver operation `<concern>.<operation>` sent as a `driver.invoke` command. `fallback:` is used when `use:` does not resolve. Acceptance steps follow the main steps, and on-failure and cleanup steps are their own rows. A profile version is immutable once used.
 - **Persistence.** The `provision/0001_workflows` migration creates `profiles`, `workflows` and `workflow_steps`. Partial unique indexes allow one active workflow and one in-flight step per node, so the worker that next owns the node's shard resumes a crashed workflow.
 - **Execution.** The `workflow` reconciler (sharded by node) runs one transition per transaction, with the workflow row locked.
-  - A `control-plane` step runs in the worker between two transactions, with idempotency key `wf:<id>:<stepId>`. A crash re-runs it. It may throw `stepNotReady(ms)` to be run again later.
+  - A `control-plane` step runs in the worker between two transactions, with idempotency key `wf:<id>:<stepId>`. A crash re-runs it. It may throw `stepNotReady(ms)` to be run again later, or `stepWaiting(until)` while it waits for something outside the workflow (an operator's decision): the step's timeout does not run until `until`, and counts in full from when the step goes on.
   - Every other step is exactly one command. Its key is `wf:<id>:<stepId>`, then `#<attempt>` for retries.
   - An `await: 'rejoin'` step completes when the agent is back with a new `boot_id` or role. Its command's own fate is ignored, and only its timeout fails it.
 - **Options.**

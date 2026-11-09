@@ -211,7 +211,12 @@ describe('booting a machine known only by its UUID', () => {
     expect(m.pxeWaiting).toBe(true);
     // The site agent sees it PXE-booting (no entry answers it) and lists it, first seen now.
     await report(s, metalDiscoveryStatusHandler(), AGENT, [machine(s.macOf(enrolled.nodeId), DHCP_UUID, {}, now)]);
-    return { s, m, nodeId: enrolled.nodeId as string, second, until, now: () => now };
+    /** Moves the clock on at once (an operator who comes back hours later). */
+    const jump = async (ms: number) => {
+      now += ms;
+      await setSimClock(s.db, now);
+    };
+    return { s, m, nodeId: enrolled.nodeId as string, second, until, jump, now: () => now };
   }
   const nodeRow = (s: MetalSim, nodeId: string) =>
     s.db
@@ -236,6 +241,41 @@ describe('booting a machine known only by its UUID', () => {
     // Still asking for DHCP after the discovery cycle, it booted the ramdisk from the entry.
     expect(m.bootedBy).toBe(AGENT);
     expect(s.events.find((e) => e.type === 'node.pxe-mac.confirmed')).toMatchObject({ data: { discovered: true } });
+  });
+
+  it('waits for a late operator outside the step timeout: the node does not fail and is not power-cycled again', async () => {
+    const { s, m, nodeId, until, jump } = await bootServer();
+    await until(async () => (await nodeRow(s, nodeId)).discovered_mac !== null, 60);
+    const cycles = () => s.seen.filter((c) => c.kind === 'bmc.power' && c.args.action === 'cycle').length;
+    const before = cycles();
+    // The operator confirms three hours later: metal.ensureRamdisk's 20 minutes are long over.
+    await jump(3 * 3_600_000);
+    await until(() => false, 30);
+    expect(await s.state(nodeId)).toMatchObject({ failed_from: null, maintenance: false });
+    expect((await s.state(nodeId)).provision_state).not.toBe('failed');
+    expect(cycles()).toBe(before);
+    expect(s.seen.some((c) => c.kind === 'boot.prepareRamdisk')).toBe(false);
+    await s.call('confirmMac', { tenantId: 'root', nodeId, mac: s.macOf(nodeId) });
+    await until(async () => (await s.state(nodeId)).provision_state === 'ready');
+    expect(await s.state(nodeId)).toMatchObject({ provision_state: 'ready' });
+    expect(m.bootedBy).toBe(AGENT);
+    // Still asking for DHCP since the discovery cycle, it booted from the confirmed entry: no cycle more.
+    expect(cycles()).toBe(before);
+  });
+
+  it('counts the step timeout again from the confirmation: a machine that then never boots fails', async () => {
+    const { s, nodeId, until, jump } = await bootServer();
+    await until(async () => (await nodeRow(s, nodeId)).discovered_mac !== null, 60);
+    await jump(3 * 3_600_000);
+    await until(() => false, 10);
+    // Bound by hand to a MAC that is not the machine's: its entry never answers the machine.
+    await s.call('confirmMac', { tenantId: 'root', nodeId, mac: '52:54:00:aa:09:09' });
+    await until(() => s.seen.some((c) => c.kind === 'boot.prepareRamdisk'), 60);
+    await until(() => false, 30);
+    expect((await s.state(nodeId)).provision_state).not.toBe('failed');
+    await jump(21 * 60_000);
+    await until(async () => (await s.state(nodeId)).provision_state === 'failed', 60);
+    expect(await s.state(nodeId)).toMatchObject({ provision_state: 'failed' });
   });
 
   /** The ramdisk's system and nics sections, as the ramdisk reports them after it connected. */

@@ -20,6 +20,7 @@ import {
   stepCommandKey,
   stepNotReady,
   StepNotReady,
+  stepWaiting,
   verifyImageForUse,
   workflowProfile,
   type CommandOutcome,
@@ -187,6 +188,13 @@ const compressionNames: Readonly<Record<string, string>> = {
   zstd: 'IMAGE_COMPRESSION_ZSTD',
   gzip: 'IMAGE_COMPRESSION_GZIP',
 };
+
+/**
+ * How long `metal.ensureRamdisk` waits for an operator to settle a machine's PXE MAC (`metal.confirmMac`)
+ * once discovery has done what it can, counted from metal's discovery power cycle: outside the step's
+ * own timeout, which is for the machine, not for people.
+ */
+export const pxeConfirmationWaitMs = 7 * 24 * 3_600_000;
 
 /** How long a ramdisk's discovery token is good for: the boot it was minted for, no more. */
 export const discoveryTokenTtlSeconds = 900;
@@ -436,7 +444,10 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
    * A machine known only by its product UUID is PXE-booted once without an entry first. Its site agent
    * lists it (StatusReport.discovered), and a MAC first seen after that power cycle under its UUID becomes
    * a candidate (discovery.ts). The step waits until an operator confirms it (`metal.confirmMac`), or binds
-   * it at once on a pool with `trustProvisioningNetwork: true`.
+   * it at once on a pool with `trustProvisioningNetwork: true`. That wait is an operator's, so it is parked
+   * outside the step's 20 minutes (`stepWaiting`, up to `pxeConfirmationWaitMs`): the node stays where it is,
+   * with its candidate in `discoveredMac`, instead of failing and being power-cycled again on `recover`. The
+   * timeout runs again from the confirmation. A machine discovery never saw still fails after 20 minutes.
    */
   const ensureRamdisk = defineStep({
     id: 'metal.ensureRamdisk',
@@ -468,6 +479,10 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
               ? `PXE discovery found ${found.mac}: waiting for metal.confirmMac`
               : `waiting for PXE discovery (${found.reason ?? 'not-seen'}); metal.confirmMac binds a MAC by hand`,
           });
+          // A candidate to confirm, or a finding only an operator can settle (several MACs, a UUID or MAC
+          // another machine has): the machine has done its part, so the wait is not the step's to time.
+          const operators = found.mac !== undefined || node.discovered_mac !== null || (found.reason !== undefined && found.reason !== 'not-seen');
+          if (operators && rows[0]?.sent) throw stepWaiting(rows[0].sent.getTime() + pxeConfirmationWaitMs);
           throw stepNotReady(5_000);
         }
         node = await metalNode(context);

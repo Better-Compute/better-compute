@@ -19,7 +19,7 @@ import {
   type SqlTx,
   type WipeMode,
 } from '@better-compute/core';
-import { builtinSteps, heldBatchNotAfter, siteAgentFor, stepRegistry, type StepRegistry } from '@better-compute/provision';
+import { builtinSteps, heldBatchNotAfter, siteAgentFor, stepRegistry, workflowWorkKind, type StepRegistry } from '@better-compute/provision';
 import { encodeMessageJson } from '@better-compute/protocol';
 import { batchSubject, stateChain, verbBatchScope } from './batch.js';
 import {
@@ -704,6 +704,8 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
               [node.node_id, input.mac],
             );
             await context.work.enqueue(tx, metalWorkKind, node.node_id);
+            // The workflow waiting for this decision (metal.ensureRamdisk) goes on now, not at its next look.
+            if (node.workflow_id) await context.work.enqueue(tx, workflowWorkKind, node.node_id);
             // Audited: who bound which MAC, and whether it was the one discovery proposed.
             await context.events.publish(tx, {
               type: 'node.pxe-mac.confirmed',

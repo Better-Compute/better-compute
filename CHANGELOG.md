@@ -185,6 +185,12 @@ All notable changes to the better-compute packages are documented here. The form
   24 hours: a slow approval found the command `expired` and the step failed. Now a held command's `notAfter` is its
   batch's (`heldBatchNotAfter`), and a workflow step does not time out while a command of its is held; its
   timeout counts from the release. A batch that expires still cancels its held commands.
+- **A late `metal.confirmMac` no longer finds a failed node** (`@better-compute/metal`, `provision`). Confirm-first
+  PXE discovery waited for the operator inside `metal.ensureRamdisk`'s 20-minute timeout: after that the node was
+  `failed`, and `recover` power-cycled it into discovery again. Now, once there is a candidate (or a finding only an
+  operator can settle), the step waits outside its timeout, for up to 7 days; the node keeps its state and is not
+  power-cycled again, `confirmMac` wakes the workflow, and the 20 minutes count from the confirmation. New for step
+  authors: `stepWaiting(until)` next to `stepNotReady(ms)`.
 - **BMC credential rotation no longer deletes the enrollment secret** (`@better-compute/metal`).
   `metal.rotateBmcCredential` purged every superseded credential from the secret store, including the one the
   machine was enrolled with: two machines enrolled with one rack-wide `secret://` broke each other on the first

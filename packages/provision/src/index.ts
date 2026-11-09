@@ -20,6 +20,7 @@ export {
   siteAgentFor,
   startWorkflow,
   stepNotReady,
+  stepWaiting,
   workflowPollMs,
   workflowWorkKind,
   type AdvanceOptions,

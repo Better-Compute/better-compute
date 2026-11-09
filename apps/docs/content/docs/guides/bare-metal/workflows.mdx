@@ -153,7 +153,9 @@ The API verbs lock the same row, so they serialize with the reconciler.
   are settled in another that first checks the step is still `running` with the same attempt. A
   crash in between re-runs the step under the same idempotency key, `wf:<id>:<stepId>`. A step that
   cannot finish yet throws `stepNotReady(ms)` and runs again after `ms` (5 seconds by default), until
-  its timeout.
+  its timeout. A step that waits for something outside the workflow, such as an operator's decision, throws
+  `stepWaiting(until)` instead: its timeout does not run until `until`, and counts in full from the
+  moment the step goes on (`metal.ensureRamdisk` waits for `metal.confirmMac` this way).
 - **Agent steps** send exactly one command, keyed `wf:<id>:<stepId>` and `#<attempt>` on retries,
   with the step's deadline as the command's `not_after`. Site steps go to the node's site agent (see
   [where site steps go](/docs/guides/bare-metal/sites)); a driver operation's command carries

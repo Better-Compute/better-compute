@@ -422,9 +422,15 @@ after an operator confirms it.
   `compute:nodes:provision` on the node), which takes the candidate or any MAC the operator knows to be the machine's.
   It publishes `node.pxe-mac.confirmed` (`nodeId`, `mac`, `discovered`, `requestId`) for the audit trail, answers
   `INVALID_STATE` for a node that already has MACs or is retired and `CONFLICT` for a MAC another machine of the site
-  has, and wakes the reconciler, so the waiting `metal.ensureRamdisk` goes on from that MAC. While it waits, the step
-  reports why (`waiting for metal.confirmMac`, or the reason there is no candidate: `not-seen`, `ambiguous`,
-  `shared-uuid`, `mac-enrolled`).
+  has, and wakes the reconciler and the workflow, so the waiting `metal.ensureRamdisk` goes on from that MAC. While
+  it waits, the step reports why (`waiting for metal.confirmMac`, or the reason there is no candidate: `not-seen`,
+  `ambiguous`, `shared-uuid`, `mac-enrolled`).
+- **How long it waits.** Once there is a candidate, or a finding only an operator can settle (`ambiguous`,
+  `shared-uuid`, `mac-enrolled`), the wait is yours and not the step's: it runs outside `metal.ensureRamdisk`'s
+  20-minute timeout, for up to 7 days from the discovery power cycle. The node keeps its provision state, the
+  machine keeps asking for PXE, and nothing power-cycles it again. The step's 20 minutes count again from the
+  confirmation. A machine that discovery never saw (`not-seen`) still fails after 20 minutes, since that is a
+  cabling, firmware or network fault rather than a pending decision.
 
 <Callout type="warn" title="policy.trustProvisioningNetwork">
 A pool whose policy sets `trustProvisioningNetwork: true` binds the candidate at once, without `metal.confirmMac`

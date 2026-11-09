@@ -29,6 +29,7 @@ import {
   batchNodeWorkflow,
   stepNotReady,
   stepRegistry,
+  stepWaiting,
   type AdvanceOptions,
   type EngineContext,
 } from '@better-compute/provision';
@@ -163,7 +164,22 @@ const once = defineStep({
     throw new Error('half done');
   },
 });
-const registry = stepRegistry([record, kexec, relayed, late, once]);
+/** A step that waits for an operator (as metal.ensureRamdisk for metal.confirmMac) while `operatorWait` is set, then is not ready, then done. */
+let operatorWait: number | undefined;
+let afterWait: 'not-ready' | 'done' = 'done';
+const decided = defineStep({
+  id: 'test.decided',
+  runsOn: 'control-plane',
+  timeout: '1m',
+  retrySafe: true,
+  input: manifest({}),
+  async run() {
+    if (operatorWait !== undefined) throw stepWaiting(operatorWait, 15_000);
+    if (afterWait === 'not-ready') throw stepNotReady(1_000);
+    return null;
+  },
+});
+const registry = stepRegistry([record, kexec, relayed, late, once, decided]);
 
 const stored = new Map<string, ProfileDocument>();
 const options: AdvanceOptions = {
@@ -615,6 +631,44 @@ describe('timeouts and not-ready steps', () => {
     notReadyUntil = 0;
     expect((await advance(id)).done).toBe(true);
     expect(ran).toEqual(['poll#0', 'poll#0']);
+  });
+
+  it('lets a step wait for an operator outside its timeout (stepWaiting), and times it again once it goes on', async () => {
+    profile({ id: 'operator', steps: [{ use: 'test.decided', timeout: '1m' }] });
+    const run = async () => {
+      const { id } = await start('operator', await addNode());
+      operatorWait = now + 24 * 3_600_000;
+      afterWait = 'not-ready';
+      const first = await advance(id);
+      expect(first).toMatchObject({ done: false, wakeAt: now + 15_000 });
+      // Hours later (and a worker that was away meanwhile): still waiting, not a timeout.
+      await tick(5 * 3_600_000);
+      expect((await advance(id)).done).toBe(false);
+      expect((await steps(id))[0]).toMatchObject({ state: 'running' });
+      return id;
+    };
+    // The operator decides; the step goes on and finishes.
+    let id = await run();
+    operatorWait = undefined;
+    afterWait = 'done';
+    expect((await advance(id)).done).toBe(true);
+    expect(await workflow(id)).toMatchObject({ state: 'succeeded' });
+    // Or it goes on and then hangs: its one minute counts from there.
+    id = await run();
+    operatorWait = undefined;
+    expect((await advance(id)).done).toBe(false);
+    await tick(59_000);
+    expect((await advance(id)).done).toBe(false);
+    await tick(2_000);
+    expect((await advance(id)).done).toBe(true);
+    expect(await workflow(id)).toMatchObject({ state: 'failed', error: { code: 'TIMEOUT' } });
+    // And nobody ever decides: past `until` plus the timeout it is a timeout after all.
+    id = await run();
+    await tick(19 * 3_600_000 + 61_000);
+    expect((await advance(id)).done).toBe(true);
+    expect(await workflow(id)).toMatchObject({ state: 'failed', error: { code: 'TIMEOUT' } });
+    operatorWait = undefined;
+    afterWait = 'done';
   });
 
   it('resumes a control-plane step that was running when a worker crashed', async () => {

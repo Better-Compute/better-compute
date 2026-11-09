@@ -42,13 +42,24 @@ export const workflowPollMs = 10_000;
 
 /** Thrown by a control-plane step that cannot finish yet; it is run again after `retryAfterMs`. */
 export class StepNotReady extends Error {
-  constructor(readonly retryAfterMs = 5_000) {
+  constructor(
+    readonly retryAfterMs = 5_000,
+    /** Set by `stepWaiting`: until when (epoch ms) the step may wait without its timeout running. */
+    readonly waitingUntil?: number,
+  ) {
     super('The step is not ready yet');
     this.name = 'StepNotReady';
   }
 }
 /** A control-plane step's way of saying "not yet, look again later" (until its timeout). */
 export const stepNotReady = (retryAfterMs?: number): StepNotReady => new StepNotReady(retryAfterMs);
+/**
+ * "Not yet, and it is not mine to hurry": the step waits for something outside the workflow, such as
+ * an operator's decision, and may do so until `until` (epoch ms on the database's clock). Its timeout
+ * does not run meanwhile; it counts in full from the moment the step stops saying so. Past `until`
+ * (plus the timeout) the step times out as any other.
+ */
+export const stepWaiting = (until: number, retryAfterMs = 15_000): StepNotReady => new StepNotReady(retryAfterMs, until);
 
 /** Where profiles come from: stored ones first, then the ones modules ship. */
 export interface ProfileSource {
@@ -179,6 +190,26 @@ async function deadlineAfterApproval(tx: SqlTx, step: StepRow, now: number): Pro
   ]);
   step.deadline = new Date(deadline);
   return deadline;
+}
+
+/**
+ * The deadline of a control-plane step that just said "not ready". A step that waits on something
+ * outside the workflow (`stepWaiting(until)`) is good until `until` plus its timeout. Any other is
+ * good for at most one timeout from now, which only changes a step that had waited: its timeout
+ * counts from when it went on. Stores a changed deadline and returns it.
+ */
+async function notReadyDeadline(tx: SqlTx, step: StepRow, now: number, waitingUntil: number | undefined): Promise<number> {
+  const current = step.deadline?.getTime() ?? now;
+  const timeoutMs = Number(step.timeout_ms);
+  const next =
+    waitingUntil !== undefined && Number.isFinite(waitingUntil) ? Math.max(current, waitingUntil + timeoutMs) : Math.min(current, now + timeoutMs);
+  if (next !== current)
+    await tx.query('UPDATE workflow_steps SET deadline = to_timestamp($3::double precision / 1000.0) WHERE workflow_id = $1 AND id = $2', [
+      step.workflow_id,
+      step.id,
+      next,
+    ]);
+  return next;
 }
 
 /** A locked workflow row, with the transaction's clock and its node's reference read in the same statement. */
@@ -861,7 +892,11 @@ async function runControlPlaneStep(
   step: StepRow,
   deadline: number,
   now: () => number,
-): Promise<{ outcome: 'succeeded'; result: Json | null } | { outcome: 'failed'; error: { code: string; message: string } } | { outcome: 'not-ready'; retryAfterMs: number }> {
+): Promise<
+  | { outcome: 'succeeded'; result: Json | null }
+  | { outcome: 'failed'; error: { code: string; message: string } }
+  | { outcome: 'not-ready'; retryAfterMs: number; waitingUntil?: number }
+> {
   const definition = options.steps.get(step.action);
   if (!definition?.run) return { outcome: 'failed', error: { code: 'INVALID_CONFIG', message: `step ${step.action} is not registered in this worker` } };
   const parsed = await definition.input['~standard'].validate(step.args);
@@ -919,7 +954,8 @@ async function runControlPlaneStep(
     ]);
     return { outcome: 'succeeded', result: (result ?? null) as Json | null };
   } catch (error) {
-    if (error instanceof StepNotReady) return { outcome: 'not-ready', retryAfterMs: error.retryAfterMs };
+    if (error instanceof StepNotReady)
+      return { outcome: 'not-ready', retryAfterMs: error.retryAfterMs, ...(error.waitingUntil !== undefined ? { waitingUntil: error.waitingUntil } : {}) };
     if (controller.signal.aborted && !options.signal?.aborted)
       return { outcome: 'failed', error: { code: 'TIMEOUT', message: `no result within ${step.timeout_ms} ms` } };
     if (options.signal?.aborted) throw error;
@@ -964,7 +1000,11 @@ export async function advanceWorkflow(
       if (!current || current.state !== 'running' || current.attempt !== step.step.attempt) return undefined;
       if (outcome.outcome === 'succeeded') await completeStep(context, tx, workflow, current, outcome.result);
       else if (outcome.outcome === 'failed') await failStep(advancing, tx, workflow, current, outcome.error);
-      else return Math.min(step.deadline, workflow.lockedAt + outcome.retryAfterMs);
+      else
+        return Math.min(
+          await notReadyDeadline(tx, current, workflow.lockedAt, outcome.waitingUntil),
+          workflow.lockedAt + outcome.retryAfterMs,
+        );
       return undefined;
     });
     transitions++;
