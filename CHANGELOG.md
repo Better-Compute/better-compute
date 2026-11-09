@@ -175,6 +175,12 @@ All notable changes to the better-compute packages are documented here. The form
   or the clock-corrected retry is refused again, the credentials are now read again and the request retried once
   with the new ones. Each call makes at most one clock correction and one credential re-read. The platform
   transport of `@better-compute/aws` gets the same retries, including the one for a refused (rotated) key.
+- **One caller giving up no longer fails the others waiting on the same AWS sign-in** (`@better-compute/aws-core`,
+  `@better-compute/provider-aws`). The shared credential refresh (`cachedCredentials`) and the account identity
+  check ran on the signal of the caller that started them, so when that caller aborted (a `listOffers` out of time)
+  a healthy `create` or purchase waiting on the same refresh was rejected with someone else's abort. Both now run
+  on their own signal and timeout (60 s; `cachedCredentials({ resolveTimeoutMs })`), each waiter leaves on its own
+  signal only, and the work is cancelled once nobody waits. `aws-core` exports `sharedFlight`.
 
 ## 0.3.0 (2026-10-20)
 

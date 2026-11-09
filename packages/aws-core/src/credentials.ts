@@ -1,6 +1,7 @@
 import { ComputeError, isComputeError, type Clock } from '@better-compute/core';
 import { queryClient } from './client.js';
 import { endpointFor, parseArn } from './endpoints.js';
+import { sharedFlight } from './flight.js';
 import { mapAwsError, parseAwsError } from './errors.js';
 import { serializeAwsQuery } from './query.js';
 import { parseXml, type XmlElement } from './xml.js';
@@ -569,15 +570,22 @@ export function ambientCredentials(
 /**
  * Single-flight caching: concurrent callers share one resolution, temporary credentials refresh
  * `refreshBeforeMs` before `expiresAt`, and credentials without an expiry are kept until
- * `invalidate()`.
+ * `invalidate()`. The shared resolution runs on its own signal and timeout (`resolveTimeoutMs`,
+ * default 60 s), not on the signal of the caller that started it: a caller that aborts leaves
+ * alone, and the others still get the credentials.
  */
 export function cachedCredentials(
   source: CredentialSource,
-  options: { refreshBeforeMs?: number } = {},
+  options: { refreshBeforeMs?: number; resolveTimeoutMs?: number } = {},
 ): CredentialSource {
   const refreshBeforeMs = options.refreshBeforeMs ?? 300_000;
   let current: AwsCredentials | undefined;
-  let inflight: Promise<AwsCredentials> | undefined;
+  /** Counts invalidations: a resolution that began before one is not kept. */
+  let generation = 0;
+  const join = sharedFlight<AwsCredentials>({
+    ...(options.resolveTimeoutMs !== undefined ? { timeoutMs: options.resolveTimeoutMs } : {}),
+    what: 'resolving AWS credentials',
+  });
   return {
     get kind() {
       return source.kind;
@@ -589,23 +597,16 @@ export function cachedCredentials(
           context.clock.now() < current.expiresAt - refreshBeforeMs)
       )
         return current;
-      if (!inflight) {
-        inflight = source.credentials(context).then(
-          (value) => {
-            current = value;
-            inflight = undefined;
-            return value;
-          },
-          (error: unknown) => {
-            inflight = undefined;
-            throw error;
-          },
-        );
-      }
-      return inflight;
+      return join(async (signal) => {
+        const began = generation;
+        const value = await source.credentials({ signal, clock: context.clock });
+        if (began === generation) current = value;
+        return value;
+      }, context.signal);
     },
     invalidate() {
       current = undefined;
+      generation += 1;
       source.invalidate?.();
     },
   };

@@ -269,6 +269,57 @@ describe('aws-core credentials', () => {
     expect(envFirst.kind).toBe('ambient:env');
   });
 
+  it('the shared refresh does not run on the first caller signal: an abort fails only that caller', async () => {
+    const seen: AbortSignal[] = [];
+    const slow: CredentialSource = {
+      kind: 'slow',
+      credentials: ({ signal: flight }) =>
+        new Promise((resolve, reject) => {
+          seen.push(flight);
+          const timer = setTimeout(() => resolve({ accessKeyId: 'A', secretAccessKey: 's' }), 50);
+          flight.addEventListener('abort', () => {
+            clearTimeout(timer);
+            reject(new Error('aborted by the first caller'));
+          });
+        }),
+    };
+    const cached = cachedCredentials(slow);
+    const clock = world().emu.clock;
+    const a = new AbortController();
+    const b = new AbortController();
+    const first = cached.credentials({ signal: a.signal, clock }).then(
+      () => 'ok',
+      (error: ComputeError) => String(error.details?.reason),
+    );
+    const second = cached.credentials({ signal: b.signal, clock }).then(
+      (value) => value.accessKeyId,
+      (error: Error) => error.message,
+    );
+    a.abort();
+    expect(await first).toBe('aborted');
+    expect(await second).toBe('A');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).not.toBe(a.signal);
+    expect(seen[0]!.aborted).toBe(false);
+
+    // A source that never answers is bounded by the flight timeout, for every waiter.
+    const stuck = cachedCredentials(
+      { kind: 'stuck', credentials: () => new Promise(() => {}) },
+      { resolveTimeoutMs: 20 },
+    );
+    const errors = await Promise.all(
+      [a, b].map(() => failure(() => stuck.credentials({ signal, clock }))),
+    );
+    for (const error of errors)
+      expect(error).toMatchObject({ code: 'UNAVAILABLE', details: { reason: 'timeout' } });
+    // An already aborted caller never starts a resolution.
+    const fresh = cachedCredentials(slow);
+    expect((await failure(() => fresh.credentials({ signal: a.signal, clock }))).code).toBe(
+      'UNAVAILABLE',
+    );
+    expect(seen).toHaveLength(1);
+  });
+
   it('cache is single-flight and refreshes before expiry', async () => {
     const { emu, context } = world();
     emu.sts.roles.set(tenantRole, {});

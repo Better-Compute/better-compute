@@ -4,6 +4,7 @@ import {
   assumeRoleCredentials,
   cachedCredentials,
   getCallerIdentity,
+  sharedFlight,
   staticCredentials,
   type CredentialContext,
   type CredentialSource,
@@ -100,25 +101,18 @@ export function accountCredentials(
     : cachedCredentials(ambient());
 
   if (!role) {
-    let verified: Promise<{ account: string }> | undefined;
     return {
       source: base,
-      verify(call) {
-        verified ??= getCallerIdentity(base, {
+      verify: verifyOnce(async (call) => {
+        const { account: id } = await getCallerIdentity(base, {
           region,
           fetch: fetchImpl,
           ...(stsEndpoint !== undefined ? { endpoint: stsEndpoint } : {}),
           signal: call.signal,
           clock: call.clock,
-        }).then(
-          ({ account: id }) => ({ account: id }),
-          (error: unknown) => {
-            verified = undefined;
-            throw error;
-          },
-        );
-        return verified;
-      },
+        });
+        return { account: id };
+      }),
     };
   }
 
@@ -133,7 +127,6 @@ export function accountCredentials(
       ...(stsEndpoint !== undefined ? { endpoint: stsEndpoint } : {}),
     }),
   );
-  let verified: Promise<{ account: string }> | undefined;
   const run = async (call: CredentialContext) => {
     const sts = {
       region,
@@ -160,17 +153,22 @@ export function accountCredentials(
       );
     return { account: assumed.account };
   };
-  return {
-    source,
-    externalId,
-    verify(call) {
-      verified ??= run(call).catch((error: unknown) => {
-        verified = undefined;
-        throw error;
-      });
-      return verified;
-    },
-  };
+  return { source, externalId, verify: verifyOnce(run) };
+}
+
+/**
+ * Memoizes an account identity check on success. Concurrent callers share one check, which runs
+ * on its own signal and timeout: the first caller aborting (a `listOffers` out of time) never fails
+ * a create or a purchase waiting on the same check. A failed check is run again by the next call.
+ */
+function verifyOnce(
+  run: (call: CredentialContext) => Promise<{ account: string }>,
+): AccountCredentials['verify'] {
+  let verified: { account: string } | undefined;
+  const join = sharedFlight<{ account: string }>({ what: 'verifying the AWS account identity' });
+  return async (call) =>
+    verified ??
+    join(async (signal) => (verified = await run({ signal, clock: call.clock })), call.signal);
 }
 
 /** `sts:GetCallerIdentity` must be the role's own account; memoized on success. */
@@ -180,29 +178,21 @@ function verifier(
   config: AwsConfig,
   options: AwsProviderOptions,
 ): AccountCredentials['verify'] {
-  let verified: Promise<{ account: string }> | undefined;
-  return (call) => {
-    verified ??= getCallerIdentity(source, {
+  return verifyOnce(async (call) => {
+    const { account } = await getCallerIdentity(source, {
       region: config.region,
       fetch: options.fetch,
       ...(options.endpoints?.sts !== undefined ? { endpoint: options.endpoints.sts } : {}),
       signal: call.signal,
       clock: call.clock,
-    })
-      .then(({ account }) => {
-        if (account !== roleAccount)
-          throw accessDenied(
-            `AssumeRoleWithWebIdentity for account ${roleAccount} returned an identity in account ${account}`,
-            'assumed-identity-mismatch',
-          );
-        return { account };
-      })
-      .catch((error: unknown) => {
-        verified = undefined;
-        throw error;
-      });
-    return verified;
-  };
+    });
+    if (account !== roleAccount)
+      throw accessDenied(
+        `AssumeRoleWithWebIdentity for account ${roleAccount} returned an identity in account ${account}`,
+        'assumed-identity-mismatch',
+      );
+    return { account };
+  });
 }
 
 /** The keyless account (A7): see `accountCredentials`. */

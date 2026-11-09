@@ -1,6 +1,7 @@
 export * from './xml.js';
 export * from './query.js';
 export * from './credentials.js';
+export * from './flight.js';
 export * from './sigv4.js';
 export * from './endpoints.js';
 export * from './redact.js';
