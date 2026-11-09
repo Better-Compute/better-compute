@@ -3,9 +3,9 @@ import type { Ec2Emulator, EmuInstance } from './ec2.js';
 import { ec2Error, ec2Response, el, items } from './xml.js';
 
 // EC2's ML fabric as provider-aws uses it (AWS A10): placement groups (CreatePlacementGroup,
-// DescribePlacementGroups, launches with Placement.GroupName / PartitionNumber) and the instance
-// topology (DescribeInstanceTopology). It plugs into Ec2Emulator through its `extra` operations
-// and `runHooks`, as capacity.ts does.
+// DescribePlacementGroups, DeletePlacementGroup, launches with Placement.GroupName /
+// PartitionNumber) and the instance topology (DescribeInstanceTopology). It plugs into Ec2Emulator
+// through its `extra` operations and `runHooks`, as capacity.ts does.
 
 export interface EmuPlacementGroup {
   name: string;
@@ -63,6 +63,7 @@ export class PlacementEmulator {
     for (const action of [
       'CreatePlacementGroup',
       'DescribePlacementGroups',
+      'DeletePlacementGroup',
       'DescribeInstanceTopology',
     ] as const)
       ec2.extra.set(action, (request) => {
@@ -74,6 +75,7 @@ export class PlacementEmulator {
         }
         if (action === 'CreatePlacementGroup') return this.#create(request);
         if (action === 'DescribePlacementGroups') return this.#describe(request);
+        if (action === 'DeletePlacementGroup') return this.#delete(request);
         return this.#topology(request);
       });
     ec2.runHooks.push({
@@ -132,6 +134,7 @@ export class PlacementEmulator {
         const name = params.get('Placement.GroupName');
         if (name === null) return;
         const partition = params.get('Placement.PartitionNumber');
+        instance.placementGroup = name;
         this.members.set(instance.id, {
           group: name,
           ...(partition !== null ? { partition: Number(partition) } : {}),
@@ -195,10 +198,35 @@ export class PlacementEmulator {
     );
   }
 
+  /** EC2 deletes a group only when no instance (terminated ones aside) is in it. */
+  #delete(request: EmulatorRequest): Response {
+    const name = request.params.get('GroupName') ?? '';
+    if (!this.groups.has(name))
+      return ec2Error('InvalidPlacementGroup.Unknown', `The Placement Group '${name}' is unknown.`);
+    const inUse = [...this.ec2.instances.values()].some(
+      (instance) => instance.placementGroup === name && instance.state !== 'terminated',
+    );
+    if (inUse)
+      return ec2Error(
+        'InvalidPlacementGroup.InUse',
+        `The placement group '${name}' is in use and may not be deleted.`,
+      );
+    this.groups.delete(name);
+    return ec2Response('DeletePlacementGroup', el('return', 'true'));
+  }
+
   #describe(request: EmulatorRequest): Response {
     const names = filterValues(request.params, 'group-name');
+    const tagFilters: [string, string[]][] = [];
+    for (let n = 1; request.params.has(`Filter.${n}.Name`); n++) {
+      const name = request.params.get(`Filter.${n}.Name`)!;
+      if (name.startsWith('tag:'))
+        tagFilters.push([name.slice(4), filterValues(request.params, name)!]);
+    }
     const shown = [...this.groups.values()].filter((group) => {
       if (names && !names.includes(group.name)) return false;
+      if (tagFilters.some(([key, values]) => !values.includes(group.tags.get(key) ?? '\0')))
+        return false;
       if (group.hiddenReads && group.hiddenReads > 0) {
         group.hiddenReads -= 1;
         return false;

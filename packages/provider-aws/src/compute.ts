@@ -47,7 +47,12 @@ import {
 } from './images.js';
 import { AwsFilesystems } from './filesystems.js';
 import { AwsNetworks } from './networks.js';
-import { checkPlacement, PlacementGroups, placementParams } from './placement.js';
+import {
+  checkPlacement,
+  PlacementGroups,
+  placementParams,
+  unknownPlacementGroup,
+} from './placement.js';
 import { InstanceTopology } from './topology.js';
 import {
   toMachine,
@@ -345,6 +350,7 @@ export class AwsCompute implements ProviderImpl {
     this.#placementGroups = new PlacementGroups(
       (action, params, signal) => this.call(action, params, signal),
       context.clock,
+      () => this.consistencyWindowMs,
     );
     this.#topology = new InstanceTopology(
       (action, params, signal) => this.call(action, params, signal),
@@ -1538,7 +1544,7 @@ export class AwsCompute implements ProviderImpl {
     };
     let doc: XmlElement;
     try {
-      doc = await this.call('RunInstances', params, signal);
+      doc = await this.#launch(params, request.placement, signal);
     } catch (error) {
       if (
         !isComputeError(error, 'CONFLICT') ||
@@ -1569,6 +1575,40 @@ export class AwsCompute implements ProviderImpl {
       });
     if (!this.recent(this.#created, id)) this.#created.set(id, this.context.clock.now());
     return this.machine(instance, signal);
+  }
+
+  /**
+   * RunInstances. A launch into a placement group EC2 does not know means the group this client
+   * remembers (for an hour, without a read) is gone: deleted by hand, or swept as unused by another
+   * replica. The memory of it is dropped, the group is ensured again and the launch is tried once
+   * more; if EC2 still does not take it, the create is a retryable UNAVAILABLE.
+   */
+  async #launch(
+    params: QueryParams,
+    placement: ProviderPlacement | undefined,
+    signal: AbortSignal,
+  ): Promise<XmlElement> {
+    const unknownGroup = (error: unknown): boolean =>
+      isComputeError(error) && error.details?.code === unknownPlacementGroup;
+    try {
+      return await this.call('RunInstances', params, signal);
+    } catch (error) {
+      if (!placement || !unknownGroup(error)) throw error;
+    }
+    this.#placementGroups.forget(placement.group);
+    await this.#placementGroups.ensure(placement, signal);
+    try {
+      return await this.call('RunInstances', params, signal);
+    } catch (error) {
+      if (!unknownGroup(error)) throw error;
+      this.#placementGroups.forget(placement.group);
+      throw new ComputeError(
+        'UNAVAILABLE',
+        `placement group ${placement.group} was made again and EC2 does not take launches into it yet`,
+        undefined,
+        { provider: 'aws', reason: 'placement-group-propagating' },
+      );
+    }
   }
 
   /**
@@ -2062,6 +2102,9 @@ export class AwsCompute implements ProviderImpl {
     context: CallContext,
     options: { waitMs: number; max: number },
   ): Promise<ProviderEventBatch> {
+    // (A10) The periodic call every account gets: placement groups no instance uses are deleted
+    // here, at most once every `placementSweepMs`; a failed sweep is logged, never this poll's error.
+    await this.#placementGroups.sweepWhenDue(context.signal, context.log);
     const { sqs } = this.deps;
     if (sqs === undefined || this.config.eventQueueUrl === undefined) {
       const now = this.context.clock.now();

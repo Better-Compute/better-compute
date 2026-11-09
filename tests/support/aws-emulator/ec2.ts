@@ -88,6 +88,8 @@ export interface EmuInstance {
   userData?: string;
   /** Tags by-id reads show instead of `tags`, for `reads` more reads (eventually consistent tags). */
   staleTags?: { tags: Map<string, string>; reads: number };
+  /** The placement group it launched into (PlacementEmulator sets it). */
+  placementGroup?: string;
 }
 
 const defaultTypes: EmuType[] = [
@@ -321,7 +323,7 @@ export class Ec2Emulator {
       el('ipAddress', instance.state === 'running' ? instance.publicIp : undefined),
       el('instanceType', instance.type),
       el('launchTime', new Date(instance.launchTime).toISOString()),
-      `<placement>${el('availabilityZone', instance.zone)}</placement>`,
+      `<placement>${el('availabilityZone', instance.zone)}${el('groupName', instance.placementGroup)}</placement>`,
       el('clientToken', instance.clientToken),
       instance.stateReason
         ? `<stateReason>${el('code', instance.stateReason)}${el('message', instance.stateReason)}</stateReason>`
@@ -356,6 +358,8 @@ export class Ec2Emulator {
       if (name === 'client-token' && !values.includes(instance.clientToken ?? '')) return false;
       if (name === 'instance-state-name' && !values.includes(instance.state)) return false;
       if (name === 'instance-id' && !values.includes(instance.id)) return false;
+      if (name === 'placement-group-name' && !values.includes(instance.placementGroup ?? ''))
+        return false;
       if (name === 'tag-key' && !values.some((key) => instance.tags.has(key))) return false;
       if (name.startsWith('tag:')) {
         const value = instance.tags.get(name.slice(4));

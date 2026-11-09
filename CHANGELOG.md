@@ -197,6 +197,16 @@ All notable changes to the better-compute packages are documented here. The form
 - **EC2 resource quotas are `QUOTA_EXCEEDED`** (`@better-compute/aws-core`). `SecurityGroupLimitExceeded`,
   `CidrLimitExceeded`, `NetworkAclEntryLimitExceeded` and `TagLimitExceeded` were not in the error table, so a
   create that hit the security group quota failed as `PROVIDER_ERROR` and was retried forever.
+- **Placement groups are re-made when they vanish and deleted when unused** (`@better-compute/provider-aws`). A
+  placement group is trusted for an hour without a read, so a group deleted meanwhile failed every launch into it
+  until the hour passed, and nothing ever deleted a group. A launch EC2 refuses with
+  `InvalidPlacementGroup.Unknown` now forgets the group, ensures it again and launches once more
+  (`placement-group-propagating` if EC2 still does not take it). Groups better-compute made (tagged
+  `better-compute:managed=true`; never one found by name) are deleted once no instance uses them: the sweep runs
+  with the account's event poll, at most every 10 minutes, and deletes a group only at the second look.
+  `aws iam-policy --phases A10` adds `PlacementGroupDelete` (`ec2:DeletePlacementGroup` on tagged groups); an
+  account with the older policy keeps its unused groups. Per-instance tag security groups were already swept
+  (`ensureNetwork`, `ensureFirewall` and `setTags` delete tag groups unused at two looks).
 
 ## 0.3.0 (2026-10-20)
 
