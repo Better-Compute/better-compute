@@ -154,7 +154,11 @@ describe('substrate: adopt', () => {
     await world.converge(pool.id, 10);
     expect(await world.substrate(pool.id)).toMatchObject({ state: 'deleted' });
     expect(world.kube.kinds(server).sort()).toEqual(['ConfigMap/theirs', 'Namespace/bcd-system']);
-    expect(world.kube.calls.filter((call) => call.method === 'DELETE')).toEqual([]);
+    // The one thing the substrate made there, its claim on the cluster, is the one thing it deletes.
+    expect(world.kube.calls.filter((call) => call.method === 'DELETE').map((call) => call.path)).toEqual([
+      '/api/v1/namespaces/kube-system/configmaps/better-compute-substrate',
+    ]);
+    expect(world.kube.claim(server)).toBeUndefined();
   });
 
   it('applies every object labelled as the substrate pool', async () => {
@@ -163,7 +167,14 @@ describe('substrate: adopt', () => {
     const pool = await world.createPool(adopt());
     await world.converge(pool.id, 6);
     const objects = [...world.kube.objects.get('https://34.118.9.1')!.values()];
-    expect(objects.map((object) => object.kind).sort()).toEqual(['ConfigMap', 'DaemonSet', 'Namespace', 'Secret']);
+    // bcd's four objects and the substrate's claim on the cluster (a ConfigMap in kube-system).
+    expect(objects.map((object) => object.kind).sort()).toEqual([
+      'ConfigMap',
+      'ConfigMap',
+      'DaemonSet',
+      'Namespace',
+      'Secret',
+    ]);
     for (const object of objects) expect(object.metadata.labels[substratePoolLabel]).toBe(pool.id);
   });
 

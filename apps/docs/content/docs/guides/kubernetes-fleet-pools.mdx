@@ -209,9 +209,19 @@ privileged DaemonSet or a cluster-admin identity behind unannounced. For the sam
 refuses an adopted cluster (`INVALID_STATE`): a kubeconfig's service account and binding would outlive the substrate
 on a cluster better-compute no longer manages. Reach your own cluster with the provider's credentials.
 
-One cluster backs one pool, checked per provider account. Adopt a cluster through one account only: two accounts
-that reach the same cluster could each adopt it, and both substrates would use the same `bc-substrate` identity, so
-one pool's teardown revokes it under the other until that substrate mints it again on its next run.
+One cluster backs one pool, whichever account or deployment reaches it. Three checks hold that:
+
+- A second pool that names the same account and cluster id is refused when its substrate is recorded.
+- Before any node pool is made, the cluster's provider-global id (the GKE selfLink, the EKS ARN, the DOKS UUID) is
+  recorded as what the pool claims. A second pool that reaches the same cluster through another provider account is
+  refused there: its cluster goes to `error`, and nothing is created in the cluster.
+- The substrate then claims the cluster itself with a ConfigMap, `kube-system/better-compute-substrate`, labelled
+  with the pool id. It is created, never applied over an existing one, so another better-compute deployment that
+  adopts the same cluster is refused before it adds node pools or applies bcd. Teardown deletes the claim, and a
+  substrate that never held it removes nothing and does not revoke the `bc-substrate` identity.
+
+To move a cluster to another pool, archive the first pool and wait for its substrate to be `deleted`. Delete the
+ConfigMap by hand only for a cluster whose deployment is gone for good.
 
 | Provider | Adopt id                    | What the cluster needs                                                                                                                                  |
 | -------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -236,6 +246,10 @@ To get the same node count everywhere, pin each flavor to one zone on GKE and EK
 its account's zone count in mind.
 
 ## Check your own provider
+
+A driver should report the cluster's provider-global id as `outputs.globalId` in the state `ensureCluster` and
+`getCluster` return: the same string whichever account reads the cluster. Without it, adoption is only checked per
+provider account and by the in-cluster claim.
 
 `@better-compute/testing` exports `kubernetesProviderConformanceCases()`: what the clusters and substrate reconcilers
 need of any `ProviderImpl.kubernetes`, as cases shaped like vps' `providerConformanceCases()`. GKE, EKS and DOKS pass

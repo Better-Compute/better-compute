@@ -86,6 +86,13 @@ export interface ClusterRow {
   adopted: boolean;
   /** (kubernetes/0002) The pool whose substrate this cluster is. */
   substrate_pool_id: string | null;
+  /**
+   * (kubernetes/0005) What the row claims, unique among live rows: the cluster's provider-global id once the provider
+   * reported it, `account:<account>/<adopted id>` until then (adopted rows), NULL for a created cluster not read yet.
+   */
+  claim_key: string | null;
+  /** (kubernetes/0005) When the substrate first held the in-cluster claim. */
+  claimed_at: Date | string | null;
 }
 
 export interface NodePoolRow {
@@ -119,7 +126,7 @@ export const clusterColumns = `id, tenant_id, project_id, pool_id, provider_acco
   description, mode, location, region, release_channel, requested_version, authorized_networks, private_nodes,
   provider_name, provider_id, state, desired_state, message, endpoint, kubernetes_version, node_version, created_by,
   encode(request_hash, 'hex') AS request_hash, version, created_at, provisioned_at, ready_at, deleted_at, adopted,
-  substrate_pool_id`;
+  substrate_pool_id, claim_key, claimed_at`;
 export const nodePoolColumns = `id, cluster_id, tenant_id, name, machine_type, node_count, autoscaling_min,
   autoscaling_max, disk_gib, disk_type, spot, accelerator_type, accelerator_count, zones, labels, taints, initial,
   state, desired_state, message, encode(request_hash, 'hex') AS request_hash, version, created_at, updated_at`;

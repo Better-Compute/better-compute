@@ -246,9 +246,47 @@ CREATE INDEX kubernetes_substrate_nodes_owned ON kubernetes_substrate_nodes (poo
 `,
 };
 
+/**
+ * One live row per provider cluster, whatever account reaches it. Adoption used to be checked per provider account
+ * with a plain SELECT: two accounts on one project (or two pools racing) could both adopt a cluster, churn each
+ * other's node pools and revoke the shared `bc-substrate` identity under each other.
+ *
+ * - `kubernetes_clusters.claim_key`: what the row claims. An adopted row is inserted with
+ *   `account:<provider account id>/<adopted id>`; once the provider was read, the cluster's provider-global id
+ *   replaces it (`ProviderResourceState.outputs.globalId`: the GKE selfLink, the EKS ARN, `do:kubernetes:<uuid>`),
+ *   before any node pool is made. A created cluster records its global id too, so it cannot be adopted through
+ *   another account. The unique index refuses the second claimant: at insert (the substrate reports why) or when the
+ *   global id is written (the cluster goes to `error` and no node pool is ensured).
+ * - `kubernetes_clusters.claimed_at`: when the substrate first held the in-cluster claim (the ConfigMap
+ *   `kube-system/better-compute-substrate`, which also stops another deployment). A newly adopted cluster gets no
+ *   node pool before it.
+ *
+ * Rows adopted before this migration keep working: the oldest of each (account, adopted id) holds the claim; a later
+ * duplicate (only a race could have made one) holds none and is refused when it next reads the provider.
+ */
+export const kubernetesClusterClaimsMigration: Migration = {
+  name: 'kubernetes/0005_cluster_claims',
+  sql: `
+ALTER TABLE kubernetes_clusters ADD COLUMN claim_key text;
+ALTER TABLE kubernetes_clusters ADD COLUMN claimed_at timestamptz;
+UPDATE kubernetes_clusters c
+   SET claim_key = 'account:' || c.provider_account_id || '/' || c.provider_id
+ WHERE c.adopted AND c.state <> 'deleted' AND c.provider_id IS NOT NULL
+   AND NOT EXISTS (
+     SELECT 1 FROM kubernetes_clusters o
+      WHERE o.adopted AND o.state <> 'deleted' AND o.id <> c.id
+        AND o.provider_account_id = c.provider_account_id AND o.provider_id = c.provider_id
+        AND (o.created_at, o.id) < (c.created_at, c.id));
+-- One live claimant per cluster (adopted rows always claim; created ones once the provider named them).
+CREATE UNIQUE INDEX kubernetes_clusters_claim ON kubernetes_clusters (claim_key)
+  WHERE claim_key IS NOT NULL AND state <> 'deleted';
+`,
+};
+
 export const kubernetesMigrations: readonly Migration[] = Object.freeze([
   kubernetesClustersMigration,
   kubernetesSubstratesMigration,
   kubernetesSubstrateNodesMigration,
   kubernetesSubstrateOwnershipMigration,
+  kubernetesClusterClaimsMigration,
 ]);

@@ -51,6 +51,8 @@ export interface FakeKubernetes {
   subjects: Map<string, Set<string>>;
   /** A driver without `revokeCredentials`. */
   noRevoke?: boolean;
+  /** A driver that reports no provider-global cluster id (`outputs.globalId`). */
+  noGlobalId?: boolean;
   reset(): void;
 }
 
@@ -75,6 +77,7 @@ export function fakeKubernetes(): FakeKubernetes {
       this.tokens.length = 0;
       this.subjects.clear();
       delete this.noRevoke;
+      delete this.noGlobalId;
     },
   };
 }
@@ -181,6 +184,7 @@ export function fakeProviderKubernetes(cloud: FakeKubernetes): ProviderKubernete
           version: found.version,
           nodeVersion: found.version,
           location: spec.location,
+          ...(cloud.noGlobalId ? {} : { globalId: `fake://${id}` }),
         },
       };
     },
@@ -197,6 +201,7 @@ export function fakeProviderKubernetes(cloud: FakeKubernetes): ProviderKubernete
           version: found.version,
           nodeVersion: found.version,
           location: found.spec.location,
+          ...(cloud.noGlobalId ? {} : { globalId: `fake://${id}` }),
         },
       };
     },

@@ -34,6 +34,7 @@ export {
   substratesWork,
   substratePoolLabel,
   substrateCapacityLabel,
+  substrateClaim,
   substrateSubject,
   substrateCredentialTtlSeconds,
   substrateCreator,

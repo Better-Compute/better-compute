@@ -44,6 +44,7 @@ export const clusterLabel = 'better-compute-cluster';
 
 const transientCodes = ['RATE_LIMITED', 'UNAVAILABLE', 'TIMEOUT'];
 const text = (error: unknown) => String((error as Error)?.message ?? error).slice(0, 500);
+const uniqueViolation = (error: unknown) => (error as { code?: string } | undefined)?.code === '23505';
 
 interface Snapshot {
   cluster: ClusterRow;
@@ -364,8 +365,50 @@ class ClusterWorker {
   }
 
   /**
+   * Records the cluster's provider-global id as what this row claims (`claim_key`, unique among live rows). A
+   * provider cluster has one live row: reached through another provider account, adopted by two pools at once, or
+   * created here and adopted there, the second claimant is refused (`CONFLICT`). A driver that reports no
+   * `outputs.globalId` leaves the claim as it was (per account).
+   */
+  async #claim(globalId: string | undefined): Promise<void> {
+    const cluster = this.#cluster;
+    if (!globalId || globalId.length > 1024 || cluster.claim_key === globalId) return;
+    try {
+      await this.sql.transaction((tx) =>
+        tx.query(`UPDATE kubernetes_clusters SET claim_key = $2 WHERE id = $1 AND state <> 'deleted'`, [
+          cluster.id,
+          globalId,
+        ]),
+      );
+      cluster.claim_key = globalId;
+    } catch (error) {
+      if (!uniqueViolation(error)) throw error;
+      const { rows } = await this.sql.transaction((tx) =>
+        tx.query<{ tenant_id: string; substrate_pool_id: string | null }>(
+          `SELECT tenant_id, substrate_pool_id FROM kubernetes_clusters
+            WHERE claim_key = $1 AND state <> 'deleted' AND id <> $2 LIMIT 1`,
+          [globalId, cluster.id],
+        ),
+      );
+      // Another tenant's pool is never named.
+      const holder = rows[0];
+      const mine = holder !== undefined && holder.tenant_id === cluster.tenant_id;
+      const who = !mine
+        ? "another pool's substrate"
+        : holder.substrate_pool_id !== null
+          ? `pool ${holder.substrate_pool_id}'s substrate`
+          : 'managed by better-compute (kubernetesClusters)';
+      throw new ComputeError(
+        'CONFLICT',
+        `Cluster ${cluster.provider_id ?? cluster.provider_name} is already ${who}, reached through another provider account or adopted at the same moment: one cluster backs one pool. Nothing was changed in it`,
+      );
+    }
+  }
+
+  /**
    * An adopted cluster (a pool substrate's `cluster: { adopt }`) as the provider has it: read, never created or
-   * changed. Gone at the provider is an error (the substrate cannot fix it).
+   * changed. Gone at the provider is an error (the substrate cannot fix it), and so is one another row already
+   * claims (`#claim`): the claim is made here, before any node pool is ensured.
    */
   async #readAdopted(kubernetes: ProviderKubernetes): Promise<ProviderResourceState> {
     const cluster = this.#cluster;
@@ -390,6 +433,7 @@ class ClusterWorker {
         ]),
       );
     }
+    await this.#claim(found.outputs?.globalId);
     return found;
   }
 
@@ -409,10 +453,32 @@ class ClusterWorker {
       return this.#next();
     }
     const result = ensured.result!;
+    if (!cluster.adopted)
+      // A cluster made here claims its provider-global id too, so it cannot be adopted through another account. Its
+      // maker is never stopped by a claim that got there first.
+      await this.#claim(result.outputs?.globalId).catch((error: unknown) => {
+        if (!isComputeError(error, 'CONFLICT')) throw error;
+        this.deps.log.warn('kubernetes: a created cluster is claimed by another row', {
+          clusterId: cluster.id,
+          error: text(error),
+        });
+      });
     if (ensured.state !== 'ready') {
       // Created or changing at the provider: node pools wait for the control plane.
       this.#inFlight = true;
       await this.#setCluster({ state: this.#converging(), result });
+      return this.#next();
+    }
+    if (
+      cluster.adopted &&
+      cluster.substrate_pool_id !== null &&
+      cluster.claimed_at === null &&
+      cluster.ready_at === null
+    ) {
+      // A newly adopted cluster gets no node pool before its substrate holds the in-cluster claim (the substrate
+      // reconciler makes it with a credential minted for this run, then wakes this one): a cluster that is another
+      // deployment's substrate is refused there, with nothing made in it. The 30 s sweep comes back meanwhile.
+      await this.#setCluster({ state: 'provisioning', result });
       return this.#next();
     }
 

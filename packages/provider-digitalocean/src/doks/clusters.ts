@@ -197,6 +197,8 @@ export function outputsOf(cluster: DoksCluster): Record<string, string> {
     version: cluster.version,
     // DOKS node pools run the control plane's version.
     nodeVersion: cluster.version,
+    // The provider-global id (DigitalOcean's URN): one cluster reached through two tokens is one cluster.
+    ...(cluster.id ? { globalId: `do:kubernetes:${cluster.id}` } : {}),
   };
 }
 

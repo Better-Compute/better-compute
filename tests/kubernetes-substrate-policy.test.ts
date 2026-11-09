@@ -124,6 +124,7 @@ describe('substratePolicyValidator', () => {
       'kubernetes/0002_substrates',
       'kubernetes/0003_substrate_nodes',
       'kubernetes/0004_substrate_ownership',
+      'kubernetes/0005_cluster_claims',
     ]);
   });
 });

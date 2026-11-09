@@ -37,6 +37,8 @@ export interface GkeNodePool {
 
 export interface GkeCluster {
   name: string;
+  /** The cluster's full URL: the same whichever credential reads it. */
+  selfLink?: string;
   location?: string;
   status?: string;
   statusMessage?: string;

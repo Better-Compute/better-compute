@@ -114,6 +114,12 @@ export interface SubstrateClusterApi {
   /** The object's metadata, or undefined when it does not exist. */
   get(object: SubstrateObjectRef): Promise<SubstrateObjectMeta | undefined>;
   apply(object: SubstrateObject): Promise<void>;
+  /**
+   * Creates the object only when none of that name exists: false when one does (it is never changed). The claim is
+   * made with it, so of two substrates exactly one holds a cluster; an agent without it claims with `apply` after
+   * `get` found nothing (not atomic).
+   */
+  create?(object: SubstrateObject): Promise<boolean>;
   remove(object: SubstrateObjectRef): Promise<void>;
   nodes(labelSelector?: string): Promise<SubstrateNode[]>;
 }
@@ -489,7 +495,10 @@ export function adoptedRegion(location: string, provider: { regions: readonly st
 /**
  * `cluster: { adopt }`: an `adopted` cluster row for the provider's cluster (the cluster reconciler reads it with
  * `getCluster`, never creates, changes or deletes it) and a node pool row per flavor (created in it under a name of
- * its own, `substrateNodePoolName`, and deleted with the substrate). One substrate per adopted cluster.
+ * its own, `substrateNodePoolName`, and deleted with the substrate). One substrate per adopted cluster: the row
+ * claims `account:<account>/<adopted id>` (`claim_key`, unique among live rows: two pools racing cannot both
+ * insert), and the cluster reconciler replaces that with the cluster's provider-global id before it makes any node
+ * pool, so the same cluster reached through another account is refused too.
  */
 async function establishAdopted(
   deps: SubstrateDeps,
@@ -520,14 +529,17 @@ async function establishAdopted(
   const clusterId = newId('kcl');
   const location = adoptedLocation(adoptId, provider);
   const region = adoptedRegion(location, provider);
-  await tx.query(
+  // ON CONFLICT: the claim (the unique `claim_key`) another pool's transaction took first is a refusal, not an
+  // error that aborts this one.
+  const inserted = await tx.query(
     `INSERT INTO kubernetes_clusters (id, tenant_id, project_id, pool_id, provider_account_id, network_id, subnet_id,
                                       name, description, mode, location, region, release_channel, requested_version,
                                       authorized_networks, private_nodes, provider_name, provider_id, state,
                                       desired_state, created_by, idempotency_key, request_hash, version, adopted,
-                                      substrate_pool_id)
+                                      substrate_pool_id, claim_key)
      VALUES ($1, $2, NULL, $3, $4, NULL, NULL, $5, $6, 'standard', $7, $8, 'regular', NULL, '[]'::jsonb, false, $9,
-             $10, 'pending', 'present', $11, $12, decode($13, 'hex'), 1, true, $3)`,
+             $10, 'pending', 'present', $11, $12, decode($13, 'hex'), 1, true, $3, $14)
+     ON CONFLICT DO NOTHING RETURNING id`,
     [
       clusterId,
       pool.owner_tenant_id,
@@ -542,8 +554,11 @@ async function establishAdopted(
       substrateCreator,
       `substrate:${clusterId}`,
       await sha256Hex(substrateIdentity(substrate)),
+      `account:${account.id}/${adoptId}`,
     ],
   );
+  if (inserted.rows.length === 0)
+    throw new Refused(`Cluster ${adoptId} is already another pool's substrate: one cluster backs one pool`);
   for (const flavor of substrate.flavors)
     await insertFlavorPool(tx, {
       clusterId,
@@ -1411,6 +1426,57 @@ async function removeOwned(api: SubstrateClusterApi, poolId: string, object: Sub
   return true;
 }
 
+/**
+ * The in-cluster claim: the ConfigMap that says whose substrate a cluster is, labelled with the pool id like every
+ * object the substrate owns. The database refuses a second row for one cluster (`claim_key`); this refuses a second
+ * DEPLOYMENT (another control plane with its own database adopting the same cluster), which would otherwise add
+ * node pools, fight over bcd's objects and, on its teardown, revoke the shared `bc-substrate` identity under the
+ * first. It lives in `kube-system`, which every cluster has and no teardown deletes.
+ */
+export const substrateClaim: SubstrateObjectRef = Object.freeze({
+  apiVersion: 'v1',
+  kind: 'ConfigMap',
+  metadata: Object.freeze({ name: 'better-compute-substrate', namespace: 'kube-system' }),
+});
+
+const claimObject = (row: SubstrateRow): SubstrateObject => ({
+  apiVersion: substrateClaim.apiVersion,
+  kind: substrateClaim.kind,
+  metadata: {
+    ...substrateClaim.metadata,
+    labels: { 'app.kubernetes.io/part-of': 'better-compute', [substratePoolLabel]: row.pool_id },
+  },
+  data: {
+    poolId: row.pool_id,
+    clusterId: row.cluster_id ?? '',
+    note: 'This cluster is the substrate of this better-compute pool: no other pool or deployment adopts it while this object exists. It is deleted when the substrate is torn down.',
+  },
+});
+
+/** Who holds a claim that is there: the pool id on its label (a ConfigMap of that name without one is not ours). */
+const claimHolder = (found: SubstrateObjectMeta): string => found.metadata.labels[substratePoolLabel] ?? 'an unknown owner';
+
+/**
+ * Makes sure this substrate holds its cluster's claim: undefined when it does (made now, or before), else who does.
+ * A claim that exists is never replaced.
+ */
+async function claimCluster(api: SubstrateClusterApi, row: SubstrateRow): Promise<string | undefined> {
+  const found = await api.get(refOf(substrateClaim));
+  if (found) return claimHolder(found) === row.pool_id ? undefined : claimHolder(found);
+  if (typeof api.create !== 'function') {
+    await api.apply(claimObject(row));
+    return undefined;
+  }
+  if (await api.create(claimObject(row))) return undefined;
+  // Made by someone else between the two calls.
+  const now = await api.get(refOf(substrateClaim));
+  if (!now) throw new ComputeError('UNAVAILABLE', 'The substrate claim changed while it was being made');
+  return claimHolder(now) === row.pool_id ? undefined : claimHolder(now);
+}
+
+const claimRefusal = (holder: string) =>
+  `The cluster is already the substrate of ${holder.startsWith('pool_') ? `pool ${holder}` : holder} (ConfigMap ${substrateClaim.metadata.namespace}/${substrateClaim.metadata.name}), in this deployment or another: one cluster backs one pool. Nothing was applied to it`;
+
 /** Whether a token id is still usable for `uses` more joins and lives past the next few runs. */
 async function tokenLive(sql: SqlExecutor, tokenId: string, uses: number): Promise<boolean> {
   const { rows } = await sql.query<{ ok: boolean }>(
@@ -1468,6 +1534,16 @@ export async function reconcileSubstrate(
     return applyBcd(deps, sql, { ...plan, problem }, cluster, signal);
   }
   if (cluster.provider_id === null || !['ready', 'updating'].includes(cluster.state)) {
+    // A newly adopted cluster waits for the in-cluster claim before its node pools are made (the cluster reconciler
+    // holds them back): applyBcd makes the claim and stops there.
+    const awaitsClaim =
+      cluster.adopted &&
+      cluster.claimed_at === null &&
+      cluster.provider_id !== null &&
+      cluster.endpoint !== null &&
+      cluster.state === 'provisioning' &&
+      cluster.desired_state === 'present';
+    if (awaitsClaim && deps.substrate) return applyBcd(deps, sql, plan, cluster, signal);
     await setState(deps, sql, row, { state: row.state === 'ready' ? 'updating' : 'provisioning' });
     return now() + substratePollMs;
   }
@@ -1539,6 +1615,25 @@ async function applyBcd(
   if (!minted) return retry();
   if ('error' in minted) return fail(`credentials: ${minted.error}`);
   const api = agent.connect(minted.value, { signal });
+  // One cluster backs one pool: the claim comes before anything is listed, applied or joined.
+  const claim = await attempt(deps, row.pool_id, signal, () => claimCluster(api, row));
+  if (!claim) return retry();
+  if ('error' in claim) return fail(`claim: ${claim.error}`);
+  if (claim.value !== undefined) return fail(claimRefusal(claim.value));
+  if (cluster.claimed_at === null) {
+    const waiting = cluster.adopted && cluster.ready_at === null;
+    await sql.transaction(async (tx) => {
+      await tx.query(`UPDATE kubernetes_clusters SET claimed_at = compute_now() WHERE id = $1 AND claimed_at IS NULL`, [
+        cluster.id,
+      ]);
+      // The cluster reconciler held the node pools back for this.
+      if (waiting) await deps.work.enqueue(tx, clustersWork, cluster.id);
+    });
+  }
+  if (!['ready', 'updating', 'error'].includes(cluster.state)) {
+    await setState(deps, sql, row, { state: row.state === 'ready' ? 'updating' : 'provisioning' });
+    return deps.clock.now() + substratePollMs;
+  }
   const selector = plan.labelled ? { [substratePoolLabel]: row.pool_id } : undefined;
   const listed = await attempt(deps, row.pool_id, signal, () =>
     api.nodes(selector ? `${substratePoolLabel}=${row.pool_id}` : undefined),
@@ -1757,8 +1852,16 @@ async function teardown(
           ])
         ).rows[0];
   if (cluster && cluster.desired_state !== 'deleted') {
-    // bcd leaves the cluster first (what matters on an adopted one, which stays).
-    if (cluster.provider_id !== null && deps.substrate && ['ready', 'updating', 'error'].includes(cluster.state)) {
+    // bcd leaves the cluster first (what matters on an adopted one, which stays). An adopted cluster this substrate
+    // never reached (refused before the provider answered: it is another pool's) has nothing of ours, and its
+    // `bc-substrate` identity is the other pool's: no credential is minted for it and nothing is revoked.
+    const untouched = cluster.adopted && cluster.claimed_at === null && cluster.endpoint === null;
+    if (
+      cluster.provider_id !== null &&
+      deps.substrate &&
+      !untouched &&
+      ['provisioning', 'ready', 'updating', 'error'].includes(cluster.state)
+    ) {
       const removed = await removeBcd(deps, sql, row, cluster, signal);
       if (removed === 'retry') return deps.clock.now() + substrateRetryMs;
       if (removed !== 'done' && 'error' in removed) {
@@ -1865,6 +1968,8 @@ export const credentialsLeftMessage = `The provider cannot revoke credentials: K
  * delete or a revoke that fails is an error teardown retries, since bcd left running there keeps a privileged
  * DaemonSet on the tenant's nodes; only a cluster the provider no longer has counts as nothing to delete. A driver
  * without `revokeCredentials` answers `left`: teardown goes on and the substrate reports the identity that stays.
+ * An adopted cluster whose claim (`substrateClaim`) another pool holds is that pool's: nothing is deleted from it and
+ * the identity, which that pool uses, is not revoked. This substrate's own claim goes after bcd, before the revoke.
  */
 async function removeBcd(
   deps: SubstrateDeps,
@@ -1917,6 +2022,17 @@ async function removeBcd(
     return failed(`credentials: ${minted.error}`);
   }
   const api = agent.connect(minted.value, { signal });
+  if (cluster.adopted) {
+    const claim = await attempt(deps, row.pool_id, signal, () => api.get(refOf(substrateClaim)));
+    if (!claim) return 'retry';
+    if ('error' in claim) return failed(`claim: ${claim.error}`);
+    if (claim.value !== undefined && claimHolder(claim.value) !== row.pool_id) {
+      deps.log.info('kubernetes: the adopted cluster is claimed by another substrate; nothing is removed from it', {
+        poolId: row.pool_id,
+      });
+      return 'done';
+    }
+  }
   const objects = [...agent.manifests({ siteId: 'site_teardown' }), agent.tokenSecret];
   // DaemonSet first, the Namespace last (it takes anything left in it).
   const order = (kind: string) => (kind === 'DaemonSet' ? 0 : kind === 'Namespace' ? 2 : 1);
@@ -1929,6 +2045,10 @@ async function removeBcd(
     }
   }
   if (!cluster.adopted) return 'done';
+  // The claim goes while the credential still works: the cluster is free for another pool from here.
+  const unclaimed = await attempt(deps, row.pool_id, signal, () => removeOwned(api, row.pool_id, substrateClaim));
+  if (!unclaimed) return 'retry';
+  if ('error' in unclaimed) return { error: `${describeObject(substrateClaim)}: ${unclaimed.error}` };
   if (typeof kubernetes.revokeCredentials !== 'function') return { left: credentialsLeftMessage };
   const revoked = await attempt(deps, row.pool_id, signal, () =>
     kubernetes.revokeCredentials!(cluster.provider_id!, substrateSubject, call),

@@ -144,6 +144,24 @@ All notable changes to the better-compute packages are documented here. The form
 
 ### Fixed
 
+- **One cluster backs one pool, whoever reaches it** (`@better-compute/kubernetes`, `provider-kubernetes`,
+  `provider-gcp`, `provider-aws`, `provider-digitalocean`). Adopting a cluster (`cluster: { adopt }`) was checked
+  per provider account with an unlocked read, so two accounts on one project, or two pools at the same moment, both
+  adopted it: the second added node pools, and its teardown revoked the shared `bc-substrate` identity under the
+  first. Three things refuse it now. Migration `kubernetes/0005_cluster_claims` adds `kubernetes_clusters.claim_key`
+  with a unique index over live rows: an adopted row claims its account and cluster id when it is inserted (the
+  second pool's substrate goes to `error`: "already another pool's substrate"). The cluster reconciler then replaces
+  that with the cluster's provider-global id, which the GKE, EKS and DOKS drivers now report as
+  `outputs.globalId` (the selfLink, the ARN, `do:kubernetes:<uuid>`), before it makes any node pool; a second row
+  for the same cluster is `CONFLICT` and its cluster goes to `error`. A cluster better-compute created records its
+  global id too, so it cannot be adopted through another account. Last, the substrate claims the cluster itself:
+  a ConfigMap `kube-system/better-compute-substrate` labelled with the pool id, created (never applied over) before
+  anything else is listed, applied or joined, and before a newly adopted cluster gets its node pools
+  (`kubernetes_clusters.claimed_at`). A cluster another pool or another deployment claimed is refused with nothing
+  made in it, and tearing the refused substrate down deletes nothing there and does not revoke the identity. An
+  adopted cluster's claim is deleted on teardown. `KubernetesApiClient` gains `create` (POST; false on 409), and
+  `SubstrateClusterApi` an optional `create`. A third-party driver without `outputs.globalId` keeps the per-account
+  check.
 - **A fleet pool in error keeps tending its nodes** (`@better-compute/kubernetes`). A pool substrate whose cluster
   went to `error` (one flavor's node pool refused: quota, a stockout), or whose policy could not be converged (a
   flavor's shape changed, the account or cluster changed, the substrate no longer parsed), stopped before it looked
