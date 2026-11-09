@@ -824,15 +824,23 @@ async function execute(
     })());
   const token = async () => {
     // BETTER_COMPUTE_TOKEN, else better-iam's saved session, else `better-compute auth login`'s (§9.3).
-    // A saved compute profile only goes to the deployment it was saved for (--url origin, or in process).
+    // A saved credential, better-iam's session or compute's own profile, only goes to the deployment it was
+    // issued or saved for (--url origin, or in process): never to whatever --url names.
+    const skipped: string[] = [];
     const found = await resolveToken(io.env, {
       target: has('url') ? { url: values.url as string } : {},
+      onSkip: (source, why) =>
+        skipped.push(
+          `The saved ${source.kind === 'better-iam' ? 'better-iam session' : 'better-compute profile'}${'profile' in source ? ` ${source.profile}` : ''} was not used: ${why}.`,
+        ),
     });
     if (found) return found.token;
     throw new CliError(
       'MISSING_ENV',
       'Set BETTER_COMPUTE_TOKEN to an IAM session token, API key or session JWT (or sign in: better-iam login, better-compute auth login)',
-      'Public methods such as system.version need no token.',
+      skipped.length
+        ? `${skipped.join(' ')} Sign in to this deployment: better-compute auth login${has('url') ? ` --url ${String(values.url)}` : ''}.`
+        : 'Public methods such as system.version need no token.',
     );
   };
   const context: CommandContext<FlagSpecs> = {

@@ -82,8 +82,15 @@ in PLAN.md section 9.3's order:
 3. compute's own credentials file, written by `better-compute auth login`: profile `BETTER_COMPUTE_PROFILE`, else the
    file's current profile, else `default`.
 
-Expired saved sessions are skipped, and a broken Better IAM file never blocks compute's own. Without any credential
-token commands stop with `MISSING_ENV`; public methods such as `system.version` need no token.
+Expired saved sessions are skipped, and a broken Better IAM file never blocks compute's own. A saved credential
+(2 and 3) is used only for the deployment it belongs to. A Better IAM session issued by a remote endpoint
+(`better-iam login --url https://compute.example.com/api/iam`) goes only to a `--url` of that same origin, and one
+issued in process only to an in-process deployment; any other is passed over, so
+`nodes list --url https://staging.example.com` never carries the production session. If your IAM and compute are
+served from different origins, save a profile for the compute URL with `better-compute auth login --url …`, or set
+`BETTER_COMPUTE_TOKEN`, which is sent wherever the command goes. Without any credential token commands stop with
+`MISSING_ENV` (the hint names a saved credential that was passed over, and why); public methods such as
+`system.version` need no token.
 
 ```bash
 export BETTER_COMPUTE_URL=https://compute.example.com

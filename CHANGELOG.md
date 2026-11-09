@@ -153,6 +153,15 @@ All notable changes to the better-compute packages are documented here. The form
   machine enrolled before this with another tenant's `secret://` is never sent a BMC command again (its workflows
   and `metal.power` fail with `ACCESS_DENIED`): enroll it again with its own secret.
 
+- **The CLI sent a saved better-iam session to any `--url` (`@better-compute/cli`).** Compute's own saved profiles
+  go only to the deployment they were saved for, but the session `better-iam login` saves was used for whatever
+  `--url` (or `BETTER_COMPUTE_URL`) named: `nodes list --url https://staging…`, a typo or a repository's default
+  URL received the production session as a bearer token. Now a better-iam session issued by a remote endpoint goes
+  only to a `--url` of the same origin, and one issued in process only to an in-process deployment; otherwise it is
+  passed over (compute's own profile for that deployment is tried next, and the `MISSING_ENV` hint says which
+  credential was not used and why). Deployments that serve IAM and compute from different origins need
+  `better-compute auth login --url …` or `BETTER_COMPUTE_TOKEN`.
+
 ### Fixed
 
 - **Scripts on images without cloud-init** (`@better-compute/provider-gcp`). Compute Engine's Debian, Rocky,

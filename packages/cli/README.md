@@ -140,6 +140,8 @@ better-compute api GROUP.METHOD [key=value ...] [--data JSON|@FILE|-] [--list [G
   one rate-limit retry. `https` is required except for localhost.
 - **Token.** Token commands use `BETTER_COMPUTE_TOKEN`, else a session saved by `better-iam login`
   (when `@better-iam/cli` is installed), else a profile saved with `better-compute auth login`.
+  A saved session or profile is used only for the deployment that issued it or it was saved for (the
+  same origin as `--url`, or in process): another `--url` never receives it.
   Public methods need none; `system.whoami` carries the token when one is set.
 
 ## Capacity shortcuts

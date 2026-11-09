@@ -140,17 +140,54 @@ export type TokenSource =
   | { kind: 'better-iam'; profile: string; path: string }
   | { kind: 'profile'; profile: string; path: string };
 
+/** A session `better-iam login` saved (the fields of @better-iam/cli's `StoredProfile` that matter here). */
+interface IamSession {
+  token: string;
+  expiresAt?: number;
+  /** The IAM endpoint (`https://host/api/iam`) that issued it, for a remote login. */
+  url?: string;
+  /** The configuration module it was issued through, for an in-process login. */
+  config?: string;
+  /** Issued through the environment-only deployment. */
+  envConfig?: boolean;
+}
+
 interface IamProfiles {
   createProfileStore(env: NodeJS.ProcessEnv): {
     readonly path: string | undefined;
     currentName(explicit?: string): Promise<string>;
-    get(name: string): Promise<{ token: string; expiresAt?: number } | undefined>;
+    get(name: string): Promise<IamSession | undefined>;
   };
+}
+
+const originOf = (url: string): string | undefined => {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Why a saved better-iam session does not go to `target`, or undefined when it does. As for compute's
+ * own profiles: a session issued by a remote IAM endpoint goes only to a `--url` of the same origin
+ * (one server mounts `/api/iam` and `/api/compute`), and a session issued in process (a configuration
+ * file or the environment) only to an in-process deployment. So `--url https://staging…` never
+ * receives the production session, whoever chose that URL.
+ */
+function iamSessionMisfit(session: IamSession, target: { url?: string }): string | undefined {
+  const issuer = session.url === undefined ? undefined : (originOf(session.url) ?? session.url);
+  if (target.url === undefined)
+    return issuer === undefined ? undefined : `it was issued by ${issuer}, not by an in-process deployment`;
+  const wanted = originOf(target.url) ?? target.url;
+  if (issuer === undefined) return `it was issued in process, not by ${wanted}`;
+  return issuer === wanted ? undefined : `it was issued by ${issuer}, not ${wanted}`;
 }
 
 /**
  * The token for token commands, in PLAN §9.3's order, or undefined when there is none. Expired saved sessions
- * are skipped. `profile` picks a saved profile by name in both stores.
+ * are skipped, and with a `target` so is every saved credential of another deployment (better-iam's session
+ * as much as compute's own profile). `profile` picks a saved profile by name in both stores.
  */
 /** Whether a saved compute profile belongs to the deployment a command is about to call. */
 function profileFits(profile: ComputeProfile, target: { url?: string }): boolean {
@@ -176,6 +213,8 @@ export async function resolveToken(
      * deployment is never sent to another.
      */
     target?: { url?: string };
+    /** Told about each live saved credential that was passed over because it is another deployment's. */
+    onSkip?: (source: TokenSource, why: string) => void;
   } = {},
 ): Promise<{ token: string; source: TokenSource } | undefined> {
   if (env.BETTER_COMPUTE_TOKEN) return { token: env.BETTER_COMPUTE_TOKEN, source: { kind: 'env' } };
@@ -197,14 +236,25 @@ export async function resolveToken(
         .currentName(options.profile ?? env.BETTER_IAM_PROFILE)
         .catch(() => undefined);
       const saved = name ? live(await profiles.get(name).catch(() => undefined)) : undefined;
-      if (saved && name)
-        return { token: saved.token, source: { kind: 'better-iam', profile: name, path: profiles.path } };
+      if (saved && name) {
+        const source: TokenSource = { kind: 'better-iam', profile: name, path: profiles.path };
+        // Only to the deployment that issued it; otherwise on to compute's own profile for this one.
+        const misfit = options.target ? iamSessionMisfit(saved as IamSession, options.target) : undefined;
+        if (misfit === undefined) return { token: saved.token, source };
+        options.onSkip?.(source, misfit);
+      }
     }
   }
   const own = createComputeProfileStore(env);
   if (!own.path) return undefined;
   const name = await own.currentName(options.profile);
   const saved = live(await own.get(name));
-  if (saved && options.target && !profileFits(saved as ComputeProfile, options.target)) return undefined;
-  return saved ? { token: saved.token, source: { kind: 'profile', profile: name, path: own.path } } : undefined;
+  if (!saved) return undefined;
+  const source: TokenSource = { kind: 'profile', profile: name, path: own.path };
+  if (options.target && !profileFits(saved as ComputeProfile, options.target)) {
+    const savedFor = (saved as ComputeProfile).url;
+    options.onSkip?.(source, savedFor === undefined ? 'it was saved for an in-process deployment' : `it was saved for ${originOf(savedFor) ?? savedFor}`);
+    return undefined;
+  }
+  return { token: saved.token, source };
 }
