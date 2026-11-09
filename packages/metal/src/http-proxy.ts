@@ -172,6 +172,7 @@ export async function httpViaSite(context: StepContext, request: HttpViaSiteRequ
       nodeId: agent,
       kind: 'site.httpProxy',
       ...(key ? { key } : {}),
+      // The request's own time; a request held for its batch's approvals lives as long as the batch waits.
       timeoutMs: timeoutMs + 30_000,
       payload,
       ...(bound ? { batch: bound } : {}),

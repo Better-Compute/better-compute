@@ -1,6 +1,6 @@
 import { ComputeError, type Json, type ProfileDocument, type SqlTx, type StepContext } from '@better-compute/core';
 import { encodeMessageJson } from '@better-compute/protocol';
-import { batchOf } from './batch.js';
+import { batchOf, heldBatchNotAfter } from './batch.js';
 import { stepNotReady } from './engine.js';
 
 // Control-plane steps that drive agents: a step that needs data only the control plane has (a
@@ -18,7 +18,10 @@ export interface AwaitCommandOptions {
   payload: Json;
   /** Distinguishes several commands of one step (`boot`, `power`, …). */
   key?: string;
-  /** How long the command may live; defaults to the step's remaining time. */
+  /**
+   * How long the command may live (default 10 minutes). A command held for its batch's approvals
+   * (§13) lives as long as the batch waits instead: see `heldBatchNotAfter`.
+   */
   timeoutMs?: number;
   /**
    * `nodeId` is one of several interchangeable agents: the site agents of its site (§8.5, BMC
@@ -112,12 +115,14 @@ export async function awaitCommand(context: StepContext, options: AwaitCommandOp
       const own = await options.batch(tx, { typeUrl: `type.googleapis.com/${typeName}`, value });
       if (own) batch = { batchId: own };
     }
+    // Held for approvals, the command must outlive the wait: it takes the batch's own end.
+    const heldUntil = await heldBatchNotAfter(tx, batch.batchId);
     await context.commands.enqueue(tx, {
       nodeId: options.nodeId,
       kind: options.kind,
       payload,
       idempotencyKey: key,
-      notAfter: now.rows[0]!.now.getTime() + (options.timeoutMs ?? 10 * 60_000),
+      notAfter: heldUntil ?? now.rows[0]!.now.getTime() + (options.timeoutMs ?? 10 * 60_000),
       ...batch,
     });
     return undefined;

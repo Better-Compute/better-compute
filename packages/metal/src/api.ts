@@ -19,7 +19,7 @@ import {
   type SqlTx,
   type WipeMode,
 } from '@better-compute/core';
-import { builtinSteps, siteAgentFor, stepRegistry, type StepRegistry } from '@better-compute/provision';
+import { builtinSteps, heldBatchNotAfter, siteAgentFor, stepRegistry, type StepRegistry } from '@better-compute/provision';
 import { encodeMessageJson } from '@better-compute/protocol';
 import { batchSubject, stateChain, verbBatchScope } from './batch.js';
 import {
@@ -655,7 +655,8 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
               kind: 'bmc.power',
               payload,
               idempotencyKey: `metal:power:${context.requestId}`,
-              notAfter: rows[0]!.now.getTime() + 5 * 60_000,
+              // Five minutes to reach the BMC; held for approvals (§13), as long as its batch waits for them.
+              notAfter: (batch?.held ? await heldBatchNotAfter(tx, batch.batchId) : undefined) ?? rows[0]!.now.getTime() + 5 * 60_000,
               ...(batch ? { batchId: batch.batchId } : {}),
             });
             return { commandId: command.id, ...(batch ? { batchId: batch.batchId, held: batch.held } : {}) };

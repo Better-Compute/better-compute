@@ -24,7 +24,7 @@ import {
   type StepRegistry,
 } from './expand.js';
 import { releaseImagePins } from './site-cache.js';
-import { batchOf, plannedCommandKinds } from './batch.js';
+import { batchOf, heldBatchNotAfter, plannedCommandKinds } from './batch.js';
 
 // The workflow engine (PLAN.md §11.2).
 //
@@ -149,6 +149,36 @@ async function cancelStepCommands(context: EngineContext, tx: SqlTx, step: Pick<
   );
   for (const { id } of rows) await context.commands.cancel(tx, id);
   return rows.length;
+}
+
+/**
+ * Called when a step's deadline has passed: whether the step is really overdue. A command that waits
+ * for its batch's approvals (§13: `pending` with `not_before = infinity`) has not run yet, and
+ * approvers may take the batch's whole lifetime, so the step's timeout counts from the release:
+ * - while a command of the step is held, the deadline moves to a full timeout from now;
+ * - once released (the quorum sets `not_before` to the release time, later than `created_at`), to a
+ *   full timeout from the release.
+ * Returns the new deadline (stored), or undefined when the step is overdue. The batch cancels its held
+ * commands when it expires, which fails the step as any cancelled command does.
+ */
+async function deadlineAfterApproval(tx: SqlTx, step: StepRow, now: number): Promise<number | undefined> {
+  const { rows } = await tx.query<{ held: boolean | null; released_at: Date | null }>(
+    `SELECT bool_or(state = 'pending' AND not_before = 'infinity') AS held,
+            max(not_before) FILTER (WHERE not_before <> 'infinity' AND not_before > created_at) AS released_at
+       FROM commands
+      WHERE idempotency_key = $1 OR starts_with(idempotency_key, $1 || '#') OR starts_with(idempotency_key, $1 || ':')`,
+    [step.idempotency_key],
+  );
+  const row = rows[0];
+  const deadline = row?.held ? now + step.timeout_ms : row?.released_at ? row.released_at.getTime() + step.timeout_ms : undefined;
+  if (deadline === undefined || deadline <= now) return undefined;
+  await tx.query('UPDATE workflow_steps SET deadline = to_timestamp($3::double precision / 1000.0) WHERE workflow_id = $1 AND id = $2', [
+    step.workflow_id,
+    step.id,
+    deadline,
+  ]);
+  step.deadline = new Date(deadline);
+  return deadline;
 }
 
 /** A locked workflow row, with the transaction's clock and its node's reference read in the same statement. */
@@ -639,6 +669,7 @@ async function startAgentStep(
     'SELECT boot_id, role FROM node_sessions WHERE node_id = $1',
     [workflow.node_id],
   );
+  const batch = batchOf({ batchId: workflow.batch_id ?? undefined, registry: context.registry }, step.command_kind ?? step.action);
   const command = await context.commands.enqueue(tx, {
     nodeId: target,
     kind: step.command_kind ?? step.action,
@@ -654,8 +685,10 @@ async function startAgentStep(
         }
       : step.args) as Json,
     idempotencyKey: commandKey(step),
-    notAfter: deadline,
-    ...batchOf({ batchId: workflow.batch_id ?? undefined, registry: context.registry }, step.command_kind ?? step.action),
+    // Held for its batch's approvals (§13), the command lives as long as the batch waits; the step's
+    // own timeout then counts from the release (deadlineAfterApproval).
+    notAfter: (await heldBatchNotAfter(tx, batch.batchId)) ?? deadline,
+    ...batch,
   });
   await setStep(tx, step, assertStepVerb('running', 'wait'), {
     command_id: command.id,
@@ -692,7 +725,9 @@ async function settleWaiting(
   step: StepRow,
   now: number,
 ): Promise<Transition> {
-  const deadline = step.deadline?.getTime() ?? now;
+  let deadline = step.deadline?.getTime() ?? now;
+  // Not overdue while its command waits for approvals, nor for a full timeout after its release.
+  if (now >= deadline) deadline = (await deadlineAfterApproval(tx, step, now)) ?? deadline;
   const overdue = now >= deadline;
   if (step.await === 'rejoin') {
     // Completes when the agent is back with a new boot or role, whatever the command said: a
@@ -760,7 +795,9 @@ async function transition(context: Advancing, tx: SqlTx, workflowId: string): Pr
   if (inFlight) {
     if (inFlight.state === 'waiting') return settleWaiting(context, tx, workflow, inFlight, now);
     if (inFlight.runs_on === 'control-plane') {
-      const deadline = inFlight.deadline?.getTime() ?? now;
+      let deadline = inFlight.deadline?.getTime() ?? now;
+      // A command it relayed that waits for approvals (§13) does not count against its timeout.
+      if (now >= deadline) deadline = (await deadlineAfterApproval(tx, inFlight, now)) ?? deadline;
       if (now >= deadline) {
         await failStep(context, tx, workflow, inFlight, { code: 'TIMEOUT', message: `no result within ${inFlight.timeout_ms} ms` });
         return { kind: 'continue' };

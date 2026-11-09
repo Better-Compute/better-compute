@@ -20,6 +20,27 @@ export function batchOf(
 }
 
 /**
+ * Until when a command enqueued into `batchId` now would be held (epoch ms), or undefined when it
+ * would not be: the batch needs approvals it does not have yet (`command_batches`, the server's
+ * quorum; a held member is `pending` with `not_before = infinity` until the approval releases it).
+ * A held command takes this as its `notAfter`: approvers have the batch's lifetime (24 h by default)
+ * to sign, and a command with its usual ten minutes would expire long before they do. The batch
+ * cancels its held members itself when it expires. Undefined without the quorum's tables.
+ */
+export async function heldBatchNotAfter(tx: SqlTx, batchId: string | undefined): Promise<number | undefined> {
+  if (!batchId) return undefined;
+  // The table is the quorum module's: a deployment (or a test double) without it holds nothing.
+  const has = await tx.query<{ has: boolean }>(`SELECT to_regclass('command_batches') IS NOT NULL AS has`);
+  if (!has.rows[0]?.has) return undefined;
+  const { rows } = await tx.query<{ not_after: Date }>(
+    `SELECT not_after FROM command_batches
+      WHERE id = $1 AND state = 'pending' AND required > 0 AND not_after > compute_now()`,
+    [batchId],
+  );
+  return rows[0]?.not_after.getTime();
+}
+
+/**
  * Puts a just-started workflow on `nodeId` under a destructive-command batch of its own (§13), for
  * workflows whose destructive kinds all run on the node itself (node.reboot, gpu.reset): each leaf's
  * subject is the node. Kinds another agent relays (bmc.*, site.httpProxy) need their owner's scope

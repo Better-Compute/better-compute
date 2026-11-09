@@ -496,7 +496,9 @@ returns `{ commandId }` without waiting for the BMC. It is decided as `compute:n
 destructive, so when the deployment keeps batches it first creates a batch of one leaf (subject
 `bmc:<site agent>/<BMC address>`, kind `bmc.power`, reason `power <action> <node>`) and enqueues the command in it
 (478025a); the answer then carries `batchId` and `held`. With approver keys configured the command stays held until
-approvers sign that batch (see [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)).
+approvers sign that batch (see [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)). A held command
+lives as long as its batch waits for approvals (24 hours by default), not the five minutes an unheld one has to
+reach the BMC, so a slow approval does not find it expired.
 
 ```bash
 better-compute metal power node_01k5w… --tenant root --action graceful-restart

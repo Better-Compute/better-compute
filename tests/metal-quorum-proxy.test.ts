@@ -101,6 +101,8 @@ describe('a non-GET site.httpProxy under the quorum', () => {
     expect(rows).toHaveLength(1);
     const command = rows[0]!;
     expect(command.held).toBe(true);
+    // Held, it lives as long as its batch waits for approvals (24 h), not the request's own minute or so.
+    expect(await lifetime(command.id)).toEqual({ seconds: 86_400, as_batch: true });
     const body = fromBinary(CommandBodySchema, new Uint8Array(command.body));
     expect(body.batchId).toBe(command.batch_id);
     // The batch holds exactly this request: one leaf, its digest the command payload's.
@@ -126,3 +128,27 @@ describe('a non-GET site.httpProxy under the quorum', () => {
     expect(after.rows[0]!.held).toBe(false);
   });
 });
+
+describe('metal.power under the quorum', () => {
+  it('is held with the lifetime of its batch, so an approval hours later still finds it', async () => {
+    const power = await compute.api.metal.power({ token: TOKEN }, { tenantId: ACME, nodeId: machine, action: 'off' });
+    expect(power).toMatchObject({ held: true });
+    expect(await lifetime(power.commandId)).toEqual({ seconds: 86_400, as_batch: true });
+    const { rows } = await db.query<{ held: boolean; batch_id: string }>(
+      `SELECT c.not_before = 'infinity' AS held, m.batch_id FROM commands c JOIN command_batch_members m ON m.command_id = c.id WHERE c.id = $1`,
+      [power.commandId],
+    );
+    expect(rows[0]).toEqual({ held: true, batch_id: power.batchId });
+  });
+});
+
+/** How long a command may still live, and whether that is exactly its batch's end. */
+async function lifetime(commandId: string) {
+  const { rows } = await db.query<{ seconds: number; as_batch: boolean }>(
+    `SELECT round(extract(epoch FROM c.not_after - compute_now()))::int AS seconds, c.not_after = b.not_after AS as_batch
+       FROM commands c JOIN command_batch_members m ON m.command_id = c.id JOIN command_batches b ON b.id = m.batch_id
+      WHERE c.id = $1`,
+    [commandId],
+  );
+  return rows[0];
+}

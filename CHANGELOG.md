@@ -179,6 +179,12 @@ All notable changes to the better-compute packages are documented here. The form
   (`steps[0].retries: deploy.deploy is not retry-safe…`), `defineStep` refuses `retries` with `retrySafe: false`,
   and the engine never retries such a step even when its row says so (a workflow started before the check).
   Driver operations written with `on:` (no registered step) keep their `retries`.
+- **Commands held for a quorum approval no longer expire while they wait** (`@better-compute/provision`, `metal`).
+  A destructive command of an unapproved batch kept the lifetime of an unheld one (a step's timeout, ten minutes
+  for `awaitCommand`, five for `metal.power`, the request's for `site.httpProxy`), while approvers have the batch's
+  24 hours: a slow approval found the command `expired` and the step failed. Now a held command's `notAfter` is its
+  batch's (`heldBatchNotAfter`), and a workflow step does not time out while a command of its is held; its
+  timeout counts from the release. A batch that expires still cancels its held commands.
 - **BMC credential rotation no longer deletes the enrollment secret** (`@better-compute/metal`).
   `metal.rotateBmcCredential` purged every superseded credential from the secret store, including the one the
   machine was enrolled with: two machines enrolled with one rack-wide `secret://` broke each other on the first

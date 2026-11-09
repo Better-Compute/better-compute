@@ -118,6 +118,7 @@ await context.workflows!.start(tx, {
   - An `await: 'rejoin'` step completes when the agent is back with a new `boot_id` or role. Its command's own fate is ignored, and only its timeout fails it.
 - **Options.**
   - `timeout` fails the step and cancels every command it sent that is still open (an agent step's one command, and whatever a control-plane step relayed with `awaitCommand`). An abort and a failure do the same.
+  - A command held for its batch's approvals (the quorum, §13) does not count against `timeout`: while it is held the step waits, the command lives as long as its batch does (`heldBatchNotAfter`, 24 h by default), and the step's timeout counts from the release.
   - `retries` re-runs the step with the next attempt, under a new command key. Only a step defined `retrySafe: true` takes retries: `profiles.validate`, `profiles.render` and a workflow's start refuse `retries` on any other (`deploy.deploy`, `raid.apply`, `power.setPower`, …) and `defineStep` refuses the combination; handle a failure of such a step with `onFailure`.
   - `onFailure` takes one of: `fail` (the default: the rest of the main phase is cancelled, cleanup runs, and the workflow ends `failed`), `rescue` (the same, with `error.rescue`), `continue`, or a step that runs before the workflow fails.
   - `when:` is a small expression over the node's labels, e.g. `nvswitch && gpu.model=H100` or `!mig.capable`. A false one skips the step.

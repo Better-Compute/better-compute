@@ -11,6 +11,7 @@ import {
 } from '@better-compute/core';
 import { setSimClock, useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
+import { quorumMigration } from '@better-compute/server';
 import {
   abortWorkflow,
   advanceWorkflow,
@@ -628,6 +629,94 @@ describe('timeouts and not-ready steps', () => {
     );
     expect((await advance(id)).done).toBe(true);
     expect(ran).toEqual(['resumed#0']);
+  });
+});
+
+describe('commands held for their batch approval (§13)', () => {
+  const hold = (key: string) =>
+    db.query(`UPDATE commands SET not_before = 'infinity', not_after = compute_now() + interval '24 hours' WHERE idempotency_key = $1`, [key]);
+  const release = (key: string) => db.query(`UPDATE commands SET not_before = compute_now() WHERE idempotency_key = $1`, [key]);
+
+  it('does not time out an agent step whose command is held, and counts its timeout from the release', async () => {
+    profile({ id: 'held-agent', steps: [{ use: 'power.setPower', on: 'site', timeout: '1m' }] });
+    const { id } = await start('held-agent');
+    await advance(id);
+    const key = `wf:${id}:main.1`;
+    await hold(key);
+    // Approvers take hours: the step neither times out nor cancels the command.
+    for (const wait of [61_000, 6 * 3_600_000, 3_600_000]) {
+      await tick(wait);
+      expect((await advance(id)).done).toBe(false);
+    }
+    expect(await stepCommands(id)).toEqual({ [key]: 'pending' });
+    expect((await steps(id))[0]).toMatchObject({ state: 'waiting' });
+    // Approved just before the look-again time: the step has its whole timeout from the release.
+    await tick(59_000);
+    await release(key);
+    await tick(2_000);
+    expect((await advance(id)).done).toBe(false);
+    expect(await stepCommands(id)).toEqual({ [key]: 'pending' });
+    await tick(57_000);
+    expect((await advance(id)).done).toBe(false);
+    // One minute after the release with no result: now it is a timeout.
+    await tick(2_000);
+    expect((await advance(id)).done).toBe(true);
+    expect(await stepCommands(id)).toEqual({ [key]: 'cancelled' });
+    expect(await workflow(id)).toMatchObject({ state: 'failed', error: { code: 'TIMEOUT' } });
+  });
+
+  it('does not time out a control-plane step whose relayed command is held, and finishes once it ran', async () => {
+    profile({ id: 'held-relay', steps: [{ use: 'test.relayed', timeout: '1m' }] });
+    const { id } = await start('held-relay');
+    await advance(id);
+    const key = `wf:${id}:main.1#0:wipe`;
+    await hold(key);
+    await tick(61_000);
+    expect((await advance(id)).done).toBe(false);
+    await tick(5 * 3_600_000);
+    expect((await advance(id)).done).toBe(false);
+    expect((await stepCommands(id))[key]).toBe('pending');
+    await release(key);
+    await tick(30_000);
+    await db.query(`UPDATE commands SET state = 'succeeded' WHERE idempotency_key = $1`, [key]);
+    expect((await advance(id)).done).toBe(true);
+    expect(await workflow(id)).toMatchObject({ state: 'succeeded' });
+  });
+
+  it('gives a held command the lifetime of its batch, and an approved or absent batch the usual one', async () => {
+    await db.migrate([quorumMigration]);
+    const batch = (batchId: string, state: string, required: number) =>
+      db.query(
+        `INSERT INTO command_batches (id, tenant_id, reason, scope_root, scope_size, required, not_after, state)
+         VALUES ($1, 'ten_a', 'r', decode(repeat('00', 32), 'hex'), 1, $3, compute_now() + interval '24 hours', $2)`,
+        [batchId, state, required],
+      );
+    await batch('batch_held', 'pending', 2);
+    await batch('batch_approved', 'approved', 2);
+    await batch('batch_audit', 'pending', 0);
+    const wipe = defineStep({ id: 'disk.wipe', runsOn: 'ramdisk', command: 'disk.wipe', timeout: '5m', retrySafe: false, input: manifest({}) });
+    const own: AdvanceOptions = { ...options, steps: stepRegistry([record, relayed, wipe]) };
+    const destructive = { ...context(), registry: { commandKind: (kind: string) => ({ kind, destructive: kind === 'disk.wipe' }) } } as never as ReturnType<typeof context>;
+    profile({ id: 'held-lifetime', steps: [{ use: 'test.relayed', timeout: '1m' }, { use: 'disk.wipe' }] });
+    const lifetimes: Record<string, number[]> = {};
+    for (const batchId of ['batch_held', 'batch_approved', 'batch_audit']) {
+      const target = await addNode();
+      const { id } = await db.transaction((tx) =>
+        startWorkflow(destructive, own, tx, { tenantId: 'ten_a', profileId: 'held-lifetime', profileVersion: 1, nodeId: target, batchId }),
+      );
+      await advanceWorkflow(destructive, own, id);
+      // The relayed wipe went out (awaitCommand); let it succeed so the agent step sends its own.
+      await db.query(`UPDATE commands SET state = 'succeeded' WHERE idempotency_key = ANY($1)`, [[`wf:${id}:main.1#0:wipe`, `wf:${id}:main.1#0:entry`]]);
+      await advanceWorkflow(destructive, own, id);
+      const { rows } = await db.query<{ seconds: string }>(
+        `SELECT round(extract(epoch FROM not_after - compute_now()))::text AS seconds FROM commands
+          WHERE idempotency_key = ANY($1) ORDER BY idempotency_key`,
+        [[`wf:${id}:main.1#0:wipe`, `wf:${id}:main.2`]],
+      );
+      lifetimes[batchId] = rows.map((row) => Number(row.seconds));
+    }
+    // [awaitCommand's wipe, the agent step's wipe]: 24 h while held; else 10 min and the step's 5 min.
+    expect(lifetimes).toEqual({ batch_held: [86_400, 86_400], batch_approved: [600, 300], batch_audit: [600, 300] });
   });
 });
 
