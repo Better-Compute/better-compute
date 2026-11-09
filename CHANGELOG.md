@@ -185,6 +185,10 @@ All notable changes to the better-compute packages are documented here. The form
   an image that does run cloud-init: it runs nothing where cloud-init has taken the script. `runsCloudInit(image)`
   now answers `true` only for an image known to run cloud-init (a `projects/ubuntu-os-*/global/images/…`
   reference); new `GcpImages.bootImage(image, signal)`.
+- **Stopping and restarting VMs with Local SSD** (`@better-compute/provider-gcp`). `graceful-off` and
+  `graceful-restart` called `instances.stop` without `discardLocalSsd`, which Compute Engine requires for a VM with
+  Local SSD disks (every A3, A4 and G4), so those VMs could only be powered off hard. Every stop now sends
+  `discardLocalSsd=false`, as `off` already did: the disks' data is kept.
 
 ## 0.3.0 (2026-10-20)
 

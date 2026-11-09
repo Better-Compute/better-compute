@@ -690,15 +690,16 @@ export class GcpCompute implements ProviderImpl {
         ),
         `${verb} ${id}`,
       );
+    // Compute Engine refuses to stop a VM with Local SSD disks (every A3, A4 and G4) unless the request
+    // says what becomes of their data. Every stop keeps it: a restart or a power-off is not a wipe.
+    const stop = () => act('stop', { discardLocalSsd: 'false' });
     switch (action) {
       case 'on':
         await act('start');
         return;
       case 'graceful-off':
-        await act('stop');
-        return;
       case 'off':
-        await act('stop', { discardLocalSsd: 'false' });
+        await stop();
         return;
       case 'reset':
       case 'cycle':
@@ -706,7 +707,7 @@ export class GcpCompute implements ProviderImpl {
         return;
       case 'graceful-restart': {
         // A VM cannot be started until it has stopped: wait for the stop (at most 20 s).
-        await this.waitDone(await act('stop'), context.signal, `stop ${id}`);
+        await this.waitDone(await stop(), context.signal, `stop ${id}`);
         await act('start');
         return;
       }

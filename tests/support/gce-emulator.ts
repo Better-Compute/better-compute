@@ -692,6 +692,19 @@ export class GceEmulator {
           url.searchParams.get('requestId'),
         );
       if (method === 'POST' && (action === 'start' || action === 'stop' || action === 'reset')) {
+        // GCE refuses to stop a VM with Local SSD disks unless the request says what becomes of their
+        // data (`discardLocalSsd`); A3, A4 and G4 machine types always carry such disks. (GCE answers
+        // 400; the message here is this emulator's wording.)
+        if (
+          action === 'stop' &&
+          (instance.disks ?? []).some((disk: Json) => disk.type === 'SCRATCH') &&
+          !['true', 'false'].includes(url.searchParams.get('discardLocalSsd') ?? '')
+        )
+          return this.error(
+            400,
+            'invalid',
+            `Invalid value for field 'discardLocalSsd': it must be specified to stop instance '${name}', which has Local SSD disks`,
+          );
         return this.#operation('zones', zone, action, target, () => {
           instance.status = action === 'stop' ? 'TERMINATED' : 'RUNNING';
         });

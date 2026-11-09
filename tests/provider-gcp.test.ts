@@ -1100,14 +1100,20 @@ describe('compute', () => {
         .filter((r) => r.method === 'POST' && r.url.pathname.includes('/instances/vm1/'))
         .map((r) => r.url.pathname.split('/').pop() + r.url.search);
     await impl.power!('us-central1-a/vm1', 'graceful-restart', ctx());
-    expect(verbs()).toEqual(['stop', 'start']);
+    expect(verbs()).toEqual(['stop?discardLocalSsd=false', 'start']);
     emu.requests.length = 0;
     await impl.power!('us-central1-a/vm1', 'off', ctx());
     await impl.power!('us-central1-a/vm1', 'graceful-off', ctx());
     await impl.power!('us-central1-a/vm1', 'on', ctx());
     await impl.power!('us-central1-a/vm1', 'reset', ctx());
     await impl.power!('us-central1-a/vm1', 'cycle', ctx());
-    expect(verbs()).toEqual(['stop?discardLocalSsd=false', 'stop', 'start', 'reset', 'reset']);
+    expect(verbs()).toEqual([
+      'stop?discardLocalSsd=false',
+      'stop?discardLocalSsd=false',
+      'start',
+      'reset',
+      'reset',
+    ]);
     await expect(impl.power!('us-central1-a/vm1', 'nmi', ctx())).rejects.toMatchObject({
       code: 'UNSUPPORTED',
     });
@@ -1117,6 +1123,42 @@ describe('compute', () => {
     await expect(impl.power!('us-central1-a/ghost', 'on', ctx())).rejects.toMatchObject({
       code: 'NOT_FOUND',
     });
+  });
+
+  it('stops a VM with Local SSD disks (A3, A4, G4), keeping their data, for every action that stops', async () => {
+    const emu = new GceEmulator();
+    emu.addInstance('us-central1-a', 'gpu1', {
+      machineType: 'a3-highgpu-8g',
+      labels: { 'better-compute-instance': 'ins_1' },
+      disks: [
+        { boot: true, type: 'PERSISTENT', source: 'zones/us-central1-a/disks/gpu1' },
+        { type: 'SCRATCH', interface: 'NVME', diskSizeGb: '375' },
+      ],
+    });
+    // The emulator refuses such a stop without the parameter, as Compute Engine does.
+    emu.validTokens.add('direct');
+    const stop = (query: string) =>
+      emu.fetch(
+        `https://compute.googleapis.com/compute/v1/projects/p/zones/us-central1-a/instances/gpu1/stop${query}`,
+        { method: 'POST', headers: { authorization: 'Bearer direct' } },
+      );
+    expect((await stop('')).status).toBe(400);
+    expect(emu.instances.get('us-central1-a/gpu1')!.status).toBe('RUNNING');
+    expect((await stop('?discardLocalSsd=true')).status).toBe(200);
+    const impl = await build(emu);
+    const stops = () =>
+      emu.requests
+        .filter((r) => r.method === 'POST' && r.url.pathname.endsWith('/instances/gpu1/stop'))
+        .map((r) => r.url.search);
+    for (const action of ['graceful-off', 'off', 'graceful-restart'] as const) {
+      emu.instances.get('us-central1-a/gpu1')!.status = 'RUNNING';
+      emu.requests.length = 0;
+      await impl.power!('us-central1-a/gpu1', action, ctx());
+      expect(stops(), action).toEqual(['?discardLocalSsd=false']);
+      expect(emu.instances.get('us-central1-a/gpu1')!.status, action).toBe(
+        action === 'graceful-restart' ? 'RUNNING' : 'TERMINATED',
+      );
+    }
   });
 
   it('graceful-restart waits for the stop, and gives up with UNAVAILABLE after 20 s', async () => {
