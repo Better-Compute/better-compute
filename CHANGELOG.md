@@ -182,6 +182,11 @@ All notable changes to the better-compute packages are documented here. The form
   provider's own `retryAfterMs` is honoured (30 s to an hour) instead of a fixed 30 s. New migration
   `cloud-resources/0006_retry_backoff` (`attempts`, `next_attempt_at` on `cloud_resources`); a change through the
   API still wakes the resource at once.
+- **A model access key is not regenerated on every poll while its rename fails**
+  (`@better-compute/provider-digitalocean`). A `do.inference-key` rotation regenerates the secret and then renames
+  the key (the name records the rotation). When the rename kept failing, each 10 s pass saw the old rotation in the
+  name and regenerated again, invalidating the key the tenant had just been given. The following passes now retry
+  the rename alone while the caller holds that key sealed.
 - **Scripts on images without cloud-init** (`@better-compute/provider-gcp`). Compute Engine's Debian, Rocky,
   CentOS, RHEL, AlmaLinux and SUSE images do not run cloud-init, so a shell-script `userData` (`#!…`) never ran on
   them. Create now also writes it as `startup-script` metadata, wrapped to run once on the first boot as cloud-init

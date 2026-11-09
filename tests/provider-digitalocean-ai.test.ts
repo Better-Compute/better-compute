@@ -464,6 +464,78 @@ describe('do.inference-key (a model access key)', () => {
     expect(mutations(emu, 'PUT', /api_keys/)).toHaveLength(puts);
   });
 
+  it('a rename that keeps failing is retried alone: the key the caller sealed is not regenerated on every pass', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const created = await resources.ensure(request(), call());
+    const failRename = () =>
+      emu.failNext({ method: 'PUT', path: /^\/gen-ai\/models\/api_keys\/[^/]+$/ }, 500, {
+        id: 'server_error',
+        message: 'Server Error',
+      });
+    const rotate = (extra: Record<string, unknown> = {}) =>
+      resources.ensure(
+        request({ id: created.id, spec: { rotation: 1 }, secretOutputs: ['key'], ...extra }),
+        call(),
+      );
+    failRename();
+    const rotated = await rotate();
+    expect(rotated.state).toBe('updating');
+    // The module seals this one: it is the key the tenant now uses.
+    const sealed = rotated.secretOutputs!.key;
+    expect(sealed).toBe(secretOf(emu, created.id));
+    // The rename keeps failing, pass after pass (the reconciler polls every 10 s): the key stays the live one.
+    for (let pass = 0; pass < 4; pass++) {
+      failRename();
+      const again = await rotate();
+      expect(again.state).toBe('updating');
+      expect(again.secretOutputs).toBeUndefined();
+      expect(secretOf(emu, created.id)).toBe(sealed);
+    }
+    expect(mutations(emu, 'PUT', /\/regenerate$/)).toHaveLength(1);
+    // Once the rename goes through it is ready, on the same key.
+    const settled = await rotate();
+    expect(settled).toMatchObject({ state: 'ready', spec: { rotation: 1 } });
+    expect(settled.secretOutputs).toBeUndefined();
+    expect(emu.state.modelKeys.get(created.id)!.name).toBe(`bc-r-key-r1-bc${hash}`);
+    expect(secretOf(emu, created.id)).toBe(sealed);
+    expect(mutations(emu, 'PUT', /\/regenerate$/)).toHaveLength(1);
+  });
+
+  it('with the name behind, a key is still minted again when its seal failed or another rotation is asked', async () => {
+    const emu = emulator();
+    const { resources } = await build(emu);
+    const created = await resources.ensure(request(), call());
+    const failRename = () =>
+      emu.failNext({ method: 'PUT', path: /^\/gen-ai\/models\/api_keys\/[^/]+$/ }, 500, {
+        id: 'server_error',
+        message: 'Server Error',
+      });
+    failRename();
+    const rotated = await resources.ensure(
+      request({ id: created.id, spec: { rotation: 1 }, secretOutputs: ['key'] }),
+      call(),
+    );
+    // The seal of that secret failed (the caller holds none): it is lost, so the key is regenerated.
+    failRename();
+    const minted = await resources.ensure(
+      request({ id: created.id, spec: { rotation: 1 }, secretOutputs: [] }),
+      call(),
+    );
+    expect(minted.secretOutputs?.key).toBe(secretOf(emu, created.id));
+    expect(minted.secretOutputs?.key).not.toBe(rotated.secretOutputs!.key);
+    expect(mutations(emu, 'PUT', /\/regenerate$/)).toHaveLength(2);
+    // A further rotation asked while the name is still behind is a new secret too.
+    const next = await resources.ensure(
+      request({ id: created.id, spec: { rotation: 2 }, secretOutputs: ['key'] }),
+      call(),
+    );
+    expect(next).toMatchObject({ state: 'ready', spec: { rotation: 2 } });
+    expect(next.secretOutputs?.key).not.toBe(minted.secretOutputs!.key);
+    expect(mutations(emu, 'PUT', /\/regenerate$/)).toHaveLength(3);
+    expect(emu.state.modelKeys.get(created.id)!.name).toBe(`bc-r-key-r2-bc${hash}`);
+  });
+
   it('two racing creates converge on the key the caller recorded; the other bearer is deleted', async () => {
     const emu = emulator();
     const { resources } = await build(emu);

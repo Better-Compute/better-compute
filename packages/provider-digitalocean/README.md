@@ -474,7 +474,9 @@ keys, guardrails, the Managed Agents objects; `resources/kinds/named.ts`).
   the inference proxy (`endpoint`, with an operator key), since it may hold no model access key there.
 - **Model access keys:** `do.inference-key`, the bearer for serverless and dedicated inference. The key is a secret
   output only (sealed by the module); raising `rotation` regenerates it, and a create whose answer was lost
-  regenerates the key it finds, so an unsealed secret is never live. Name: `<name>-r<rotation>-bc<hash>`. A key
+  regenerates the key it finds, so an unsealed secret is never live. Name: `<name>-r<rotation>-bc<hash>`. When the
+  rename after a regenerate fails, the new secret is still returned and the following runs retry the rename alone
+  (remembered in memory; a restart regenerates once more), so the key the tenant holds is not replaced on every poll. A key
   reaches the whole account, so it is accepted only on the tenant's own account (`accountWide` on a shared one).
 - **Inference proxy:** `inferenceProxy({ record, endpoint?, fetch?, log? })` forwards `/v1/chat/completions`,
   `/v1/completions` and `/v1/embeddings` to `https://inference.do-ai.run` with the tenant's resolved key and hands each
