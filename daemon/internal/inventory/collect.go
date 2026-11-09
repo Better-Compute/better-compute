@@ -23,6 +23,10 @@ type Collector struct {
 	Root string
 	// Hostname defaults to os.Hostname.
 	Hostname func() string
+	// KubernetesNode names the Kubernetes Node this machine is, when bcd runs on it as a DaemonSet pod
+	// (default: the NODE_NAME environment variable, which the DaemonSet sets from spec.nodeName; a fake
+	// tree has none). Empty anywhere else.
+	KubernetesNode func() string
 	// Now stamps CollectedAt (default time.Now).
 	Now func() time.Time
 	// Trace, when set, is told every absolute path the collector looks at (read, stat, readlink,
@@ -738,5 +742,25 @@ func (c Collector) os() *OsSection {
 	} else {
 		s.Hostname = c.read("/proc/sys/kernel/hostname")
 	}
+	if c.KubernetesNode != nil {
+		s.KubernetesNodeName = kubernetesNodeName(c.KubernetesNode())
+	} else if c.Root == "" {
+		s.KubernetesNodeName = kubernetesNodeName(os.Getenv("NODE_NAME"))
+	}
 	return s
+}
+
+// kubernetesNodeName is name when it can be a Node's (a DNS-1123 subdomain: at most 253 characters of
+// lowercase letters, digits, '-' and '.'), else "": an environment variable is not trusted to be one.
+func kubernetesNodeName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 253 {
+		return ""
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '-' && r != '.' {
+			return ""
+		}
+	}
+	return name
 }

@@ -1186,10 +1186,10 @@ const nodesPerRun = 500;
 const relearnAfter = '1 hour';
 
 /**
- * The Kubernetes Node a pool node's bcd says it runs on: inventory `kubernetes.nodeName` (the DaemonSet's
- * NODE_NAME), else the OS hostname (`os.hostname`), which is the Node name on GKE and DOKS but not always on EKS
- * (Node `ip-10-0-1-2.<region>.compute.internal`, a short kernel hostname on some AMIs). Undefined when neither is
- * reported.
+ * The Kubernetes Node a pool node's bcd says it runs on: inventory `os.kubernetesNodeName` (the DaemonSet's
+ * NODE_NAME, which bcd reports in its `os` section; `kubernetes.nodeName` is read too, for a section of that name),
+ * else the OS hostname (`os.hostname`), which is the Node name on GKE and DOKS but not always on EKS (Node
+ * `ip-10-0-1-2.<region>.compute.internal`, a short kernel hostname on some AMIs). Undefined when none is reported.
  */
 function reportedNodeName(sections: Readonly<Record<string, Json>> | undefined): string | undefined {
   const field = (section: string, key: string) => {
@@ -1198,7 +1198,7 @@ function reportedNodeName(sections: Readonly<Record<string, Json>> | undefined):
     const found = (value as Record<string, Json>)[key];
     return typeof found === 'string' && found.length > 0 && found.length <= 253 ? found : undefined;
   };
-  return field('kubernetes', 'nodeName') ?? field('os', 'hostname');
+  return field('os', 'kubernetesNodeName') ?? field('kubernetes', 'nodeName') ?? field('os', 'hostname');
 }
 
 /**

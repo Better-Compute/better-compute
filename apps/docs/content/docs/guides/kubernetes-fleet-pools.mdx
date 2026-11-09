@@ -179,7 +179,8 @@ identity: a plan that changes them is blocked, so create a new pool instead. Siz
    are matched to their Node: only reservations made with `spot: true` are placed on them, so nothing sold as
    uninterruptible sits on a machine the provider may reclaim.
 5. **Scale.** Change a flavor's `nodes` in the document and apply. The provider removes Nodes. Each pool node is
-   matched to its Kubernetes Node by the Node name bcd reports. When a matched node is disconnected and its Node is
+   matched to its Kubernetes Node by the Node name bcd reports: the pod's `spec.nodeName`, in its inventory's `os`
+   section (`kubernetesNodeName`), or the hostname from a bcd that does not report one yet. When a matched node is disconnected and its Node is
    gone, its reservations end: bound ones are released with their quota refunded once, and spot reservations and
    anything on a Spot node end as `preempted`. Then the node is retired.
 6. **Teardown.** Remove the pool from the document and apply with `prune`, or archive the pool. Taking only

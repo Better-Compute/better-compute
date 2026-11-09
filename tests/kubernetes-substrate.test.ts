@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { create, toBinary } from '@bufbuild/protobuf';
 import { newId } from '@better-compute/core';
+import { sectionJson } from '@better-compute/inventory';
+import { decodeInventorySection, OsSectionSchema } from '@better-compute/protocol';
 import {
   substrateCapacityLabel,
   substrateFirstConnectGraceSeconds,
@@ -603,6 +606,41 @@ describe('substrate: which Kubernetes Node a pool node is', () => {
     const rows = await nodeRows(pool.id);
     expect(rows.get(joined[1]!)).toMatchObject({ provision_state: 'retired' });
     expect(rows.get(joined[1]!)!.no_schedule_reasons).toContain('substrate-node-removed');
+    expect(rows.get(joined[0]!)).toMatchObject({ provision_state: 'adopted', no_schedule_reasons: [] });
+  });
+
+  it("matches by the Node name bcd reports in its os section (os.kubernetesNodeName), whatever the hostname", async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(createSpec([gpu]));
+    await world.converge(pool.id, 6);
+    const names = (await world.nodeNames(pool.id)).sort();
+    // What bcd sends from a DaemonSet pod on an EKS AMI with a short kernel hostname: NODE_NAME as
+    // os.kubernetesNodeName. The second node's hostname is even another Node's name: the reported Node wins.
+    const section = (hostname: string, node: string) => {
+      const bytes = toBinary(OsSectionSchema, create(OsSectionSchema, { hostname, kubernetesNodeName: node }));
+      return { os: sectionJson(decodeInventorySection('os', bytes)) as Record<string, unknown> };
+    };
+    const first = section('ip-10-0-1-2', names[0]!);
+    expect(first.os).toMatchObject({ hostname: 'ip-10-0-1-2', kubernetesNodeName: names[0] });
+    const joined = await world.joinNodes(pool.id, 2, undefined, [first, section(names[0]!, names[1]!)]);
+    await world.converge(pool.id, 3);
+    const { rows: matched } = await world.fixture.database.query<{ node_id: string; kubernetes_node: string | null }>(
+      `SELECT node_id, kubernetes_node FROM kubernetes_substrate_nodes WHERE node_id = ANY($1)`,
+      [joined],
+    );
+    expect(new Map(matched.map((row) => [row.node_id, row.kubernetes_node]))).toEqual(
+      new Map([
+        [joined[0], names[0]],
+        [joined[1], names[1]],
+      ]),
+    );
+    // So a Node that goes is noticed: its node is retired, the other one only disconnected.
+    world.reclaimed.add(names[1]!);
+    await world.fixture.database.query(`UPDATE nodes SET connectivity = 'disconnected' WHERE id = ANY($1)`, [joined]);
+    await world.fixture.advance(2 * 60_000);
+    await world.converge(pool.id, 3);
+    const rows = await nodeRows(pool.id);
+    expect(rows.get(joined[1]!)).toMatchObject({ provision_state: 'retired' });
     expect(rows.get(joined[0]!)).toMatchObject({ provision_state: 'adopted', no_schedule_reasons: [] });
   });
 

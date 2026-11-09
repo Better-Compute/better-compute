@@ -1,9 +1,11 @@
 package inventory
 
 import (
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -193,6 +195,52 @@ func TestCollectorNICFirmware(t *testing.T) {
 	}
 	if inv, _ := (Collector{Root: root}).Collect(); inv.Nics.Nics[0].Firmware != "" {
 		t.Fatal("firmware without a source")
+	}
+}
+
+// A bcd that runs as a DaemonSet pod reports the Kubernetes Node it is on: the pod's spec.nodeName, which the
+// DaemonSet passes as NODE_NAME. The kernel hostname is not always the Node's name (a short hostname on some EKS
+// AMIs), and the control plane's pool substrate matches the pool node to its Node by this field.
+func TestCollectorReportsItsKubernetesNode(t *testing.T) {
+	node := "ip-10-0-1-2.us-east-1.compute.internal"
+	short := func() string { return "ip-10-0-1-2" }
+
+	// The live collector (no Root) reads NODE_NAME.
+	t.Setenv("NODE_NAME", node)
+	if got := (Collector{Hostname: short}).os(); got.KubernetesNodeName != node || got.Hostname != "ip-10-0-1-2" {
+		t.Fatalf("os = %+v, want the Node %q beside the hostname", got, node)
+	}
+	// Not in a pod: nothing is reported.
+	t.Setenv("NODE_NAME", "")
+	if got := (Collector{Hostname: short}).os(); got.KubernetesNodeName != "" {
+		t.Fatalf("kubernetes node = %q without NODE_NAME", got.KubernetesNodeName)
+	}
+	// A fake tree never takes the test process's environment; a caller can name the Node itself.
+	t.Setenv("NODE_NAME", node)
+	if got := (Collector{Root: t.TempDir(), Hostname: short}).os(); got.KubernetesNodeName != "" {
+		t.Fatalf("kubernetes node = %q from the environment under a fake root", got.KubernetesNodeName)
+	}
+	named := Collector{Root: t.TempDir(), Hostname: short, KubernetesNode: func() string { return " gke-pool-a0 \n" }}
+	if got := named.os(); got.KubernetesNodeName != "gke-pool-a0" {
+		t.Fatalf("kubernetes node = %q, want the trimmed name", got.KubernetesNodeName)
+	}
+	// What cannot be a Node name (a DNS-1123 subdomain) is not reported.
+	for _, bad := range []string{"Node_1", "a/b", "über", strings.Repeat("a", 254), "a b"} {
+		c := Collector{Root: t.TempDir(), Hostname: short, KubernetesNode: func() string { return bad }}
+		if got := c.os(); got.KubernetesNodeName != "" {
+			t.Fatalf("kubernetes node = %q for %q", got.KubernetesNodeName, bad)
+		}
+	}
+
+	// On the wire it is OsSection field 9; an os section without it encodes as it always did (same hash).
+	var with, without protoWriter
+	(&OsSection{Hostname: "h", KubernetesNodeName: "n1"}).encode(&with)
+	(&OsSection{Hostname: "h"}).encode(&without)
+	if got := hex.EncodeToString(with.buf); got != "4201684a026e31" {
+		t.Fatalf("os section bytes = %s", got)
+	}
+	if got := hex.EncodeToString(without.buf); got != "420168" {
+		t.Fatalf("os section bytes without a Node = %s", got)
 	}
 }
 

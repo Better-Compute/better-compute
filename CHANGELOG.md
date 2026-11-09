@@ -144,6 +144,15 @@ All notable changes to the better-compute packages are documented here. The form
 
 ### Fixed
 
+- **bcd reports the Kubernetes Node it runs on** (`proto`, `@better-compute/protocol`, `bcd`,
+  `@better-compute/kubernetes`). A fleet pool matches each pool node to its Kubernetes Node by the Node name bcd
+  reports, but bcd never reported one: `NODE_NAME` only reached its Kubernetes manager, so matching fell back to the
+  kernel hostname, which is not the Node's name on EKS AMIs with a short hostname. Such a node was never matched,
+  so its Node going away was never noticed. `OsSection` gains `kubernetes_node_name` (field 9, additive): bcd's
+  inventory collector fills it from `NODE_NAME` (the DaemonSet sets it from `spec.nodeName`) when the value can be
+  a Node name, and reports nothing outside a pod, so other machines' `os` section hashes do not change. The
+  substrate reads `os.kubernetesNodeName` first, then the hostname. The Node's uid is not reported (a pod cannot
+  read it without the API); the substrate still records it from the Node list when it makes the match.
 - **Provider Spot nodes are Spot to capacity** (`@better-compute/capacity`, `@better-compute/kubernetes`). A fleet
   pool's Spot flavor was marked only on the Kubernetes Node (`better-compute.dev/capacity=spot`), so a non-spot
   reservation could land on a machine the provider may take back, and a reclaim ended what the node held as
