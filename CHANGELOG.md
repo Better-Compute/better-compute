@@ -215,6 +215,11 @@ All notable changes to the better-compute packages are documented here. The form
   with a key is one version however often it is retried. Without a key, a `CreateSecret` that may have created
   the secret (no answer, a 5xx) is followed by a best-effort `DeleteSecret` of that name. `SecretStore.put` in
   `core` does not carry a key yet, so callers pass it through the store's own type.
+- **`@better-compute/aws` signs and redacts with `aws-core`** (`@better-compute/aws`). Its private copy of the SigV4
+  signer had drifted from `aws-core`'s and is gone: requests and presigned URLs are signed by `aws-core`. Error
+  messages are redacted with `aws-core`'s patterns (every access key id prefix, signed header lines, credential
+  XML) plus `SecretString`, `SecretBinary` and `Plaintext`, and the transport no longer follows redirects (a
+  redirect would have sent the signed headers to another host). RDS IAM tokens still sign the empty-body hash.
 
 ## 0.3.0 (2026-10-20)
 

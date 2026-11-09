@@ -3,7 +3,7 @@
 // the credential scope's service, and lets tests inject failures. Service fakes live beside it.
 import { createHash, createHmac } from 'node:crypto';
 import { manualClock, type ManualClock } from '@better-compute/core';
-import { canonicalRequest } from '../../../packages/aws/src/internal/sigv4.js';
+import { canonicalRequest, presignUrl } from '@better-compute/aws-core';
 import type { CredentialSource } from '../../../packages/aws/src/internal/transport.js';
 
 export type EmuProtocol = 'json' | 'query' | 'rest-xml';
@@ -174,14 +174,16 @@ export class AwsEmulator {
     let date: number;
     let checkUrl = url;
     let payloadHash: string | undefined;
+    let expiresInSeconds = 0;
     if (presigned) {
       credential = url.searchParams.get('X-Amz-Credential') ?? '';
       signedHeaders = url.searchParams.get('X-Amz-SignedHeaders') ?? '';
       signature = url.searchParams.get('X-Amz-Signature') ?? '';
       date = parseAmzDate(url.searchParams.get('X-Amz-Date') ?? '');
       const expires = Number(url.searchParams.get('X-Amz-Expires'));
-      if (!Number.isFinite(date) || !(expires >= 1 && expires <= 604_800))
+      if (!Number.isFinite(date) || !(Number.isInteger(expires) && expires >= 1 && expires <= 604_800))
         return { error: new EmuError('AuthorizationQueryParametersError', 'bad query auth', 400) };
+      expiresInSeconds = expires;
       if (this.now > date + expires * 1000)
         return { error: new EmuError('AccessDenied', 'Request has expired', 403), service: credential.split('/')[3] };
       checkUrl = new URL(url);
@@ -212,6 +214,34 @@ export class AwsEmulator {
     for (const name of signedHeaders.split(';')) if (name !== 'host') signed[name] = headers[name] ?? '';
     if (!signedHeaders.split(';').includes('host'))
       return { error: new EmuError('SignatureDoesNotMatch', 'host is not signed', 403), service };
+    if (presigned) {
+      // Query authentication is checked by presigning the same request again with the signer and
+      // comparing signatures: the URL without its X-Amz-* parameters, at the URL's own time.
+      const bare = new URL(url);
+      const token = bare.searchParams.get('X-Amz-Security-Token') ?? undefined;
+      for (const name of [...bare.searchParams.keys()])
+        if (name.toLowerCase().startsWith('x-amz-')) bare.searchParams.delete(name);
+      let again: string;
+      try {
+        again = presignUrl({
+          method,
+          url: bare,
+          headers: signed,
+          service,
+          region,
+          credentials: { accessKeyId: accessKeyId!, secretAccessKey: secret, ...(token ? { sessionToken: token } : {}) },
+          now: date,
+          expiresInSeconds,
+          unsignedPayload: payloadHash === 'UNSIGNED-PAYLOAD',
+          normalizePath: service !== 's3',
+        });
+      } catch {
+        return { error: new EmuError('SignatureDoesNotMatch', 'signature mismatch', 403), service };
+      }
+      if (new URL(again).searchParams.get('X-Amz-Signature') !== signature)
+        return { error: new EmuError('SignatureDoesNotMatch', 'signature mismatch', 403), service };
+      return { service, presigned, accessKeyId: accessKeyId! };
+    }
     const { canonical } = canonicalRequest({
       method,
       url: checkUrl,

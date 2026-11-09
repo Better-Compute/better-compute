@@ -218,6 +218,40 @@ describe('internal transport', () => {
       expect(text).not.toContain(leaked);
   });
 
+  it('signs with the aws-core signer and redacts with its patterns, plus the platform fields', async () => {
+    const core = await import('@better-compute/aws-core');
+    expect(signRequest).toBe(core.signRequest);
+    expect(presignUrl).toBe(core.presignUrl);
+    // What only aws-core's patterns cover (other key id prefixes, a signed header line), and what
+    // only the platform services answer with.
+    const text = redactAws(
+      'AROAABCDEFGHIJKLMNOP authorization: AWS4-HMAC-SHA256 Credential=AKIAABCDEFGHIJKLMNOP/x, Signature=abcdef0123456789\n' +
+        '<SecretAccessKey>xmlsecret</SecretAccessKey> "SecretString":"value1" "Plaintext":"value2" "SecretBinary":"value3"',
+    );
+    for (const leaked of ['ABCDEFGHIJKLMNOP', 'abcdef0123456789', 'xmlsecret', 'value1', 'value2', 'value3'])
+      expect(text).not.toContain(leaked);
+  });
+
+  it('never follows a redirect with its signed headers', async () => {
+    const seen: (string | undefined)[] = [];
+    const redirecting = (async (_url: unknown, init: RequestInit) => {
+      seen.push(init.redirect);
+      return new Response('', { status: 307, headers: { location: 'https://elsewhere.example/' } });
+    }) as unknown as typeof fetch;
+    const kms = jsonClient(
+      createTransport({
+        region: 'us-east-1',
+        credentials: { kind: 'test', credentials: async () => suiteCredentials },
+        fetch: redirecting,
+        endpoint: 'http://emu',
+      }),
+      { hostPrefix: 'kms', jsonVersion: '1.1', targetPrefix: 'TrentService' },
+    );
+    const error = await kms.call('Ping', {}).catch((e: unknown) => e as ComputeError);
+    expect(error).toBeInstanceOf(ComputeError);
+    expect(seen).toEqual(['manual']);
+  });
+
   it('logs only request metadata', async () => {
     const emu = new AwsEmulator();
     emu.register('kms', { protocol: 'json', handle: () => jsonResponse({ Plaintext: 'c2VjcmV0' }) });

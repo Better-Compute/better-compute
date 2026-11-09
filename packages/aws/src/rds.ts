@@ -50,6 +50,9 @@ async function mintRdsAuthToken(options: RdsAuthTokenOptions): Promise<{ token: 
     credentials,
     now: clock.now(),
     expiresInSeconds: lifetimeSeconds,
+    // An RDS token signs the hash of the empty body (only S3 presigns UNSIGNED-PAYLOAD, which is
+    // the signer's default).
+    unsignedPayload: false,
   });
   return {
     token: signed.replace(/^https:\/\//, ''),

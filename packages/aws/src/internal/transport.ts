@@ -1,9 +1,17 @@
-// A private, minimal AWS transport: endpoints, signed fetch with one skew/expired-token retry, AWS
-// error mapping and redaction, and the JSON and awsQuery protocol clients. It mirrors the shapes
-// A0 Task 3-4 give aws-core (`jsonClient`, `queryClient`, `mapAwsError`, `redactAws`,
-// `CredentialSource`), so the imports can move to aws-core once it ships them. Not exported.
+// The platform services' AWS transport: endpoints, signed fetch with the same bounded retries as
+// aws-core's (one clock correction, one credential re-read), AWS error mapping, and the JSON and
+// awsQuery protocol clients. The signer and the redaction are aws-core's. The send path stays
+// separate from aws-core's clients because it hands back the response unread (S3 bodies stream),
+// presigns, and takes per-request timeouts and accepted statuses, none of which aws-core's
+// buffered clients do. Not exported.
 import { ComputeError, systemClock, type Clock, type Logger } from '@better-compute/core';
-import { parseXml, serializeAwsQuery, type QueryParams, type XmlElement } from '@better-compute/aws-core';
+import {
+  parseXml,
+  redactAws as redactAwsCore,
+  serializeAwsQuery,
+  type QueryParams,
+  type XmlElement,
+} from '@better-compute/aws-core';
 import { presignUrl, signRequest, type AwsCredentials } from './sigv4.js';
 
 export type { AwsCredentials } from './sigv4.js';
@@ -66,13 +74,16 @@ export function serviceEndpoint(hostPrefix: string, region: string, override?: s
 
 // --- Errors ---------------------------------------------------------------------------------------
 
-/** Removes access key ids, secrets, session tokens and signatures from text. */
+/**
+ * Removes access key ids, secrets, session tokens and signatures from text: aws-core's patterns
+ * (every key id prefix, signed headers, credential JSON and XML), plus the fields only the platform
+ * services answer with (a Secrets Manager value, KMS plaintext).
+ */
 export function redactAws(text: string): string {
-  return text
-    .replace(/\b(AKIA|ASIA)[A-Z0-9]{12,}\b/g, '$1[redacted]')
-    .replace(/(X-Amz-(?:Signature|Security-Token|Credential)=)[^&\s"']+/gi, '$1[redacted]')
-    .replace(/(Signature=)[0-9a-f]{16,}/gi, '$1[redacted]')
-    .replace(/("(?:SecretAccessKey|SessionToken|Token|SecretString|Plaintext)"\s*:\s*")[^"]*"/g, '$1[redacted]"');
+  return redactAwsCore(text).replace(
+    /("(?:SecretString|SecretBinary|Plaintext)"\s*:\s*")[^"]*"/g,
+    '$1[REDACTED]"',
+  );
 }
 
 const codeGroups: [RegExp, ComputeError['code']][] = [
@@ -272,6 +283,8 @@ export function createTransport(options: TransportOptions): Transport {
             ? undefined
             : (input.body as BodyInit),
         signal,
+        // Never followed: a redirect would send the signed headers to a host this code did not choose.
+        redirect: 'manual',
       });
     } catch (error) {
       if (input.signal?.aborted) throw error;
@@ -373,7 +386,8 @@ export function createTransport(options: TransportOptions): Transport {
       region,
       credentials: creds,
       now: (input.at ?? clock.now()) + skewMs,
-      unsignedPayload: input.s3,
+      // S3 presigns UNSIGNED-PAYLOAD; every other service signs the hash of the empty body.
+      unsignedPayload: input.s3 === true,
       normalizePath: !input.s3,
       expiresInSeconds: input.expiresInSeconds,
     });
