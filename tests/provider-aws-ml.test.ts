@@ -112,6 +112,141 @@ describe('placement groups', () => {
     expect(w.placement.calls.filter((c) => c.action === 'DescribePlacementGroups')).toHaveLength(1);
   });
 
+  it('a remembered group that is gone is made again by the launch that finds out', async () => {
+    const w = world();
+    const placement = { group: 'bc-pg-gone', strategy: 'cluster' } as const;
+    await w.compute.create(request('us-east-1a/p5.48xlarge', placement), w.call('ins_1'));
+    // Deleted behind this client's back (by hand, or swept by another replica); it is trusted for
+    // an hour without a read, so the launch is what finds out.
+    w.placement.groups.delete('bc-pg-gone');
+    const machine = await w.compute.create(
+      request('us-east-1a/p5.48xlarge', placement),
+      w.call('ins_2'),
+    );
+    expect(w.placement.members.get(machine.id)).toEqual({ group: 'bc-pg-gone' });
+    expect(w.placement.groups.get('bc-pg-gone')?.tags.get('better-compute:managed')).toBe('true');
+    expect(w.placement.calls.filter((c) => c.action === 'CreatePlacementGroup')).toHaveLength(2);
+    // Two launches for ins_2: the refused one and the one after the group was made again.
+    expect(w.runs()).toHaveLength(3);
+
+    // Made again but not usable yet: retried, with one extra launch only, and nothing remembered.
+    w.placement.groups.delete('bc-pg-gone');
+    const before = w.runs().length;
+    const original = w.placement.add.bind(w.placement);
+    w.placement.add = (group) => original({ ...group, state: 'pending' });
+    await expect(
+      w.compute.create(request('us-east-1a/p5.48xlarge', placement), w.call('ins_3')),
+    ).rejects.toMatchObject({
+      code: 'UNAVAILABLE',
+      details: { reason: 'placement-group-propagating' },
+    });
+    expect(w.runs().length - before).toBe(2);
+    w.placement.groups.get('bc-pg-gone')!.state = 'available';
+    const third = await w.compute.create(
+      request('us-east-1a/p5.48xlarge', placement),
+      w.call('ins_3'),
+    );
+    expect(w.placement.members.get(third.id)).toEqual({ group: 'bc-pg-gone' });
+  });
+
+  it('the sweep deletes managed groups no instance uses, at the second look, and no others', async () => {
+    const w = world();
+    const used = { group: 'bc-pg-used', strategy: 'cluster' } as const;
+    const idle = { group: 'bc-pg-idle', strategy: 'spread' } as const;
+    const kept = await w.compute.create(request('us-east-1a/p5.48xlarge', used), w.call('ins_1'));
+    const gone = await w.compute.create(request('us-east-1a/m7i.large', idle), w.call('ins_2'));
+    // Someone else's group, and one that only looks like ours by name.
+    w.placement.add({ name: 'theirs', strategy: 'cluster' });
+    w.placement.add({ name: 'bc-pg-lookalike', strategy: 'cluster' });
+    const poll = () => w.compute.pollEvents(w.call('events'), { waitMs: 0, max: 10 });
+    const deletes = () => w.placement.calls.filter((c) => c.action === 'DeletePlacementGroup');
+    await poll();
+    expect(deletes()).toHaveLength(0);
+    // The idle group's only instance terminates.
+    w.ec2emu.instances.get(gone.id)!.state = 'terminated';
+    // At most one sweep in ten minutes.
+    await poll();
+    expect(w.placement.calls.filter((c) => c.action === 'DescribePlacementGroups')).toHaveLength(3);
+    w.emu.clock.advance(11 * 60_000);
+    await poll();
+    // Seen unused once: kept (a launch into it may not show yet).
+    expect(w.placement.groups.has('bc-pg-idle')).toBe(true);
+    w.emu.clock.advance(11 * 60_000);
+    await poll();
+    expect([...w.placement.groups.keys()].sort()).toEqual([
+      'bc-pg-lookalike',
+      'bc-pg-used',
+      'theirs',
+    ]);
+    expect(deletes().map((c) => c.params.get('GroupName'))).toEqual(['bc-pg-idle']);
+    // A stopped instance still holds its group.
+    w.ec2emu.instances.get(kept.id)!.state = 'stopped';
+    for (let n = 0; n < 3; n++) {
+      w.emu.clock.advance(11 * 60_000);
+      await poll();
+    }
+    expect(w.placement.groups.has('bc-pg-used')).toBe(true);
+    // The next launch into the swept group makes it again.
+    const again = await w.compute.create(request('us-east-1a/m7i.large', idle), w.call('ins_3'));
+    expect(w.placement.members.get(again.id)).toEqual({ group: 'bc-pg-idle' });
+  });
+
+  it('a group that is in use again by the second look, or that EC2 says is in use, is kept', async () => {
+    const w = world();
+    const placement = { group: 'bc-pg-race', strategy: 'cluster' } as const;
+    const first = await w.compute.create(
+      request('us-east-1a/p5.48xlarge', placement),
+      w.call('ins_1'),
+    );
+    const poll = () => w.compute.pollEvents(w.call('events'), { waitMs: 0, max: 10 });
+    w.ec2emu.instances.get(first.id)!.state = 'terminated';
+    w.emu.clock.advance(11 * 60_000);
+    await poll();
+    // Another machine launches into it before the second look.
+    await w.compute.create(request('us-east-1a/p5.48xlarge', placement), w.call('ins_2'));
+    for (let n = 0; n < 2; n++) {
+      w.emu.clock.advance(11 * 60_000);
+      await poll();
+    }
+    expect(w.placement.groups.has('bc-pg-race')).toBe(true);
+    expect(w.placement.calls.filter((c) => c.action === 'DeletePlacementGroup')).toHaveLength(0);
+  });
+
+  it('a sweep the account may not run never fails the poll; only a refused delete is worth a warning', async () => {
+    const logs: unknown[][] = [];
+    const w = world({}, logs);
+    const poll = () => w.compute.pollEvents(w.call('events'), { waitMs: 0, max: 10 });
+    const reads = () => w.placement.calls.filter((c) => c.action === 'DescribePlacementGroups');
+    const warnings = () =>
+      logs.filter(([, message]) => String(message).includes('placement groups'));
+    // No A10 policy at all: the account has no group of ours either, and its operator hears nothing.
+    w.placement.failNext.set('DescribePlacementGroups', 'UnauthorizedOperation');
+    await expect(poll()).resolves.toMatchObject({ events: [] });
+    expect(warnings()).toHaveLength(0);
+    // Tried again only after an hour.
+    w.emu.clock.advance(11 * 60_000);
+    await poll();
+    expect(reads()).toHaveLength(1);
+    w.emu.clock.advance(60 * 60_000);
+    await poll();
+    expect(reads()).toHaveLength(2);
+
+    // An older A10 policy (no DeletePlacementGroup): one warning, the group stays, the poll works.
+    const machine = await w.compute.create(
+      request('us-east-1a/m7i.large', { group: 'bc-pg-old', strategy: 'spread' }),
+      w.call('ins_1'),
+    );
+    w.ec2emu.instances.get(machine.id)!.state = 'terminated';
+    for (let n = 0; n < 3; n++) {
+      w.emu.clock.advance(61 * 60_000);
+      w.placement.failNext.set('DeletePlacementGroup', 'UnauthorizedOperation');
+      await expect(poll()).resolves.toMatchObject({ events: [] });
+    }
+    expect(w.placement.groups.has('bc-pg-old')).toBe(true);
+    expect(warnings()).toHaveLength(1);
+    expect(String(warnings()[0]![1])).toContain('ec2:DeletePlacementGroup');
+  });
+
   it('a partition group gets seven partitions and a launch may name one', async () => {
     const w = world();
     const machine = await w.compute.create(
@@ -648,6 +783,14 @@ describe('aws iam-policy --phases A10', () => {
       Action: 'ec2:CreateTags',
       Resource: 'arn:aws:ec2:*:*:placement-group/*',
       Condition: { StringEquals: { 'ec2:CreateAction': 'CreatePlacementGroup' } },
+    });
+    // The sweep deletes only groups better-compute made.
+    expect(sid(policy, 'PlacementGroupDelete')).toEqual({
+      Sid: 'PlacementGroupDelete',
+      Effect: 'Allow',
+      Action: 'ec2:DeletePlacementGroup',
+      Resource: 'arn:aws:ec2:*:*:placement-group/*',
+      Condition: { StringEquals: { 'ec2:ResourceTag/better-compute:managed': 'true' } },
     });
     // Launches go only into groups better-compute made.
     expect(sid(policy, 'RunInPlacementGroup')).toEqual({

@@ -8,6 +8,8 @@ export interface FakeSecret {
   kmsKeyId?: string;
   tags: { Key: string; Value: string }[];
   versions: number;
+  /** ClientRequestToken → the value of the version it made (requests are idempotent by token). */
+  tokens?: Map<string, string | undefined>;
 }
 
 export function secretsManagerFake(emu: AwsEmulator) {
@@ -20,19 +22,33 @@ export function secretsManagerFake(emu: AwsEmulator) {
       switch (request.operation) {
         case 'CreateSecret': {
           const name = String(body.Name);
-          if (secrets.has(name)) throw new EmuError('ResourceExistsException', 'exists');
+          const token = String(body.ClientRequestToken ?? '');
+          const existing = secrets.get(name);
+          // The same request again (name, token and value) answers with the secret it made.
+          if (existing && existing.tokens?.has(token) && existing.tokens.get(token) === body.SecretString)
+            return jsonResponse({ ARN: `arn:aws:secretsmanager:us-east-1:111111111111:secret:${name}-AbCdEf`, Name: name });
+          if (existing) throw new EmuError('ResourceExistsException', 'exists');
           secrets.set(name, {
             name,
             value: body.SecretString as string | undefined,
             kmsKeyId: body.KmsKeyId as string | undefined,
             tags: (body.Tags as FakeSecret['tags']) ?? [],
             versions: 1,
+            tokens: new Map([[token, body.SecretString as string | undefined]]),
           });
           return jsonResponse({ ARN: `arn:aws:secretsmanager:us-east-1:111111111111:secret:${name}-AbCdEf`, Name: name });
         }
         case 'PutSecretValue': {
           const secret = secrets.get(String(body.SecretId));
           if (!secret) throw new EmuError('ResourceNotFoundException', 'Secrets Manager cannot find the specified secret.');
+          const token = String(body.ClientRequestToken ?? '');
+          secret.tokens ??= new Map();
+          if (secret.tokens.has(token)) {
+            // A version with this token exists: the same value is a no-op, another one a conflict.
+            if (secret.tokens.get(token) === body.SecretString) return jsonResponse({ Name: secret.name });
+            throw new EmuError('ResourceExistsException', 'a version with this ClientRequestToken exists');
+          }
+          secret.tokens.set(token, body.SecretString as string);
           secret.value = body.SecretString as string;
           secret.versions += 1;
           return jsonResponse({ Name: secret.name });

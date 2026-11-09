@@ -13,6 +13,7 @@ import {
 import { partitionOf, type QueryParams, type XmlElement } from '@better-compute/aws-core';
 import type { IamStatement } from './cli.js';
 import type { AwsConfig } from './config.js';
+import { ReadConsistency } from './consistency.js';
 import { clientToken, parseInstanceId, tags, tagValue } from './ids.js';
 
 // Tenant networking on Amazon VPC (AWS A2). A better-compute network is a VPC with an internet
@@ -308,7 +309,12 @@ export class AwsNetworks implements ProviderNetworks {
   /** Tag group id → when a sweep first saw it unused (it is deleted at a later sweep, if still unused). */
   readonly #unused = new Map<string, { vpcId: string; at: number }>();
 
-  constructor(readonly host: AwsNetworksHost) {}
+  /** The account's consistency window, shared with compute, volumes and placement. */
+  readonly #lag: ReadConsistency;
+
+  constructor(readonly host: AwsNetworksHost) {
+    this.#lag = new ReadConsistency(host.context.clock, () => host.consistencyWindowMs());
+  }
 
   get #config(): AwsConfig {
     return this.host.config;
@@ -408,7 +414,7 @@ export class AwsNetworks implements ProviderNetworks {
     }
     if (found[0]) return found[0];
     const created = this.#created.get(name);
-    if (created && this.host.context.clock.now() - created.at < this.host.consistencyWindowMs())
+    if (created && this.#lag.recent(created.at))
       return {
         id: created.id,
         state: 'pending',
@@ -775,11 +781,7 @@ export class AwsNetworks implements ProviderNetworks {
     const vpcs = await this.#vpcsOf(name, signal);
     // A VPC this client just created may not show in tag reads yet: never take that for "gone".
     const created = this.#created.get(name);
-    if (
-      created &&
-      !vpcs.some((vpc) => vpc.id === created.id) &&
-      this.host.context.clock.now() - created.at < this.host.consistencyWindowMs()
-    ) {
+    if (created && !vpcs.some((vpc) => vpc.id === created.id) && this.#lag.recent(created.at)) {
       const fresh = await this.#vpc(created.id, signal);
       // Not even a read by id shows it yet: wait, rather than leave a VPC nobody deletes.
       if (!fresh) return state(created.id, 'pending', `Waiting for VPC ${created.id} to show`);
@@ -2308,7 +2310,7 @@ export class AwsNetworks implements ProviderNetworks {
           this.#unused.set(id, { vpcId, at: now });
           continue;
         }
-        if (now - since < this.host.consistencyWindowMs()) continue;
+        if (this.#lag.recent(since)) continue;
         try {
           await this.#call('DeleteSecurityGroup', { GroupId: id }, signal);
           this.#unused.delete(id);

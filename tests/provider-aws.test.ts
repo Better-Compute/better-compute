@@ -551,11 +551,14 @@ describe('compute', () => {
     expect(ec2emu.instances.size).toBe(1);
   });
 
-  it('IdempotentParameterMismatch is CONFLICT', async () => {
-    const { create } = await providerWorld();
-    await create('ins_same');
-    const error = await rejection(() => create('ins_same', { offerId: 'us-east-1b/t3.micro' }));
-    expect(error.code).toBe('CONFLICT');
+  it('IdempotentParameterMismatch answers with what the key already launched, as it is', async () => {
+    const { create, ec2emu } = await providerWorld();
+    const first = await create('ins_same');
+    // The same create asked for another zone: the instance its key launched is the answer, and it
+    // reports where it really is. Nothing second is launched and nothing runs untracked.
+    const again = await create('ins_same', { offerId: 'us-east-1b/t3.micro' });
+    expect(again).toMatchObject({ id: first.id, zone: 'us-east-1a' });
+    expect(ec2emu.instances.size).toBe(1);
   });
 
   it('create refuses zones outside config', async () => {
@@ -685,8 +688,82 @@ describe('compute', () => {
     });
     emu.clock.advance(61_000);
     expect(await impl.get(machine.id, call('ins_window'))).toBeUndefined();
-    expect(await impl.get('i-0000000000000dead', call('other'))).toBeUndefined();
+    // An id this process never saw may be another process's launch: pending for one window from its
+    // first miss, then gone.
+    const ghost = 'i-0000000000000dead';
+    expect(await impl.get(ghost, call('other'))).toEqual({
+      id: ghost,
+      state: 'pending',
+      addresses: [],
+    });
+    emu.clock.advance(121_000);
+    expect(await impl.get(ghost, call('other'))).toBeUndefined();
     expect(await impl.get('not-an-id', call('other'))).toBeUndefined();
+  });
+
+  it('another process (a replica, a restart) neither loses nor leaks an instance EC2 does not show yet', async () => {
+    const { emu, ec2emu, create, provider, config, call } = await providerWorld();
+    // A second client of the same account: none of the first one's memory.
+    const other = (await provider.create(config, {
+      clock: emu.clock,
+      log: quiet,
+      secrets: { resolve: async () => '' },
+      account: { id: 'pa_platform', tenantId: 'root', platform: true },
+    })) as AwsCompute;
+    ec2emu.newInstanceNotFound = { byId: 9, byToken: 9 };
+    const machine = await create('ins_two');
+    // get: pending, never undefined (vps would mark it lost and stop billing it).
+    expect(await other.get(machine.id, call('ins_two'))).toEqual({
+      id: machine.id,
+      state: 'pending',
+      addresses: [],
+    });
+    // delete: retried; nothing is terminated blind and nothing is reported deleted.
+    const error = await rejection(() => other.delete(machine.id, call('ins_two')));
+    expect(error).toMatchObject({
+      code: 'UNAVAILABLE',
+      details: { reason: 'eventual-consistency' },
+    });
+    expect(emu.calls('TerminateInstances')).toHaveLength(0);
+    expect(ec2emu.instances.get(machine.id)!.state).toBe('pending');
+    // Once EC2 shows the instance the guarded delete (managed tag checked) terminates it.
+    ec2emu.instances.get(machine.id)!.notFoundById = 0;
+    await other.delete(machine.id, call('ins_two'));
+    expect(emu.calls('TerminateInstances')).toHaveLength(1);
+    expect(ec2emu.instances.get(machine.id)!.state).toBe('shutting-down');
+  });
+
+  it('TerminateInstances missing an instance a read just found is a retry, not a delete', async () => {
+    const { emu, ec2emu, impl, call } = await providerWorld();
+    const managed = ec2emu.addInstance({ tags: { 'better-compute:managed': 'true' } });
+    emu.failNext('TerminateInstances', 'InvalidInstanceID.NotFound');
+    const error = await rejection(() => impl.delete(managed.id, call()));
+    expect(error).toMatchObject({
+      code: 'UNAVAILABLE',
+      details: { reason: 'eventual-consistency' },
+    });
+    await impl.delete(managed.id, call());
+    expect(managed.state).toBe('shutting-down');
+  });
+
+  it('a retried create whose parameters drifted answers with the instance the first attempt launched', async () => {
+    const { emu, ec2emu, create } = await providerWorld();
+    const first = await create('ins_drift');
+    // The answer was lost; before the retry a label changed (as an image alias or a subnet might).
+    const again = await create('ins_drift', { labels: { team: 'ml' } });
+    expect(again.id).toBe(first.id);
+    expect(emu.calls('RunInstances')).toHaveLength(2);
+    expect(ec2emu.instances.size).toBe(1);
+    // While EC2 does not show that instance by its token yet, the create is retried, never CONFLICT.
+    ec2emu.newInstanceNotFound = { byId: 0, byToken: 1 };
+    const other = await create('ins_drift2');
+    const error = await rejection(() => create('ins_drift2', { labels: { team: 'ml' } }));
+    expect(error).toMatchObject({
+      code: 'UNAVAILABLE',
+      details: { reason: 'eventual-consistency' },
+    });
+    expect((await create('ins_drift2', { labels: { team: 'ml' } })).id).toBe(other.id);
+    expect(ec2emu.instances.size).toBe(2);
   });
 
   it('async stockout surfaces through get', async () => {
@@ -756,8 +833,18 @@ describe('compute', () => {
   });
 
   it('delete treats missing instances as deleted', async () => {
-    const { impl, call, create, ec2emu } = await providerWorld();
-    await impl.delete('i-0000000000000dead', call());
+    const { impl, call, create, ec2emu, emu } = await providerWorld();
+    // An id no read ever showed may be lagging: retried for one window, then gone.
+    const ghost = 'i-0000000000000dead';
+    expect(await rejection(() => impl.delete(ghost, call()))).toMatchObject({
+      code: 'UNAVAILABLE',
+      details: { reason: 'eventual-consistency' },
+    });
+    emu.clock.advance(60_000);
+    expect((await rejection(() => impl.delete(ghost, call()))).code).toBe('UNAVAILABLE');
+    emu.clock.advance(61_000);
+    await impl.delete(ghost, call());
+    expect(emu.calls('TerminateInstances')).toHaveLength(0);
     const machine = await create('ins_del');
     await impl.delete(machine.id, call('ins_del'));
     expect(ec2emu.instances.get(machine.id)!.state).toBe('shutting-down');

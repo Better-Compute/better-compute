@@ -204,6 +204,70 @@ All notable changes to the better-compute packages are documented here. The form
   GPU machine type (and so `TERMINATE`) when `machineTypes.get` fails now knows the `a4x-` and `g4-` families.
 - **GB200 and RTX PRO 6000 GPUs** (`@better-compute/provider-gcp`). `nvidia-gb200` and `nvidia-rtx-pro-6000`
   accelerators report the `GB200` and `RTX-PRO-6000` GPU families (and meters) instead of `other`.
+- **An EC2 instance another process just launched is never lost or leaked** (`@better-compute/provider-aws`).
+  Whether EC2 may still not show an instance was decided from one process's memory of its own launches, so
+  another replica (or the same one after a restart) read a just-launched instance as gone: `get` returned
+  `undefined` (vps marked it `lost` and stopped billing it) and `delete` reported success without terminating it.
+  A first miss by id now opens the consistency window for any instance: `get` answers `pending` and `delete` a
+  retryable `UNAVAILABLE` (`eventual-consistency`) until EC2 shows the instance or it has been missing for the
+  whole window. `TerminateInstances` not finding an instance a read just found is retried the same way. Volumes,
+  networks and instances share one consistency helper.
+- **A static AWS access key rotated in place is picked up without a restart** (`@better-compute/aws-core`). A
+  long-term key is cached until it is invalidated, and only `ExpiredToken` invalidated it, so after an operator
+  rotated the secret every call answered `AuthFailure` until the process restarted. `AuthFailure`,
+  `InvalidClientTokenId` and `UnrecognizedClientException` (now `UNAUTHENTICATED`) re-read the credentials and
+  retry once, and only when the source then gives a different key.
+- **`RequestExpired` from expired temporary credentials recovers** (`@better-compute/aws-core`,
+  `@better-compute/aws`). `RequestExpired` was handled only as clock skew: one retry with the same credentials,
+  then `UNAUTHENTICATED` until the local clock reached the refresh point. When the measured skew is under a minute,
+  or the clock-corrected retry is refused again, the credentials are now read again and the request retried once
+  with the new ones. Each call makes at most one clock correction and one credential re-read. The platform
+  transport of `@better-compute/aws` gets the same retries, including the one for a refused (rotated) key.
+- **One caller giving up no longer fails the others waiting on the same AWS sign-in** (`@better-compute/aws-core`,
+  `@better-compute/provider-aws`). The shared credential refresh (`cachedCredentials`) and the account identity
+  check ran on the signal of the caller that started them, so when that caller aborted (a `listOffers` out of time)
+  a healthy `create` or purchase waiting on the same refresh was rejected with someone else's abort. Both now run
+  on their own signal and timeout (60 s; `cachedCredentials({ resolveTimeoutMs })`), each waiter leaves on its own
+  signal only, and the work is cancelled once nobody waits. `aws-core` exports `sharedFlight`.
+- **A capacity purchase is not held back by a failure that sent nothing** (`@better-compute/vps`,
+  `@better-compute/provider-aws`). Any retryable failure marked a purchase attempt as one that may have bought,
+  including failures raised before `PurchaseCapacityBlock` was sent (one throttled describe, an STS blip); every
+  later attempt then answered `purchase-propagating` for 15 minutes and the block was bought late or not at all.
+  provider-aws now marks retryable failures raised before the purchase request with `details.reason:
+  'purchase-not-sent'` (the reason they had moves to `details.cause`), and vps leaves a purchase as uncertain as
+  it was for those and for failures before the provider was asked. A failure of the purchase request itself, or
+  after it, is uncertain as before: the double-buy guard is unchanged.
+- **A retried EC2 create whose parameters drifted finds its instance** (`@better-compute/provider-aws`). When a
+  `RunInstances` answer was lost and a parameter changed before the retry, EC2 answers
+  `IdempotentParameterMismatch`; that surfaced as `CONFLICT`, which vps retried forever while the launched
+  instance ran untracked. `create` now answers with the instance the key already launched (as it is: it reports
+  its real zone and type), or a retryable `UNAVAILABLE` (`eventual-consistency`) until EC2 shows it.
+- **EC2 resource quotas are `QUOTA_EXCEEDED`** (`@better-compute/aws-core`). `SecurityGroupLimitExceeded`,
+  `CidrLimitExceeded`, `NetworkAclEntryLimitExceeded` and `TagLimitExceeded` were not in the error table, so a
+  create that hit the security group quota failed as `PROVIDER_ERROR` and was retried forever.
+- **Placement groups are re-made when they vanish and deleted when unused** (`@better-compute/provider-aws`). A
+  placement group is trusted for an hour without a read, so a group deleted meanwhile failed every launch into it
+  until the hour passed, and nothing ever deleted a group. A launch EC2 refuses with
+  `InvalidPlacementGroup.Unknown` now forgets the group, ensures it again and launches once more
+  (`placement-group-propagating` if EC2 still does not take it). Groups better-compute made (tagged
+  `better-compute:managed=true`; never one found by name) are deleted once no instance uses them: the sweep runs
+  with the account's event poll, at most every 10 minutes, and deletes a group only at the second look.
+  `aws iam-policy --phases A10` adds `PlacementGroupDelete` (`ec2:DeletePlacementGroup` on tagged groups); an
+  account with the older policy keeps its unused groups. Per-instance tag security groups were already swept
+  (`ensureNetwork`, `ensureFirewall` and `setTags` delete tag groups unused at two looks).
+- **A retried Secrets Manager `put` no longer leaves a second secret** (`@better-compute/aws`).
+  `awsSecretsManagerStore().put` used a new name and a new `ClientRequestToken` on every call, so a `CreateSecret`
+  whose answer was lost, followed by a retry, left a secret holding tenant plaintext that no ref named. `put` now
+  takes `idempotencyKey` (`AwsSecretPutOptions`): the name and the token are derived from it and the tenant, so a
+  retry with the same key answers with the same ref (the same key with another value is `CONFLICT`); a rotation
+  with a key is one version however often it is retried. Without a key, a `CreateSecret` that may have created
+  the secret (no answer, a 5xx) is followed by a best-effort `DeleteSecret` of that name. `SecretStore.put` in
+  `core` does not carry a key yet, so callers pass it through the store's own type.
+- **`@better-compute/aws` signs and redacts with `aws-core`** (`@better-compute/aws`). Its private copy of the SigV4
+  signer had drifted from `aws-core`'s and is gone: requests and presigned URLs are signed by `aws-core`. Error
+  messages are redacted with `aws-core`'s patterns (every access key id prefix, signed header lines, credential
+  XML) plus `SecretString`, `SecretBinary` and `Plaintext`, and the transport no longer follows redirects (a
+  redirect would have sent the signed headers to another host). RDS IAM tokens still sign the empty-body hash.
 
 ## 0.3.0 (2026-10-20)
 

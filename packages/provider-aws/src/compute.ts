@@ -28,6 +28,7 @@ import type {
 } from '@better-compute/aws-core';
 import type { AccountCredentials } from './account.js';
 import { parseDiscoverTag, type AwsConfig, type AwsProviderOptions } from './config.js';
+import { ReadConsistency } from './consistency.js';
 import { clientToken, offerId, parseInstanceId, parseOfferId, tags, tagValue } from './ids.js';
 import {
   defaultEventSources,
@@ -46,7 +47,12 @@ import {
 } from './images.js';
 import { AwsFilesystems } from './filesystems.js';
 import { AwsNetworks } from './networks.js';
-import { checkPlacement, PlacementGroups, placementParams } from './placement.js';
+import {
+  checkPlacement,
+  PlacementGroups,
+  placementParams,
+  unknownPlacementGroup,
+} from './placement.js';
 import { InstanceTopology } from './topology.js';
 import {
   toMachine,
@@ -124,6 +130,17 @@ const imageTtlMs = 86_400_000;
  * reads settle in seconds; this is far beyond that.
  */
 export const purchasePropagationMs = 15 * 60_000;
+/**
+ * `details.reason` of a retryable purchase failure raised before the purchase request was sent:
+ * the attempt provably bought nothing (vps does not mark the purchase uncertain for it).
+ */
+export const purchaseNotSent = 'purchase-not-sent';
+/** The codes vps retries a purchase on. */
+const retriedPurchaseCodes: ReadonlySet<string> = new Set([
+  'UNAVAILABLE',
+  'RATE_LIMITED',
+  'TIMEOUT',
+]);
 /** Clock skew allowed between vps (the purchase's request time) and EC2 (a block's createDate). */
 const purchaseSkewMs = 5 * 60_000;
 /** EC2 allows 50 tags per resource; ours take 3, the rest is for tenant labels. */
@@ -184,6 +201,16 @@ function transitional(id: string, state?: string): ComputeError {
   );
 }
 
+/** No EC2 read shows the instance, and it may only be lagging: the delete is retried, never done. */
+function notVisible(id: string): ComputeError {
+  return new ComputeError(
+    'UNAVAILABLE',
+    `EC2 does not show instance ${id} (yet); the delete is retried until it shows or has been missing for the consistency window`,
+    undefined,
+    { provider: 'aws', reason: 'eventual-consistency' },
+  );
+}
+
 /** EC2 tag writes are eventually consistent: a read right after CreateTags may not show them. */
 function tagPropagation(id: string): ComputeError {
   return new ComputeError(
@@ -234,7 +261,14 @@ export class AwsCompute implements ProviderImpl {
   /** Managed Kubernetes (EKS clusters and node groups); the provider sets it. */
   kubernetes?: ProviderKubernetes;
   #offerings: { pairs: [string, string][]; at: number } | undefined;
+  /** Instance id → when this client launched it. Only a hint: another process may have launched it. */
   readonly #created = new Map<string, number>();
+  /**
+   * By-id instance reads that missed. Which process launched an instance is no test of whether EC2
+   * may still not show it (another replica, or this one before a restart, may have), so a first
+   * miss opens the consistency window for any id.
+   */
+  readonly #lag: ReadConsistency;
   /** Instance id → when this client last claimed it with `managed` (tags lag behind writes). */
   readonly #managedClaims = new Map<string, number>();
   /** Instance id → when this client last wrote or saw its own ownership tag on it in `claim`. */
@@ -281,6 +315,7 @@ export class AwsCompute implements ProviderImpl {
   ) {
     this.#ssmPrefixes = ssmImagePrefixes(options.ssmImagePrefixes);
     this.#imageOwners = imageOwnersOf(options.imageOwners);
+    this.#lag = new ReadConsistency(context.clock, () => this.consistencyWindowMs);
     this.networks = new AwsNetworks({
       config,
       context,
@@ -315,6 +350,7 @@ export class AwsCompute implements ProviderImpl {
     this.#placementGroups = new PlacementGroups(
       (action, params, signal) => this.call(action, params, signal),
       context.clock,
+      () => this.consistencyWindowMs,
     );
     this.#topology = new InstanceTopology(
       (action, params, signal) => this.call(action, params, signal),
@@ -354,6 +390,15 @@ export class AwsCompute implements ProviderImpl {
     }
     const at = map.get(id);
     return at !== undefined && now - at < this.consistencyWindowMs;
+  }
+
+  /**
+   * Whether no read finding instance `id` may still be EC2's eventual consistency: launched by this
+   * client inside the window, or first missed by this process less than the window ago (it may be
+   * another process's launch). False once it has been missing for the whole window: gone.
+   */
+  #mayLag(id: string): boolean {
+    return this.#lag.mayLag(id, this.recent(this.#created, id) ? this.#created.get(id) : undefined);
   }
 
   /** Records `id` at the current time (moving it to the end, so the map stays in time order). */
@@ -825,36 +870,60 @@ export class AwsCompute implements ProviderImpl {
     const offering = parseOfferingId(id, this.config.zones);
     const { signal } = context;
     const token = clientToken(context.idempotencyKey);
-    const earlier = await this.#purchased(token, signal);
-    if (earlier) return earlier;
-    // PurchaseCapacityBlock takes no ClientToken, and EC2's reads are eventually consistent: when an
-    // earlier attempt may have bought (its answer was lost), the block it bought may not show its
-    // tag, or not show at all, yet. Look for it by what it is; until the window passes, never buy
-    // again (nor take a sold-out offering for a failure): the earlier attempt may be the buyer.
-    if (offering.kind === 'block' && attempt?.uncertainSince !== undefined) {
-      const like = await this.#boughtBlock(
-        offering,
-        token,
-        attempt.requestedAt,
-        new Set(attempt.excludeReservationIds ?? []),
-        signal,
-      );
-      if (like) return like;
-      if (this.context.clock.now() < attempt.uncertainSince + purchasePropagationMs)
-        throw new ComputeError(
-          'UNAVAILABLE',
-          'an earlier attempt of this purchase may have bought the Capacity Block; EC2 does not show it yet',
-          undefined,
-          { provider: 'aws', reason: 'purchase-propagating' },
+    // Everything before the purchase request only reads. A retryable failure there (a throttled
+    // describe, an STS blip) provably bought nothing, and says so (`purchase-not-sent`): vps then
+    // does not take the attempt for one that may have bought, which would hold every later attempt
+    // back for `purchasePropagationMs`. From the purchase request on, any failure may have bought.
+    const found = await this.#beforePurchaseRequest(async () => {
+      const earlier = await this.#purchased(token, signal);
+      if (earlier) return earlier;
+      // PurchaseCapacityBlock takes no ClientToken, and EC2's reads are eventually consistent: when
+      // an earlier attempt may have bought (its answer was lost), the block it bought may not show
+      // its tag, or not show at all, yet. Look for it by what it is; until the window passes, never
+      // buy again (nor take a sold-out offering for a failure): the earlier attempt may be the buyer.
+      if (offering.kind === 'block' && attempt?.uncertainSince !== undefined) {
+        const like = await this.#boughtBlock(
+          offering,
+          token,
+          attempt.requestedAt,
+          new Set(attempt.excludeReservationIds ?? []),
+          signal,
         );
-    }
+        if (like) return like;
+        if (this.context.clock.now() < attempt.uncertainSince + purchasePropagationMs)
+          throw new ComputeError(
+            'UNAVAILABLE',
+            'an earlier attempt of this purchase may have bought the Capacity Block; EC2 does not show it yet',
+            undefined,
+            { provider: 'aws', reason: 'purchase-propagating' },
+          );
+      }
+      if (offering.kind === 'block') await this.#confirmBlock(offering, signal);
+      else {
+        const offered = (await this.#offeringPairs(signal)).some(
+          ([zone, type]) => zone === offering.zone && type === offering.instanceType,
+        );
+        if (!offered)
+          throw new ComputeError(
+            'INVALID_INPUT',
+            `${offering.instanceType} is not offered in ${offering.zone}`,
+            undefined,
+            { provider: 'aws', reason: 'offering' },
+          );
+      }
+      // The identity check and the credentials the purchase request is signed with are resolved
+      // here (both are cached), so a failure of either is still before the request.
+      await this.ready(signal);
+      await this.deps.account.source.credentials({ signal, clock: this.context.clock });
+      return undefined;
+    });
+    if (found) return found;
     const purchaseTags = [
       { Key: tags.managed, Value: 'true' },
       { Key: purchaseTag, Value: token },
     ];
     let doc: XmlElement;
     if (offering.kind === 'block') {
-      await this.#confirmBlock(offering, signal);
       doc = await this.call(
         'PurchaseCapacityBlock',
         {
@@ -865,16 +934,6 @@ export class AwsCompute implements ProviderImpl {
         signal,
       );
     } else {
-      const offered = (await this.#offeringPairs(signal)).some(
-        ([zone, type]) => zone === offering.zone && type === offering.instanceType,
-      );
-      if (!offered)
-        throw new ComputeError(
-          'INVALID_INPUT',
-          `${offering.instanceType} is not offered in ${offering.zone}`,
-          undefined,
-          { provider: 'aws', reason: 'offering' },
-        );
       try {
         doc = await this.call(
           'CreateCapacityReservation',
@@ -928,6 +987,38 @@ export class AwsCompute implements ProviderImpl {
         { provider: 'aws', reason: 'purchase-answer-unreadable' },
       );
     return reservation;
+  }
+
+  /**
+   * Runs the part of a purchase that sends no purchase request. A retryable failure of it is
+   * rethrown with `details.reason: 'purchase-not-sent'` (the reason it had moves to `cause`):
+   * nothing can have been bought. `purchase-propagating` keeps its reason, and so does every
+   * failure that is not retried.
+   */
+  async #beforePurchaseRequest<T>(step: () => Promise<T>): Promise<T> {
+    try {
+      return await step();
+    } catch (error) {
+      if (!isComputeError(error)) {
+        this.context.log.warn('aws: a purchase failed before its request was sent', {
+          provider: 'aws',
+          error: error instanceof Error ? error.name : typeof error,
+        });
+        throw new ComputeError(
+          'UNAVAILABLE',
+          'the purchase could not be prepared; nothing was bought and it is retried',
+          undefined,
+          { provider: 'aws', reason: purchaseNotSent },
+        );
+      }
+      const reason = error.details?.reason;
+      if (!retriedPurchaseCodes.has(error.code) || reason === 'purchase-propagating') throw error;
+      throw new ComputeError(error.code, error.message, error.status, {
+        ...error.details,
+        reason: purchaseNotSent,
+        ...(typeof reason === 'string' ? { cause: reason } : {}),
+      });
+    }
   }
 
   /** The reservation an earlier attempt with this purchase token bought, if EC2 shows one. */
@@ -1451,7 +1542,31 @@ export class AwsCompute implements ProviderImpl {
           }
         : {}),
     };
-    const doc = await this.call('RunInstances', params, signal);
+    let doc: XmlElement;
+    try {
+      doc = await this.#launch(params, request.placement, signal);
+    } catch (error) {
+      if (
+        !isComputeError(error, 'CONFLICT') ||
+        error.details?.code !== 'IdempotentParameterMismatch'
+      )
+        throw error;
+      // EC2 knows this create's ClientToken with other parameters: an earlier attempt launched (its
+      // answer was lost) and something drifted since (an image alias moved, a subnet or security
+      // group was recreated, a label changed). That instance is this create's result. Passing the
+      // CONFLICT on would have vps retry it forever while the instance runs untracked.
+      const launched = await this.#launchedBefore(context);
+      if (!launched)
+        throw new ComputeError(
+          'UNAVAILABLE',
+          'an earlier attempt of this create launched an instance; EC2 does not show it yet',
+          undefined,
+          { provider: 'aws', reason: 'eventual-consistency' },
+        );
+      const launchedId = launched.textOf('instanceId');
+      if (launchedId) this.#lag.seen(launchedId);
+      return this.machine(launched, signal);
+    }
     const instance = doc.items('instancesSet')[0];
     const id = instance?.textOf('instanceId');
     if (!instance || !id)
@@ -1460,6 +1575,40 @@ export class AwsCompute implements ProviderImpl {
       });
     if (!this.recent(this.#created, id)) this.#created.set(id, this.context.clock.now());
     return this.machine(instance, signal);
+  }
+
+  /**
+   * RunInstances. A launch into a placement group EC2 does not know means the group this client
+   * remembers (for an hour, without a read) is gone: deleted by hand, or swept as unused by another
+   * replica. The memory of it is dropped, the group is ensured again and the launch is tried once
+   * more; if EC2 still does not take it, the create is a retryable UNAVAILABLE.
+   */
+  async #launch(
+    params: QueryParams,
+    placement: ProviderPlacement | undefined,
+    signal: AbortSignal,
+  ): Promise<XmlElement> {
+    const unknownGroup = (error: unknown): boolean =>
+      isComputeError(error) && error.details?.code === unknownPlacementGroup;
+    try {
+      return await this.call('RunInstances', params, signal);
+    } catch (error) {
+      if (!placement || !unknownGroup(error)) throw error;
+    }
+    this.#placementGroups.forget(placement.group);
+    await this.#placementGroups.ensure(placement, signal);
+    try {
+      return await this.call('RunInstances', params, signal);
+    } catch (error) {
+      if (!unknownGroup(error)) throw error;
+      this.#placementGroups.forget(placement.group);
+      throw new ComputeError(
+        'UNAVAILABLE',
+        `placement group ${placement.group} was made again and EC2 does not take launches into it yet`,
+        undefined,
+        { provider: 'aws', reason: 'placement-group-propagating' },
+      );
+    }
   }
 
   /**
@@ -1556,9 +1705,12 @@ export class AwsCompute implements ProviderImpl {
     // EC2 is eventually consistent right after RunInstances: the ClientToken finds it sooner.
     instance ??= await this.#byClientToken(id, context);
     if (!instance) {
-      if (this.recent(this.#created, id)) return { id, state: 'pending', addresses: [] };
-      return undefined;
+      // Not visible: pending while that may be lag (also for an instance another replica, or this
+      // process before a restart, just launched), and gone only after a whole window of misses. vps
+      // marks a machine that reads `undefined` lost and stops billing it.
+      return this.#mayLag(id) ? { id, state: 'pending', addresses: [] } : undefined;
     }
+    this.#lag.seen(id);
     // Just claimed by this client: a lagging read may not show the ownership tag yet. vps would take
     // the missing label as lost ownership, so that is a retryable UNAVAILABLE inside the window.
     if (
@@ -1568,6 +1720,8 @@ export class AwsCompute implements ProviderImpl {
       throw tagPropagation(id);
     const machine = await this.machine(instance, context.signal);
     if (instance.child('instanceState')?.textOf('name') === 'terminated') {
+      // EC2 drops a terminated instance from reads after a while: that miss is final.
+      this.#lag.gone(id);
       const failure = terminatedFailure(instance.child('stateReason')?.textOf('code'));
       if (failure instanceof ComputeError) throw failure;
       if (failure === 'error') return { ...machine, state: 'error' };
@@ -1605,14 +1759,25 @@ export class AwsCompute implements ProviderImpl {
     const instance =
       (await this.describe(id, context.signal)) ?? (await this.#byClientToken(id, context));
     if (!instance) {
-      // Never seen and not ours recently: gone. Ours and not yet visible: RunInstances tagged it
-      // managed, so terminate it rather than report a delete that leaves it running.
-      if (!this.recent(this.#created, id)) return;
-      await this.#terminate(id, context);
-      return;
+      const ours = this.recent(this.#created, id);
+      // Missing for the whole consistency window (or known terminated): gone.
+      if (!this.#mayLag(id)) return;
+      // Launched by this client and not visible yet: RunInstances tagged it managed, so terminate
+      // it rather than report a delete that leaves it running.
+      if (ours) {
+        await this.#terminate(id, context);
+        return;
+      }
+      // Never seen by this process: it may be an instance another replica (or this one before a
+      // restart) just launched. Its managed tag cannot be checked yet, so nothing is terminated
+      // blind and nothing is reported deleted: the delete is retried until EC2 shows the instance
+      // or the window has passed.
+      throw notVisible(id);
     }
+    this.#lag.seen(id);
     const state = instance.child('instanceState')?.textOf('name');
     if (state === 'terminated' || state === 'shutting-down') {
+      this.#lag.gone(id);
       this.volumes.forgetInstance(id);
       return;
     }
@@ -1638,22 +1803,18 @@ export class AwsCompute implements ProviderImpl {
   }
 
   /**
-   * TerminateInstances. NOT_FOUND is success (already gone), except for an instance this client
-   * launched inside the consistency window: EC2 may simply not show it yet, so that is a retryable
-   * UNAVAILABLE (vps treats NOT_FOUND and success alike: deleted).
+   * TerminateInstances. NOT_FOUND is success (already gone) only once the instance has been missing
+   * for the whole consistency window. Before that EC2 may simply not show it yet (this client just
+   * launched it, or a read just found it and this call reached a lagging replica), so it is a
+   * retryable UNAVAILABLE (vps treats NOT_FOUND and success alike: deleted).
    */
   async #terminate(id: string, context: CallContext): Promise<void> {
     try {
       await this.call('TerminateInstances', { InstanceId: [id] }, context.signal);
     } catch (error) {
       if (isComputeError(error, 'NOT_FOUND')) {
-        if (!this.recent(this.#created, id)) return;
-        throw new ComputeError(
-          'UNAVAILABLE',
-          `instance ${id} was just launched and EC2 does not show it yet; retry the delete`,
-          undefined,
-          { provider: 'aws', reason: 'eventual-consistency' },
-        );
+        if (!this.#mayLag(id)) return;
+        throw notVisible(id);
       }
       if (isComputeError(error, 'INVALID_STATE') && error.details?.code === 'OperationNotPermitted')
         throw new ComputeError(
@@ -1941,6 +2102,9 @@ export class AwsCompute implements ProviderImpl {
     context: CallContext,
     options: { waitMs: number; max: number },
   ): Promise<ProviderEventBatch> {
+    // (A10) The periodic call every account gets: placement groups no instance uses are deleted
+    // here, at most once every `placementSweepMs`; a failed sweep is logged, never this poll's error.
+    await this.#placementGroups.sweepWhenDue(context.signal, context.log);
     const { sqs } = this.deps;
     if (sqs === undefined || this.config.eventQueueUrl === undefined) {
       const now = this.context.clock.now();

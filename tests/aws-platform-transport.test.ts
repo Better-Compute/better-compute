@@ -145,6 +145,68 @@ describe('internal transport', () => {
     expect(emu.requests).toHaveLength(1);
   });
 
+  /** A JSON service that accepts one access key id and answers `code` to any other. */
+  function keyed(code: string, accepts: string, aheadMs = 0) {
+    const seen: string[] = [];
+    const fetchImpl = (async (_url: unknown, init: { headers: Record<string, string> }) => {
+      const auth = init.headers.authorization ?? '';
+      seen.push(/Credential=([A-Z0-9]+)/.exec(auth)?.[1] ?? '');
+      const ok = auth.includes(accepts);
+      return new Response(ok ? '{}' : JSON.stringify({ __type: code, message: 'no' }), {
+        status: ok ? 200 : 400,
+        headers: { date: new Date(Date.now() + aheadMs).toUTCString() },
+      });
+    }) as unknown as typeof fetch;
+    return { seen, fetchImpl };
+  }
+  /** Credentials that change after each invalidate (a refreshed session, a rotated secret). */
+  function generations(prefix: string) {
+    const state = { generation: 1, invalidated: 0 };
+    const source = {
+      kind: 'test',
+      credentials: async () => ({ accessKeyId: `${prefix}${state.generation}XXXXXXXXXXXX`, secretAccessKey: 's' }),
+      invalidate: () => {
+        state.invalidated += 1;
+        state.generation += 1;
+      },
+    };
+    return { state, source };
+  }
+  const ping = (credentials: Parameters<typeof createTransport>[0]['credentials'], fetchImpl: typeof fetch) =>
+    jsonClient(createTransport({ region: 'us-east-1', credentials, fetch: fetchImpl, endpoint: 'http://emu' }), {
+      hostPrefix: 'kms',
+      jsonVersion: '1.1',
+      targetPrefix: 'TrentService',
+    }).call('Ping', {});
+
+  it('RequestExpired with a right clock reads the credentials again (an expired session)', async () => {
+    const { state, source } = generations('ASIAGEN');
+    const { seen, fetchImpl } = keyed('RequestExpired', 'ASIAGEN2');
+    await expect(ping(source, fetchImpl)).resolves.toEqual({});
+    expect(seen).toEqual(['ASIAGEN1XXXXXXXXXXXX', 'ASIAGEN2XXXXXXXXXXXX']);
+    expect(state.invalidated).toBe(1);
+    // With a clock that is off too: one correction, one re-read, then it stops.
+    const never = generations('ASIAGEN');
+    const refused = keyed('RequestExpired', 'ASIANEVER', 20 * 60_000);
+    const error = await ping(never.source, refused.fetchImpl).catch((e: unknown) => e as ComputeError);
+    expect((error as ComputeError).code).toBe('UNAUTHENTICATED');
+    expect(refused.seen).toHaveLength(3);
+    expect(never.state.invalidated).toBe(1);
+  });
+
+  it('a refused key is read again once and retried only when it changed', async () => {
+    const rotated = generations('AKIAKEY');
+    const accepted = keyed('UnrecognizedClientException', 'AKIAKEY2');
+    await expect(ping(rotated.source, accepted.fetchImpl)).resolves.toEqual({});
+    expect(accepted.seen).toHaveLength(2);
+    // The same key again: not sent twice.
+    const fixed = { kind: 'test', credentials: async () => ({ accessKeyId: 'AKIAFIXEDXXXXXXXXXXX', secretAccessKey: 's' }), invalidate() {} };
+    const refused = keyed('UnrecognizedClientException', 'AKIANEVER');
+    const error = await ping(fixed, refused.fetchImpl).catch((e: unknown) => e as ComputeError);
+    expect((error as ComputeError).code).toBe('UNAUTHENTICATED');
+    expect(refused.seen).toHaveLength(1);
+  });
+
   it('maps codes and redacts messages', () => {
     expect(mapAwsError({ status: 400, code: 'ResourceNotFoundException', service: 'secretsmanager' }).code).toBe('NOT_FOUND');
     expect(mapAwsError({ status: 503, service: 's3' }).code).toBe('UNAVAILABLE');
@@ -154,6 +216,40 @@ describe('internal transport', () => {
     );
     for (const leaked of ['ABCDEFGHIJKLMNOP', 'abc123', 'tok', '0123456789abcdef0123', 's3cr3t', 'value'])
       expect(text).not.toContain(leaked);
+  });
+
+  it('signs with the aws-core signer and redacts with its patterns, plus the platform fields', async () => {
+    const core = await import('@better-compute/aws-core');
+    expect(signRequest).toBe(core.signRequest);
+    expect(presignUrl).toBe(core.presignUrl);
+    // What only aws-core's patterns cover (other key id prefixes, a signed header line), and what
+    // only the platform services answer with.
+    const text = redactAws(
+      'AROAABCDEFGHIJKLMNOP authorization: AWS4-HMAC-SHA256 Credential=AKIAABCDEFGHIJKLMNOP/x, Signature=abcdef0123456789\n' +
+        '<SecretAccessKey>xmlsecret</SecretAccessKey> "SecretString":"value1" "Plaintext":"value2" "SecretBinary":"value3"',
+    );
+    for (const leaked of ['ABCDEFGHIJKLMNOP', 'abcdef0123456789', 'xmlsecret', 'value1', 'value2', 'value3'])
+      expect(text).not.toContain(leaked);
+  });
+
+  it('never follows a redirect with its signed headers', async () => {
+    const seen: (string | undefined)[] = [];
+    const redirecting = (async (_url: unknown, init: RequestInit) => {
+      seen.push(init.redirect);
+      return new Response('', { status: 307, headers: { location: 'https://elsewhere.example/' } });
+    }) as unknown as typeof fetch;
+    const kms = jsonClient(
+      createTransport({
+        region: 'us-east-1',
+        credentials: { kind: 'test', credentials: async () => suiteCredentials },
+        fetch: redirecting,
+        endpoint: 'http://emu',
+      }),
+      { hostPrefix: 'kms', jsonVersion: '1.1', targetPrefix: 'TrentService' },
+    );
+    const error = await kms.call('Ping', {}).catch((e: unknown) => e as ComputeError);
+    expect(error).toBeInstanceOf(ComputeError);
+    expect(seen).toEqual(['manual']);
   });
 
   it('logs only request metadata', async () => {

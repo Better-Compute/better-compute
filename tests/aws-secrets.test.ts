@@ -56,6 +56,79 @@ describe('Secrets Manager', () => {
     expect(emu.calls('CreateSecret')).toHaveLength(1);
   });
 
+  /** A store whose next `lose` CreateSecret answers are lost after Secrets Manager applied them. */
+  function lossy(lose: number) {
+    const emu = new AwsEmulator();
+    const fake = secretsManagerFake(emu);
+    const state = { lose };
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const response = await emu.fetch(input, init);
+      const target = new Headers(init?.headers).get('x-amz-target') ?? '';
+      if (target.endsWith('.CreateSecret') && state.lose > 0) {
+        state.lose -= 1;
+        throw new TypeError('fetch failed: connection reset');
+      }
+      return response;
+    };
+    const store = awsSecretsManagerStore({
+      region: 'us-east-1',
+      credentials: emu.credentials,
+      fetch: fetchImpl,
+      endpoint: 'http://emu.local',
+      clock: emu.clock,
+    });
+    return { emu, fake, store, state };
+  }
+
+  it('a put retried with the same idempotency key after a lost answer makes one secret and one ref', async () => {
+    const { store, fake, emu } = lossy(1);
+    const put = () => store.put('t1', 'hunter2', { idempotencyKey: 'connection:c_1' });
+    expect(await codeOf(put())).toBe('UNAVAILABLE');
+    // Secrets Manager created it; with the key nothing is deleted behind the caller's back.
+    expect(fake.secrets.size).toBe(1);
+    expect(emu.calls('DeleteSecret')).toHaveLength(0);
+    const ref = await put();
+    expect(await put()).toBe(ref);
+    expect(fake.secrets.size).toBe(1);
+    expect([...fake.secrets.keys()]).toEqual([`better-compute/t1/${ref.split('/').at(-1)}`]);
+    await expect(store.resolve(ref, { tenantId: 't1' })).resolves.toBe('hunter2');
+    // The key itself is in no name; another tenant or key gets another secret.
+    expect(ref).not.toContain('c_1');
+    expect(await store.put('t2', 'hunter2', { idempotencyKey: 'connection:c_1' })).not.toBe(ref);
+    expect(await store.put('t1', 'hunter2', { idempotencyKey: 'connection:c_2' })).not.toBe(ref);
+    expect(fake.secrets.size).toBe(3);
+    // The same key with another value is refused, not a silent overwrite.
+    expect(await codeOf(store.put('t1', 'other', { idempotencyKey: 'connection:c_1' }))).toBe('CONFLICT');
+    await expect(store.resolve(ref)).resolves.toBe('hunter2');
+    expect(await codeOf(store.put('t1', 'v', { idempotencyKey: '' }))).toBe('INVALID_INPUT');
+    expect(await codeOf(store.put('t1', 'v', { idempotencyKey: 'k'.repeat(257) }))).toBe('INVALID_INPUT');
+  });
+
+  it('without a key, a put whose answer was lost leaves no secret nobody can delete', async () => {
+    const { store, fake, emu } = lossy(1);
+    expect(await codeOf(store.put('t1', 'hunter2'))).toBe('UNAVAILABLE');
+    // The secret Secrets Manager made has no ref: it is removed at once, with no recovery window.
+    expect(fake.secrets.size).toBe(0);
+    expect(fake.deletions).toMatchObject([{ force: true }]);
+    const ref = await store.put('t1', 'hunter2');
+    expect([...fake.secrets.keys()]).toEqual([`better-compute/t1/${ref.split('/').at(-1)}`]);
+    // A refusal created nothing: no delete is sent.
+    emu.failNext('CreateSecret', 'LimitExceededException');
+    expect(await codeOf(store.put('t1', 'again'))).toBe('QUOTA_EXCEEDED');
+    expect(emu.calls('DeleteSecret')).toHaveLength(1);
+  });
+
+  it('a rotation retried with the same idempotency key is one version', async () => {
+    const { store, fake } = smWorld();
+    const ref = await store.put('t1', 'v1');
+    await store.put('t1', 'v2', { ref, idempotencyKey: 'rotate-1' });
+    await store.put('t1', 'v2', { ref, idempotencyKey: 'rotate-1' });
+    expect([...fake.secrets.values()][0]!.versions).toBe(2);
+    await store.put('t1', 'v3', { ref, idempotencyKey: 'rotate-2' });
+    expect([...fake.secrets.values()][0]!.versions).toBe(3);
+    await expect(store.resolve(ref)).resolves.toBe('v3');
+  });
+
   it('resolve returns the value', async () => {
     const { store } = smWorld();
     const ref = await store.put('t1', 'hunter2');

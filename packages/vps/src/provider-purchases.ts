@@ -596,6 +596,18 @@ function propagating(error: unknown): boolean {
     (error.details as { reason?: unknown } | undefined)?.reason === 'purchase-propagating'
   );
 }
+/**
+ * The provider's own statement that the attempt failed before it sent the purchase request (a
+ * throttled read, a credential refresh that failed): it provably bought nothing, so the purchase is
+ * retried and stays as uncertain as it was. A provider says so only for failures raised before the
+ * request left; anything else that is retried may have bought.
+ */
+function notSent(error: unknown): boolean {
+  return (
+    isComputeError(error) &&
+    (error.details as { reason?: unknown } | undefined)?.reason === 'purchase-not-sent'
+  );
+}
 const maxAttempts = 20;
 const retryMs = (attempt: number) => Math.min(15 * 60_000, 15_000 * 2 ** Math.min(attempt, 6));
 
@@ -651,6 +663,8 @@ export async function reconcilePurchase(
   const account = await sql.transaction((tx) => readAccount(tx, claimed.account_id));
   if (!account) return undefined;
   let bought: ExternalReservation;
+  /** Whether the provider was asked to buy: a failure before that bought nothing. */
+  let asked = false;
   try {
     // Purchases stay the platform's even if the account changed hands since the request.
     if (
@@ -671,18 +685,20 @@ export async function reconcilePurchase(
       ...(claimed.uncertain_since ? { uncertainSince: claimed.uncertain_since.getTime() } : {}),
       ...(claim.exclude.length ? { excludeReservationIds: claim.exclude } : {}),
     };
-    bought = await client.purchaseReservation(
-      claimed.offering_id,
-      callContext(deps, `purchase:${claimed.id}`, signal),
-      attempt,
-    );
+    const context = callContext(deps, `purchase:${claimed.id}`, signal);
+    asked = true;
+    bought = await client.purchaseReservation(claimed.offering_id, context, attempt);
   } catch (error) {
     const failure = safeError(error);
     // A failure that is not the provider's answer (a timeout, a dropped connection) may or may not
     // have bought: try again with the same key, which the provider makes idempotent, and tell it
     // when this attempt started (it waits for what it may have bought before buying again).
     const retry = !isComputeError(error) || retryable.has(error.code);
-    const uncertain = retry && !propagating(error);
+    // Uncertain unless it provably bought nothing: the provider was never asked, it says the
+    // purchase request was not sent, or it says it only waited for an earlier attempt. Marking an
+    // attempt that sent nothing uncertain would hold every later attempt back while the provider
+    // waits for a purchase that never happened. Anything else that is retried stays uncertain.
+    const uncertain = retry && asked && !propagating(error) && !notSent(error);
     const again = retry && Number(claimed.attempts) < maxAttempts;
     // Settled while this or an earlier attempt may have bought (out of attempts, or refused after
     // one whose answer was lost): money may have been spent, so 'unknown', never 'failed'.

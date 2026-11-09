@@ -435,6 +435,99 @@ describe('provider capacity purchases', () => {
     }
   };
 
+  const uncertainSince = async (w: Awaited<ReturnType<typeof world>>) =>
+    (
+      await w.fixture.database.query<{ uncertain_since: Date | null }>(
+        `SELECT uncertain_since FROM provider_purchases`,
+      )
+    ).rows.map((row) => row.uncertain_since);
+
+  it.each([
+    ['a throttled describe', 'DescribeCapacityReservations', 'RequestLimitExceeded', 503],
+    ['an unavailable offering read', 'DescribeCapacityBlockOfferings', 'ServiceUnavailable', 503],
+    ['an STS blip', 'GetCallerIdentity', 'ServiceUnavailable', 503],
+  ] as const)(
+    'a failure before the purchase request was sent (%s) does not make the purchase uncertain',
+    async (_what, operation, code, status) => {
+      const w = await world();
+      const offering = block(await w.offerings());
+      // EC2 could sell more blocks like it: an attempt taken for one that may have bought would wait
+      // for a block that was never bought (15 minutes) before buying.
+      w.capacity.blockOfferings[0]!.stock = 5;
+      const requested = await w.purchase(offering.id);
+      // A new client, as after a restart: the identity check runs again (the STS case).
+      const { deps } = w.direct({
+        clients: new ProviderClients(
+          new Map([['aws', awsProvider({ fetch: w.emu.fetch, credentials: w.emu.ambient })]]),
+        ),
+      });
+      w.emu.failNext(operation, code, status);
+      const next = await reconcilePurchase(deps, w.fixture.database, requested.id, signal());
+      expect(next).toBeGreaterThan(w.fixture.clock.now());
+      expect(await w.list()).toMatchObject([{ state: 'purchasing', attempts: 1 }]);
+      expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(0);
+      expect(await uncertainSince(w)).toEqual([null]);
+      // The next attempt buys at once: nothing holds it back.
+      await w.fixture.advance(60_000);
+      await reconcilePurchase(deps, w.fixture.database, requested.id, signal());
+      expect(await w.list()).toMatchObject([{ state: 'purchased', attempts: 2 }]);
+      expect(w.capacity.purchases).toHaveLength(1);
+    },
+  );
+
+  it('a purchase request EC2 refused with a retryable error is uncertain and waits out the window', async () => {
+    const w = await world();
+    const offering = block(await w.offerings());
+    w.capacity.blockOfferings[0]!.stock = 5;
+    // The request was sent: whatever EC2 answered, the attempt may have bought.
+    w.emu.failNext('PurchaseCapacityBlock', 'ServiceUnavailable', 503);
+    await w.purchase(offering.id);
+    await w.work('vps.purchases');
+    expect(await w.list()).toMatchObject([{ state: 'purchasing', attempts: 1 }]);
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(1);
+    expect(await uncertainSince(w)).toEqual([expect.any(Date)]);
+    // Inside the propagation window no attempt sends a second purchase request.
+    for (let round = 0; round < 5; round++) {
+      await w.fixture.advance(60_000);
+      await w.work('vps.purchases');
+    }
+    expect(w.emu.calls('PurchaseCapacityBlock')).toHaveLength(1);
+    expect(await w.list()).toMatchObject([{ state: 'purchasing', error: { code: 'UNAVAILABLE' } }]);
+    expect(w.capacity.purchases).toHaveLength(0);
+  });
+
+  it('a failure before the provider is asked at all is not uncertain', async () => {
+    const w = await world();
+    const offering = block(await w.offerings());
+    const requested = await w.purchase(offering.id);
+    const { ComputeError } = await import('@better-compute/core');
+    const clients = {
+      client: async () => {
+        throw new ComputeError('UNAVAILABLE', 'the secret store is down');
+      },
+    } as any;
+    const { deps } = w.direct({ clients });
+    await reconcilePurchase(deps, w.fixture.database, requested.id, signal());
+    expect(await w.list()).toMatchObject([{ state: 'purchasing', attempts: 1 }]);
+    expect(await uncertainSince(w)).toEqual([null]);
+    // A provider failure that names no reason stays uncertain (it may have bought).
+    const vague = {
+      client: async () => ({
+        purchaseReservation: async () => {
+          throw new ComputeError('UNAVAILABLE', 'something failed');
+        },
+      }),
+    } as any;
+    await w.fixture.advance(60_000);
+    await reconcilePurchase(
+      w.direct({ clients: vague }).deps,
+      w.fixture.database,
+      requested.id,
+      signal(),
+    );
+    expect(await uncertainSince(w)).toEqual([expect.any(Date)]);
+  });
+
   it('a settle that fails after EC2 sold the block never buys twice, nor reports failed', async () => {
     const w = await world();
     const offering = block(await w.offerings());

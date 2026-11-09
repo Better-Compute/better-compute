@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ComputeError, manualClock, type ErrorCode } from '@better-compute/core';
 import {
+  cachedCredentials,
   ec2Client,
   jsonClient,
   mapAwsError,
@@ -9,6 +10,7 @@ import {
   queryClient,
   redactAws,
   restClient,
+  staticCredentials,
   type CredentialSource,
 } from '@better-compute/aws-core';
 import { AwsEmulator } from './support/aws-emulator/index.js';
@@ -61,6 +63,12 @@ const table: [string, ErrorCode][] = [
   ['InstanceLimitExceeded', 'QUOTA_EXCEEDED'],
   ['VcpuLimitExceeded', 'QUOTA_EXCEEDED'],
   ['ServiceQuotaExceededException', 'QUOTA_EXCEEDED'],
+  // EC2 resource quotas: never PROVIDER_ERROR, which a reconciler retries forever.
+  ['SecurityGroupLimitExceeded', 'QUOTA_EXCEEDED'],
+  ['RulesPerSecurityGroupLimitExceeded', 'QUOTA_EXCEEDED'],
+  ['CidrLimitExceeded', 'QUOTA_EXCEEDED'],
+  ['NetworkAclEntryLimitExceeded', 'QUOTA_EXCEEDED'],
+  ['TagLimitExceeded', 'QUOTA_EXCEEDED'],
   ['InvalidInstanceID.NotFound', 'NOT_FOUND'],
   ['InvalidAMIID.NotFound', 'NOT_FOUND'],
   ['NoSuchEntity', 'NOT_FOUND'],
@@ -214,6 +222,142 @@ describe('aws-core clients', () => {
     const error = await failure(() => client.call('DescribeInstances', {}, { signal }));
     expect(error.code).toBe('UNAUTHENTICATED');
     expect(invalidate).toHaveBeenCalledTimes(2);
+  });
+
+  /** An EC2 endpoint that accepts one access key id and answers `code` to any other. */
+  function keyed(code: string) {
+    const state = { active: '', requests: 0 };
+    const fetchImpl = (async (_url: unknown, init: { headers: Record<string, string> }) => {
+      state.requests += 1;
+      const accepted = (init.headers.authorization ?? '').includes(state.active);
+      return new Response(
+        accepted
+          ? '<DescribeRegionsResponse><requestId>r</requestId></DescribeRegionsResponse>'
+          : `<?xml version="1.0"?><Response><Errors><Error><Code>${code}</Code><Message>no</Message></Error></Errors><RequestID>r</RequestID></Response>`,
+        { status: accepted ? 200 : 401, headers: { date: new Date().toUTCString() } },
+      );
+    }) as unknown as typeof fetch;
+    return { state, fetchImpl };
+  }
+
+  it.each(['AuthFailure', 'InvalidClientTokenId', 'UnrecognizedClientException'])(
+    'reads a static key rotated in place again on %s, once',
+    async (code) => {
+      let secret = { accessKeyId: 'AKIAOLDOLDOLDOLDOLD1', secretAccessKey: 'old' };
+      let loads = 0;
+      const source = cachedCredentials(
+        staticCredentials(async () => {
+          loads += 1;
+          return JSON.stringify(secret);
+        }),
+      );
+      const { state, fetchImpl } = keyed(code);
+      state.active = secret.accessKeyId;
+      const ec2 = ec2Client({ region: 'us-east-1', credentials: source, fetch: fetchImpl });
+      await ec2.call('DescribeRegions', {}, { signal });
+      expect([loads, state.requests]).toEqual([1, 1]);
+      // The operator rotates the secret in place and deactivates the old key.
+      secret = { accessKeyId: 'AKIANEWNEWNEWNEWNEW1', secretAccessKey: 'new' };
+      state.active = secret.accessKeyId;
+      await ec2.call('DescribeRegions', {}, { signal });
+      await ec2.call('DescribeRegions', {}, { signal });
+      // One refused request, one re-read, then the new key for good.
+      expect([loads, state.requests]).toEqual([2, 4]);
+      // A key that is simply wrong is re-read once per call and not sent again.
+      state.active = 'AKIAOTHEROTHEROTHER1';
+      const error = await failure(() => ec2.call('DescribeRegions', {}, { signal }));
+      expect(error.code).toBe('UNAUTHENTICATED');
+      expect([loads, state.requests]).toEqual([3, 5]);
+    },
+  );
+
+  it('a refused key is retried once even when every read gives another key', async () => {
+    let minted = 0;
+    const source = cachedCredentials({
+      kind: 'test',
+      credentials: async () => ({
+        accessKeyId: `AKIAMINTED${String((minted += 1)).padStart(10, '0')}`,
+        secretAccessKey: 'secret',
+      }),
+    });
+    const { state, fetchImpl } = keyed('AuthFailure');
+    state.active = 'AKIANEVERNEVERNEVER1';
+    const ec2 = ec2Client({ region: 'us-east-1', credentials: source, fetch: fetchImpl });
+    const error = await failure(() => ec2.call('DescribeRegions', {}, { signal }));
+    expect(error.code).toBe('UNAUTHENTICATED');
+    expect([minted, state.requests]).toEqual([2, 2]);
+    // Nothing of the key reaches the error.
+    expect(JSON.stringify([error.message, error.details])).not.toMatch(/AKIA|secret/);
+  });
+
+  /** A source of temporary credentials that mints the next generation after each invalidate. */
+  function sessions() {
+    const state = { minted: 0, invalidated: 0 };
+    const source = cachedCredentials({
+      kind: 'test',
+      credentials: async () => ({
+        accessKeyId: `ASIAGEN${(state.minted += 1)}XXXXXXXXXXXX`,
+        secretAccessKey: 's',
+        sessionToken: 't',
+      }),
+      invalidate: () => void (state.invalidated += 1),
+    });
+    return { state, source };
+  }
+  /** EC2 answering RequestExpired to the first session, with a Date header `aheadMs` from now. */
+  function expiring(aheadMs: number, accepts = 'ASIAGEN2') {
+    const seen: string[] = [];
+    const fetchImpl = (async (_url: unknown, init: { headers: Record<string, string> }) => {
+      const auth = init.headers.authorization ?? '';
+      seen.push(`${/ASIAGEN\d/.exec(auth)?.[0]}@${init.headers['x-amz-date']}`);
+      const ok = auth.includes(accepts);
+      return new Response(
+        ok
+          ? '<DescribeRegionsResponse><requestId>r</requestId></DescribeRegionsResponse>'
+          : '<?xml version="1.0"?><Response><Errors><Error><Code>RequestExpired</Code><Message>Request has expired.</Message></Error></Errors><RequestID>r</RequestID></Response>',
+        {
+          status: ok ? 200 : 400,
+          headers: { date: new Date(Date.now() + aheadMs).toUTCString() },
+        },
+      );
+    }) as unknown as typeof fetch;
+    return { seen, fetchImpl };
+  }
+
+  it('RequestExpired with a right clock is an expired session: the credentials are read again', async () => {
+    const { state, source } = sessions();
+    const { seen, fetchImpl } = expiring(0);
+    const ec2 = ec2Client({ region: 'us-east-1', credentials: source, fetch: fetchImpl });
+    await ec2.call('DescribeRegions', {}, { signal });
+    expect(seen.map((entry) => entry.split('@')[0])).toEqual(['ASIAGEN1', 'ASIAGEN2']);
+    expect(state.invalidated).toBe(1);
+    // The next call signs with the new session at once.
+    await ec2.call('DescribeRegions', {}, { signal });
+    expect(seen).toHaveLength(3);
+  });
+
+  it('RequestExpired again after the clock correction reads the credentials again, then stops', async () => {
+    const { state, source } = sessions();
+    const { seen, fetchImpl } = expiring(20 * 60_000);
+    const ec2 = ec2Client({ region: 'us-east-1', credentials: source, fetch: fetchImpl });
+    await ec2.call('DescribeRegions', {}, { signal });
+    // The first session with the local time, then with the server's, then the second session.
+    expect(seen.map((entry) => entry.split('@')[0])).toEqual(['ASIAGEN1', 'ASIAGEN1', 'ASIAGEN2']);
+    expect(seen[1]!.split('@')[1]).not.toBe(seen[0]!.split('@')[1]);
+    expect(state.invalidated).toBe(1);
+
+    // Refused whatever is tried: one clock correction and one re-read, never a loop.
+    const never = sessions();
+    const refused = expiring(20 * 60_000, 'ASIANEVER');
+    const client = ec2Client({
+      region: 'us-east-1',
+      credentials: never.source,
+      fetch: refused.fetchImpl,
+    });
+    const error = await failure(() => client.call('DescribeRegions', {}, { signal }));
+    expect(error.code).toBe('UNAUTHENTICATED');
+    expect(refused.seen).toHaveLength(3);
+    expect(never.state.invalidated).toBe(1);
   });
 
   it('times out as UNAVAILABLE with reason timeout', async () => {

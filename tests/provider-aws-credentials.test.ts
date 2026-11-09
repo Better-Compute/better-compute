@@ -202,4 +202,75 @@ describe('provider-aws account credentials', () => {
     expect(emu.calls('GetCallerIdentity')).toHaveLength(2);
     expect(emu.calls('AssumeRole')).toHaveLength(1);
   });
+
+  it('a caller that aborts during the shared identity check does not fail the others', async () => {
+    const { emu, context, call } = world();
+    // STS answers only once released, and honours the signal it is called with.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const slow: typeof fetch = async (input, init) => {
+      await new Promise<void>((resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        void gate.then(resolve);
+      });
+      return emu.fetch(input, init);
+    };
+    const account = accountCredentials(
+      config({ assumeRoleArn: roleA }),
+      context('pa_tenantA', false),
+      {
+        fetch: slow,
+        credentials: emu.ambient,
+      },
+    );
+    // listOffers (out of time first) and a create share the check and the credential refresh.
+    const offers = new AbortController();
+    const first = account.verify({ signal: offers.signal, clock: emu.clock }).then(
+      () => 'ok',
+      (error: ComputeError) => error.details?.reason,
+    );
+    const second = account.verify(call);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    offers.abort();
+    expect(await first).toBe('aborted');
+    release();
+    expect(await second).toEqual({ account: '222222222222' });
+    expect(emu.calls('AssumeRole')).toHaveLength(1);
+    // The same holds for the credentials themselves.
+    expect((await account.source.credentials(call)).sessionToken).toBeDefined();
+  });
+
+  it('a check every caller left is cancelled, and the next caller starts a new one', async () => {
+    const { emu, context, call } = world();
+    let aborted = 0;
+    let hold = true;
+    const slow: typeof fetch = async (input, init) => {
+      if (hold)
+        await new Promise<void>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => {
+              aborted += 1;
+              reject(new Error('aborted'));
+            },
+            { once: true },
+          );
+        });
+      return emu.fetch(input, init);
+    };
+    const account = accountCredentials(config(), context('pa_platform', true), {
+      fetch: slow,
+      credentials: emu.ambient,
+    });
+    const only = new AbortController();
+    const first = account
+      .verify({ signal: only.signal, clock: emu.clock })
+      .catch((error: ComputeError) => error.details?.reason);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    only.abort();
+    expect(await first).toBe('aborted');
+    expect(aborted).toBe(1);
+    hold = false;
+    expect(await account.verify(call)).toEqual({ account: platformAccount });
+  });
 });
