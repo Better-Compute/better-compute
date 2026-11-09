@@ -131,4 +131,19 @@ export interface DoProviderOptions {
    * `node:https`, trusting only the cluster's CA. Tests pass a fake.
    */
   kubeTransport?: KubeTransport;
+  /** The fetch for Spaces (S3) requests of the storage kinds; default `fetch`. Tests pass an emulating one. */
+  spacesFetch?: typeof fetch;
+  /** The Spaces endpoint of a region; default `https://<region>.digitaloceanspaces.com`. */
+  spacesEndpoint?: (region: string) => string;
+  /**
+   * Allows `do.spaces-key` grants of `*:fullaccess` (every bucket of the account). Off by
+   * default: tenant keys are granted bucket by bucket. An operator-only code option.
+   */
+  spacesKeyFullAccess?: boolean;
+  /**
+   * Lets a tenant (an `adopt` carrying `better-compute-tenant`) adopt an unmarked Spaces bucket.
+   * Off by default: unmarked buckets are the operator's (its spacesBlobStore bucket among them),
+   * so only operator calls adopt them. An operator-only code option.
+   */
+  spacesTenantBucketAdopt?: boolean;
 }

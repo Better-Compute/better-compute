@@ -271,6 +271,15 @@ export function spacesKeyKind(deps: {
         await reap(name, created.key, ctx);
         return state(created.key, created.key.secret_key);
       }
+      // DigitalOcean shows a key's secret once, at creation. A caller that holds none sealed (its seal
+      // failed in the run that received it) has a key nobody can use: say so, rather than `ready`.
+      if (request.secretOutputs !== undefined && !request.secretOutputs.includes('secretKey'))
+        return {
+          ...state(existing),
+          state: 'error',
+          message:
+            'The secret of this Spaces key was never sealed and DigitalOcean does not show it again; delete the key and create a new one',
+        };
       if (grantKey(existing.grants) === grantKey(wanted)) return state(existing);
       const updated = await client.request<{ key: DoSpacesKey }>(
         'PUT',
@@ -278,6 +287,14 @@ export function spacesKeyKind(deps: {
         { body: { name: existing.name, grants: wanted }, signal: ctx.signal, budget: 'mutate' },
       );
       return state(updated.key);
+    },
+
+    // A create whose answer was lost: the newest key with the request's name (the one a retried
+    // ensure would have kept), read-only.
+    async find(request, ctx) {
+      const name = names.provider(request.name, 'A Spaces key');
+      const keys = await namedKeys(name, ctx.signal);
+      return keys.find((key) => keys.every((other) => !olderThan(key, other)))?.access_key;
     },
 
     // A key records bucket names but not their regions, so its spec cannot be read back.

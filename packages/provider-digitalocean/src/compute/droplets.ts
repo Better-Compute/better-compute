@@ -35,7 +35,8 @@ import { DoDns } from '../edge/dns.js';
 import { DoLoadBalancers } from '../edge/load-balancers.js';
 import { DoNetworks } from '../networks/index.js';
 import { DoVolumes } from '../storage/volumes.js';
-import { DoResources } from '../resources/registry.js';
+import { DoResources, doResourceKinds } from '../resources/registry.js';
+import type { DoKind } from '../resources/kind.js';
 import { networkNamer, vpcForNetwork } from '../networks/vpcs.js';
 import { listPrices } from '../ops/prices.js';
 import { poolMembers } from './autoscale.js';
@@ -177,7 +178,13 @@ const powerTypes: Readonly<Record<Exclude<PowerAction, 'nmi'>, string>> = {
 
 /** What a DoCompute takes from the provider options. */
 export type DoComputeOptions = Required<Pick<DoProviderOptions, 'deployment' | 'inCallWaitMs'>> &
-  Pick<DoProviderOptions, 'catalogImages'>;
+  Pick<DoProviderOptions, 'catalogImages'> & {
+    /**
+     * Kinds `resources` serves after `doResourceKinds()`: the provider passes the account's storage kinds
+     * (`doStorageKinds`: Spaces buckets and keys, CDN endpoints, the Container Registry).
+     */
+    resourceKinds?: readonly DoKind[];
+  };
 
 export class DoCompute implements ProviderImpl {
   protected readonly config: DoConfig;
@@ -231,7 +238,10 @@ export class DoCompute implements ProviderImpl {
           context.log,
         )
       : undefined;
-    this.resources = new DoResources(client, config, options.deployment);
+    this.resources = new DoResources(client, config, options.deployment, [
+      ...doResourceKinds(),
+      ...(options.resourceKinds ?? []),
+    ]);
     this.loadBalancers = new DoLoadBalancers(client, config, options.deployment, context.log);
     this.dns = new DoDns(client, options.deployment, context.log);
     this.certificates = new DoCertificates(client, options.deployment, context.log);

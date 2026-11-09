@@ -157,6 +157,15 @@ All notable changes to the better-compute packages are documented here. The form
   says which kinds through `releasable(kind)`, which the DigitalOcean provider implements), and `delete` overrides a
   release that is still pending. A row already stranded recovers on the next sweep: the release of a resource
   better-compute created is withdrawn, an adopted one is let go without the provider call.
+- **The DigitalOcean storage kinds are served** (`@better-compute/provider-digitalocean`). `do.spaces-bucket`,
+  `do.spaces-key`, `do.cdn-endpoint`, `do.container-registry` and `do.registry-garbage-collection` were documented
+  but never reached the provider's `resources`, so `cloudResources.kinds` did not list them and a create was
+  `UNSUPPORTED`. `digitaloceanProvider()` now appends them to its long-tail kinds (same API client and request
+  budget), and `spacesFetch`, `spacesEndpoint`, `spacesKeyFullAccess` and `spacesTenantBucketAdopt` are provider
+  options (`DoStorageOptions` is now an alias of `DoProviderOptions`). The storage kinds use core's contract types
+  (the `Do…` request, state and definition types are aliases), implement `find`, and get the request's
+  `accountScope` and `secretOutputs`: a CDN endpoint's `certificateId`/`customDomain` are refused on a shared
+  account (`accountWide`), and a Spaces key whose secret was never sealed answers `error` instead of `ready`.
 - **Scripts on images without cloud-init** (`@better-compute/provider-gcp`). Compute Engine's Debian, Rocky,
   CentOS, RHEL, AlmaLinux and SUSE images do not run cloud-init, so a shell-script `userData` (`#!…`) never ran on
   them. Create now also writes it as `startup-script` metadata, wrapped to run once on the first boot as cloud-init

@@ -419,6 +419,17 @@ export function spacesBucketKind(deps: {
       return converge(s3, target, spec, ctx.signal);
     },
 
+    // A create whose answer was lost: the bucket under the derived name (it carries this deployment's
+    // prefix, so the name alone says ensure made it), read-only.
+    async find({ name, spec }, ctx) {
+      const target = parseBucketId(
+        `${spec.region}/${deps.names.provider(name, 'A Spaces bucket')}`,
+      );
+      // A 403 is the name taken by another Spaces account: nothing of ours.
+      const status = await head(deps.spaces(target.region), target.bucket, ctx.signal);
+      return status === 200 ? `${target.region}/${target.bucket}` : undefined;
+    },
+
     async get(id, ctx) {
       const target = parseBucketId(id);
       const s3 = deps.spaces(target.region);

@@ -166,6 +166,12 @@ export function cdnEndpointKind(deps: {
     regional: false,
     updatable: ['ttl', 'customDomain', 'certificateId'],
     parent: 'do.spaces-bucket',
+    // A certificate is an object of the whole account, named by its raw uuid: on a shared account
+    // it may be another tenant's, so only the tenant's own account may name one (and so a custom domain).
+    accountWide: (spec) => [
+      ...(spec?.certificateId !== undefined ? ['certificateId'] : []),
+      ...(spec?.customDomain !== undefined ? ['customDomain'] : []),
+    ],
 
     async ensure({ spec, id, parent, labels }, ctx: CallContext) {
       if (!(cdnTtls as readonly number[]).includes(spec.ttl))
@@ -253,6 +259,18 @@ export function cdnEndpointKind(deps: {
         },
       );
       return state(updated.endpoint);
+    },
+
+    // A create whose answer was lost: the endpoint of the request's origin (DO allows one per
+    // origin, which is how ensure finds it), when the origin is a bucket this deployment manages.
+    async find({ spec }, ctx) {
+      if ((await originOwner(spec.origin, ctx.signal)) !== 'mine') return undefined;
+      for await (const endpoint of client.pages<DoCdnEndpoint>('/cdn/endpoints', 'endpoints', {
+        signal: ctx.signal,
+        budget: 'sweep',
+      }))
+        if (endpoint.origin === spec.origin) return endpoint.id;
+      return undefined;
     },
 
     async get(id, ctx) {
