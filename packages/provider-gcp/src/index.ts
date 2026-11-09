@@ -10,6 +10,7 @@ export * from './costs.js';
 export { checkGcpAccount } from './federation.js';
 export * from './gke/index.js';
 export * from './ids.js';
+export * from './images.js';
 export * from './prices.js';
 export * from './provider.js';
 export * from './shapes.js';

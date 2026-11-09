@@ -96,6 +96,7 @@
         "filesystems",
         "firewallRules",
         "flavors",
+        "images",
         "instances",
         "loadBalancers",
         "networks",

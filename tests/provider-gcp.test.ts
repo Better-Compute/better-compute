@@ -600,7 +600,7 @@ describe('compute', () => {
     await impl.create(
       {
         offerId: 'us-central1-a/n2-standard-4',
-        image: 'https://compute.googleapis.com/compute/v1/projects/x/global/images/img-1',
+        image: 'https://compute.googleapis.com/compute/v1/projects/debian-cloud/global/images/img-1',
         userData: '',
         name: 'ins_b',
       },
@@ -617,7 +617,7 @@ describe('compute', () => {
       'projects/my-images/global/images/family/ubuntu-2404-lts',
     );
     expect(bodies[1]!.disks[0].initializeParams.sourceImage).toBe(
-      'https://compute.googleapis.com/compute/v1/projects/x/global/images/img-1',
+      'https://compute.googleapis.com/compute/v1/projects/debian-cloud/global/images/img-1',
     );
     expect(bodies[0]!.scheduling.onHostMaintenance).toBe('MIGRATE');
   });

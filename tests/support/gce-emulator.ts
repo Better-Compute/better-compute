@@ -517,6 +517,13 @@ export class GceEmulator {
       return this.json(200, body);
     }
 
+    // [U-03 images] images live in their own project (a public one, or the account's)
+    if (first === 'global' && second === 'images')
+      return this.#images(
+        method,
+        decodeURIComponent(url.pathname.split('/')[4] ?? ''),
+        segments.slice(2),
+      );
     if (first === 'zones' && second)
       return this.#zonal(method, url, second, segments.slice(2), body);
     if (first === 'regions' && second && third === 'subnetworks')
@@ -932,6 +939,68 @@ export class GceEmulator {
     });
   }
   // ====================================================================================== [/P6 catalog]
+
+  // ======================================================================================================
+  // [U-03 images] Images and image families in any project: GET projects/<p>/global/images/<name> and
+  // GET projects/<p>/global/images/family/<family> (getFromFamily: the newest READY image of the family that
+  // is not DEPRECATED, OBSOLETE or DELETED; 404 when there is none). Tests add images with `addImage`.
+  // ======================================================================================================
+
+  /** GCE `Image` resources, keyed by project. */
+  images = new Map<string, Json[]>();
+  /** Test switch: getFromFamily also answers with a deprecated newest image (to check the caller hides it). */
+  familyServesDeprecated = false;
+
+  /** Adds an image to `project` as GCE would return it; `creationTimestamp` orders a family's images. */
+  addImage(project: string, image: Json & { name: string }): Json {
+    const body: Json = {
+      kind: 'compute#image',
+      id: String(1_000_000 + [...this.images.values()].flat().length),
+      status: 'READY',
+      architecture: 'X86_64',
+      diskSizeGb: '10',
+      guestOsFeatures: [{ type: 'UEFI_COMPATIBLE' }, { type: 'VIRTIO_SCSI_MULTIQUEUE' }],
+      creationTimestamp: '2026-10-01T00:00:00.000-07:00',
+      ...image,
+      selfLink: `${origin}/projects/${project}/global/images/${image.name}`,
+    };
+    const list = this.images.get(project) ?? [];
+    list.push(body);
+    this.images.set(project, list);
+    return body;
+  }
+
+  #images(method: string, project: string, rest: string[]): Response {
+    const [first, second] = rest;
+    if (method !== 'GET') return this.error(404, 'notFound', 'unsupported image request');
+    const all = this.images.get(project) ?? [];
+    if (first === 'family' && second) {
+      const usable = all
+        .filter((image) => image.family === second && image.status === 'READY')
+        .filter(
+          (image) =>
+            this.familyServesDeprecated ||
+            !['DEPRECATED', 'OBSOLETE', 'DELETED'].includes(image.deprecated?.state),
+        )
+        .sort((a, b) => Date.parse(b.creationTimestamp) - Date.parse(a.creationTimestamp));
+      return usable[0]
+        ? this.json(200, usable[0])
+        : this.error(
+            404,
+            'notFound',
+            `The resource 'projects/${project}/global/images/family/${second}' was not found`,
+          );
+    }
+    const image = first && !second ? all.find((entry) => entry.name === first) : undefined;
+    return image
+      ? this.json(200, image)
+      : this.error(
+          404,
+          'notFound',
+          `The resource 'projects/${project}/global/images/${first}' was not found`,
+        );
+  }
+  // ====================================================================================== [/U-03 images]
 }
 
 // ============================================================================================

@@ -3437,6 +3437,51 @@
         "additionalProperties": false
       }
     },
+    "images.resolve": {
+      "route": "POST /api/compute/images/resolve",
+      "kind": "read",
+      "action": "compute:flavors:read",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A provider pool the tenant owns or is offered"
+          },
+          "families": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._:/-]{0,199}$",
+              "maxLength": 200,
+              "description": "An image family (ubuntu-2404-lts-amd64, in the account's imageProject), project/family, or projects/<project>/global/images/family/<family>"
+            },
+            "description": "The families, at most 50"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "families"
+        ],
+        "additionalProperties": false
+      }
+    },
     "instances.attach": {
       "route": "POST /api/compute/instances/attach",
       "kind": "mutation",

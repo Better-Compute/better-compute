@@ -791,10 +791,13 @@ async function reconcileProvider(
       }
       // W3a: the provider refused the create for capacity or quota, at once or (read back through
       // `get` while it is still being created) after accepting it. Retrying cannot help: the
-      // instance fails, keeping its quota until it is deleted.
+      // instance fails, keeping its quota until it is deleted. So does a create the provider refuses
+      // as invalid (U-03: an image from a project the account does not allow, a zone or disk size it
+      // does not take): the same request would be refused again.
       if (
-        (code === 'CAPACITY_UNAVAILABLE' || code === 'QUOTA_EXCEEDED') &&
-        (action.kind === 'create' || action.kind === 'get') &&
+        (((code === 'CAPACITY_UNAVAILABLE' || code === 'QUOTA_EXCEEDED') &&
+          (action.kind === 'create' || action.kind === 'get')) ||
+          (code === 'INVALID_INPUT' && action.kind === 'create')) &&
         (current.state === 'scheduling' || current.state === 'provisioning')
       ) {
         const failed = await moveInstance(tx, current, 'fail', 'error', {

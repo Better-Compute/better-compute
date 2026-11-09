@@ -1,6 +1,7 @@
 import { field, manifest, type SecretRef } from '@better-compute/core';
 import type { TokenSource } from './auth.js';
 import type { KubeTransport } from './gke/transport.js';
+import { imageProjectPattern } from './images.js';
 
 /**
  * A BigQuery table id, `project.dataset.table`. A table name cannot be a query parameter, so the
@@ -41,6 +42,16 @@ export const gcpConfig = manifest({
     .string()
     .default('ubuntu-os-cloud')
     .describe('Project that image families resolve in'),
+  imageProjects: field
+    .list(field.string({ pattern: imageProjectPattern, maxLength: 100 }), { max: 64 })
+    .optional()
+    .describe(
+      "Projects whose images VMs may boot, besides imageProject and the account's own project; absent means the public OS image projects",
+    ),
+  ownProjectImages: field
+    .boolean()
+    .optional()
+    .describe("Whether VMs may boot images from the account's own project (default true)"),
   diskGiB: field.int().default(100).describe('Boot disk size in GiB'),
   discoverLabel: field
     .string()
@@ -68,6 +79,10 @@ export interface GcpConfig {
   network?: string;
   subnet?: string;
   imageProject?: string;
+  /** (U-03) The image projects allowed besides `imageProject` and the own project; default `defaultImageProjects`. */
+  imageProjects?: string[];
+  /** (U-03) Default true: images in `projectId` may be booted. */
+  ownProjectImages?: boolean;
   diskGiB?: number;
   discoverLabel?: string;
   /** `project.dataset.table` of the detailed billing export (provider costs, D10). */

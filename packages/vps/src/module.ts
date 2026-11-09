@@ -246,6 +246,13 @@ import {
   externalMetricsSettings,
   type ExternalMetricsOptions,
 } from './external-metrics.js';
+import {
+  imageSchemas,
+  parseResolveImages,
+  resolvePoolImages,
+  type ResolveImagesInput,
+  type ResolveImagesOutput,
+} from './images.js';
 import { vpsMigrations } from './migrations.js';
 import { listProviderClusters } from './provider-clusters.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
@@ -718,6 +725,10 @@ export type VpsApi = {
       ListPoolMachinesInput,
       { items: PoolMachineView[]; cursor?: string; discoveredAt?: number }
     >;
+  };
+  /** (U-03) A provider pool's image families, resolved by its account (images.ts); the rest of the group is provision's. */
+  images: {
+    resolve: MethodDefinition<ResolveImagesInput, ResolveImagesOutput>;
   };
   sandboxes: {
     create: MethodDefinition<CreateSandboxInput, Sandbox>;
@@ -2318,6 +2329,24 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
               context.iam.rootTenantId !== undefined &&
               context.caller?.tenantId === context.iam.rootTenantId,
           }),
+      }),
+    },
+    // U-03: image families for the launch pickers of whoever may see the pool's flavors.
+    images: {
+      resolve: defineMethod({
+        action: 'compute:flavors:read',
+        kind: 'read',
+        // The provider is read over the network, never inside a compute transaction.
+        transaction: 'manual',
+        resource: poolResource,
+        validate: describedBy(imageSchemas.resolve, parseResolveImages),
+        handler: (context, input) =>
+          resolvePoolImages(
+            { ...depsOf(context), clients },
+            context.sql,
+            input,
+            context.signal ?? new AbortController().signal,
+          ),
       }),
     },
     // §3.7 (D24): a sandbox drives one hosted instance; templates are per tenant.

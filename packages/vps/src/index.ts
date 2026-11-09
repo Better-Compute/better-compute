@@ -33,6 +33,7 @@ export * from './purchase-proposals.js';
 export * from './reservation-grants.js';
 export * from './discovery.js';
 export * from './provider-events.js';
+export * from './images.js';
 export * from './attach.js';
 export * from './sandboxes.js';
 export * from './snapshots.js';
@@ -82,6 +83,9 @@ export type {
   OfferQuery,
   ProviderContext,
   ProviderDefinition,
+  ProviderImage,
+  ProviderImageMiss,
+  ProviderImages,
   ProviderImpl,
   ProviderInput,
   RescueAccess,

@@ -644,6 +644,8 @@ group('images', 'provision', [
   ['get', 'read', 'images:read', 'image', 'v0.2'],
   ['list', 'read', 'images:read', 'tenant', 'v0.2', list],
   ['promote', 'mutation', 'images:publish', 'image', 'v0.2'],
+  // U-03: a provider pool's image families, resolved by its account for whoever may see its flavors.
+  ['resolve', 'read', 'flavors:read', 'pool', 'v1.0', { module: 'vps' }],
 ]);
 group('workflows', 'provision', [
   ['get', 'read', 'workflows:read', 'node', 'v0.2'],

@@ -75,7 +75,8 @@ afterAll(() => db.close());
 
 describe('the §9.2 images rows', () => {
   it('declares exactly the images rows', () => {
-    const rows = apiSurface.filter((row) => row.group === 'images');
+    // images.resolve is vps' (U-03: a provider pool's image families); the rest of the group is provision's.
+    const rows = apiSurface.filter((row) => row.group === 'images' && row.module === 'provision');
     expect(Object.keys(api.images).sort()).toEqual(rows.map((row) => row.method).sort());
     for (const row of rows) {
       const method = api.images[row.method as keyof ProvisionApi['images']];

@@ -439,7 +439,7 @@ describe('apiSurface (§9.2)', () => {
     const modules: Record<string, string> = {};
     // Methods another module contributes to a group: break-glass SSH certificates, sandbox exec
     // (tickets and the sandbox SSH CA live in tunnels), and the provider machines bound to pools
-    // (provider_machines is vps').
+    // (provider_machines is vps'), and a provider pool's image families (U-03, resolved by vps).
     const contributed: Record<string, string> = {
       'nodes.issueSshCert': 'tunnels',
       'nodes.revokeSshCert': 'tunnels',
@@ -447,6 +447,7 @@ describe('apiSurface (§9.2)', () => {
       'pools.bindMachines': 'vps',
       'pools.unbindMachines': 'vps',
       'pools.machines': 'vps',
+      'images.resolve': 'vps',
     };
     for (const row of apiSurface) {
       const path = `${row.group}.${row.method}`;
@@ -502,6 +503,7 @@ describe('apiSurface (§9.2)', () => {
       'instances.detach': 'v1.0',
       'instances.reboot': 'v1.0',
       'instances.estimate': 'v1.0',
+      'images.resolve': 'v1.0',
     };
     for (const [path, phase] of Object.entries(later))
       expect(apiMethod(...(path.split('.') as [string, string]))?.phase, path).toBe(phase);
