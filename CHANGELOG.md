@@ -165,6 +165,15 @@ All notable changes to the better-compute packages are documented here. The form
   something the VM listing does not show (an LXC container, a VM the token cannot audit), the clone was refused as
   "already exists" and retried against the same VMID until the call was aborted. Such a VMID now counts as taken and
   the create probes the next one, ending in `CAPACITY_UNAVAILABLE` when the range has no free VMID nearby.
+- **Hetzner Robot calls on a server that is no longer claimed** (`@better-compute/provider-hetzner`, `vps`).
+  `power`, `rescue`, `identify` and `bootstrap` never read the claim, and `get` and `delete` accepted any `bc-` name,
+  so a call that landed after `delete` released a dedicated server, or after another key claimed it, hardware-reset
+  it and ran installimage on it. Each of them now reads the server again and acts only while its name is the claim
+  of the call's idempotency key (`robotClaimName(key)`); anything else is `NOT_FOUND` and untouched, and `bootstrap`
+  checks again once rescue is up, before the join token is delivered. **Callers of the Robot provider outside vps
+  must pass the key the server was claimed under on every call** (the reconciler and `providerAccounts.bootstrap`
+  already do). `providerConformanceCases()` now calls `get`, `delete`, `power` and `reinstall` under the key the
+  machine was created with.
 
 ## 0.3.0 (2026-10-20)
 

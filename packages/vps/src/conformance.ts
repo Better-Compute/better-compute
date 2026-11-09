@@ -20,6 +20,10 @@ import {
 
 // providerConformance (PLAN.md §5.6 walkthrough 2): behavioural cases every ProviderImpl must pass,
 // run from any test runner against a live account, a record/replay transport or an emulator.
+//
+// Every call on a machine (`get`, `delete`, `power`, `reinstall`) carries the idempotency key the machine
+// was created under, as the reconciler's calls do: a provider whose only record of ownership is that key
+// (Hetzner Robot's claim) refuses a call under any other.
 
 /** What the cases run against: a provider, an account config, and something cheap to create. */
 export interface ProviderConformanceSubject {
@@ -217,13 +221,15 @@ async function create(subject: ProviderConformanceSubject, key: string) {
   return { impl, call, machine };
 }
 
+/** Deletes machine `id`, under the key it was created with. */
 async function cleanUp(
   impl: ProviderImpl,
   call: (key: string) => CallContext,
   id: string,
+  createdAs: string,
 ): Promise<void> {
   try {
-    await impl.delete(id, call(`cleanup-${id}`));
+    await impl.delete(id, call(createdAs));
   } catch (error) {
     if (!isComputeError(error, 'NOT_FOUND')) throw error;
   }
@@ -334,23 +340,24 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
           const again = await create(subject, name);
           checkEqual(again.machine.id, first.machine.id, 'a retried create names the same machine');
         } finally {
-          await cleanUp(first.impl, first.call, first.machine.id);
+          await cleanUp(first.impl, first.call, first.machine.id, name);
         }
       },
     },
     {
       name: 'get follows the machine; delete removes it; deleting again counts as deleted',
       async run(subject) {
-        const { impl, call, machine } = await create(subject, key(subject, 'lifecycle'));
-        checkMachine(await impl.get(machine.id, call('get')), 'get after create');
-        await impl.delete(machine.id, call('delete'));
-        const after = await impl.get(machine.id, call('get-after-delete'));
+        const name = key(subject, 'lifecycle');
+        const { impl, call, machine } = await create(subject, name);
+        checkMachine(await impl.get(machine.id, call(name)), 'get after create');
+        await impl.delete(machine.id, call(name));
+        const after = await impl.get(machine.id, call(name));
         check(
           after === undefined || after.state === 'deleting' || after.state === 'deleted',
           'get after delete finds nothing live',
         );
         try {
-          await impl.delete(machine.id, call('delete-again'));
+          await impl.delete(machine.id, call(name));
         } catch (error) {
           check(
             isComputeError(error, 'NOT_FOUND'),
@@ -366,20 +373,21 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
     {
       name: 'power (when offered) stops and starts the machine',
       async run(subject) {
-        const { impl, call, machine } = await create(subject, key(subject, 'power'));
+        const name = key(subject, 'power');
+        const { impl, call, machine } = await create(subject, name);
         try {
           if (!impl.power) return;
           const observable = subject.powerObservable !== false;
-          await impl.power(machine.id, 'off', call('off'));
-          const off = await impl.get(machine.id, call('get-off'));
+          await impl.power(machine.id, 'off', call(name));
+          const off = await impl.get(machine.id, call(name));
           checkMachine(off, 'get after power off');
           if (observable)
             check(
               off.state === 'stopped' || off.state === 'pending',
               `power off leaves it stopped, not ${off.state}`,
             );
-          await impl.power(machine.id, 'on', call('on'));
-          const on = await impl.get(machine.id, call('get-on'));
+          await impl.power(machine.id, 'on', call(name));
+          const on = await impl.get(machine.id, call(name));
           checkMachine(on, 'get after power on');
           if (observable)
             check(
@@ -387,7 +395,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
               `power on leaves it running, not ${on.state}`,
             );
         } finally {
-          await cleanUp(impl, call, machine.id);
+          await cleanUp(impl, call, machine.id, name);
         }
       },
     },
@@ -402,14 +410,15 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
           !subject.image.includes('@'),
           'the subject image is a provider image, not a catalog ref (a host sends catalogImage only for those)',
         );
-        const { impl, call, machine } = await create(subject, key(subject, 'reinstall'));
+        const name = key(subject, 'reinstall');
+        const { impl, call, machine } = await create(subject, name);
         try {
           if (!impl.reinstall) return;
-          await impl.reinstall(machine.id, subject.image, call('reinstall'));
-          await impl.reinstall(machine.id, subject.image, call('reinstall-empty'), {});
-          checkMachine(await impl.get(machine.id, call('get-reinstalled')), 'get after reinstall');
+          await impl.reinstall(machine.id, subject.image, call(name));
+          await impl.reinstall(machine.id, subject.image, call(name), {});
+          checkMachine(await impl.get(machine.id, call(name)), 'get after reinstall');
         } finally {
-          await cleanUp(impl, call, machine.id);
+          await cleanUp(impl, call, machine.id, name);
         }
       },
     },
@@ -539,7 +548,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
               .catch(() => {});
             await volumes.deleteVolume(volumeId, call('vol-cleanup')).catch(() => {});
           }
-          await cleanUp(impl, call, machine.id);
+          await cleanUp(impl, call, machine.id, key(subject, 'volume-host'));
         }
       },
     },
@@ -592,7 +601,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
         } finally {
           if (volumeId !== undefined)
             await volumes.deleteVolume(volumeId, call('snapvol-cleanup')).catch(() => {});
-          await cleanUp(impl, call, machine.id);
+          await cleanUp(impl, call, machine.id, key(subject, 'snapshot-host'));
         }
       },
     },
@@ -617,7 +626,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
           step: () => Promise<{ id: string; state: string; message?: string }>,
           what: string,
         ) => settle(subject, step as () => Promise<ProviderResourceState>, ['ready'], what);
-        const machines: ExternalMachine[] = [];
+        const machines: (ExternalMachine & { createdAs: string })[] = [];
         let volumeId: string | undefined;
         try {
           await networkSettle(
@@ -639,8 +648,8 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
           );
           for (const which of ['a', 'b']) {
             const name = key(subject, `share-host-${which}`);
-            machines.push(
-              await impl.create(
+            machines.push({
+              ...(await impl.create(
                 {
                   offerId: subject.offerId,
                   image: subject.image,
@@ -649,8 +658,9 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
                   network: { network, subnet },
                 },
                 call(name),
-              ),
-            );
+              )),
+              createdAs: name,
+            });
           }
           const spec = {
             name: key(subject, 'share'),
@@ -729,7 +739,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
                 .catch(() => {});
             await volumes.deleteVolume(volumeId, call('share-cleanup')).catch(() => {});
           }
-          for (const machine of machines) await cleanUp(impl, call, machine.id);
+          for (const machine of machines) await cleanUp(impl, call, machine.id, machine.createdAs);
           await networks.deleteSubnet(region, subnet, call('share-subnet-cleanup')).catch(() => {});
           await networks.deleteNetwork(network, call('share-net-cleanup')).catch(() => {});
         }
@@ -829,8 +839,8 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
             ).catch(() => {});
             await addresses.deleteAddress(addressId, call('conflict-addr-cleanup')).catch(() => {});
           }
-          await cleanUp(impl, call, other.id);
-          await cleanUp(impl, call, machine.id);
+          await cleanUp(impl, call, other.id, key(subject, 'conflict-other'));
+          await cleanUp(impl, call, machine.id, key(subject, 'conflict-host'));
         }
       },
     },
@@ -910,8 +920,8 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
             await volumes.deleteVolume(volumeId, call('region-vol-cleanup')).catch(() => {});
           if (addresses && addressId !== undefined)
             await addresses.deleteAddress(addressId, call('region-addr-cleanup')).catch(() => {});
-          await cleanUp(impl, call, foreign.id);
-          await cleanUp(impl, call, machine.id);
+          await cleanUp(impl, call, foreign.id, key(subject, 'region-foreign'));
+          await cleanUp(impl, call, machine.id, key(subject, 'region-host'));
         }
       },
     },
@@ -1059,7 +1069,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
               .catch(() => {});
             await addresses.deleteAddress(addressId, call('addr-cleanup')).catch(() => {});
           }
-          await cleanUp(impl, call, machine.id);
+          await cleanUp(impl, call, machine.id, key(subject, 'address-host'));
         }
       },
     },
@@ -1149,7 +1159,7 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
         } finally {
           if (lbId !== undefined)
             await lbs.deleteLoadBalancer(lbId, call('lb-cleanup')).catch(() => {});
-          await cleanUp(impl, call, machine.id);
+          await cleanUp(impl, call, machine.id, key(subject, 'lb-host'));
         }
       },
     },
@@ -1195,8 +1205,8 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
             'a load balancer targeting a machine in another region',
           );
         } finally {
-          if (foreign) await cleanUp(impl, call, foreign.id);
-          await cleanUp(impl, call, machine.id);
+          if (foreign) await cleanUp(impl, call, foreign.id, key(subject, 'lb-region-foreign'));
+          await cleanUp(impl, call, machine.id, key(subject, 'lb-region-host'));
         }
       },
     },

@@ -62,6 +62,7 @@ The package passes `providerConformanceCases()` from `@better-compute/vps`.
 - **`delete` releases the claim** (clears the name and deactivates rescue).
   - Ordering and cancelling servers are contractual actions, left to people.
   - `get` treats unclaimed servers as absent.
+- **Every later call carries the key the server was claimed under**, as the reconciler's calls do. The name is the only record of who holds a server, so `get`, `delete`, `power`, `rescue`, `identify` and `bootstrap` read the server again and act only while its name is `bc-<that key>`. A server that was released, or that another key has claimed since, is `NOT_FOUND` (`get` answers nothing) and is not reset, put into rescue or installed. `bootstrap` and `identify` check once more when rescue answers, before the token is delivered. Robot has no compare-and-set, so a rename in the moment between that read and the action is not caught.
 - **Power** maps to Robot resets: `reset`/`cycle` → `hw`, `graceful-restart` → `sw`, `graceful-off`/`on` → `power`, `off` → `power_long`. Robot cannot report power state.
 - **`rescue`** activates Linux rescue with the account's key, then hardware-resets into it.
 - **`identify(machine)`** boots rescue (unless it already answers) and reads `/sys/class/dmi/id/product_uuid` over SSH, so the bootstrap token can be bound to the machine (`expect.productUuid`; the `provisioned` attestor refuses unbound tokens). It leaves the server in rescue for `bootstrap`.
