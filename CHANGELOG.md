@@ -141,6 +141,12 @@ All notable changes to the better-compute packages are documented here. The form
     takes the pool's model once the pool's `gpu` row is locked, and `pools.update` locks those rows before
     changing `gpuModel`. A deleted instance refunds its recorded charge before its allocation is released.
   - `@better-compute/testing`: `computeFixture({ capacity })`.
+- **Destructive CLI commands ask before they act** (`@better-compute/cli`). `metal retire`, `metal undeploy` and
+  `metal power --action off|reset|cycle` now need `--yes`, as `nodes delete` did, or a yes at an interactive
+  terminal (a prompt on stderr when stdin and stderr are terminals); without either they stop with a usage error
+  before calling the API. Scripts that run them must add `--yes`. One helper decides for all four
+  (`confirmDestructive` and `yesFlag`, exported for project commands; embedders answer the prompt through the new
+  optional `CliIO.confirm`). `on`, `graceful-off`, `graceful-restart` and `nmi` are unchanged.
 
 ### Security
 

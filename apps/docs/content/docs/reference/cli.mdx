@@ -3362,21 +3362,22 @@ better-compute metal recover node_01k5w…
 Retire a node: its retiring workflow erases its disks and powers it off (metal.retire)
 
 ```sh
-better-compute metal retire NODE --tenant ID [--config PATH] [--url URL]
+better-compute metal retire NODE --tenant ID [--yes] [--config PATH] [--url URL]
 ```
 
-Retire a node: its retiring workflow erases its disks and powers it off (metal.retire)
+metal retire starts the retiring workflow: a crypto-erase of the disks, power off, and the end of the node’s identity (certificates revoked, BMC credentials forgotten). A retired node does not come back; the machine has to be enrolled again. It needs --yes, or a yes at an interactive terminal. Decided as compute:nodes:provision.
 
 | Flag              | Description                                                                                                   | Default | Environment             |
 | ----------------- | ------------------------------------------------------------------------------------------------------------- | ------- | ----------------------- |
 | `--tenant ID`     | The tenant acting (the caller’s organization)                                                                 |         | `BETTER_COMPUTE_TENANT` |
+| `--yes`           | Confirm: the disks are erased and the node is retired for good                                                |         |                         |
 | `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                         |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |         |                         |
 
 ```sh
-better-compute metal retire node_01k5w…
+better-compute metal retire node_01k5w… --yes
 ```
 
 ### metal deploy
@@ -3408,22 +3409,23 @@ better-compute metal deploy node_01k5w… --profile ubuntu-gpu --profile-version
 Release a deployed node: wipe its disks and power it off (metal.undeploy)
 
 ```sh
-better-compute metal undeploy NODE --tenant ID [--wipe MODE] [--config PATH] [--url URL]
+better-compute metal undeploy NODE --tenant ID [--wipe MODE] [--yes] [--config PATH] [--url URL]
 ```
 
-Release a deployed node: wipe its disks and power it off (metal.undeploy)
+metal undeploy releases a deployed node: the installed system is gone, the disks are wiped as --wipe says (quick by default) and the machine is powered off, back to ready. It needs --yes, or a yes at an interactive terminal. Decided as compute:nodes:provision.
 
 | Flag              | Description                                                                                                   | Default | Environment             |
 | ----------------- | ------------------------------------------------------------------------------------------------------------- | ------- | ----------------------- |
 | `--tenant ID`     | The tenant acting (the caller’s organization)                                                                 |         | `BETTER_COMPUTE_TENANT` |
 | `--wipe MODE`     | How the disks are wiped (default quick)                                                                       |         |                         |
+| `--yes`           | Confirm: the installed system and its disks are wiped                                                         |         |                         |
 | `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                         |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |         |                         |
 
 ```sh
-better-compute metal undeploy node_01k5w… --wipe secure-erase
+better-compute metal undeploy node_01k5w… --wipe secure-erase --yes
 ```
 
 ### metal abort
@@ -3500,15 +3502,16 @@ better-compute metal confirm-mac node_01k5w… --mac 3c:ec:ef:12:34:56
 Send a BMC power action through the site agent (metal.power)
 
 ```sh
-better-compute metal power NODE --tenant ID --action ACTION [--config PATH] [--url URL]
+better-compute metal power NODE --tenant ID --action ACTION [--yes] [--config PATH] [--url URL]
 ```
 
-Send a BMC power action through the site agent (metal.power)
+metal power sends one BMC power action through the site agent and returns without waiting for the BMC. The actions that cut power under a running system without asking it (off, reset, cycle) need --yes, or a yes at an interactive terminal; on, graceful-off, graceful-restart and nmi do not. Decided as compute:nodes:power.
 
 | Flag              | Description                                                                                                   | Default | Environment             |
 | ----------------- | ------------------------------------------------------------------------------------------------------------- | ------- | ----------------------- |
 | `--tenant ID`     | The tenant acting (the caller’s organization)                                                                 |         | `BETTER_COMPUTE_TENANT` |
 | `--action ACTION` | The power action                                                                                              |         |                         |
+| `--yes`           | Confirm: off, reset and cycle cut power without asking the running system                                     |         |                         |
 | `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                         |
@@ -3516,6 +3519,7 @@ Send a BMC power action through the site agent (metal.power)
 
 ```sh
 better-compute metal power node_01k5w… --action graceful-restart
+better-compute metal power node_01k5w… --action off --yes
 ```
 
 ### metal bulk

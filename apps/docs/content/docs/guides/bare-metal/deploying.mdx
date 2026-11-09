@@ -191,7 +191,7 @@ phases of a machine that is already `ready`.
 
 ```bash
 better-compute metal deploy node_… --profile ubuntu-24.04-gpu-host --profile-version 1
-better-compute metal undeploy node_… --wipe quick
+better-compute metal undeploy node_… --wipe quick --yes
 ```
 
 The deploy ends when the installed OS has joined as the same node and the profile's acceptance
@@ -459,14 +459,20 @@ export BETTER_COMPUTE_TENANT=root
 better-compute metal enroll --site site_01k5w… --pool pool_01k5w… --bmc-address 10.20.0.14 \
   --bmc-driver redfish --bmc-credentials secret://root/bmc-r12-14 --macs b8:ce:f6:00:00:01
 better-compute metal deploy node_01k5w… --profile ubuntu-24.04-gpu-host --profile-version 1
-better-compute metal power node_01k5w… --action cycle
-better-compute metal undeploy node_01k5w… --wipe secure-erase
+better-compute metal power node_01k5w… --action cycle --yes
+better-compute metal undeploy node_01k5w… --wipe secure-erase --yes
 better-compute metal abort node_01k5w… --reason 'wrong profile'
 better-compute metal bulk --pool pool_01k5w… --verb retire --nodes-file retire.txt --reason 'EOL rack r12'
 ```
 
-- **Credentials** are a `secret://`, `vault://` or `env://` reference (`--bmc-credentials`), or `--bmc-username` with
-  `--bmc-password-file`. There is no password flag. See [enrolling a machine](/docs/guides/bare-metal/bmc#enrolling-a-machine).
+- **Credentials** are a `secret://<tenant>/<id>` reference of the node's own tenant (`--bmc-credentials`; `vault://`
+  and `env://` references only as the root tenant), or `--bmc-username` with `--bmc-password-file`. There is no
+  password flag. See [enrolling a machine](/docs/guides/bare-metal/bmc#enrolling-a-machine).
+- **Destructive commands ask first**: `metal retire` (the disks are erased and the node is retired for good),
+  `metal undeploy` (the installed system and its disks are wiped) and `metal power` with `off`, `reset` or `cycle`
+  (power is cut without asking the running system) go ahead only with `--yes`, or after a yes at an interactive
+  terminal; in a script or CI job without `--yes` they stop with a usage error before calling the API, as
+  `nodes delete` does. `metal bulk` is not asked this way: its `--reason` and the batch's approvers are its check.
 - **One verb per node**: `manage`, `inspect`, `provide`, `rescue`, `unrescue`, `recover` and `retire` take only the
   node; `deploy` takes `--profile` and `--profile-version`, `undeploy` takes `--wipe`, `abort` takes `--reason`, and
   `power` takes `--action` (`on`, `off`, `graceful-off`, `reset`, `graceful-restart`, `cycle`, `nmi`).

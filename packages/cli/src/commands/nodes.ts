@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { parseDuration } from '@better-compute/core';
 import { CliError, usageError } from '../errors.js';
+import { confirmDestructive, yesFlag } from '../confirm.js';
 import { defineCommand } from '../framework.js';
 import { writeReserved } from '../secret-file.js';
 import { newIdempotencyKey, tenantFlag } from './capacity.js';
@@ -257,12 +258,12 @@ export const nodeCommands = [
     args: nodeArg,
     flags: {
       ...changeFlags,
-      yes: { type: 'boolean', description: 'Confirm: the node is removed for good' },
+      yes: yesFlag('the node is removed for good'),
     },
     examples: ['better-compute nodes delete node_01k5w… --reason "TPM replaced" --yes'],
-    async run({ flags, args, api }) {
+    async run({ flags, args, api, io }) {
       const id = nodeId(args);
-      if (!flags.yes) throw usageError(`nodes delete removes ${id} for good; re-run with --yes`);
+      await confirmDestructive({ flags, io }, `nodes delete removes ${id} for good`);
       return (await api()).call('nodes/delete', {
         tenantId: flags.tenant,
         nodeId: id,

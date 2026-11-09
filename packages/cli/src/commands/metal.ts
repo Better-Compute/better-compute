@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { usageError } from '../errors.js';
+import { confirmDestructive, yesFlag } from '../confirm.js';
 import { defineCommand } from '../framework.js';
 import { newIdempotencyKey, tenantFlag } from './capacity.js';
 
@@ -25,7 +26,7 @@ async function jsonFile(path: string, flag: string): Promise<unknown> {
 
 /** One lifecycle verb on one node, with the API's own summary. */
 function metalVerb(
-  verb: 'manage' | 'inspect' | 'provide' | 'rescue' | 'unrescue' | 'recover' | 'retire',
+  verb: 'manage' | 'inspect' | 'provide' | 'rescue' | 'unrescue' | 'recover',
   summary: string,
 ) {
   return defineCommand({
@@ -44,6 +45,27 @@ function metalVerb(
     },
   });
 }
+
+/** `metal retire`: as the other verbs, behind the confirmation of a destructive command. */
+const metalRetire = defineCommand({
+  name: 'metal retire',
+  group: 'Metal',
+  summary: 'Retire a node: its retiring workflow erases its disks and powers it off (metal.retire)',
+  description:
+    'metal retire starts the retiring workflow: a crypto-erase of the disks, power off, and the end of the node’s identity (certificates revoked, BMC credentials forgotten). A retired node does not come back; the machine has to be enrolled again. It needs --yes, or a yes at an interactive terminal. Decided as compute:nodes:provision.',
+  target: 'token',
+  args: nodeArg,
+  flags: { tenant: tenantFlag, yes: yesFlag('the disks are erased and the node is retired for good') },
+  examples: ['better-compute metal retire node_01k5w… --yes'],
+  async run({ flags, args, api, io }) {
+    const nodeId = id(args[0]!, 'node', 'node');
+    await confirmDestructive({ flags, io }, `metal retire erases ${nodeId}'s disks, powers it off and retires it for good`);
+    return (await api()).call('metal/retire', { tenantId: flags.tenant, nodeId });
+  },
+});
+
+/** The power actions that take the power from under a running system (the graceful ones ask it first). */
+const hardPowerActions: ReadonlySet<string> = new Set(['off', 'reset', 'cycle']);
 
 const wipeFlag = {
   type: 'string',
@@ -178,7 +200,7 @@ export const metalCommands = [
     'recover',
     'Move a failed node back to the last stable point for the state it failed in',
   ),
-  metalVerb('retire', 'Retire a node: its retiring workflow erases its disks and powers it off'),
+  metalRetire,
   defineCommand({
     name: 'metal deploy',
     group: 'Metal',
@@ -215,14 +237,18 @@ export const metalCommands = [
     name: 'metal undeploy',
     group: 'Metal',
     summary: 'Release a deployed node: wipe its disks and power it off (metal.undeploy)',
+    description:
+      'metal undeploy releases a deployed node: the installed system is gone, the disks are wiped as --wipe says (quick by default) and the machine is powered off, back to ready. It needs --yes, or a yes at an interactive terminal. Decided as compute:nodes:provision.',
     target: 'token',
     args: nodeArg,
-    flags: { tenant: tenantFlag, wipe: wipeFlag },
-    examples: ['better-compute metal undeploy node_01k5w… --wipe secure-erase'],
-    async run({ flags, args, api }) {
+    flags: { tenant: tenantFlag, wipe: wipeFlag, yes: yesFlag('the installed system and its disks are wiped') },
+    examples: ['better-compute metal undeploy node_01k5w… --wipe secure-erase --yes'],
+    async run({ flags, args, api, io }) {
+      const nodeId = id(args[0]!, 'node', 'node');
+      await confirmDestructive({ flags, io }, `metal undeploy wipes ${nodeId}'s disks (${flags.wipe ?? 'quick'}) and powers it off`);
       return (await api()).call('metal/undeploy', {
         tenantId: flags.tenant,
-        nodeId: id(args[0]!, 'node', 'node'),
+        nodeId,
         ...(flags.wipe ? { wipe: flags.wipe } : {}),
       });
     },
@@ -289,6 +315,8 @@ export const metalCommands = [
     name: 'metal power',
     group: 'Metal',
     summary: 'Send a BMC power action through the site agent (metal.power)',
+    description:
+      'metal power sends one BMC power action through the site agent and returns without waiting for the BMC. The actions that cut power under a running system without asking it (off, reset, cycle) need --yes, or a yes at an interactive terminal; on, graceful-off, graceful-restart and nmi do not. Decided as compute:nodes:power.',
     target: 'token',
     args: nodeArg,
     flags: {
@@ -300,12 +328,19 @@ export const metalCommands = [
         choices: ['on', 'off', 'graceful-off', 'reset', 'graceful-restart', 'cycle', 'nmi'],
         description: 'The power action',
       },
+      yes: yesFlag('off, reset and cycle cut power without asking the running system'),
     },
-    examples: ['better-compute metal power node_01k5w… --action graceful-restart'],
-    async run({ flags, args, api }) {
+    examples: [
+      'better-compute metal power node_01k5w… --action graceful-restart',
+      'better-compute metal power node_01k5w… --action off --yes',
+    ],
+    async run({ flags, args, api, io }) {
+      const nodeId = id(args[0]!, 'node', 'node');
+      if (hardPowerActions.has(flags.action!))
+        await confirmDestructive({ flags, io }, `metal power --action ${flags.action} cuts ${nodeId}'s power without asking its running system`);
       return (await api()).call('metal/power', {
         tenantId: flags.tenant,
-        nodeId: id(args[0]!, 'node', 'node'),
+        nodeId,
         action: flags.action,
       });
     },

@@ -31,6 +31,12 @@ export interface CliIO {
   cwd?: string;
   /** The Fetch implementation remote (`--url`) calls use (default `globalThis.fetch`). */
   fetch?: typeof globalThis.fetch;
+  /**
+   * Asks the person at an interactive terminal a yes/no question (the confirmation of a destructive
+   * command without `--yes`). Absent where nobody can answer (a pipe, CI, tests): such commands then
+   * require `--yes`.
+   */
+  confirm?(question: string): Promise<boolean>;
   /** Ends long-running commands (`serve`, `dev`); default: SIGINT or SIGTERM. */
   signal?: AbortSignal;
   /** The interactive terminal `console` and `exec` attach to (default: the process's own). */
