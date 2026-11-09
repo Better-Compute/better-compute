@@ -175,11 +175,13 @@ identity: a plan that changes them is blocked, so create a new pool instead. Siz
    whose bcd is not connected. bcd's join container reads it, and each node joins the pool. Once every Node has
    joined, the token is revoked and the Secret deleted.
 4. **Book.** Reservations with `binding: 'kubernetes'` book the nodes' GPUs. bcd's device plugin advertises only the
-   devices a reservation holds.
+   devices a reservation holds. The nodes of a Spot flavor carry the system label `bc.dev/capacity=spot` once they
+   are matched to their Node: only reservations made with `spot: true` are placed on them, so nothing sold as
+   uninterruptible sits on a machine the provider may reclaim.
 5. **Scale.** Change a flavor's `nodes` in the document and apply. The provider removes Nodes. Each pool node is
    matched to its Kubernetes Node by the Node name bcd reports. When a matched node is disconnected and its Node is
-   gone, its reservations end: bound ones are released with their quota refunded once, and Spot ones end as
-   `preempted`. Then the node is retired.
+   gone, its reservations end: bound ones are released with their quota refunded once, and spot reservations and
+   anything on a Spot node end as `preempted`. Then the node is retired.
 6. **Teardown.** Remove the pool from the document and apply with `prune`, or archive the pool. Taking only
    `policy.substrate` out of a pool that stays tears the substrate down the same way, and also needs `prune`: a
    plain apply keeps the substrate. The token is revoked

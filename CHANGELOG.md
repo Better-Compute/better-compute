@@ -144,6 +144,16 @@ All notable changes to the better-compute packages are documented here. The form
 
 ### Fixed
 
+- **Provider Spot nodes are Spot to capacity** (`@better-compute/capacity`, `@better-compute/kubernetes`). A fleet
+  pool's Spot flavor was marked only on the Kubernetes Node (`better-compute.dev/capacity=spot`), so a non-spot
+  reservation could land on a machine the provider may take back, and a reclaim ended what the node held as
+  `node-removed`. The substrate now writes the system label `bc.dev/capacity=spot` on every pool node whose Node is
+  Spot, when it learns the Node (nodes learned earlier are marked on the next run). Capacity places only
+  `spot: true` reservations on such a node (`capacity.preview` too; the request's `nodeLabels` carries
+  `bc.dev/capacity: '!spot'`, and a `nodeLabels` value starting with `!` now means the node must not carry that
+  value), and `endNodeReservations` ends whatever a Spot node held as `preempted`, whatever the reservation asked
+  for. A node can still take a non-spot booking in the moment between its join and its first inventory, before it
+  is matched to its Node; that booking ends as `preempted` as well.
 - **A refused delete backs off** (`@better-compute/kubernetes`). A cluster whose delete the provider refuses for
   good was asked for again every 30 s forever (the fast sweep queued every row still to delete, the one in `error`
   included), and a substrate tearing down polled that cluster every 10 s. A cluster in `error` with a pending

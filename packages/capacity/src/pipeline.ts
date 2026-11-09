@@ -56,8 +56,17 @@ export interface Rejection {
 export const anyLabelValue = '*';
 
 /**
- * The first `request.nodeLabels` entry a node does not carry with exactly that value (or at all,
- * for `anyLabelValue`), as `key=value`; `undefined` when it carries them all (or none are asked).
+ * A `nodeLabels` value that starts with this asks for the opposite: the node must NOT carry the label
+ * with the value after it (a node without the label passes). `{ 'bc.dev/capacity': '!spot' }` keeps
+ * work off provider Spot nodes.
+ */
+export const notLabelPrefix = '!';
+
+/**
+ * The first `request.nodeLabels` entry a node does not meet, `undefined` when it meets them all (or
+ * none are asked): one it does not carry with exactly that value (or at all, for `anyLabelValue`),
+ * as `key=value`; or one it carries although the request forbids that value (`notLabelPrefix`), as
+ * `key!=value`.
  */
 export function missingNodeLabel(
   wanted: Readonly<Record<string, string>> | undefined,
@@ -66,6 +75,11 @@ export function missingNodeLabel(
   if (!wanted) return undefined;
   for (const key in wanted) {
     const value = wanted[key]!;
+    if (value.startsWith(notLabelPrefix)) {
+      if (labels[key] === value.slice(notLabelPrefix.length))
+        return `${key}!=${value.slice(notLabelPrefix.length)}`;
+      continue;
+    }
     if (value === anyLabelValue ? labels[key] === undefined : labels[key] !== value)
       return `${key}=${value}`;
   }

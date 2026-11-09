@@ -165,13 +165,14 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
     pending.forEach((node, index) => kubelets.set(node.name, ids[index]!));
     return ids;
   };
-  const book = async (poolId: string, key: string) => {
+  const book = async (poolId: string, key: string, spot = false) => {
     const reservation = await api.reservations.create(dev.root, {
       tenantId: dev.rootTenantId,
       poolId,
       devices: [{ class: 'gpu', count: 8 }],
       duration: 3_600_000,
       binding: 'kubernetes',
+      ...(spot ? { spot: true } : {}),
       idempotencyKey: key,
     });
     return until(`reservation ${key} to bind`, async () => {
@@ -221,6 +222,7 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
     let server: string;
     let providerId: string;
     const reservations: string[] = [];
+    const spotReservations: string[] = [];
     // A flavor's `nodes` are per zone of its node pool (the ProviderKubernetes contract): `zones` Nodes per node.
     const z = profile.zones;
     // Two on-demand nodes and one Spot node (per zone).
@@ -292,11 +294,46 @@ export function fleetPoolScenario(makeProfile: () => ManagedKubernetesProfile): 
     }, 90_000);
 
     it("books every node's GPUs for kubernetes-bound reservations, through bcd's device plugin", async () => {
-      // One 8-GPU booking per node: every node's GPUs are booked.
-      for (let i = 0; i < 3 * z; i++) reservations.push((await book(poolId, `${profile.label}-booking-${i}`)).id);
+      // The Spot flavor's nodes are Spot to capacity: the system label, on exactly them.
+      const spotNames = kube
+        .nodeList(server)
+        .filter((node) => node.labels[substrateCapacityLabel] === 'spot')
+        .map((node) => node.name);
+      const spotIds = spotNames.map((name) => kubelets.get(name)!);
+      const { rows: marked } = await dev.database.query<{ node_id: string }>(
+        `SELECT node_id FROM node_labels WHERE key = 'bc.dev/capacity' AND value = 'spot' AND source = 'system'
+            AND node_id = ANY($1)`,
+        [[...kubelets.values()]],
+      );
+      expect(marked.map((row) => row.node_id).sort()).toEqual([...spotIds].sort());
+      // One 8-GPU booking per on-demand node: none of them lands on a Spot node, and one more finds no room
+      // although the Spot nodes are free.
+      for (let i = 0; i < 2 * z; i++) reservations.push((await book(poolId, `${profile.label}-booking-${i}`)).id);
+      const onDemand = await liveAllocations(poolId);
+      expect(onDemand).toHaveLength(2 * z);
+      expect(onDemand.filter((allocation) => spotIds.includes(allocation.node_id))).toEqual([]);
+      const refused = await api.reservations.create(dev.root, {
+        tenantId: dev.rootTenantId,
+        poolId,
+        devices: [{ class: 'gpu', count: 8 }],
+        duration: 3_600_000,
+        binding: 'kubernetes',
+        idempotencyKey: `${profile.label}-booking-no-room`,
+      });
+      expect(refused.state).toBe('pending');
+      await api.reservations.cancel(dev.root, { tenantId: dev.rootTenantId, reservationId: refused.id });
+      // Spot reservations take the Spot nodes: every node's GPUs are booked.
+      for (let i = 0; i < z; i++) {
+        const booked = await book(poolId, `${profile.label}-spot-booking-${i}`, true);
+        reservations.push(booked.id);
+        spotReservations.push(booked.id);
+      }
       const live = await liveAllocations(poolId);
       expect(live).toHaveLength(3 * z);
       expect(new Set(live.map((allocation) => allocation.node_id))).toEqual(new Set(kubelets.values()));
+      expect(
+        live.filter((allocation) => spotIds.includes(allocation.node_id)).map((allocation) => allocation.owner_id).sort(),
+      ).toEqual([...spotReservations].sort());
       for (const allocation of live) {
         const spec = JSON.parse(dev.daemons.get(allocation.node_id)!.files.get(cdiSpecPath(allocation.id))!);
         expect(spec.annotations['bcd.dev/binding']).toBe('kubernetes');

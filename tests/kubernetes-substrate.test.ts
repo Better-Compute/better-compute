@@ -523,6 +523,40 @@ describe('substrate: replaced nodes', () => {
   });
 });
 
+describe('substrate: provider Spot nodes', () => {
+  it('marks the pool nodes of a Spot flavor for capacity (bc.dev/capacity=spot), and only those', async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(createSpec([{ ...gpu, nodes: 1 }, spot], { allowSpot: true }));
+    await world.converge(pool.id, 6);
+    const server = await world.server(pool.id);
+    const listed = world.kube.nodeList(server);
+    const spotName = listed.find((node) => node.labels[substrateCapacityLabel] === 'spot')!.name;
+    const plainName = listed.find((node) => node.labels[substrateCapacityLabel] === undefined)!.name;
+    // A node is matched to its Node by the name bcd reports; one that reports nothing yet is not marked.
+    const [onSpot, onDemand] = await world.joinNodes(pool.id, 2, [spotName, plainName]);
+    const [unreported] = await world.joinNodes(pool.id, 1);
+    // Spot nodes that joined before this label existed are marked too (their Node was learned already).
+    const labels = async () =>
+      (
+        await world!.fixture.database.query<{ node_id: string; key: string; value: string; source: string }>(
+          `SELECT node_id, key, value, source FROM node_labels WHERE node_id = ANY($1) ORDER BY node_id`,
+          [[onSpot, onDemand, unreported]],
+        )
+      ).rows;
+    await world.converge(pool.id, 3);
+    expect(await labels()).toEqual([{ node_id: onSpot, key: 'bc.dev/capacity', value: 'spot', source: 'system' }]);
+    // Removed by hand in the database, it comes back on the next run; one set on an on-demand node goes.
+    await world.fixture.database.query(`DELETE FROM node_labels WHERE node_id = $1`, [onSpot]);
+    await world.fixture.database.query(
+      `INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, 'bc.dev/capacity', 'spot', 'system')`,
+      [onDemand],
+    );
+    await world.fixture.advance(2 * 60_000);
+    await world.converge(pool.id, 3);
+    expect(await labels()).toEqual([{ node_id: onSpot, key: 'bc.dev/capacity', value: 'spot', source: 'system' }]);
+  });
+});
+
 describe('substrate: which Kubernetes Node a pool node is', () => {
   const nodeRows = async (poolId: string) =>
     new Map(

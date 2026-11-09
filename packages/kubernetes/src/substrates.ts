@@ -15,7 +15,7 @@ import {
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
-import { endNodeReservations, rebuildPoolRollup } from '@better-compute/capacity';
+import { capacityLabel, endNodeReservations, rebuildPoolRollup, spotCapacity } from '@better-compute/capacity';
 import { readAccount } from '@better-compute/vps';
 import { clusterNetwork, markDeleted, reopen } from './clusters.js';
 import { canonical, sha256Hex } from './input.js';
@@ -1246,6 +1246,36 @@ async function retireNode(
 }
 
 /**
+ * Tells capacity which of the substrate's pool nodes are provider Spot capacity. The `better-compute.dev/capacity=spot`
+ * label of a Spot flavor exists on the Kubernetes Node only; capacity places by the pool node. So every owned pool
+ * node matched to a listed Node carries the system label `bc.dev/capacity=spot` exactly when its Node is Spot: set when
+ * the Node is learned (and for nodes learned before this label existed), removed if the Node is not (a Node
+ * re-created under the name in another node pool). Capacity then keeps non-spot reservations off the node and ends
+ * what it holds as `preempted` when the Node is reclaimed. A node not matched yet carries no label: for the moment
+ * between its join and its first inventory it can take a non-spot booking, which still ends as `preempted`.
+ */
+async function markSpotNodes(sql: SqlExecutor, poolId: string, nodes: readonly SubstrateNode[]): Promise<void> {
+  const spot = nodes.filter((node) => node.labels[substrateCapacityLabel] === spotCapacity).map((node) => node.name);
+  const plain = nodes.filter((node) => node.labels[substrateCapacityLabel] !== spotCapacity).map((node) => node.name);
+  if (spot.length > 0)
+    await sql.query(
+      `INSERT INTO node_labels (node_id, key, value, source)
+       SELECT m.node_id, $3, $4, 'system' FROM kubernetes_substrate_nodes m
+        WHERE m.pool_id = $1 AND m.owned AND m.kubernetes_node = ANY($2)
+       ON CONFLICT (node_id, key) DO UPDATE SET value = EXCLUDED.value, source = 'system'
+         WHERE node_labels.value <> EXCLUDED.value OR node_labels.source <> 'system'`,
+      [poolId, spot, capacityLabel, spotCapacity],
+    );
+  if (plain.length > 0)
+    await sql.query(
+      `DELETE FROM node_labels l USING kubernetes_substrate_nodes m
+        WHERE l.node_id = m.node_id AND m.pool_id = $1 AND m.owned AND m.kubernetes_node = ANY($2)
+          AND l.key = $3 AND l.source = 'system'`,
+      [poolId, plain, capacityLabel],
+    );
+}
+
+/**
  * Pool nodes whose Kubernetes Node is gone.
  *
  * Learning: a CONNECTED pool node is matched to its Node once, by the Node name its bcd reports
@@ -1306,6 +1336,7 @@ async function removeGoneNodes(
     await sql.query(`UPDATE kubernetes_substrate_nodes SET checked_at = compute_now() WHERE node_id = ANY($1)`, [
       unreported,
     ]);
+  await markSpotNodes(sql, row.pool_id, selected.nodes);
   // A connected node's Node re-created under its name: the new uid.
   const { rows: matched } = await sql.query<{ node_id: string; kubernetes_node: string; kubernetes_uid: string | null }>(
     `SELECT m.node_id, m.kubernetes_node, m.kubernetes_uid
