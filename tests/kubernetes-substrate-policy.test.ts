@@ -126,6 +126,7 @@ describe('substratePolicyValidator', () => {
       'kubernetes/0004_substrate_ownership',
       'kubernetes/0005_cluster_claims',
       'kubernetes/0006_delete_backoff',
+      'kubernetes/0007_substrate_join_wait',
     ]);
   });
 });

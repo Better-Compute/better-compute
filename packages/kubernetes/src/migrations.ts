@@ -304,6 +304,18 @@ ALTER TABLE kubernetes_pool_substrates ADD COLUMN retried_at timestamptz;
 `,
 };
 
+/**
+ * Nodes that never join. `kubernetes_pool_substrates.join_wait_since`: since when the substrate has listed Nodes
+ * without a joined bcd and none has joined (NULL when every listed Node joined; it starts over when one joins or
+ * more Nodes appear). After `substrateJoinStallSeconds` the substrate says so in its message.
+ */
+export const kubernetesSubstrateJoinWaitMigration: Migration = {
+  name: 'kubernetes/0007_substrate_join_wait',
+  sql: `
+ALTER TABLE kubernetes_pool_substrates ADD COLUMN join_wait_since timestamptz;
+`,
+};
+
 export const kubernetesMigrations: readonly Migration[] = Object.freeze([
   kubernetesClustersMigration,
   kubernetesSubstratesMigration,
@@ -311,4 +323,5 @@ export const kubernetesMigrations: readonly Migration[] = Object.freeze([
   kubernetesSubstrateOwnershipMigration,
   kubernetesClusterClaimsMigration,
   kubernetesDeleteBackoffMigration,
+  kubernetesSubstrateJoinWaitMigration,
 ]);

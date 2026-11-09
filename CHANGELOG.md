@@ -144,6 +144,14 @@ All notable changes to the better-compute packages are documented here. The form
 
 ### Fixed
 
+- **A fleet pool says when its Nodes are not joining** (`@better-compute/kubernetes`). A substrate whose Nodes never
+  ran bcd (the image does not pull, the gateway is unreachable from the cluster, a pin is wrong) stayed `ready` with
+  0 joined, polled every 10 s and minted a new token every hour, with nothing to say why. `kubernetesSubstrates.get`
+  now returns `waitingToJoin: { nodes, since }` while listed Nodes have no joined bcd (`since` starts over when one
+  joins or more Nodes appear). After 15 minutes without a join the substrate, still `ready`, carries a `message`
+  naming how many Nodes wait and what to check, `selfCheck` reports `kubernetes.substrate-nodes-not-joining`, and
+  the substrate leaves the 10 s poll to the 2 minute refresh (the join token is kept for the Nodes). Migration
+  `kubernetes/0007_substrate_join_wait` adds `kubernetes_pool_substrates.join_wait_since`.
 - **bcd reports the Kubernetes Node it runs on** (`proto`, `@better-compute/protocol`, `bcd`,
   `@better-compute/kubernetes`). A fleet pool matches each pool node to its Kubernetes Node by the Node name bcd
   reports, but bcd never reported one: `NODE_NAME` only reached its Kubernetes manager, so matching fell back to the

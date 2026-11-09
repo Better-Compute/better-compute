@@ -191,12 +191,14 @@ export interface SubstrateRow {
   /** `upgrades: 'drain'`: the version being drained for (or pushed after a drain, until the cluster runs it). */
   upgrade_version: string | null;
   upgrade_since: Date | string | null;
+  /** Since when Nodes are listed without a joined bcd and none has joined (NULL: none waits). */
+  join_wait_since: Date | string | null;
   version: string | number;
 }
 
 const substrateColumns = `pool_id, tenant_id, provider_account_id, mode, adopt_id, identity, cluster_id, create_spec,
   state, desired_state, message, join_token_id, token_applied, manifests_sha256, applied_at, nodes_listed,
-  nodes_joined, pool_version, upgrade_version, upgrade_since, version`;
+  nodes_joined, pool_version, upgrade_version, upgrade_since, join_wait_since, version`;
 
 interface PoolRow {
   id: string;
@@ -222,6 +224,11 @@ export interface SubstrateView {
   nodesJoined?: number;
   /** `upgrades: 'drain'`: the version drained for, and since when, until the cluster runs it. */
   upgrade?: { version: string; since: number };
+  /**
+   * Nodes the cluster lists whose bcd has not joined the pool, and since when none has joined (it starts over when
+   * one joins or more Nodes appear). After `substrateJoinStallSeconds` the `message` says what to check.
+   */
+  waitingToJoin?: { nodes: number; since: number };
 }
 
 export function substrateView(row: SubstrateRow): SubstrateView {
@@ -237,6 +244,14 @@ export function substrateView(row: SubstrateRow): SubstrateView {
     ...(row.nodes_joined !== null ? { nodesJoined: Number(row.nodes_joined) } : {}),
     ...(row.upgrade_version !== null && row.upgrade_since !== null
       ? { upgrade: { version: row.upgrade_version, since: new Date(row.upgrade_since).getTime() } }
+      : {}),
+    ...(row.join_wait_since !== null && Number(row.nodes_listed ?? 0) > Number(row.nodes_joined ?? 0)
+      ? {
+          waitingToJoin: {
+            nodes: Number(row.nodes_listed) - Number(row.nodes_joined ?? 0),
+            since: new Date(row.join_wait_since).getTime(),
+          },
+        }
       : {}),
   };
 }
@@ -832,7 +847,11 @@ async function setState(
     message?: string | null;
     fields?: Partial<
       Pick<SubstrateRow, 'manifests_sha256' | 'nodes_listed' | 'nodes_joined' | 'join_token_id' | 'token_applied'>
-    > & { applied?: boolean };
+    > & {
+      applied?: boolean;
+      /** Epoch ms since when Nodes wait to join, null when none does; left as it is when absent. */
+      joinWaitSince?: number | null;
+    };
   },
 ): Promise<boolean> {
   return sql.transaction(async (tx) => {
@@ -845,7 +864,8 @@ async function setState(
               nodes_listed = coalesce($7, nodes_listed),
               nodes_joined = coalesce($8, nodes_joined),
               join_token_id = CASE WHEN $9 THEN $10 ELSE join_token_id END,
-              token_applied = coalesce($11, token_applied)
+              token_applied = coalesce($11, token_applied),
+              join_wait_since = CASE WHEN $12 THEN $13::timestamptz ELSE join_wait_since END
         WHERE pool_id = $1 AND version = $2
         RETURNING pool_id`,
       [
@@ -860,6 +880,8 @@ async function setState(
         'join_token_id' in fields,
         fields.join_token_id ?? null,
         fields.token_applied ?? null,
+        fields.joinWaitSince !== undefined,
+        typeof fields.joinWaitSince === 'number' ? new Date(fields.joinWaitSince).toISOString() : null,
       ],
     );
     if (rows.length === 0) return false;
@@ -959,7 +981,7 @@ async function prepare(
                   create_spec = NULL, state = 'pending', desired_state = 'present', message = NULL,
                   join_token_id = NULL, token_applied = false, manifests_sha256 = NULL, applied_at = NULL,
                   nodes_listed = NULL, nodes_joined = NULL, upgrade_version = NULL, upgrade_since = NULL,
-                  deleted_at = NULL, updated_at = compute_now(),
+                  join_wait_since = NULL, deleted_at = NULL, updated_at = compute_now(),
                   version = version + 1
             WHERE pool_id = $1`,
           [poolId, pool!.owner_tenant_id, substrate.account, fresh.mode, fresh.adopt, identity],
@@ -1074,6 +1096,11 @@ async function prepare(
 
 /** A node that joined but never connected counts as joined this long after its join (its bcd is still starting). */
 export const substrateFirstConnectGraceSeconds = 600;
+/**
+ * How long Nodes may be listed without a joined bcd, with none joining, before the substrate says they are not
+ * joining (longer than a GPU node takes to pull bcd's image and start).
+ */
+export const substrateJoinStallSeconds = 900;
 
 /** SQL: node `alias` is one the substrate owns (`learnOwnership`); `$1` is the pool id. */
 const ownedNode = (alias: string) =>
@@ -1787,6 +1814,22 @@ async function applyBcd(
     });
   }
   const drain = plan.drain;
+  // Nodes that never join: a token and a DaemonSet do not make bcd start (the image does not pull, the gateway is
+  // not reachable from the cluster, a pin is wrong, the GPU runtime class is missing). The wait is counted from the
+  // first run that listed Nodes without a joined bcd, and starts over when one joins or more Nodes appear; past
+  // `substrateJoinStallSeconds` the substrate says so (it stays `ready`: the cluster is) and leaves the 10 s poll
+  // to the 2 minute refresh, which keeps the token alive for them.
+  const nowJoined = Math.min(joined, nodes.length);
+  const progressed =
+    row.join_wait_since === null ||
+    nowJoined > Number(row.nodes_joined ?? 0) ||
+    nodes.length > Number(row.nodes_listed ?? 0);
+  const waitingSince =
+    gap === 0 ? null : progressed ? deps.clock.now() : new Date(row.join_wait_since!).getTime();
+  const stalled = waitingSince !== null && deps.clock.now() - waitingSince >= substrateJoinStallSeconds * 1000;
+  const notJoining = stalled
+    ? `${gap} of ${nodes.length} Node(s) have not joined since ${new Date(waitingSince).toISOString()}: bcd is not starting on them. Check the pods of DaemonSet ${describeObject(manifests.find((object) => object.kind === 'DaemonSet') ?? agent.tokenSecret)} (image pull, the gateway URL and pins, the GPU runtime class); the join token is kept for them`
+    : null;
   // With a problem the substrate stays in error (its message says why); its nodes were tended all the same.
   const written = await setState(deps, sql, row, {
     state: plan.problem !== undefined ? 'error' : drain ? 'updating' : 'ready',
@@ -1794,11 +1837,12 @@ async function applyBcd(
       plan.problem ??
       (drain
         ? `Draining before the upgrade to ${drain.version}: waiting for ${drain.bookings} booking(s) on the substrate's nodes to end (no new bookings meanwhile)`
-        : null),
+        : notJoining),
     fields: {
       ...(due ? { applied: true, manifests_sha256: hash } : {}),
+      joinWaitSince: waitingSince,
       nodes_listed: nodes.length,
-      nodes_joined: Math.min(joined, nodes.length),
+      nodes_joined: nowJoined,
       ...(revoke ? { join_token_id: null, token_applied: false } : {}),
       ...(joinToken !== undefined ? { token_applied: true } : {}),
     },
@@ -1807,7 +1851,7 @@ async function applyBcd(
   // Nodes still joining, or the cluster still converging (a resize, an upgrade): look again soon. A drain looks
   // again for its bookings now and then; a drained upgrade until the cluster runs the version. Otherwise the
   // periodic refresh comes back (as it does to a substrate in error, every 2 minutes).
-  if (gap > 0) return deps.clock.now() + substratePollMs;
+  if (gap > 0 && !stalled) return deps.clock.now() + substratePollMs;
   if (plan.problem !== undefined) return drain ? deps.clock.now() + substrateUpgradeRecheckMs : undefined;
   if (cluster.state !== 'ready') return deps.clock.now() + substratePollMs;
   if (drain) return deps.clock.now() + substrateUpgradeRecheckMs;

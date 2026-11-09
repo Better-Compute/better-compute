@@ -39,6 +39,7 @@ export {
   substrateCredentialTtlSeconds,
   substrateCreator,
   substrateFirstConnectGraceSeconds,
+  substrateJoinStallSeconds,
   substrateNodeRemovedReason,
   substrateTeardownReason,
   substrateUpgradeReason,

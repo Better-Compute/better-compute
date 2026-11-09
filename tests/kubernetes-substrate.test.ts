@@ -6,6 +6,7 @@ import { decodeInventorySection, OsSectionSchema } from '@better-compute/protoco
 import {
   substrateCapacityLabel,
   substrateFirstConnectGraceSeconds,
+  substrateJoinStallSeconds,
   substratePoolLabel,
   substrateSubject,
 } from '@better-compute/kubernetes';
@@ -211,6 +212,8 @@ describe('substrate: create', () => {
       state: 'ready',
       nodesListed: 2,
       nodesJoined: 1,
+      // One Node has no joined bcd yet, since the substrate first listed it.
+      waitingToJoin: { nodes: 1, since: expect.any(Number) },
     });
     // Nothing secret in it: no token id, no credential.
     expect(JSON.stringify(view)).not.toMatch(/token|jtk_/i);
@@ -273,6 +276,57 @@ describe('substrate: create', () => {
     expect(cluster).toMatchObject({ requestedVersion: '1.34', state: 'ready' });
     expect(cluster.kubernetesVersion).toMatch(/^1\.34/);
     expect(row.state).toBe('ready');
+  });
+});
+
+describe('substrate: Nodes that never join', () => {
+  it('says so after 15 minutes without a join, in the view and to doctor, and stops polling every 10 s', async () => {
+    world = await substrateWorld();
+    const pool = await world.createPool(createSpec());
+    await world.converge(pool.id, 6);
+    const get = () => world!.api.kubernetesSubstrates.get(world!.root, { tenantId: world!.rootTenant, poolId: pool.id });
+    const findings = async () =>
+      ((await world!.module.selfCheck!({ sql: world!.fixture.database } as never)) as any[]).filter(
+        (entry) => entry.check === 'kubernetes.substrate-nodes-not-joining',
+      );
+    // Just applied: three Nodes wait for their bcd to join. Nothing is wrong yet.
+    const fresh = await get();
+    expect(fresh).toMatchObject({ state: 'ready', nodesListed: 3, nodesJoined: 0, waitingToJoin: { nodes: 3 } });
+    expect(fresh.message).toBeUndefined();
+    expect(await findings()).toEqual([]);
+
+    // A quarter of an hour later still none joined (the image does not pull, the gateway cannot be reached, …).
+    await world.fixture.advance(substrateJoinStallSeconds * 1000);
+    await world.converge(pool.id, 6);
+    const stalled = await get();
+    expect(stalled).toMatchObject({ state: 'ready', nodesJoined: 0, waitingToJoin: { nodes: 3, since: fresh.waitingToJoin.since } });
+    expect(stalled.message).toMatch(/^3 of 3 Node\(s\) have not joined/);
+    expect(stalled.message).toMatch(/DaemonSet/);
+    expect(await findings()).toEqual([
+      expect.objectContaining({ severity: 'warning', count: 1, message: expect.stringContaining(pool.id) }),
+    ]);
+    // The token is still there for them, and the substrate no longer looks every 10 seconds: only the refresh does.
+    expect(await world.substrate(pool.id)).toMatchObject({ token_applied: true });
+    const credentials = world.cloud.credentials.length;
+    await world.converge(pool.id, 6); // two minutes of ticks
+    expect(world.cloud.credentials.length - credentials).toBeLessThanOrEqual(2);
+
+    // One joins: that is progress, the wait starts over for the other two.
+    await world.joinNodes(pool.id, 1);
+    await world.fixture.advance(2 * 60_000);
+    await world.converge(pool.id, 3);
+    const progressed = await get();
+    expect(progressed).toMatchObject({ nodesJoined: 1, waitingToJoin: { nodes: 2 } });
+    expect(progressed.waitingToJoin.since).toBeGreaterThan(fresh.waitingToJoin.since);
+    expect(progressed.message).toBeUndefined();
+    expect(await findings()).toEqual([]);
+    // The rest join: nothing waits.
+    await world.joinNodes(pool.id, 2);
+    await world.converge(pool.id, 3);
+    const done = await get();
+    expect(done).toMatchObject({ state: 'ready', nodesJoined: 3 });
+    expect(done.waitingToJoin).toBeUndefined();
+    expect(done.message).toBeUndefined();
   });
 });
 
