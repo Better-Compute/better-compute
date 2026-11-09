@@ -254,6 +254,10 @@ All notable changes to the better-compute packages are documented here. The form
   read every warm instance a template ever had; drafts a refused create left behind blocked deleting their network
   or provider account (collected after a day by `reapInstanceDrafts`); the default `zoneRegion` made a Compute
   Engine AI zone (`us-south1-ai1b`) its own region.
+- **A slow worker could delete a work row nobody had processed** (`@better-compute/server`). Work is settled by
+  `(kind, key, gen)`, and `gen` starts again at 1 once a key's row is deleted: a worker whose claim had run out could
+  report DONE against a fresh, unclaimed row and delete it, losing that wake-up until the next resync. Completion
+  deletes only a claimed row.
 - **A node could land in two active rollouts** (`@better-compute/rollout`). Two concurrent `rollouts.create` over the
   same pools both passed the "already in a rollout" check; creates of one tenant take turns under an advisory lock.
 - **A late row could be destroyed with its history partition** (`@better-compute/postgres`).
