@@ -50,6 +50,7 @@ import { isMatchableUuid, matchDiscoveredMachine, verifyMachineIdentity } from '
 import { invalidateSiteProxyTargets } from './proxy-targets.js';
 import { newIdentityGeneration, tenantRootPolicy } from './tenant-root.js';
 import { bmcResult, dcgmResult, deployResult, inventoryRefreshResult, wipeResult } from './results.js';
+import { assertStoredCredentialRef } from './secret-refs.js';
 import type { HardwareProfile } from './module-types.js';
 import { readMetalNode, type MetalNodeRow } from './store.js';
 
@@ -113,6 +114,7 @@ async function bmc(
 ): Promise<Json> {
   const node = known ?? (await metalNode(context));
   if (!node.bmc_credentials) throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no BMC credentials`);
+  assertStoredCredentialRef(node);
   const outcome = await awaitCommand(context, {
     nodeId: await siteAgent(context, node.node_id),
     kind,
@@ -912,6 +914,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       const previousRef = node.bmc_credentials;
       if (!previousRef) throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no BMC credentials`);
       if (!context.secrets) throw new ComputeError('INVALID_CONFIG', 'metal.rotateBmcCredential needs the secret broker');
+      assertStoredCredentialRef(node);
       // A retry picks up the pending version, whose password the BMC may already have.
       let pending = await pendingCredential(context.sql, node.node_id);
       if (!pending) {

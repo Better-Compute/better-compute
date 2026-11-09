@@ -8093,7 +8093,7 @@
       "aliases": [],
       "group": "Metal",
       "summary": "Enroll a machine by its BMC into a pool (metal.enroll)",
-      "description": "metal enroll creates a node in --pool of --site from its BMC (--bmc-address, --bmc-driver) and queues BMC verification, inspection and commissioning. The BMC credentials are a reference (--bmc-credentials secret://…, vault://… or env://…), or --bmc-username with --bmc-password-file, which the server stores in its secret broker at once and never echoes. --bmc-tls-spki pins the BMC certificate. Decided as compute:nodes:provision.",
+      "description": "metal enroll creates a node in --pool of --site from its BMC (--bmc-address, --bmc-driver) and queues BMC verification, inspection and commissioning. The BMC credentials are a reference to a secret of the tenant itself (--bmc-credentials secret://<tenant>/<id>; vault://… and env://… only as the root tenant), or --bmc-username with --bmc-password-file, which the server stores in its secret broker at once and never echoes. --bmc-tls-spki pins the BMC certificate. Decided as compute:nodes:provision.",
       "usage": "better-compute metal enroll --tenant ID --site ID --pool ID --bmc-address HOST|URL --bmc-driver DRIVER [--bmc-credentials REF] [--bmc-username USER] [--bmc-password-file PATH] [--bmc-tls-spki HEX] [--macs MAC,…] [--product-uuid UUID] [--arch ARCH] [--legacy-bios] [--hardware-profile NAME] [--config PATH] [--url URL]",
       "target": "token",
       "args": [],
@@ -8133,7 +8133,7 @@
           "flag": "--bmc-credentials",
           "value": "REF",
           "optional": true,
-          "description": "secret://, vault:// or env:// reference"
+          "description": "secret://<tenant>/<id>, a secret of the node's tenant (vault:// or env:// as root only)"
         },
         {
           "flag": "--bmc-username",

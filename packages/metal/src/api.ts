@@ -38,6 +38,7 @@ import { invalidateSiteProxyTargets } from './proxy-targets.js';
 import { stateProfile, unrescueProfile } from './profiles.js';
 import { metalWorkKind, unrescuePhase } from './reconcile.js';
 import { schemas } from './schemas.js';
+import { assertCredentialRef, assertStoredCredentialRef } from './secret-refs.js';
 import { bmcOperationJson, metalSteps } from './steps.js';
 import { applyProvisionVerb, readMetalNode, resolveDriverBindings, setMetalWorkflow, type MetalNodeRow } from './store.js';
 
@@ -334,8 +335,13 @@ async function enroll(context: MethodContext, caps: Capabilities, input: EnrollI
   const { hardwareProfiles } = caps;
   // Inline credentials go to the secret broker before anything else, so they never reach a row.
   let credentials: SecretRef;
-  if (typeof input.bmc.credentials === 'string') credentials = input.bmc.credentials;
-  else {
+  if (typeof input.bmc.credentials === 'string') {
+    // The site agent presents this secret to bmc.address, which the caller also chooses: a tenant names
+    // only its own secrets. Root is the deployment's root tenant calling (the envelope sets the caller).
+    const root = context.iam?.rootTenantId;
+    assertCredentialRef(input.bmc.credentials, input.tenantId, Boolean(root) && (context.caller?.tenantId ?? input.tenantId) === root);
+    credentials = input.bmc.credentials;
+  } else {
     if (!context.secrets)
       throw new ComputeError('INVALID_CONFIG', 'No secret broker is configured; pass bmc.credentials as a secret:// reference');
     credentials = await context.secrets.put(input.tenantId, JSON.stringify(input.bmc.credentials));
@@ -620,6 +626,7 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
           context.sql.transaction(async (tx) => {
             const node = await readMetalNode(tx, input.nodeId, { tenantId: input.tenantId });
             if (!node.bmc_credentials) throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no BMC credentials`);
+            assertStoredCredentialRef(node);
             if (servesBmcOperation(node.bmc_driver, 'power.setPower', caps.bmcDrivers, await siteDriverKinds(tx, node.site_id, node.bmc_driver)) === false)
               throw bmcDriverUnsupported(node.bmc_driver, [{ profile: 'metal.power', step: 'power.setPower', operations: ['power.setPower'] }]);
             if (['deploying', 'releasing', 'commissioning', 'inspecting'].includes(node.provision_state))

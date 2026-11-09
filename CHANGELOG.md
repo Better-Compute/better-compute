@@ -142,6 +142,17 @@ All notable changes to the better-compute packages are documented here. The form
     changing `gpuModel`. A deleted instance refunds its recorded charge before its allocation is released.
   - `@better-compute/testing`: `computeFixture({ capacity })`.
 
+### Security
+
+- **`metal.enroll` let a tenant read out another tenant's or the platform's secrets (`@better-compute/metal`).**
+  `bmc.credentials` took any secret reference and `bmc.address` any address, both from the caller, and the site
+  agent fetches the one and presents it to the other: a tenant with `compute:nodes:provision` on one of its pools
+  could enroll `secret://<other-tenant>/…`, `env://…` or `vault://…` against a host it controls and receive the
+  value as a BMC login. Now a `secret://` reference must be the enrolling tenant's own (`secret://<tenantId>/<id>`),
+  `env://` and `vault://` references are taken from root callers only, and anything else is `ACCESS_DENIED`. A
+  machine enrolled before this with another tenant's `secret://` is never sent a BMC command again (its workflows
+  and `metal.power` fail with `ACCESS_DENIED`): enroll it again with its own secret.
+
 ### Fixed
 
 - **Scripts on images without cloud-init** (`@better-compute/provider-gcp`). Compute Engine's Debian, Rocky,

@@ -58,7 +58,7 @@ export const metalCommands = [
     group: 'Metal',
     summary: 'Enroll a machine by its BMC into a pool (metal.enroll)',
     description:
-      'metal enroll creates a node in --pool of --site from its BMC (--bmc-address, --bmc-driver) and queues BMC verification, inspection and commissioning. The BMC credentials are a reference (--bmc-credentials secret://…, vault://… or env://…), or --bmc-username with --bmc-password-file, which the server stores in its secret broker at once and never echoes. --bmc-tls-spki pins the BMC certificate. Decided as compute:nodes:provision.',
+      'metal enroll creates a node in --pool of --site from its BMC (--bmc-address, --bmc-driver) and queues BMC verification, inspection and commissioning. The BMC credentials are a reference to a secret of the tenant itself (--bmc-credentials secret://<tenant>/<id>; vault://… and env://… only as the root tenant), or --bmc-username with --bmc-password-file, which the server stores in its secret broker at once and never echoes. --bmc-tls-spki pins the BMC certificate. Decided as compute:nodes:provision.',
     target: 'token',
     flags: {
       tenant: tenantFlag,
@@ -84,7 +84,7 @@ export const metalCommands = [
       'bmc-credentials': {
         type: 'string',
         value: 'REF',
-        description: 'secret://, vault:// or env:// reference',
+        description: "secret://<tenant>/<id>, a secret of the node's tenant (vault:// or env:// as root only)",
       },
       'bmc-username': {
         type: 'string',
