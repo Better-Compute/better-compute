@@ -469,17 +469,44 @@ func (l *Libvirt) List(ctx context.Context) ([]Domain, error) {
 	return domains, nil
 }
 
-// managed reads a domain's metadata: whether it exists, and whether bcd created it.
-func (l *Libvirt) managed(ctx context.Context, id string) (exists, managed bool, meta instanceMetaXML) {
+// managed reads a domain's metadata: whether it exists, and whether bcd created it. A failed read is
+// never "it does not exist": a domain is absent only when libvirt, still answering, does not list it.
+// (libvirtd restarting mid-pass fails every call: Ensure once took that for a new instance and
+// created a disk over the tenant's.)
+func (l *Libvirt) managed(ctx context.Context, id string) (exists, managed bool, meta instanceMetaXML, err error) {
 	raw, err := l.virsh(ctx, "dumpxml", id)
 	if err != nil {
-		return false, false, meta
+		listed, listErr := l.virsh(ctx, "list", "--all", "--name")
+		if listErr != nil {
+			return false, false, meta, fmt.Errorf("libvirt does not answer for domain %s: %w", id, err)
+		}
+		for _, name := range strings.Split(string(listed), "\n") {
+			if strings.TrimSpace(name) == id {
+				return false, false, meta, fmt.Errorf("domain %s is defined but could not be read: %w", id, err)
+			}
+		}
+		return false, false, meta, nil
 	}
 	var x domainXML
 	if xml.Unmarshal(raw, &x) != nil || x.Metadata == nil || x.Metadata.Instance.ID != id {
-		return true, false, meta
+		return true, false, meta, nil
 	}
-	return true, true, x.Metadata.Instance
+	return true, true, x.Metadata.Instance, nil
+}
+
+// creatingMarker is in an instance's directory from before its disk is created until its domain is
+// defined: a directory that still has it belongs to an Ensure that never finished, whose domain never
+// existed, so it holds nothing of the tenant's and the next Ensure starts it over.
+const creatingMarker = ".creating"
+
+// stopped reads a domain's state for a decision that touches its disk: whether it is stopped. A
+// failed read is an error, never "stopped".
+func (l *Libvirt) stopped(ctx context.Context, id string) (bool, error) {
+	st, err := l.virsh(ctx, "domstate", id)
+	if err != nil {
+		return false, fmt.Errorf("domain %s's state: %w", id, err)
+	}
+	return stateOf(string(st)) == StateStopped, nil
 }
 
 // ---- Ensure -----------------------------------------------------------------------------------
@@ -498,7 +525,10 @@ func (l *Libvirt) Ensure(ctx context.Context, spec *agentv1.InstanceSpec, userDa
 		return err
 	}
 	dir := l.instanceDir(id)
-	exists, managed, meta := l.managed(ctx, id)
+	exists, managed, meta, err := l.managed(ctx, id)
+	if err != nil {
+		return err
+	}
 	if exists && !managed {
 		return fmt.Errorf("a domain named %s exists that bcd did not create", id)
 	}
@@ -507,8 +537,25 @@ func (l *Libvirt) Ensure(ctx context.Context, spec *agentv1.InstanceSpec, userDa
 		addrs = append(addrs, n.GetAddresses()...)
 	}
 	cdrom := ""
+	creating := filepath.Join(dir, creatingMarker)
 	if !exists {
+		// What an Ensure that never finished left (killed mid-download, mid-unpack): start it over.
+		if _, err := os.Lstat(creating); err == nil {
+			if err := os.RemoveAll(dir); err != nil {
+				return err
+			}
+		}
+		// Never a new disk over an existing one: a disk without a domain and without the marker was an
+		// instance's (its definition was lost, or removed by hand), and it is the tenant's data.
+		if _, err := os.Lstat(filepath.Join(dir, "disk.qcow2")); err == nil {
+			return fmt.Errorf("instances/%s/disk.qcow2 exists but libvirt has no domain %s: bcd does not create a disk over it (define the domain again from instances/%s/domain.xml, or remove the directory to start the instance afresh)", id, id, id)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(creating, nil, 0o600); err != nil {
 			return err
 		}
 		meta = instanceMetaXML{ID: id, Allocation: spec.GetAllocationId()}
@@ -558,6 +605,8 @@ func (l *Libvirt) Ensure(ctx context.Context, spec *agentv1.InstanceSpec, userDa
 		if err := l.grow(ctx, id, dir, spec.GetDiskBytes()); err != nil {
 			return err
 		}
+		// Defined: whatever marker a kill between the definition and its removal left is stale.
+		_ = os.Remove(creating)
 	}
 	meta.Addresses = strings.Join(addrs, ",")
 	d, err := l.domainFor(spec, dir, cdrom, meta)
@@ -593,7 +642,13 @@ func (l *Libvirt) Ensure(ctx context.Context, spec *agentv1.InstanceSpec, userDa
 			}
 		}
 	}
-	return l.define(ctx, d, dir)
+	if err := l.define(ctx, d, dir); err != nil {
+		return err
+	}
+	if err := os.Remove(creating); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func (l *Libvirt) basePath(digestHex, format string) string {
@@ -798,8 +853,12 @@ func (l *Libvirt) grow(ctx context.Context, id, dir string, size uint64) error {
 	case size == current:
 		return nil
 	}
-	st, _ := l.virsh(ctx, "domstate", id)
-	if stateOf(string(st)) == StateStopped {
+	// qemu-img only on a disk no QEMU has open: an unreadable state is not "stopped".
+	stopped, err := l.stopped(ctx, id)
+	if err != nil {
+		return err
+	}
+	if stopped {
 		_, err = l.run(ctx, "qemu-img", "resize", "-f", "qcow2", disk, strconv.FormatUint(size, 10))
 	} else {
 		_, err = l.virsh(ctx, "blockresize", id, "vda", strconv.FormatUint(size, 10)+"B")
@@ -814,7 +873,10 @@ func (l *Libvirt) grow(ctx context.Context, id, dir string, size uint64) error {
 func (l *Libvirt) SetState(ctx context.Context, id, state string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	exists, managed, meta := l.managed(ctx, id)
+	exists, managed, meta, err := l.managed(ctx, id)
+	if err != nil {
+		return err
+	}
 	if !exists || !managed {
 		return fmt.Errorf("no managed domain %s", id)
 	}
@@ -963,12 +1025,20 @@ func (l *Libvirt) stopDomain(ctx context.Context, id string) error {
 func (l *Libvirt) Destroy(ctx context.Context, id string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	exists, managed, _ := l.managed(ctx, id)
+	exists, managed, _, err := l.managed(ctx, id)
+	if err != nil {
+		// Its files stay until libvirt says the domain is gone or lets bcd remove it.
+		return err
+	}
 	if exists && !managed {
 		return fmt.Errorf("the domain %s is not bcd's", id)
 	}
 	if exists {
-		if st, _ := l.virsh(ctx, "domstate", id); stateOf(string(st)) != StateStopped {
+		stopped, err := l.stopped(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !stopped {
 			if _, err := l.virsh(ctx, "destroy", id); err != nil {
 				return err
 			}
@@ -1000,7 +1070,10 @@ type libvirtSnapshot struct {
 func (l *Libvirt) Snapshot(ctx context.Context, id string, includeMemory bool, cpuModel string, w io.Writer) (string, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	exists, managed, dom := l.managed(ctx, id)
+	exists, managed, dom, err := l.managed(ctx, id)
+	if err != nil {
+		return "", err
+	}
 	if !exists || !managed {
 		return "", fmt.Errorf("no managed domain %s", id)
 	}
@@ -1187,8 +1260,11 @@ func (l *Libvirt) Console(ctx context.Context, id string) (io.ReadWriteCloser, e
 // acknowledgement; the disk is detached and its file scrubbed whatever happens.
 func (l *Libvirt) Rebind(ctx context.Context, id string, b Rebind) error {
 	l.mu.Lock()
-	if exists, managed, _ := l.managed(ctx, id); !exists || !managed {
+	if exists, managed, _, err := l.managed(ctx, id); err != nil || !exists || !managed {
 		l.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		return fmt.Errorf("no managed domain %s", id)
 	}
 	if st, _ := l.virsh(ctx, "domstate", id); stateOf(string(st)) != StateRunning {

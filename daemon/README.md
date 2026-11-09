@@ -418,6 +418,14 @@ events. It never drops a hold on its own.
 
 **Instances** (`agent/instances.go`, `agent/admission.go`, `runtime/`).
 
+- *A disk is created once.* A libvirt domain counts as absent only when libvirt answers and does not
+  list it. While libvirtd does not answer (a restart mid-pass), the instance's pass fails and is
+  tried again; nothing is created, resized offline or deleted on a guess.
+  - `instances/<id>/.creating` marks a creation that has not defined its domain yet. A directory
+    that still has it after a crash is started over.
+  - A directory with a `disk.qcow2`, no marker and no domain is the tenant's data: Ensure fails with
+    `bcd does not create a disk over it`. Define the domain again from
+    `instances/<id>/domain.xml`, or remove the directory to start the instance afresh.
 - *Admission.* bcd admits a start only when the host has memory for it:
   - MemTotal minus the hugetlb pool and 1 GiB, less what running and paused domains hold (their
     memory plus VMM overhead);

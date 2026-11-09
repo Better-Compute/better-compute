@@ -29,6 +29,9 @@ type fakeVirt struct {
 	mu      sync.Mutex
 	domains map[string]*fakeDomain
 	calls   []string
+	// down: libvirtd does not answer (every virsh call fails); failVerb: only that verb fails.
+	down     bool
+	failVerb string
 }
 
 type fakeDomain struct {
@@ -53,6 +56,9 @@ func (f *fakeVirt) exec(_ context.Context, name string, args ...string) ([]byte,
 			}
 		} else {
 			f.calls = append(f.calls, "virsh "+strings.Join(args, " "))
+		}
+		if f.down || (f.failVerb != "" && f.failVerb == args[0]) {
+			return nil, errors.New("error: failed to connect to the hypervisor\nerror: Failed to connect socket to '/var/run/libvirt/libvirt-sock': Connection refused")
 		}
 		return f.virsh(args)
 	case "qemu-img":
