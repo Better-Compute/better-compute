@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { CliError, usageError } from '../errors.js';
 import { defineCommand } from '../framework.js';
 import { newIdempotencyKey, tenantFlag } from './capacity.js';
-import { writeNewFile } from './catalog.js';
+import { writeReserved } from '../secret-file.js';
 
 // Pools, join requests, inventory, secrets, site tokens and drivers (PLAN.md §9.3: commands mirror the API
 // groups). Each is the API call as BETTER_COMPUTE_TOKEN, in process or with --url. Secret values never come from
@@ -519,24 +519,23 @@ export const adminCommands = [
       'better-compute site-tokens create --site site_01k5w… --ttl 3600 --out ./site-token',
     ],
     async run({ flags, path, api, note }) {
-      const created = await (
-        await api()
-      ).call<{ token?: unknown } & Record<string, unknown>>('siteTokens/create', {
-        tenantId: flags.tenant,
-        siteId: flags.site,
-        ttlSeconds: flags.ttl,
-        ...(flags['max-uses'] !== undefined ? { maxUses: flags['max-uses'] } : {}),
-        idempotencyKey: flags.key ?? newIdempotencyKey(),
-      });
-      if (!flags.out) return created;
-      const { token, ...info } = created;
-      if (typeof token !== 'string')
-        throw new CliError(
-          'INVALID_STATE',
-          'The answer carries no token: a replayed --key never shows it again',
-        );
+      const client = await api();
+      const create = () =>
+        client.call<{ token?: unknown } & Record<string, unknown>>('siteTokens/create', {
+          tenantId: flags.tenant,
+          siteId: flags.site,
+          ttlSeconds: flags.ttl,
+          ...(flags['max-uses'] !== undefined ? { maxUses: flags['max-uses'] } : {}),
+          idempotencyKey: flags.key ?? newIdempotencyKey(),
+        });
+      if (!flags.out) return create();
       const file = path(flags.out);
-      await writeNewFile(file, `${token}\n`);
+      // Reserved before the token is minted, so a taken path costs no token.
+      const { token: _token, ...info } = await writeReserved(file, create, (created) => {
+        if (typeof created.token !== 'string')
+          throw new CliError('INVALID_STATE', 'The answer carries no token: a replayed --key never shows it again');
+        return `${created.token}\n`;
+      });
       note(`Wrote the site token to ${file} (0600).`);
       return { ...info, tokenFile: file };
     },

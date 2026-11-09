@@ -206,6 +206,13 @@ All notable changes to the better-compute packages are documented here. The form
   Metal now records when it last cut a machine's power (migration `metal/0009_power_cut`,
   `metal_nodes.power_cut_at`, set by `power.setPower`, the step's own power cycles and `metal.power`), and a ramdisk
   session counts only if it connected since.
+- **A one-time secret is no longer minted for a file that cannot be written** (`@better-compute/cli`).
+  `webhooks rotate-secret --secret-out`, `webhooks create --secret-out`, `join-tokens create --out` and
+  `site-tokens create --out` called the API first and opened the file afterwards: with a path that already existed
+  the secret was rotated or the token minted, the command failed `ALREADY_EXISTS`, and the value was lost. They
+  now reserve the file (created exclusively, mode 0600) before the call, refuse a taken or uncreatable path while
+  nothing has changed (`ALREADY_EXISTS`, `FILE_NOT_WRITABLE`), and remove the file if the call fails.
+  `usage export --out` reserves its file the same way.
 - **BMC credential rotation no longer deletes the enrollment secret** (`@better-compute/metal`).
   `metal.rotateBmcCredential` purged every superseded credential from the secret store, including the one the
   machine was enrolled with: two machines enrolled with one rack-wide `secret://` broke each other on the first

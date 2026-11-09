@@ -645,7 +645,8 @@ exit non-zero with the error's code:
 | `FLEET_DRIFTED`, `PLAN_BLOCKED`, `CONFIG_DRIFT` | fleet plan, status and apply outcomes |
 | `AUDIT_TAMPERED`, `INVALID_PROOF`, `AUDIT_KEY_MISSING`, `PKI_NOT_FOUND` | audit verification outcomes |
 | `DOCTOR_FINDINGS` | `doctor --strict` found an error or warning |
-| `ALREADY_EXISTS` | an `--out` or `--secret-out` file exists; a token, secret or export is never written over a file |
+| `ALREADY_EXISTS` | an `--out` or `--secret-out` file exists; a token, secret or export is never written over a file. The file is reserved before the API call, so nothing was minted or rotated |
+| `FILE_NOT_WRITABLE` | an `--out` or `--secret-out` file for a one-time secret cannot be created (no such directory, no permission); refused before the API call |
 | `SCOPE_MISMATCH`, `SCOPE_CHANGED`, `SCOPE_UNEXPECTED`, `UNBOUND_SCOPE`, `INVALID_RESPONSE` | `batch show`, `approve` and `sign` refused a batch; see [destructive batches](#destructive-batches) |
 | `REMOTE_EXIT` | `console`, `exec`, `sandbox exec` or `ssh-cert --connect`: the binary exits with the remote program's own status (1 to 255), or 255 when the tunnel broke (or ssh was ended by a signal) |
 
