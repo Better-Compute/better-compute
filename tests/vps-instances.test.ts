@@ -1215,6 +1215,44 @@ describe('flavor placement: NUMA, pinned CPUs, hugepages (§3.8)', () => {
     expect(await placement(created.id, VB)).toEqual({ hugepageSizeBytes: GiB });
   });
 
+  it('books nothing for an instance the reconciler places but cannot give an address', async () => {
+    // It waits in `scheduling` (no host has 1 GiB hugepages yet), so the reconciler places it later.
+    const waiting = (await call(
+      'instances',
+      'create',
+      createHosted({ flavor: 'huge.1g', idempotencyKey: 'h-leak' }),
+    )) as View;
+    expect(waiting.state).toBe('scheduling');
+    // Meanwhile the pool's address range (10.0.0.0/29: .2 to .6) fills up, and a host gains hugepages.
+    for (let host = 2; host <= 6; host++)
+      await db.query(`INSERT INTO ip_leases (pool_id, address, instance_id) VALUES ($1, $2::inet, $3)`, [
+        hostedPool,
+        `10.0.0.${host}`,
+        `other-${host}`,
+      ]);
+    await db.query(
+      `INSERT INTO node_resources (node_id, resource, allocatable, ratio, allocated) VALUES ($1, 'hugepages1Gi', 16, 1, 0)`,
+      [VB],
+    );
+    clock.advance(60_000);
+    await setSimClock(db, clock.now());
+    await reconcile(waiting.id);
+    const failed = await get(waiting.id);
+    expect(failed.state).toBe('error');
+    expect(failed.conditions.find((c) => c.type === 'Unschedulable')).toMatchObject({
+      reason: 'CAPACITY_UNAVAILABLE',
+    });
+    // The capacity it was placed on a moment before the address lease failed is given back: it used
+    // to stay booked under an instance with no allocation id, which nothing could ever release.
+    expect((await db.query(`SELECT 1 FROM allocations WHERE released_at IS NULL`)).rows).toEqual([]);
+    expect((await readQuotas(db, 'acme', hostedPool)).every((row) => row.used === 0)).toBe(true);
+    const { rows } = await db.query<{ allocated: string }>(
+      `SELECT allocated::text FROM node_resources WHERE node_id = $1`,
+      [VB],
+    );
+    expect(rows.every((row) => Number(row.allocated) === 0)).toBe(true);
+  });
+
   it('pins to kernel-isolated CPUs first and never to the host’s reserved ones', async () => {
     await call(
       'flavors',

@@ -13,6 +13,7 @@ import {
   readInstance,
   sameLabels,
   updateInstance,
+  upsertInstanceAuthz,
   wake,
   type InstanceDeps,
   type InstanceRow,
@@ -99,7 +100,7 @@ function changes(row: InstanceRow, input: UpdateInstanceInput): string[] {
  * it is, without a new version or event.
  */
 export async function updateInstanceIdentity(
-  deps: Pick<InstanceDeps, 'events' | 'work' | 'desired' | 'rootTenantId'>,
+  deps: Pick<InstanceDeps, 'events' | 'work' | 'desired' | 'rootTenantId' | 'authz'>,
   context: Pick<MethodContext, 'caller'>,
   tx: SqlTx,
   input: UpdateInstanceInput,
@@ -140,6 +141,9 @@ export async function updateInstanceIdentity(
     ...(changed.includes('labels') ? { labels: input.labels ?? null } : {}),
     ...(changed.includes('issuedBy') ? { issuedBy: input.issuedBy ?? null } : {}),
   });
+  // IAM policies read `resource.labels.<key>`: the projection follows the labels, or an instance
+  // relabelled from dev to prod would still be judged as dev.
+  if (changed.includes('labels')) await upsertInstanceAuthz(deps, tx, next);
   await publishInstance(deps, tx, next, 'instance.updated', { changed });
   // New labels of a provider machine: the reconciler writes them.
   if (next.labelsPending) await wake(deps, tx, next);

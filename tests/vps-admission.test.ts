@@ -222,6 +222,7 @@ describe('flavor allowlists', () => {
         poolId: world.poolId,
         externalId: 'us-central1-a/legacy',
         ownerIdentityId: world.fixture.tenants.acme.caller.identityId,
+        labels: { env: 'dev' },
         idempotencyKey: key,
       });
     // No flavor offers a3-highgpu-8g: the machine has no flavor, and the offer lists flavors.
@@ -255,10 +256,30 @@ describe('flavor allowlists', () => {
       `SELECT attributes FROM authz_projection WHERE type = 'instance' AND id = $1`,
       [attached.id],
     );
+    // The labels an attach names reach IAM as a create's do.
     expect(rows[0]!.attributes).toMatchObject({
       poolId: world.poolId,
       flavor: 'a3.8g',
       region: 'us-central1',
+      'labels.env': 'dev',
+    });
+    // Relabelling an attached machine keeps the flavor its type maps to (it has none of its own).
+    await world.api.instances.update(world.acme, {
+      tenantId: world.acmeTenant,
+      instanceId: attached.id,
+      labels: { env: 'prod' },
+    });
+    const after = await world.fixture.database.query<{ attributes: Record<string, unknown> }>(
+      `SELECT attributes FROM authz_projection WHERE type = 'instance' AND id = $1`,
+      [attached.id],
+    );
+    expect(after.rows[0]!.attributes).toMatchObject({
+      poolId: world.poolId,
+      flavor: 'a3.8g',
+      region: 'us-central1',
+      'labels.env': 'prod',
+      vcpu: rows[0]!.attributes.vcpu,
+      gpus: rows[0]!.attributes.gpus,
     });
   });
 });
@@ -319,6 +340,28 @@ describe('the host admission policy', () => {
       vcpu: 12,
       gpus: 1,
     });
+    // The projection follows the labels: an instance relabelled later is judged by what it is now.
+    // (It used to keep the labels it was created with, so a policy on resource.labels.env went stale.)
+    const attributes = async () =>
+      (
+        await world.fixture.database.query<{ attributes: Record<string, unknown> }>(
+          `SELECT attributes FROM authz_projection WHERE type = 'instance' AND id = $1`,
+          [vm.id],
+        )
+      ).rows[0]!.attributes;
+    await world.api.instances.update(world.acme, {
+      tenantId: world.acmeTenant,
+      instanceId: vm.id,
+      labels: { env: 'staging' },
+    });
+    const relabelled = await attributes();
+    expect(relabelled).toMatchObject({ 'labels.env': 'staging', flavor: 'a2.highgpu.1g', provider: 'fake-gce', vcpu: 12 });
+    expect(relabelled).not.toHaveProperty('labels.team');
+    // A change that touches no label leaves the projection as it is.
+    await world.api.instances.update(world.acme, { tenantId: world.acmeTenant, instanceId: vm.id, name: 'renamed' });
+    expect(await attributes()).toEqual(relabelled);
+    await world.api.instances.update(world.acme, { tenantId: world.acmeTenant, instanceId: vm.id, labels: {} });
+    expect(Object.keys(await attributes()).filter((key) => key.startsWith('labels.'))).toEqual([]);
   });
 });
 

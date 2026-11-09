@@ -247,8 +247,13 @@ async function reconcileHosted(
 
   if (row.state === 'pending') row = await moveInstance(tx, row, 'schedule', 'scheduling');
   if (row.state === 'scheduling') {
+    // Scheduling books an allocation and its quota, then leases an address and binds the host: a refusal
+    // after the booking (the pool's address range is full, say) must undo the booking. The instance moves
+    // to `error` in this same transaction with no allocation id, so nothing would ever release it.
+    await tx.query('SAVEPOINT vps_schedule');
     try {
       const next = await scheduleHosted(deps, tx, row);
+      await tx.query('RELEASE SAVEPOINT vps_schedule');
       return next.state === 'scheduling' ? now + scheduleRetryMs : now;
     } catch (error) {
       if (
@@ -256,6 +261,7 @@ async function reconcileHosted(
         !isComputeError(error, 'CAPACITY_UNAVAILABLE')
       )
         throw error;
+      await tx.query('ROLLBACK TO SAVEPOINT vps_schedule');
       const failed = await moveInstance(tx, row, 'fail', 'error', {
         conditions: withCondition(
           row.conditions,
@@ -927,7 +933,12 @@ async function reconcileProvider(
       action.kind === 'create' || (action.kind === 'labels' && labelFailure === undefined);
     const machineConditions =
       action.kind !== 'labels'
-        ? conditions
+        ? // Nothing left to write (the tenant put the labels back to what the machine holds, say): a
+          // refusal recorded earlier no longer describes the instance. Only a successful write used to
+          // clear it, and none runs once the labels match.
+          current.labelsPending
+          ? conditions
+          : withoutCondition(conditions, labelsNotAppliedCondition)
         : labelFailure === undefined
           ? withoutCondition(conditions, labelsNotAppliedCondition)
           : withCondition(

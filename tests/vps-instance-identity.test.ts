@@ -253,6 +253,28 @@ describe('instances.update', () => {
     });
   });
 
+  it('drops the refused-write condition once the labels are back to what the machine holds', async () => {
+    const w = await gceWorld();
+    const instance = await create(w, { labels: { team: 'ml' } });
+    await settle(w);
+    const ref = { tenantId: w.acmeTenant, instanceId: instance.id };
+    w.cloud.failSetLabels = new ComputeError('PROVIDER_ERROR', 'labels refused');
+    await w.api.instances.update(w.acme, { ...ref, labels: { team: 'bad-value' } });
+    await settle(w, 1);
+    expect((await w.api.instances.get(w.acme, ref)).conditions).toEqual([
+      expect.objectContaining({ type: labelsNotAppliedCondition }),
+    ]);
+    // The tenant gives up on the change before any retry: nothing is left to write, so no label write
+    // runs again. Only a successful write used to clear the condition, so it stayed forever.
+    const writes = () => w.cloud.requests.filter((request) => request.startsWith('setLabels')).length;
+    const before = writes();
+    await w.api.instances.update(w.acme, { ...ref, labels: { team: 'ml' } });
+    await poll(w);
+    expect(writes()).toBe(before);
+    expect((await w.api.instances.get(w.acme, ref)).conditions).toEqual([]);
+    expect(vmOf(w, instance.id)!.labels).toMatchObject({ team: 'ml' });
+  });
+
   it('refuses deleted instances', async () => {
     const w = await gceWorld();
     const instance = await create(w);

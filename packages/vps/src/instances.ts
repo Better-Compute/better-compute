@@ -38,6 +38,7 @@ import { readAccount, type ClientDeps, type ProviderClients } from './accounts.j
 import {
   admitInstance,
   admissionPlacement,
+  flavorForMachineType,
   placementAttributes,
   poolPlacement,
   type InstancePlacementAttributes,
@@ -2289,7 +2290,27 @@ export async function resizeInstance(
   return instanceView(resized);
 }
 
-async function upsertInstanceAuthz(deps: InstanceDeps, tx: SqlTx, row: InstanceRow): Promise<void> {
+/**
+ * Writes the instance's authz row from the instance as it is now: the one place that says what IAM reads
+ * on an instance after it exists. Whatever changes an attribute policies read (the flavor on resize, the
+ * labels on update) calls it, so the projection never keeps what the instance used to be.
+ */
+export async function upsertInstanceAuthz(
+  deps: Pick<InstanceDeps, 'authz'>,
+  tx: SqlTx,
+  row: InstanceRow,
+): Promise<void> {
+  // A created instance is judged by its flavor. An attached machine has none of ours: as at attach, it
+  // is judged by the pool flavor whose offer is the machine's type, when there is one.
+  let flavor: string | undefined = row.shape.name;
+  if (row.origin === 'attached') {
+    const { rows } = await tx.query<{ machine: { machineType?: string; zone?: string } | string }>(
+      `SELECT machine FROM provider_machines WHERE instance_id = $1`,
+      [row.id],
+    );
+    const machine = rows[0] ? json<{ machineType?: string; zone?: string }>(rows[0].machine) : undefined;
+    flavor = await flavorForMachineType(tx, row.poolId, machine);
+  }
   await deps.authz.upsert(tx, {
     type: 'instance',
     id: row.id,
@@ -2301,7 +2322,7 @@ async function upsertInstanceAuthz(deps: InstanceDeps, tx: SqlTx, row: InstanceR
       row.projectId,
       await admissionPlacement(tx, {
         poolId: row.poolId,
-        flavor: row.shape.name,
+        ...(flavor !== undefined ? { flavor } : {}),
         ...(row.labels !== undefined ? { labels: row.labels } : {}),
       }),
     ),

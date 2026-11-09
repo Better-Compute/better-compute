@@ -2890,7 +2890,9 @@ export async function reconcileSandboxes(
             count(i.id) FILTER (WHERE i.desired_state <> 'deleted' AND i.state NOT IN ('deleting', 'deleted')
                                   AND ${warmStale('i.', 't.instance_version', '$1', 'least(t.default_ttl_seconds, $2)')}) AS stale
        FROM sandbox_templates t
-       LEFT JOIN instances i ON i.warm_template_id = t.id
+       -- Instance rows are kept after deletion: without the state filter every pass read every warm
+       -- instance a template ever had, and every long-deleted template that once had one.
+       LEFT JOIN instances i ON i.warm_template_id = t.id AND i.state <> 'deleted'
       WHERE (NOT t.deleted AND t.warm_min > 0) OR i.id IS NOT NULL
       GROUP BY t.id`,
     [at, warmCertificateFloorSeconds],
