@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
@@ -66,6 +67,13 @@ type WSOptions struct {
 	Proxy func(*http.Request) (*url.URL, error)
 	// DialTimeout bounds the TCP, proxy and TLS setup (default 10 s).
 	DialTimeout time.Duration
+	// PingInterval is how often the session pings the gateway (default 20 s). IdleTimeout is how
+	// long it goes without receiving a byte (a frame, or the pong to a ping) before the connection
+	// counts as dead and Receive fails (default 60 s); a write that cannot be sent in that time
+	// fails too. A proxy or a network that silently drops the connection is thereby noticed, and
+	// the agent redials.
+	PingInterval time.Duration
+	IdleTimeout  time.Duration
 	// Now is the clock of the proofs (default time.Now).
 	Now func() time.Time
 }
@@ -77,8 +85,38 @@ type WSStream struct {
 	wmu       sync.Mutex
 	pending   []byte
 	closeOnce sync.Once
+	// idle is the read side's deadline keeper (and the write deadline's length); done ends the pings.
+	idle *idleReader
+	done chan struct{}
 	// GatewayID is the gateway the verified gateway proof names.
 	GatewayID string
+}
+
+// Defaults of WSOptions.PingInterval and IdleTimeout: three pings fit in one idle timeout.
+const (
+	wsPingInterval = 20 * time.Second
+	wsIdleTimeout  = 60 * time.Second
+)
+
+// idleReader reads the connection, giving every read `after` to return a byte once it is set (zero
+// during the upgrade, which the dial's own deadline bounds). The deadline moves with every read, so
+// a large frame arriving slowly is not a dead connection: only silence is.
+type idleReader struct {
+	conn  net.Conn
+	after atomic.Int64 // a time.Duration
+}
+
+func (r *idleReader) Read(b []byte) (int, error) {
+	after := time.Duration(r.after.Load())
+	if after > 0 {
+		_ = r.conn.SetReadDeadline(time.Now().Add(after))
+	}
+	n, err := r.conn.Read(b)
+	var timeout net.Error
+	if err != nil && after > 0 && errors.As(err, &timeout) && timeout.Timeout() {
+		return n, fmt.Errorf("transport: nothing from the gateway for %s (pings unanswered): the WebSocket connection is dead: %w", after, err)
+	}
+	return n, err
 }
 
 // WSRejected is an upgrade the gateway refused, with its reason and pushback.
@@ -399,7 +437,8 @@ func upgrade(ctx context.Context, conn net.Conn, o WSOptions, hostHeader, path, 
 	if _, err := io.WriteString(conn, req); err != nil {
 		return nil, err
 	}
-	br := bufio.NewReaderSize(conn, 64<<10)
+	idle := &idleReader{conn: conn}
+	br := bufio.NewReaderSize(idle, 64<<10)
 	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodGet})
 	if err != nil {
 		return nil, fmt.Errorf("transport: WebSocket upgrade: %w", err)
@@ -428,8 +467,37 @@ func upgrade(ctx context.Context, conn net.Conn, o WSOptions, hostHeader, path, 
 	if err != nil {
 		return nil, err
 	}
+	// The setup's deadline ends here; from now on the connection must keep talking. bcd pings, the
+	// gateway answers each with a pong, and a read that hears nothing for the idle timeout fails.
 	_ = conn.SetDeadline(time.Time{})
-	return &WSStream{conn: conn, br: br, GatewayID: gatewayID}, nil
+	interval, timeout := o.PingInterval, o.IdleTimeout
+	if interval <= 0 {
+		interval = wsPingInterval
+	}
+	if timeout <= 0 {
+		timeout = wsIdleTimeout
+	}
+	idle.after.Store(int64(timeout))
+	s := &WSStream{conn: conn, br: br, idle: idle, done: make(chan struct{}), GatewayID: gatewayID}
+	go s.keepalive(interval)
+	return s, nil
+}
+
+// keepalive pings the gateway until the stream closes; a ping that cannot be written closes it.
+func (s *WSStream) keepalive(every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-t.C:
+			if err := s.Ping(); err != nil {
+				s.Close()
+				return
+			}
+		}
+	}
 }
 
 // Send writes one AgentFrame as a length-prefixed message in one binary WebSocket message.
@@ -570,6 +638,12 @@ func (s *WSStream) writeFrame(opcode byte, payload []byte) error {
 	for i, b := range payload {
 		masked[i] = b ^ mask[i%4]
 	}
+	// A peer that stopped reading must not block a send (or the ping) for good.
+	if s.idle != nil {
+		if after := time.Duration(s.idle.after.Load()); after > 0 {
+			_ = s.conn.SetWriteDeadline(time.Now().Add(after))
+		}
+	}
 	_, err := s.conn.Write(append(head, masked...))
 	return err
 }
@@ -577,9 +651,14 @@ func (s *WSStream) writeFrame(opcode byte, payload []byte) error {
 // Ping sends a WebSocket ping (keepalive through proxies).
 func (s *WSStream) Ping() error { return s.writeFrame(0x9, nil) }
 
-// Close ends the connection.
+// Close ends the connection (and its pings).
 func (s *WSStream) Close() {
-	s.closeOnce.Do(func() { _ = s.conn.Close() })
+	s.closeOnce.Do(func() {
+		if s.done != nil {
+			close(s.done)
+		}
+		_ = s.conn.Close()
+	})
 }
 
 // CloseRequest and CloseResponse end the stream (the agent Stream interface).

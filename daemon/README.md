@@ -264,7 +264,10 @@ length-prefixed frames). bcd proves itself with an ES256 proof JWT (`x5c` = its 
 `jti`, the connection nonce) and accepts only a gateway whose `x-bc-gateway-proof` chains to the
 pinned serving CA; `proxy_ca_file` is trusted for TLS only. Renewals go to `POST /v1/renew` on the
 same listener. WS mode needs command-signing roots (the gateway sends it signed intent only) and has
-no tunnels.
+no tunnels. The session pings the gateway every 20 s. When it receives nothing for 60 s (no frame,
+no pong), or cannot write a frame in that time, the connection counts as dead: the session ends
+with `nothing from the gateway for 1m0s` and bcd redials. A proxy that silently drops the
+connection no longer leaves bcd looking connected.
 
 **Privilege separation** (`internal/helper`, `cmd/bcd/helper.go`). With `[helper]`, `bcd node` runs
 unprivileged and asks `bcd helper` (root) over a unix socket for: files named by kind and id

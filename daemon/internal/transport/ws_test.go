@@ -85,6 +85,8 @@ type wsGateway struct {
 	refuse   bool
 	badProof bool
 	proofs   chan map[string]any
+	// script, when set, plays the gateway's side after the upgrade instead of the default exchange.
+	script func(brw *bufio.ReadWriter)
 }
 
 func (g *wsGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -138,6 +140,10 @@ func (g *wsGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"Sec-WebSocket-Accept: " + base64.StdEncoding.EncodeToString(sum[:]) + "\r\nSec-WebSocket-Protocol: " + WSSubprotocol +
 		"\r\nX-Bc-Gateway-Proof: " + gp + "\r\n\r\n")
 	_ = brw.Flush()
+	if g.script != nil {
+		g.script(brw)
+		return
+	}
 	// One client frame in: it must be masked and hold a length-prefixed Hello.
 	msg := readClientFrame(g.t, brw.Reader)
 	if msg == nil {
