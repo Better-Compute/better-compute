@@ -447,7 +447,10 @@ describe('connectGatewayWs (the daemon side)', () => {
   it('rotates the TLS certificate and the proof key together on setTls (a renewed serving pair)', async () => {
     // Both certificates serve TLS (wall clock) and sign proofs (sim clock): a serving leaf lives at most
     // 30 days, so bring the sim clock up to the wall clock first (T0 is a fixed date) and issue from there.
+    // The CAs are made again at that time: the ones from beforeEach were born at T0 and live one year, so
+    // a leaf they issue is cut to their own end, which the wall clock passes a year after T0.
     await f.advance(Math.max(0, Date.now() - f.clock.now()));
+    p = await pki(f.clock);
     const issue = async (ca: LocalCertificateAuthority) => {
       const key = generateP256KeyPair();
       const cert = await ca.issue(key.publicKey, { usage: 'server', dnsSans: ['localhost'], ttlSeconds: 30 * 86_400 });
