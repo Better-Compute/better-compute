@@ -51,6 +51,12 @@ export interface ManagedKubernetesProfile {
   machines(cluster: string): string[];
   /** Whether a cluster's node pool is Spot (preemptible) capacity at the provider. */
   spotPool(cluster: string, pool: string): boolean;
+  /**
+   * A Spot reclaim (or a repair), as the provider does it: it takes back the machine behind this Node and puts a
+   * new one in its place, the node pool's size unchanged. The Node leaves the cluster's list and its replacement is
+   * listed instead: under another name on GKE and DOKS, and on EKS under the same IP-based name with another uid.
+   */
+  reclaim(node: string): void;
   /** A running cluster the tenant made itself (one node pool of its own); returns its provider id. */
   seedCluster(): string;
   /** Secrets the provider side holds (account tokens): never in a row, an event or a log line. */
@@ -64,6 +70,27 @@ export interface ManagedKubernetesProfile {
 
 const origin = (url: string) => new URL(url).origin;
 
+/**
+ * The reclaim hook of a profile: how often each Node (by the name its slot in the node pool first had) was
+ * replaced, applied to the Nodes the emulator's node pools give. `reuseNames`: the replacement keeps the name and
+ * differs by uid (EKS); otherwise it gets a name of its own.
+ */
+function reclaims(reuseNames: boolean) {
+  const replaced = new Map<string, number>();
+  const slot = (name: string) => name.replace(/-r\d+$/, '');
+  return {
+    apply: (nodes: FakeKubeNode[]): FakeKubeNode[] =>
+      nodes.map((node) => {
+        const times = replaced.get(node.name);
+        if (times === undefined) return node;
+        return reuseNames ? { ...node, uid: `uid-${node.name}-r${times}` } : { ...node, name: `${node.name}-r${times}` };
+      }),
+    reclaim(node: string): void {
+      replaced.set(slot(node), (replaced.get(slot(node)) ?? 0) + 1);
+    },
+  };
+}
+
 export function gkeProfile(): ManagedKubernetesProfile {
   const gke = new GkeEmulator();
   gke.operationDelayTicks = 0;
@@ -72,6 +99,7 @@ export function gkeProfile(): ManagedKubernetesProfile {
     caPem: emulatedCaPem,
     now: Date.now,
   });
+  const replacements = reclaims(false);
   return {
     label: 'GKE',
     provider: 'gcp',
@@ -94,8 +122,9 @@ export function gkeProfile(): ManagedKubernetesProfile {
           }
         }
       }
-      return nodes;
+      return replacements.apply(nodes);
     },
+    reclaim: replacements.reclaim,
     accepts: (token) => api.issued.includes(token),
     clusters: () => [...gke.clusters.keys()],
     nodePools: (cluster) => ((gke.clusters.get(cluster)?.nodePools ?? []) as Json[]).map((pool) => pool.name as string),
@@ -138,6 +167,8 @@ export function eksProfile(): ManagedKubernetesProfile {
   eks.delayTicks = 0;
   const kube = eks.kubeApi();
   const providerId = (name: string) => `us-east-1/${name}`;
+  // EKS names a Node after its instance's private IP, and a replacement instance may get the address again.
+  const replacements = reclaims(true);
   return {
     label: 'EKS',
     provider: 'aws',
@@ -165,8 +196,9 @@ export function eksProfile(): ManagedKubernetesProfile {
             nodes.push({ name: `ip-10-0-${subnet}-${i + 10}.ec2.internal`, labels: { ...group.labels } });
         }
       }
-      return nodes;
+      return replacements.apply(nodes);
     },
+    reclaim: replacements.reclaim,
     accepts: (token) => kube.issued.includes(token),
     clusters: () => [...eks.clusters.keys()].map(providerId),
     nodePools: (cluster) =>
@@ -224,6 +256,7 @@ export function doksProfile(): ManagedKubernetesProfile {
   resetBudgets();
   const doks = new DoksEmulator(new DoEmulator());
   doks.transitionReads = 0;
+  const replacements = reclaims(false);
   return {
     label: 'DOKS',
     provider: 'digitalocean',
@@ -250,8 +283,9 @@ export function doksProfile(): ManagedKubernetesProfile {
                 labels: { ...(pool.labels ?? {}), 'doks.digitalocean.com/node-pool': pool.name },
               });
       }
-      return nodes;
+      return replacements.apply(nodes);
     },
+    reclaim: replacements.reclaim,
     accepts: (token) => doks.kube.issued.includes(token),
     clusters: () => [...doks.clusters.keys()],
     nodePools: (cluster) => ((doks.clusters.get(cluster)?.node_pools ?? []) as Json[]).map((pool) => pool.name as string),
