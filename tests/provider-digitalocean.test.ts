@@ -256,15 +256,32 @@ describe('client', () => {
     expect(error.code).toBe('RATE_LIMITED');
     expect(error.retryAfterMs).toBe(30_000);
 
-    // Without the header it waits a minute; a reset in the past waits nothing.
+    // Without a header it waits a minute.
     const body = { id: 'too_many_requests', message: 'API rate limit exceeded.' };
     expect(mapDoError(429, body, new Headers(), 0).retryAfterMs).toBe(60_000);
-    expect(
-      mapDoError(429, body, new Headers({ 'ratelimit-reset': '5' }), 10_000).retryAfterMs,
-    ).toBe(0);
     expect(mapDoError(429, body, new Headers({ 'ratelimit-reset': '' }), 10_000).retryAfterMs).toBe(
       60_000,
     );
+  });
+
+  it('a 429 waits what retry-after says, before ratelimit-reset, and never less than 1 s or more than 5 min', () => {
+    const body = { id: 'too_many_requests', message: 'API rate limit exceeded.' };
+    const now = Date.parse('2026-11-05T10:00:00Z');
+    const wait = (headers: Record<string, string>) =>
+      mapDoError(429, body, new Headers(headers), now).retryAfterMs;
+    const inSeconds = (seconds: number) => String(Math.floor(now / 1000) + seconds);
+    // retry-after is this refusal's own wait (a burst limit clears in seconds); ratelimit-reset is the hourly window's.
+    expect(wait({ 'retry-after': '7', 'ratelimit-reset': inSeconds(3300) })).toBe(7000);
+    expect(wait({ 'retry-after': new Date(now + 45_000).toUTCString() })).toBe(45_000);
+    // A retry-after that does not read falls back to ratelimit-reset.
+    expect(wait({ 'retry-after': 'soon', 'ratelimit-reset': inSeconds(30) })).toBe(30_000);
+    // A reset already past (clock skew between here and DigitalOcean) is not a hot loop: at least a second.
+    expect(wait({ 'ratelimit-reset': inSeconds(-5) })).toBe(1000);
+    expect(wait({ 'retry-after': '0' })).toBe(1000);
+    expect(wait({ 'retry-after': '-3' })).toBe(1000);
+    // The hourly window's reset can be most of an hour away while the burst limit that refused clears much sooner.
+    expect(wait({ 'ratelimit-reset': inSeconds(3300) })).toBe(300_000);
+    expect(wait({ 'retry-after': '86400' })).toBe(300_000);
   });
 
   it('refuses a 2xx body that is not JSON, and takes an empty one as nothing', async () => {

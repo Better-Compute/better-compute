@@ -10,8 +10,39 @@ interface DoErrorBody {
   request_id?: unknown;
 }
 
-/** How long a 429 without a usable `ratelimit-reset` waits. */
+/** How long a 429 without a usable `retry-after` or `ratelimit-reset` waits. */
 const defaultRetryAfterMs = 60_000;
+/** The shortest wait a 429 answers: never zero, so a reset already past (clock skew) is not a hot loop. */
+export const minRetryAfterMs = 1000;
+/**
+ * The longest wait a 429 answers: `ratelimit-reset` is when the oldest request leaves the hourly window, which can be
+ * most of an hour away while the burst limit that refused the request clears within a minute.
+ */
+export const maxRetryAfterMs = 300_000;
+
+/**
+ * How long a 429 says to wait, in ms: `retry-after` first (this refusal's own wait: delay seconds or an HTTP date),
+ * else the time until `ratelimit-reset` (epoch seconds), else a minute; kept between `minRetryAfterMs` and
+ * `maxRetryAfterMs`.
+ */
+export function rateLimitWaitMs(headers: Pick<Headers, 'get'>, nowMs: number): number {
+  let wait: number | undefined;
+  const retryAfter = headers.get('retry-after')?.trim();
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(retryAfter) - nowMs;
+    if (Number.isFinite(ms)) wait = ms;
+  }
+  if (wait === undefined) {
+    const reset = headers.get('ratelimit-reset')?.trim();
+    const resetAt = Number(reset);
+    if (reset && Number.isFinite(resetAt)) wait = resetAt * 1000 - nowMs;
+  }
+  return Math.min(
+    maxRetryAfterMs,
+    Math.max(minRetryAfterMs, Math.round(wait ?? defaultRetryAfterMs)),
+  );
+}
 
 /**
  * The 422 messages that mean more than "bad input". DO's spec doesn't list them: they are what its
@@ -103,13 +134,7 @@ export function mapDoError(
   } else if (status === 429) {
     code = 'RATE_LIMITED';
     details.reason = 'rateLimit';
-    // ratelimit-reset is when the oldest request leaves the window, in epoch seconds.
-    const rawReset = headers.get('ratelimit-reset');
-    const resetAt = Number(rawReset);
-    details.retryAfterMs =
-      rawReset !== null && rawReset.trim() !== '' && Number.isFinite(resetAt)
-        ? Math.max(0, resetAt * 1000 - nowMs)
-        : defaultRetryAfterMs;
+    details.retryAfterMs = rateLimitWaitMs(headers, nowMs);
   } else if (status >= 500) code = 'UNAVAILABLE';
   else if (status === 400) code = 'INVALID_INPUT';
   else code = 'PROVIDER_ERROR';
