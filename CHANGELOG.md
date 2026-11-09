@@ -194,6 +194,9 @@ All notable changes to the better-compute packages are documented here. The form
   `IdempotentParameterMismatch`; that surfaced as `CONFLICT`, which vps retried forever while the launched
   instance ran untracked. `create` now answers with the instance the key already launched (as it is: it reports
   its real zone and type), or a retryable `UNAVAILABLE` (`eventual-consistency`) until EC2 shows it.
+- **EC2 resource quotas are `QUOTA_EXCEEDED`** (`@better-compute/aws-core`). `SecurityGroupLimitExceeded`,
+  `CidrLimitExceeded`, `NetworkAclEntryLimitExceeded` and `TagLimitExceeded` were not in the error table, so a
+  create that hit the security group quota failed as `PROVIDER_ERROR` and was retried forever.
 
 ## 0.3.0 (2026-10-20)
 

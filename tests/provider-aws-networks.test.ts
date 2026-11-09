@@ -1234,6 +1234,17 @@ describe('networks: machines', () => {
     expect(instance.groups.map((g) => g.name)).toEqual(['bc-net-bc-net-1', tagA]);
   });
 
+  it('a create that hits the security group quota is QUOTA_EXCEEDED, not a provider error retried forever', async () => {
+    const { create, emu } = await onNetwork();
+    // The tag group of the machine is one more group than the VPC may hold.
+    emu.failNext('CreateSecurityGroup', 'SecurityGroupLimitExceeded');
+    await expect(create('ins_quota', { tags: [tagB] })).rejects.toMatchObject({
+      code: 'QUOTA_EXCEEDED',
+      details: { code: 'SecurityGroupLimitExceeded' },
+    });
+    expect(emu.calls('RunInstances')).toHaveLength(0);
+  });
+
   it('create refuses a subnet in another zone than the offer, and a network that is not there', async () => {
     const { create } = await onNetwork();
     await expect(create('ins_2', {}, 'us-east-1b/t3.micro')).rejects.toMatchObject({

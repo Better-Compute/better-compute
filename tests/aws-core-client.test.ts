@@ -63,6 +63,12 @@ const table: [string, ErrorCode][] = [
   ['InstanceLimitExceeded', 'QUOTA_EXCEEDED'],
   ['VcpuLimitExceeded', 'QUOTA_EXCEEDED'],
   ['ServiceQuotaExceededException', 'QUOTA_EXCEEDED'],
+  // EC2 resource quotas: never PROVIDER_ERROR, which a reconciler retries forever.
+  ['SecurityGroupLimitExceeded', 'QUOTA_EXCEEDED'],
+  ['RulesPerSecurityGroupLimitExceeded', 'QUOTA_EXCEEDED'],
+  ['CidrLimitExceeded', 'QUOTA_EXCEEDED'],
+  ['NetworkAclEntryLimitExceeded', 'QUOTA_EXCEEDED'],
+  ['TagLimitExceeded', 'QUOTA_EXCEEDED'],
   ['InvalidInstanceID.NotFound', 'NOT_FOUND'],
   ['InvalidAMIID.NotFound', 'NOT_FOUND'],
   ['NoSuchEntity', 'NOT_FOUND'],
