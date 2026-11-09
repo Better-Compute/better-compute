@@ -643,6 +643,7 @@ interface RawInstance {
   labels_applied: Record<string, string> | string | null;
   disks: InstanceDisk[] | string | null;
   created_ms: number | string | null;
+  create_attempted_ms: number | string | null;
 }
 
 /** (U-04) A disk the provider reported for an instance's machine (`ExternalMachine.disks`). */
@@ -799,6 +800,12 @@ export interface InstanceRow {
   disks?: InstanceDisk[];
   /** Epoch ms. */
   createdAt: number;
+  /**
+   * When a provider was last asked to create its machine and has not answered (epoch ms, vps/0124);
+   * undefined: never asked, or answered. While set, the provider may hold a machine though `externalId`
+   * is unset (the answer can be lost).
+   */
+  createAttemptedAt?: number;
 }
 
 const json = <T>(value: T | string): T =>
@@ -870,6 +877,8 @@ function toRow(raw: RawInstance): InstanceRow {
   if (raw.metadata !== null && raw.metadata !== undefined) row.metadata = json(raw.metadata);
   if (raw.issued_by !== null && raw.issued_by !== undefined) row.issuedBy = raw.issued_by;
   if (raw.disks !== null && raw.disks !== undefined) row.disks = json(raw.disks);
+  if (raw.create_attempted_ms !== null && raw.create_attempted_ms !== undefined)
+    row.createAttemptedAt = Number(raw.create_attempted_ms);
   return row;
 }
 
@@ -890,7 +899,8 @@ const columns = `i.id, i.tenant_id, i.pool_id, i.project_id, i.flavor_id, i.flav
   (SELECT n.external_name FROM networks n WHERE n.id = i.network_id) AS network_external_name,
   i.name, i.metadata, i.issued_by, i.labels_applied, i.disks,
   (p.class = 'provider' AND i.labels IS DISTINCT FROM i.labels_applied) AS labels_pending,
-  (extract(epoch FROM i.created_at) * 1000)::float8 AS created_ms`;
+  (extract(epoch FROM i.created_at) * 1000)::float8 AS created_ms,
+  (extract(epoch FROM i.create_attempted_at) * 1000)::float8 AS create_attempted_ms`;
 
 export async function readInstance(
   tx: SqlTx,

@@ -30,6 +30,12 @@ export interface FakeGce {
   reservations?: ExternalReservation[];
   /** (U-04) Thrown by the next `setLabels` (the machine is left as it was). */
   failSetLabels?: Error;
+  /** Thrown by the next `create` after the machine was made: the provider accepted, the answer was lost. */
+  failAfterCreate?: Error;
+  /** Thrown by the next `create` before anything is made. */
+  failCreate?: Error;
+  /** Runs inside the next `create`, after the machine was made and before it answers. */
+  onCreate?: () => Promise<void>;
 }
 
 const copy = (machine: ExternalMachine): ExternalMachine =>
@@ -81,6 +87,11 @@ export function fakeGceProvider(cloud: FakeGce, id = 'fake-gce'): ProviderDefini
         const [zone, machineType] = request.offerId.split('/');
         const vmId = cloud.createId ?? `${zone}/${call.idempotencyKey.replaceAll('_', '-')}`;
         cloud.requests.push(`create ${vmId}`);
+        const refused = cloud.failCreate;
+        if (refused) {
+          delete cloud.failCreate;
+          throw refused;
+        }
         const existing = cloud.machines.get(vmId);
         if (existing) return copy(existing);
         const created = gceVm(call.idempotencyKey.replaceAll('_', '-'), {
@@ -96,6 +107,16 @@ export function fakeGceProvider(cloud: FakeGce, id = 'fake-gce'): ProviderDefini
           },
         });
         cloud.machines.set(vmId, created);
+        const during = cloud.onCreate;
+        if (during) {
+          delete cloud.onCreate;
+          await during();
+        }
+        const lost = cloud.failAfterCreate;
+        if (lost) {
+          delete cloud.failAfterCreate;
+          throw lost;
+        }
         return copy(created);
       },
       async get(machineId) {

@@ -460,6 +460,11 @@ type ProviderAction =
   | { kind: 'blocked' }
   /** Attached, ownership lost or never won, being deleted: finish as a detach, no provider call. */
   | { kind: 'forget' }
+  /**
+   * Being deleted with no machine id, though a create was asked of the provider and not refused: its
+   * answer may have been lost. Look for the machine by its ownership label before finishing.
+   */
+  | { kind: 'find' }
   | { kind: 'none' };
 
 function providerAction(row: InstanceRow): ProviderAction {
@@ -468,7 +473,12 @@ function providerAction(row: InstanceRow): ProviderAction {
   // Or whose machine id a live instance holds: that machine is the live one's.
   const blocked = (attached && ownershipBlocked(row.conditions)) || duplicateBlocked(row.conditions);
   if (row.state === 'deleting') {
-    if (!row.externalId) return { kind: 'none' };
+    if (!row.externalId)
+      // An attempt is outstanding (asked, never answered) unless the provider refused it for good. An
+      // instance whose machine was known and then lost has none: its create was answered long ago.
+      return !attached && row.createAttemptedAt !== undefined && !provisionFailed(row.conditions)
+        ? { kind: 'find' }
+        : { kind: 'none' };
     if (blocked) return { kind: 'forget' };
     if (attached) return row.onDelete === 'detach' ? { kind: 'release' } : { kind: 'managed-delete' };
     return { kind: 'delete' };
@@ -599,6 +609,79 @@ const machineStates: Partial<Record<ExternalMachine['state'], ReportedState>> = 
   deleted: 'absent',
 };
 
+/** How long after a create attempt a provider's listing may still not show the machine it made. */
+export const lostMachineWindowMs = 3 * 60_000;
+const lostMachineRetryMs = 20_000;
+
+/**
+ * A deleting instance with no machine id whose create was asked of the provider (action `find`): the
+ * provider may hold its machine. Looks through the account's machines for one whose ownership label names
+ * this instance. Found: its id is recorded, and the next step deletes it. Not found: the listing may lag
+ * a machine just made, so the search repeats until `lostMachineWindowMs` after the attempt, then the
+ * deletion finishes. A provider that cannot list its machines, or writes no ownership labels, has nothing
+ * to search: the deletion finishes at once, as it always did.
+ */
+async function findLostMachine(
+  deps: InstanceDeps,
+  sql: SqlExecutor,
+  row: InstanceRow,
+  account: NonNullable<Awaited<ReturnType<typeof readPoolAccount>>>,
+  signal: AbortSignal,
+): Promise<number | undefined> {
+  const now = deps.clock.now();
+  let found: ExternalMachine | undefined;
+  let searched = false;
+  let failure: unknown;
+  try {
+    const client: ProviderImpl = await deps.clients.client(account, deps);
+    // The machines better-compute made, or failing that every machine the account sees.
+    const listing =
+      typeof client.list === 'function'
+        ? client.list.bind(client)
+        : typeof client.discover === 'function'
+          ? client.discover.bind(client)
+          : undefined;
+    if (listing) {
+      searched = true;
+      // The label names the instance, or its call key when it was recreated in place.
+      const names = new Set([row.id, providerCallKey(row)]);
+      for await (const machine of listing(callContext(deps, providerCallKey(row), signal)))
+        if (machine.claimedBy !== undefined && names.has(machine.claimedBy) && machine.state !== 'deleted') {
+          found = machine;
+          break;
+        }
+    }
+  } catch (error) {
+    failure = error;
+  }
+  return sql.transaction(async (tx) => {
+    const current = await readInstance(tx, row.id, { lock: true });
+    if (!current || current.version !== row.version) return deps.clock.now();
+    if (found) {
+      await tx.query('SAVEPOINT vps_found_id');
+      try {
+        await updateInstance(tx, current, { externalId: found.id });
+        await tx.query(`UPDATE instances SET create_attempted_at = NULL WHERE id = $1`, [current.id]);
+        await tx.query('RELEASE SAVEPOINT vps_found_id');
+        deps.log.warn('vps: found the machine of an instance deleted while its create was unanswered', {
+          instanceId: current.id,
+          externalId: found.id,
+        });
+        return deps.clock.now();
+      } catch (error) {
+        await tx.query('ROLLBACK TO SAVEPOINT vps_found_id');
+        if ((error as { code?: unknown }).code !== '23505') throw error;
+        // A live instance holds that id: the machine is its, and this one never had one.
+      }
+    }
+    // The search could not run for now, or ran inside the window where a listing may lag: look again.
+    const within = now < (current.createAttemptedAt ?? 0) + lostMachineWindowMs;
+    if (!found && (failure !== undefined || (searched && within))) return now + lostMachineRetryMs;
+    await finishDeletion(deps, tx, current);
+    return undefined;
+  });
+}
+
 /**
  * One provider-pool step: plan in a short transaction, call the provider outside any transaction,
  * then apply the result in a second transaction guarded by the row version.
@@ -621,6 +704,17 @@ async function reconcileProvider(
       : undefined;
     // (P2) The volumes its machine delete may take with it (DO's selective destroy).
     const withVolumes = row.state === 'deleting' ? await volumesDeletedWith(tx, row.id) : [];
+    // Committed before the provider is called, at every attempt: whatever happens to the call or its
+    // answer, the row says when a machine may last have been made. Not part of the version: nothing a
+    // caller sees changes.
+    if (account && providerAction(row).kind === 'create') {
+      await tx.query(
+        `UPDATE instances SET create_attempted_at = compute_now()
+          WHERE id = $1`,
+        [row.id],
+      );
+      row = { ...row, createAttemptedAt: deps.clock.now() };
+    }
     return { row, account, withVolumes };
   });
   if (!planned) return undefined;
@@ -658,6 +752,7 @@ async function reconcileProvider(
   }
   if (!account)
     throw new ComputeError('INVALID_STATE', `Instance ${row.id} has no provider account`);
+  if (action.kind === 'find') return findLostMachine(deps, sql, row, account, signal);
   // (P3) A preempted instance recreated in place more than once in a row waits out its backoff.
   if (action.kind === 'create') {
     const replaced = preemptedReplacementsOf(row.conditions);
@@ -803,7 +898,31 @@ async function reconcileProvider(
 
   return sql.transaction(async (tx) => {
     let current = await readInstance(tx, instanceId, { lock: true });
-    if (!current || current.version !== row.version) return deps.clock.now();
+    if (!current || current.version !== row.version) {
+      // The row changed while the provider was asked (a delete, say), so the result is not applied.
+      // A machine the create made exists all the same: its id is kept, or the delete that follows would
+      // find none and finish without ever asking the provider to remove it.
+      if (
+        current &&
+        action.kind === 'create' &&
+        machine !== undefined &&
+        current.externalId === undefined &&
+        current.state !== 'deleted' &&
+        providerCallKey(current) === providerCallKey(row)
+      ) {
+        await tx.query('SAVEPOINT vps_created_id');
+        try {
+          await updateInstance(tx, current, { externalId: machine.id });
+          await tx.query(`UPDATE instances SET create_attempted_at = NULL WHERE id = $1`, [current.id]);
+          await tx.query('RELEASE SAVEPOINT vps_created_id');
+        } catch (error) {
+          await tx.query('ROLLBACK TO SAVEPOINT vps_created_id');
+          // instances_external_live: a live instance holds this id; the usual path reports it.
+          if ((error as { code?: unknown }).code !== '23505') throw error;
+        }
+      }
+      return deps.clock.now();
+    }
     if (failure !== undefined) {
       const code = isComputeError(failure) ? failure.code : 'PROVIDER_ERROR';
       // A reboot the provider cannot do is dropped (with the error as a condition): the instance runs on.
@@ -990,6 +1109,9 @@ async function reconcileProvider(
           ...(labelsWritten ? { labelsApplied: row.labels ?? null } : {}),
           ...(disks !== undefined ? { disks } : {}),
         });
+      // The create was answered: the row holds the machine's id, and no attempt is outstanding.
+      if (action.kind === 'create')
+        await tx.query(`UPDATE instances SET create_attempted_at = NULL WHERE id = $1`, [current.id]);
       await tx.query('RELEASE SAVEPOINT vps_external_id');
     } catch (error) {
       await tx.query('ROLLBACK TO SAVEPOINT vps_external_id');

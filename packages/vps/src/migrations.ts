@@ -207,6 +207,19 @@ export const vpsInstanceLabelsMigration: Migration = {
   sql: `ALTER TABLE instances ADD COLUMN labels jsonb;`,
 };
 
+/**
+ * When the reconciler last asked a provider to create the instance's machine. The call happens outside any
+ * transaction and its answer can be lost (a timeout after the provider accepted, a crash, a delete that
+ * raced it): from then on the provider may hold a machine the row has no id for. A delete of such an
+ * instance looks the machine up by its ownership label before finishing (`lifecycle.ts`, action `find`),
+ * where it used to finish at once and leave the machine running, unbilled. NULL: never asked, or the last
+ * attempt was answered (the row holds the machine's id).
+ */
+export const vpsInstanceCreateAttemptedMigration: Migration = {
+  name: 'vps/0124_instance_create_attempted',
+  sql: `ALTER TABLE instances ADD COLUMN create_attempted_at timestamptz;`,
+};
+
 /** (AWS A10) The tenant's placement group of an instance (`instances.create({ placement })`). */
 export const vpsInstancePlacementMigration: Migration = {
   name: 'vps/0111_instance_placement',
@@ -331,4 +344,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   quotaBookingsMigration,
   externalMetricsMigration,
   connectSecretsMigration,
+  vpsInstanceCreateAttemptedMigration,
 ]);
