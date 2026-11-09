@@ -93,7 +93,9 @@ type openVolumes map[string]map[string]bool
 func openVolumesOf(domains map[string]runtime.Domain) openVolumes {
 	o := openVolumes{}
 	for id, d := range domains {
-		if d.Managed && (d.State == runtime.StateRunning || d.State == runtime.StatePaused) {
+		// A domain in error may still run (a VMM whose state cannot be read): the volumes its runtime
+		// reports for it stay taken.
+		if d.Managed && d.State != runtime.StateStopped {
 			for _, v := range d.Volumes {
 				o.add(v.ID, id, !v.ReadOnly)
 			}

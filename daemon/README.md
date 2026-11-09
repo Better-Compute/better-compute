@@ -432,6 +432,13 @@ events. It never drops a hold on its own.
     A directory under `instances/` without a `vm.json` is not bcd's and stays refused (`is not
     bcd's`): only one left by a bcd from before this rule can be in that state, and it is removed by
     hand.
+- *A cloud-hypervisor VM's state* is its VMM's `vm.info`. When the VMM does not answer, the unit
+  decides (`systemctl show --property=ActiveState bcd-ch-<id>.service`, which the node runs as
+  itself): `inactive` or `failed` is stopped, and so is a running VMM that answers it has no VM.
+  A running unit whose API fails, or a systemd that cannot be asked, is *unknown*: the instance
+  reports `ERROR` with `the state of <id> is unknown…`, keeps its volumes taken, and bcd neither
+  resizes its disk offline, starts it (a start recreates its taps) nor snapshots it. A stop still
+  goes through.
 - *Stopping.* On SIGTERM (and before a self-update's exec) the converger pass under way is cancelled
   and bcd waits up to 20 s for it to return, so a download or an instance being created undoes itself.
 - *Admission.* bcd admits a start only when the host has memory for it:

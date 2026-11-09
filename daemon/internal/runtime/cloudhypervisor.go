@@ -190,9 +190,27 @@ func (c *CloudHypervisor) apiFiles(ctx context.Context, id, method, path string,
 		return nil, err
 	}
 	if status > 299 {
-		return out, fmt.Errorf("cloud-hypervisor %s: HTTP %d: %s", path, status, strings.TrimSpace(string(out)))
+		return out, &chStatusError{Path: path, Status: status, Body: strings.TrimSpace(string(out))}
 	}
 	return out, nil
+}
+
+// chStatusError is a VMM's answer above 299: the VMM is there and said no (a failed call is any
+// other error: it says nothing about the VMM).
+type chStatusError struct {
+	Path   string
+	Status int
+	Body   string
+}
+
+func (e *chStatusError) Error() string {
+	return fmt.Sprintf("cloud-hypervisor %s: HTTP %d: %s", e.Path, e.Status, e.Body)
+}
+
+// noVM reports a VMM's answer that it has no VM ("VM is not created", VmNotCreated).
+func (e *chStatusError) noVM() bool {
+	body := strings.ToLower(strings.Join(strings.Fields(e.Body), ""))
+	return strings.Contains(body, "notcreated")
 }
 
 // record is the record of a finished instance (one still being created is no instance yet).
@@ -285,30 +303,54 @@ func (c *CloudHypervisor) sweep() {
 	}
 }
 
-// state is the VM's state: stopped when its VMM does not answer.
-func (c *CloudHypervisor) state(ctx context.Context, id string) (string, string) {
-	out, err := c.api(ctx, id, http.MethodGet, "vm.info", nil)
+// unitState is the VMM unit's ActiveState as systemd reports it ("inactive" for a unit that is gone).
+func (c *CloudHypervisor) unitState(ctx context.Context, id string) (string, error) {
+	out, err := c.run(ctx, "systemctl", "show", "--property=ActiveState", "--value", unitName(id))
 	if err != nil {
-		if _, perr := c.api(ctx, id, http.MethodGet, "vmm.ping", nil); perr != nil {
-			return StateStopped, ""
+		return "", err
+	}
+	s := strings.TrimSpace(string(out))
+	if s == "" {
+		return "", errors.New("systemctl show answered no ActiveState")
+	}
+	return s, nil
+}
+
+// state is the VM's state. A VMM that does not answer says nothing: whether one runs at all is its
+// unit's ActiveState, systemd's to say. The VM is stopped when the unit is not running, or when the
+// VMM answers that it has no VM yet; when the unit runs and its API fails, or systemd cannot be asked,
+// the state is unknown and that is an error, never "stopped" (the disk may be open, the taps in use).
+func (c *CloudHypervisor) state(ctx context.Context, id string) (state, message string, err error) {
+	out, apiErr := c.api(ctx, id, http.MethodGet, "vm.info", nil)
+	if apiErr != nil {
+		unit, err := c.unitState(ctx, id)
+		if err != nil {
+			return "", "", fmt.Errorf("the state of %s is unknown: its VMM does not answer (%v) and its unit cannot be read: %w", id, apiErr, err)
 		}
-		return StateStopped, "" // a VMM without a VM yet
+		if unit == "inactive" || unit == "failed" {
+			return StateStopped, "", nil
+		}
+		var status *chStatusError
+		if errors.As(apiErr, &status) && status.noVM() {
+			return StateStopped, "", nil // a VMM without a VM yet
+		}
+		return "", "", fmt.Errorf("the state of %s is unknown: its VMM's unit is %s but its API fails: %w", id, unit, apiErr)
 	}
 	var info struct {
 		State string `json:"state"`
 	}
 	if json.Unmarshal(out, &info) != nil {
-		return StateError, "unreadable vm.info"
+		return StateError, "unreadable vm.info", nil
 	}
 	switch info.State {
 	case "Running":
-		return StateRunning, ""
+		return StateRunning, "", nil
 	case "Paused":
-		return StatePaused, ""
+		return StatePaused, "", nil
 	case "Created", "Shutdown":
-		return StateStopped, ""
+		return StateStopped, "", nil
 	}
-	return StateError, "state " + info.State
+	return StateError, "state " + info.State, nil
 }
 
 // ---- List ---------------------------------------------------------------------------------------
@@ -345,8 +387,12 @@ func (c *CloudHypervisor) List(ctx context.Context) ([]Domain, error) {
 		if r.Placement != nil && !r.FromSnapshot {
 			d.HugepageSize = r.Placement.HugepageSize
 		}
-		d.State, d.Message = c.state(ctx, r.ID)
-		if d.State == StateRunning || d.State == StatePaused {
+		var stateErr error
+		if d.State, d.Message, stateErr = c.state(ctx, r.ID); stateErr != nil {
+			// Unknown is reported as an error, and counted as possibly running: its volumes stay taken.
+			d.State, d.Message = StateError, stateErr.Error()
+		}
+		if d.State != StateStopped {
 			d.Volumes = r.StartedVolumes
 		}
 		out = append(out, d)
@@ -519,7 +565,12 @@ func (c *CloudHypervisor) Ensure(ctx context.Context, spec *agentv1.InstanceSpec
 			}
 		}
 	} else if spec.GetDiskBytes() > r.DiskBytes && r.DiskBytes > 0 {
-		if state, _ := c.state(ctx, id); state == StateStopped {
+		// qemu-img only on a disk no VMM has open: an unknown state is not "stopped".
+		state, _, err := c.state(ctx, id)
+		if err != nil {
+			return err
+		}
+		if state == StateStopped {
 			if err := c.checkDisk(r); err != nil {
 				return err
 			}
@@ -1035,7 +1086,13 @@ func (c *CloudHypervisor) SetState(ctx context.Context, id, state string) error 
 	if err != nil {
 		return fmt.Errorf("no managed domain %s", id)
 	}
-	current, _ := c.state(ctx, id)
+	current, _, err := c.state(ctx, id)
+	if err != nil && state != StateStopped {
+		// Never a start over a VM that may be running (start deletes and recreates its taps). A stop
+		// goes ahead: it ends in the unit's own state.
+		return err
+	}
+	err = nil
 	switch state {
 	case StateRunning:
 		switch current {
@@ -1068,11 +1125,11 @@ func (c *CloudHypervisor) stop(ctx context.Context, r *chRecord) error {
 	if timeout <= 0 {
 		timeout = time.Minute
 	}
-	if st, _ := c.state(ctx, id); st == StateRunning {
+	if st, _, _ := c.state(ctx, id); st == StateRunning {
 		_, _ = c.api(ctx, id, http.MethodPut, "vm.power-button", nil)
 		deadline := time.Now().Add(timeout)
 		for time.Now().Before(deadline) {
-			if st, _ := c.state(ctx, id); st == StateStopped {
+			if st, _, err := c.state(ctx, id); err == nil && st == StateStopped {
 				break
 			}
 			select {
@@ -1288,7 +1345,11 @@ func (c *CloudHypervisor) Snapshot(ctx context.Context, id string, includeMemory
 		return "", err
 	}
 	defer os.RemoveAll(work)
-	state, _ := c.state(ctx, id)
+	// A disk is copied while its VM is paused or stopped: never on a guess about which.
+	state, _, err := c.state(ctx, id)
+	if err != nil {
+		return "", err
+	}
 	if state == StateRunning {
 		if _, err := c.api(ctx, id, http.MethodPut, "vm.pause", nil); err != nil {
 			return "", err
@@ -1514,7 +1575,11 @@ func (c *CloudHypervisor) GrowVolume(ctx context.Context, id string, v AttachedV
 	if err != nil {
 		return err
 	}
-	if st, _ := c.state(ctx, id); st == StateStopped {
+	st, _, err := c.state(ctx, id)
+	if err != nil {
+		return err
+	}
+	if st == StateStopped {
 		return nil
 	}
 	i := slices.IndexFunc(r.StartedVolumes, func(s AttachedVolume) bool { return s.Path == v.Path })
@@ -1530,7 +1595,9 @@ func (c *CloudHypervisor) Console(ctx context.Context, id string) (io.ReadWriteC
 	if _, err := c.record(id); err != nil {
 		return nil, fmt.Errorf("no managed domain %s", id)
 	}
-	if st, _ := c.state(ctx, id); st != StateRunning {
+	if st, _, err := c.state(ctx, id); err != nil {
+		return nil, err
+	} else if st != StateRunning {
 		return nil, fmt.Errorf("domain %s is not running", id)
 	}
 	return (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(c.instanceDir(id), "serial.sock"))
@@ -1546,8 +1613,11 @@ func (c *CloudHypervisor) Rebind(ctx context.Context, id string, b Rebind) error
 		c.mu.Unlock()
 		return fmt.Errorf("no managed domain %s", id)
 	}
-	if st, _ := c.state(ctx, id); st != StateRunning {
+	if st, _, err := c.state(ctx, id); err != nil || st != StateRunning {
 		c.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		return fmt.Errorf("domain %s is not running", id)
 	}
 	img, nonce, err := rebindImage(b)

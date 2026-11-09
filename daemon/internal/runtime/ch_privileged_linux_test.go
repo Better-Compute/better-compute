@@ -94,7 +94,7 @@ func TestCloudHypervisorUnderTheHelper(t *testing.T) {
 		}
 		t.Fatal(err)
 	}
-	if st, _ := c.state(ctx, "inst_h"); st != StateRunning {
+	if st, _, _ := c.state(ctx, "inst_h"); st != StateRunning {
 		t.Fatalf("state %s", st)
 	}
 	// Live usage is read as the node itself: the VMM unit's cgroup (world-readable) and its taps' counters, no

@@ -148,7 +148,7 @@ func TestCloudHypervisorKilledMidEnsure(t *testing.T) {
 	if _, err := os.Stat(foreign); err != nil {
 		t.Fatal("a directory bcd did not make was removed")
 	}
-	if got, _ := restarted.state(ctx, "inst_web"); got != StateRunning {
+	if got, _, _ := restarted.state(ctx, "inst_web"); got != StateRunning {
 		t.Fatalf("inst_web = %s after the restart", got)
 	}
 }
@@ -175,5 +175,98 @@ func TestCloudHypervisorRecordComesFirst(t *testing.T) {
 	}
 	if seen == 0 {
 		t.Fatal("no command ran while the instance was being created")
+	}
+}
+
+// A VMM whose API fails says nothing about its VM: the state comes from its unit, and when the unit
+// runs and the API does not answer it is unknown, never "stopped". Nothing that needs a stopped VM
+// (an offline resize, a start that recreates the taps, a disk copy) runs on an unknown one.
+func TestCloudHypervisorUnknownStateIsNotStopped(t *testing.T) {
+	f := newCHFixture(t)
+	c, ctx := f.c, context.Background()
+	spec := f.spec("inst_web")
+	if err := c.Ensure(ctx, spec, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetState(ctx, "inst_web", StateRunning); err != nil {
+		t.Fatal(err)
+	}
+	mark := func() (int, int) {
+		f.ch.mu.Lock()
+		defer f.ch.mu.Unlock()
+		f.ch.virt.mu.Lock()
+		defer f.ch.virt.mu.Unlock()
+		return len(f.ch.calls), len(f.ch.virt.calls)
+	}
+	since := func(chFrom, virtFrom int) string {
+		f.ch.mu.Lock()
+		defer f.ch.mu.Unlock()
+		f.ch.virt.mu.Lock()
+		defer f.ch.virt.mu.Unlock()
+		return strings.Join(append(append([]string(nil), f.ch.calls[chFrom:]...), f.ch.virt.calls[virtFrom:]...), "\n")
+	}
+
+	// The VM runs; its API socket stops answering.
+	f.ch.apiDown = true
+	chFrom, virtFrom := mark()
+	if st, _, err := c.state(ctx, "inst_web"); err == nil {
+		t.Fatalf("state with a running unit and a dead API = %q, want an error", st)
+	}
+	domains, err := c.List(ctx)
+	if err != nil || len(domains) != 1 || domains[0].State != StateError || !strings.Contains(domains[0].Message, "unknown") {
+		t.Fatalf("list = %+v, %v", domains, err)
+	}
+	grown := f.spec("inst_web")
+	grown.DiskBytes = 20 << 30
+	if err := c.Ensure(ctx, grown, nil, nil); err == nil {
+		t.Fatal("a disk grew while its VM's state was unknown")
+	}
+	if err := c.SetState(ctx, "inst_web", StateRunning); err == nil {
+		t.Fatal("a VM whose state is unknown was started again")
+	}
+	if _, err := c.Snapshot(ctx, "inst_web", false, "", &bytes.Buffer{}); err == nil {
+		t.Fatal("a VM whose state is unknown was snapshotted")
+	}
+	calls := since(chFrom, virtFrom)
+	for _, never := range []string{"qemu-img resize", "qemu-img convert", "ip link delete", "ip tuntap add", "systemd-run"} {
+		if strings.Contains(calls, never) {
+			t.Fatalf("%q ran on a VM whose state was unknown:\n%s", never, calls)
+		}
+	}
+
+	// systemd cannot be asked either: still unknown.
+	f.ch.systemdDown = true
+	if st, _, err := c.state(ctx, "inst_web"); err == nil {
+		t.Fatalf("state without systemd = %q, want an error", st)
+	}
+	f.ch.systemdDown = false
+
+	// A stop still goes through (it ends in the unit's own state), and then the state is known again
+	// with the API as silent as before: the unit is gone.
+	if err := c.SetState(ctx, "inst_web", StateStopped); err != nil {
+		t.Fatalf("stopping a VM whose state is unknown = %v", err)
+	}
+	if st, _, err := c.state(ctx, "inst_web"); err != nil || st != StateStopped {
+		t.Fatalf("state after the stop = %q, %v", st, err)
+	}
+	f.ch.apiDown = false
+	if err := c.Ensure(ctx, grown, nil, nil); err != nil {
+		t.Fatalf("growing the stopped VM's disk = %v", err)
+	}
+
+	// A VMM that runs and answers that it has no VM is stopped (a start that failed after its launch).
+	socket := c.socket("inst_web")
+	f.ch.mu.Lock()
+	f.ch.vmms[socket] = &fakeVMM{}
+	f.ch.units[unitName("inst_web")] = socket
+	f.ch.mu.Unlock()
+	if st, _, err := c.state(ctx, "inst_web"); err != nil || st != StateStopped {
+		t.Fatalf("state of a VMM without a VM = %q, %v", st, err)
+	}
+	if err := c.SetState(ctx, "inst_web", StateRunning); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, err := c.state(ctx, "inst_web"); err != nil || st != StateRunning {
+		t.Fatalf("state = %q, %v", st, err)
 	}
 }
