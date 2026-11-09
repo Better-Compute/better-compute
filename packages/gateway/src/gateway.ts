@@ -156,8 +156,25 @@ export interface GatewayOptions {
   /** Daemon liveness lease (default 40 000 ms). */
   sessionLeaseTtlMs?: number;
   credits?: Partial<LaneCreditLimits>;
-  /** Session opens and joins admitted per second (default 200, the §7.2 token bucket). */
+  /** Session opens admitted per second (default 200, the §7.2 token bucket). */
   handshakesPerSecond?: number;
+  /**
+   * Joins admitted per second (default: as many as `handshakesPerSecond`, in a bucket of their own).
+   * Join takes no client certificate, so anyone who reaches the port can send it: it never spends the
+   * tokens that the reconnects of nodes already in the fleet need.
+   */
+  joinsPerSecond?: number;
+  /**
+   * How long an admitted stream may stay silent before its Hello (default 10 000 ms). A stream that
+   * sends none is closed `DEADLINE_EXCEEDED`; until then it counts toward `maxStreams`.
+   */
+  helloTimeoutMs?: number;
+  /**
+   * Frames one stream may have waiting to be handled (default 4 096). A daemon sends far fewer between
+   * the gateway's commits; a stream past the bound is closed `RESOURCE_EXHAUSTED` instead of growing
+   * the queue without limit.
+   */
+  maxQueuedFrames?: number;
   /**
    * Hello transactions in flight at once (default 64). Beyond it a Hello is refused
    * `RESOURCE_EXHAUSTED` (retry with jitter), so a reconnect storm cannot queue enough database work
@@ -235,6 +252,8 @@ export interface GatewayStatus {
   started: boolean;
   draining: boolean;
   sessions: number;
+  /** Streams admitted that have not completed their Hello yet (they count toward `maxStreams`). */
+  pendingStreams: number;
   maxStreams: number;
   /** The `gateway:<id>` lease epoch, or null while fenced. */
   leaseEpoch: number | null;
@@ -265,7 +284,7 @@ export interface Gateway {
   crash(): void;
   /** A new stream. Throws `GrpcError` (`RESOURCE_EXHAUSTED`, `UNAVAILABLE`) when not admitted. */
   open(peer: PeerIdentity, sink: SessionSink): SessionHandle;
-  /** Forwarded to the api's JoinService; counted against the handshake bucket. */
+  /** Forwarded to the api's JoinService; counted against the join bucket (`joinsPerSecond`). */
   join(request: JoinRequest): Promise<JoinResponse>;
   /** Forwarded to the api's JoinService, which verifies the proof of possession. */
   renew(request: RenewRequest, peer: PeerIdentity): Promise<RenewResponse>;
@@ -310,7 +329,15 @@ export interface Gateway {
 const noopLog: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 
 /** How a session handshake ended, for `GatewayOptions.observe.onHandshake` (`gateway_handshakes_total{outcome}`). */
-export type HandshakeOutcome = 'welcomed' | 'upgrade-required' | 'busy' | 'refused' | 'unavailable' | 'error';
+export type HandshakeOutcome =
+  | 'welcomed'
+  | 'upgrade-required'
+  | 'busy'
+  | 'refused'
+  | 'unavailable'
+  | 'error'
+  /** The stream was admitted and sent no Hello within `helloTimeoutMs`. */
+  | 'timeout';
 
 /** The outcome of a refused handshake, from its status. */
 function handshakeOutcome(error: unknown): HandshakeOutcome {
@@ -423,6 +450,11 @@ export function createGateway(options: GatewayOptions): Gateway {
   const credits: LaneCreditLimits = { control: 8, provision: 4, bulk: 2, ...options.credits };
   const handshakesPerSecond = options.handshakesPerSecond ?? 200;
   const handshakes = new TokenBucket(handshakesPerSecond, clock);
+  const joins = new TokenBucket(options.joinsPerSecond ?? handshakesPerSecond, clock);
+  const helloTimeoutMs = options.helloTimeoutMs ?? 10_000;
+  const maxQueuedFrames = options.maxQueuedFrames ?? 4_096;
+  /** Streams admitted by `open` that have no session yet. */
+  let preHello = 0;
   // Refusals in the current second: a refused handshake is told to come back somewhere in the time
   // the bucket needs to admit everyone refused (refusals ÷ rate), jittered, so a power-on herd
   // spreads over that window instead of retrying on each daemon's own doubling back-off (§8.6).
@@ -1262,7 +1294,9 @@ export function createGateway(options: GatewayOptions): Gateway {
       try {
         if (!started || stopping || !lease) throw new GrpcError(GrpcCode.UNAVAILABLE, 'gateway is not ready');
         if (draining) throw new GrpcError(GrpcCode.UNAVAILABLE, 'gateway is draining');
-        if (sessions.size >= maxStreams && !sessions.has(peer.nodeId))
+        // Streams still waiting for their Hello hold a place too: otherwise a certificate holder could
+        // open any number of them and never say Hello.
+        if (sessions.size + preHello >= maxStreams && !sessions.has(peer.nodeId))
           // A full gateway: come back much later (or to another gateway).
           throw new GrpcError(GrpcCode.RESOURCE_EXHAUSTED, 'gateway is at its stream limit', jitteredPushback(5_000, 30_000));
         if (peer.serial && options.revocations?.has(peer.serial))
@@ -1281,6 +1315,24 @@ export function createGateway(options: GatewayOptions): Gateway {
       let session: Session | undefined;
       let ended = false;
       let queue: Promise<void> = Promise.resolve();
+      let queued = 0;
+      // The stream holds a pre-Hello place until its Hello is answered or it ends.
+      preHello++;
+      let waiting = true;
+      const settle = () => {
+        if (!waiting) return;
+        waiting = false;
+        preHello--;
+        clearTimeout(helloTimer);
+      };
+      const helloTimer = setTimeout(() => {
+        if (ended || session) return;
+        ended = true;
+        settle();
+        observeHandshake('timeout');
+        sink.close(new GrpcError(GrpcCode.DEADLINE_EXCEEDED, 'no Hello in time'));
+      }, helloTimeoutMs);
+      helloTimer.unref?.();
 
       const handle = async (agentFrame: AgentFrame) => {
         if (ended) return;
@@ -1288,9 +1340,12 @@ export function createGateway(options: GatewayOptions): Gateway {
         if (!session) {
           if (msg.case !== 'hello') {
             ended = true;
+            settle();
             sink.close(new GrpcError(GrpcCode.INVALID_ARGUMENT, 'the first frame must be Hello'));
             return;
           }
+          // The Hello arrived: from here the Hello transaction's own limits apply, not the deadline.
+          clearTimeout(helloTimer);
           try {
             session = await onHello(peer, sink, msg.value);
             observeHandshake(session.upgradeRequired ? 'upgrade-required' : 'welcomed');
@@ -1299,6 +1354,8 @@ export function createGateway(options: GatewayOptions): Gateway {
             const status = toGrpcError(error);
             observeHandshake(handshakeOutcome(status));
             sink.close(status);
+          } finally {
+            settle();
           }
           return;
         }
@@ -1338,12 +1395,34 @@ export function createGateway(options: GatewayOptions): Gateway {
 
       return {
         receive(agentFrame) {
-          queue = queue.then(() => handle(agentFrame));
+          if (ended) return queue;
+          if (queued >= maxQueuedFrames) {
+            // Frames arrive faster than they are handled, and nothing here slows the sender down: end
+            // the stream rather than let its queue grow until the process runs out of memory.
+            ended = true;
+            settle();
+            const overloaded = new GrpcError(
+              GrpcCode.RESOURCE_EXHAUSTED,
+              'too many frames waiting; reconnect with jitter',
+              jitteredPushback(1_000, 10_000),
+            );
+            log.warn('gateway: a stream outran its frame queue and was closed', {
+              gatewayId: id,
+              nodeId: peer.nodeId,
+              queued,
+            });
+            if (session) void terminate(session, overloaded, true, 'overloaded').catch(() => undefined);
+            else sink.close(overloaded);
+            return queue;
+          }
+          queued++;
+          queue = queue.then(() => handle(agentFrame)).finally(() => void queued--);
           return queue;
         },
         end(reason = 'stream-closed') {
           queue = queue.then(async () => {
             ended = true;
+            settle();
             if (session) await terminate(session, undefined, true, reason);
           });
           return queue;
@@ -1352,7 +1431,7 @@ export function createGateway(options: GatewayOptions): Gateway {
     },
 
     async join(request) {
-      if (!handshakes.take())
+      if (!joins.take())
         throw new GrpcError(
           GrpcCode.RESOURCE_EXHAUSTED,
           'handshake rate exceeded; retry with jitter',
@@ -1437,6 +1516,7 @@ export function createGateway(options: GatewayOptions): Gateway {
         started,
         draining,
         sessions: sessions.size,
+        pendingStreams: preHello,
         maxStreams,
         leaseEpoch: lease?.epoch ?? null,
         loops: Object.fromEntries(Object.entries(loops).map(([name, health]) => [name, { ...health }])),

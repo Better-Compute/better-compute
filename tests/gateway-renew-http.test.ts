@@ -128,4 +128,66 @@ describe('POST /v1/renew (renewal without a TLS client certificate)', () => {
     const url = `http://127.0.0.1:${(server!.address() as AddressInfo).port}/v1/renew`;
     expect((await fetch(url)).status).toBe(405);
   });
+
+  it('never counts a forged request against the node it names', { timeout: 60_000 }, async () => {
+    dev = await createDevStack({ admitExternalJoins: true });
+    const node = await joined(dev);
+    const post = await serve(dev, { perNodePerHour: 1 });
+    // Anyone can mint a certificate that names the victim's node id. Its requests fail verification, and
+    // used to fill the victim's window all the same: six of them an hour locked its renewals out.
+    const foreignCa = createNodeCa({ trustDomain: 'evil.example' });
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const key = generateP256KeyPair();
+      const foreign = await foreignCa.issue(key.publicKey, {
+        usage: 'client',
+        role: 'node',
+        uriSans: [nodeSpiffeId({ trustDomain: 'evil.example', siteId: 'site_x', nodeId: node.nodeId })],
+        ttlSeconds: 3600,
+      });
+      const forged = prepareAgentRenew({
+        nodeId: node.nodeId,
+        currentKey: key.privateKey,
+        chain: [foreign.certificate, ...foreign.chain],
+        now: Date.now(),
+      });
+      expect([401, 403]).toContain((await post(encoded(forged.request))).status);
+    }
+    // The node itself still renews; only that grant is counted.
+    const genuine = () =>
+      encoded(prepareAgentRenew({ nodeId: node.nodeId, currentKey: node.privateKey, chain: node.chain, now: Date.now() }).request);
+    expect((await post(genuine())).status).toBe(200);
+    expect((await post(genuine())).status).toBe(429);
+  });
+
+  it('bounds unverified attempts with one bucket, whatever node ids they claim', { timeout: 60_000 }, async () => {
+    dev = await createDevStack({ admitExternalJoins: true });
+    const node = await joined(dev);
+    let now = Date.now();
+    const post = await serve(dev, { attemptsPerSecond: 2, clock: { now: () => now } });
+    const foreignCa = createNodeCa({ trustDomain: 'evil.example' });
+    const forged = async (nodeId: string) => {
+      const key = generateP256KeyPair();
+      const foreign = await foreignCa.issue(key.publicKey, {
+        usage: 'client',
+        role: 'node',
+        uriSans: [nodeSpiffeId({ trustDomain: 'evil.example', siteId: 'site_x', nodeId })],
+        ttlSeconds: 3600,
+      });
+      return encoded(
+        prepareAgentRenew({ nodeId, currentKey: key.privateKey, chain: [foreign.certificate, ...foreign.chain], now: Date.now() })
+          .request,
+      );
+    };
+    const statuses: number[] = [];
+    for (let i = 0; i < 4; i++)
+      statuses.push((await post(await forged(`node_01k5w00000000000000000000${i}`))).status);
+    // Two reach verification; the rest are turned away before any certificate or database work.
+    expect(statuses.filter((status) => status === 429)).toHaveLength(2);
+    // The bucket refills, and the real node gets through.
+    now += 1_000;
+    const genuine = encoded(
+      prepareAgentRenew({ nodeId: node.nodeId, currentKey: node.privateKey, chain: node.chain, now: Date.now() }).request,
+    );
+    expect((await post(genuine)).status).toBe(200);
+  });
 });

@@ -41,6 +41,7 @@ describe('internalHandler', () => {
       started: true,
       draining: false,
       sessions: 0,
+      pendingStreams: 0,
       maxStreams: 5_000,
       leaseEpoch: 1,
       loops: { lease: { consecutiveFailures: 0, failures: 0, lastOkMs: expect.any(Number) } },

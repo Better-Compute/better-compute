@@ -4,6 +4,7 @@ import { nodeSpiffeIdOf, parseCertificate } from '@better-compute/pki';
 import { decodeMessage, encodeMessage, RenewRequestSchema, RenewResponseSchema } from '@better-compute/protocol';
 import type { Gateway } from './gateway.js';
 import { GrpcCode, GrpcError, toGrpcError } from './grpc.js';
+import { TokenBucket } from './token-bucket.js';
 
 // Certificate renewal over plain HTTP (PLAN.md §7.1): WS-mode daemons sit behind proxies that strip
 // client certificates, so the mTLS gRPC Renew is out of reach. `POST /v1/renew` takes the RenewRequest
@@ -11,14 +12,23 @@ import { GrpcCode, GrpcError, toGrpcError } from './grpc.js';
 // the presented chain (node CA, revocation, current generation), the proof of possession by the
 // current key (±60 s, replay cache) and that the chain's node is the certificate's. The node id read
 // from the leaf here only keys the rate limit and is checked against JoinService's record again.
+//
+// Anyone can reach this endpoint and put any node's id in a certificate of their own making, so nothing
+// an unverified request does may count against a node: the per-node window is filled only by renewals
+// JoinService accepted. What unverified requests can cost is bounded by one bucket for all attempts.
 
 export const RENEW_PATH = '/v1/renew';
 
 export interface RenewHttpOptions {
   /** Largest request body (default 64 KiB). */
   maxBytes?: number;
-  /** Renewals admitted per node id per hour (default 6; a daemon renews at ~60% of 24 h). */
+  /** Renewals granted per node id per hour (default 6; a daemon renews at ~60% of 24 h). */
   perNodePerHour?: number;
+  /**
+   * Renewal attempts verified per second, over all callers (default 50): bounds the certificate and
+   * database work that requests nobody has authenticated yet can cause.
+   */
+  attemptsPerSecond?: number;
   clock?: Clock;
 }
 
@@ -72,21 +82,32 @@ export function gatewayRenewHandler(
   const clock = options.clock ?? systemClock;
   const maxBytes = options.maxBytes ?? 64 * 1024;
   const perHour = options.perNodePerHour ?? 6;
+  const attempts = new TokenBucket(options.attemptsPerSecond ?? 50, clock);
+  /** Granted renewals per node in the last hour. Only verified renewals are recorded here. */
   const recent = new Map<string, number[]>();
+  const maxTracked = 100_000;
 
-  const admit = (nodeId: string): number | undefined => {
+  /** How long the node must wait (ms), or undefined when it may renew now. Records nothing. */
+  const waitFor = (nodeId: string): number | undefined => {
     const now = clock.now();
-    const window = (recent.get(nodeId) ?? []).filter((at) => at > now - 3_600_000);
-    if (window.length >= perHour) {
-      recent.set(nodeId, window);
-      return window[0]! + 3_600_000 - now;
+    const times = recent.get(nodeId);
+    if (!times) return undefined;
+    const window = times.filter((at) => at > now - 3_600_000);
+    if (window.length === 0) recent.delete(nodeId);
+    else recent.set(nodeId, window);
+    return window.length >= perHour ? window[0]! + 3_600_000 - now : undefined;
+  };
+  /** Records a renewal JoinService granted. */
+  const granted = (nodeId: string): void => {
+    const now = clock.now();
+    recent.set(nodeId, [...(recent.get(nodeId) ?? []).filter((at) => at > now - 3_600_000), now]);
+    if (recent.size <= maxTracked) return;
+    // Real nodes only, so this is rare: drop emptied windows, then the oldest entries.
+    for (const [key, times] of recent) if (!times.some((at) => at > now - 3_600_000)) recent.delete(key);
+    for (const key of recent.keys()) {
+      if (recent.size <= maxTracked) break;
+      recent.delete(key);
     }
-    window.push(now);
-    recent.set(nodeId, window);
-    // Bounded by the active nodes: drop keys whose window emptied.
-    if (recent.size > 100_000)
-      for (const [key, times] of recent) if (!times.some((at) => at > now - 3_600_000)) recent.delete(key);
-    return undefined;
   };
 
   return (req, res) => {
@@ -127,15 +148,21 @@ export function gatewayRenewHandler(
         const nodeId = leafNodeId(request.chain[0]);
         if (!nodeId)
           return answerError(res, new GrpcError(GrpcCode.UNAUTHENTICATED, 'the chain names no node certificate'));
-        const waitMs = admit(nodeId);
+        const waitMs = waitFor(nodeId);
         if (waitMs !== undefined)
           return answerError(
             res,
             new GrpcError(GrpcCode.RESOURCE_EXHAUSTED, `node ${nodeId} renewed too often; retry later`, waitMs),
           );
+        if (!attempts.take())
+          return answerError(
+            res,
+            new GrpcError(GrpcCode.RESOURCE_EXHAUSTED, 'renewals are busy; retry with jitter', 1_000 + Math.random() * 4_000),
+          );
         try {
           // The peer is the chain's own node: JoinService checks it against its certificate record.
           const response = await gateway.renew(request, { nodeId });
+          granted(nodeId);
           const body = Buffer.from(encodeMessage(RenewResponseSchema, response));
           res.writeHead(200, { 'content-type': 'application/x-protobuf', 'content-length': String(body.byteLength) }).end(body);
         } catch (error) {
