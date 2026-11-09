@@ -194,6 +194,7 @@ Files the daemon owns:
 | `/etc/cdi/bcd-<allocationId>.json` | CDI spec per GPU hold |
 | `/run/bcd/allocations/<allocationId>.env` | the hold's environment (`BCD_ALLOCATION_ID`, `BCD_RESERVATION_ID`, `NVIDIA_VISIBLE_DEVICES`, …) |
 | `<data_dir>/libvirt/…` | libvirt-kvm instances and base images. QEMU runs as its own user, so bcd gives "others" search (x, never read) on the way from `<data_dir>` to each file a domain names; the files stay root's until libvirt relabels them. Under `[helper]` it's group search and group-shared files instead (see Privilege separation) |
+| `<data_dir>/cloud-hypervisor/…` | cloud-hypervisor instances (`instances/<id>/vm.json` is bcd's record of each) and base images; `vfio-release.json` lists GPUs still to be given back to their driver |
 | `<data_dir>/volumes/<id>.raw`, `<id>.json` | persistent host volumes and their serials (0600; a CH VMM's user holds a read-write one while it runs) |
 | `bcd-alloc-<allocationId>.slice` | a hold's runtime slice when it has limits (`/sys/fs/cgroup/bcd.slice/bcd-alloc.slice/…`); under a fake root, `/run/bcd/slices/<name>.json` |
 | `/etc/ssh/sshd_config.d/10-better-compute.conf`, `/etc/ssh/bc_ca.pub`, `/etc/ssh/bc_principals/<account>`, `/etc/ssh/bc_krl` | break-glass SSH, written by the access converger |
@@ -485,7 +486,11 @@ events. It never drops a hold on its own.
   nvidia (`nvidia-smi -pm 0`) and on again once nvidia has it back. libvirt's managed hostdevs get the
   same around `start`/`restore` and `destroy`, done by root (bcd itself, or `bcd helper`). Each
   `nvidia-smi` call is killed after 30 s (`no answer after 30s`): a hung driver fails the step
-  instead of holding the runtime.
+  instead of holding the runtime. When a destroyed cloud-hypervisor instance's GPU cannot be given
+  back (its unbind fails), the instance still goes, and the address is kept in
+  `<data_dir>/cloud-hypervisor/vfio-release.json` (`{"<pci address>": "<instance id>"}`). bcd tries
+  the release again about once a minute until it works, or until another instance binds that GPU.
+  The file is absent when nothing is pending.
 - *NoCloud seed* (`runtime/netconfig.go`). It carries network-config v2 for leased NICs:
   - each NIC is matched by MAC and gets its CIDR addresses;
   - the gateway becomes the default route, and the NIC's nameservers are set;

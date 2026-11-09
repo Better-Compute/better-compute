@@ -92,6 +92,10 @@ type CloudHypervisor struct {
 	mu sync.Mutex
 	// swept: what a killed bcd left was removed (sweep, once per process, at the first List).
 	swept sync.Once
+	// releaseEvery is how often List retries the VFIO releases that failed (default a minute; tests),
+	// and releaseTried when it last did.
+	releaseEvery time.Duration
+	releaseTried time.Time
 }
 
 // chRecord is instances/<id>/vm.json: bcd's metadata and the VM's configuration.
@@ -364,6 +368,19 @@ func (c *CloudHypervisor) List(ctx context.Context) ([]Domain, error) {
 		defer c.mu.Unlock()
 		c.sweep()
 	})
+	// The GPUs a destroyed instance left on vfio-pci are tried again, now and then; never waiting
+	// behind an operation that holds the lock (the next List tries).
+	if c.mu.TryLock() {
+		every := c.releaseEvery
+		if every <= 0 {
+			every = time.Minute
+		}
+		if time.Since(c.releaseTried) >= every {
+			c.releaseTried = time.Now()
+			c.retryReleases(ctx)
+		}
+		c.mu.Unlock()
+	}
 	entries, err := os.ReadDir(filepath.Join(c.Dir, "instances"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -952,6 +969,7 @@ func (c *CloudHypervisor) start(ctx context.Context, r *chRecord, paused bool) e
 				return err
 			}
 			r.BoundAddrs = union(r.BoundAddrs, c.gpuAddresses(r))
+			c.forgetReleases(r.BoundAddrs)
 		}
 		if err := c.grantFiles(r); err != nil {
 			return err
@@ -967,6 +985,7 @@ func (c *CloudHypervisor) start(ctx context.Context, r *chRecord, paused bool) e
 			}
 			r.BoundAddrs = union(r.BoundAddrs, []string{addr})
 		}
+		c.forgetReleases(r.BoundAddrs)
 		if err := c.giveFiles(r, int(r.UID)); err != nil {
 			return err
 		}
@@ -1273,16 +1292,149 @@ func (c *CloudHypervisor) Destroy(ctx context.Context, id string) error {
 	if err := c.stop(ctx, r); err != nil {
 		return err
 	}
-	// The GPUs go back to their host driver (best effort: a GPU left on vfio-pci is only unusable
-	// to the host until the next pass or boot).
-	if addrs := union(r.BoundAddrs, c.gpuAddresses(r)); c.Privileged != nil && len(addrs) > 0 {
-		_ = c.Privileged.ReleaseVFIO(ctx, id, addrs)
-	} else {
-		for _, addr := range addrs {
-			_ = c.vfio().Release(addr)
+	// The GPUs go back to their host driver. One that does not (its release failed) would stay on
+	// vfio-pci, unusable to the host, with the record that names it gone: it is written down first
+	// (vfio-release.json, the instance's tombstone) and its release is tried again from List.
+	held := c.boundElsewhere(id)
+	failed := map[string]string{}
+	var releaseErr error
+	for _, addr := range union(r.BoundAddrs, c.gpuAddresses(r)) {
+		if held[addr] {
+			continue // another instance of bcd's has it bound: its own destroy gives it back
+		}
+		if err := c.releaseVFIO(ctx, id, addr); err != nil {
+			failed[addr] = id
+			releaseErr = errors.Join(releaseErr, err)
+		}
+	}
+	if len(failed) > 0 {
+		if err := c.rememberReleases(failed); err != nil {
+			// Without the tombstone the record is all that names the GPUs: the instance stays, and
+			// the next pass destroys it again.
+			return fmt.Errorf("instance %s is stopped but kept: its GPUs were not given back to their driver (%v) and that could not be recorded: %w", id, releaseErr, err)
 		}
 	}
 	return os.RemoveAll(c.instanceDir(id))
+}
+
+// releaseVFIO gives one PCI address back to its host driver, as root or through the helper.
+func (c *CloudHypervisor) releaseVFIO(ctx context.Context, id, addr string) error {
+	if c.Privileged != nil {
+		return c.Privileged.ReleaseVFIO(ctx, id, []string{addr})
+	}
+	return c.vfio().Release(addr)
+}
+
+// releasesFile is <Dir>/vfio-release.json: the PCI addresses destroyed instances left on vfio-pci
+// because their release failed, each with the instance that had it. It is what is left of those
+// instances' records, kept until the release succeeds.
+func (c *CloudHypervisor) releasesFile() string { return filepath.Join(c.Dir, "vfio-release.json") }
+
+func (c *CloudHypervisor) pendingReleases() (map[string]string, error) {
+	raw, err := os.ReadFile(c.releasesFile())
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	pending := map[string]string{}
+	if err := json.Unmarshal(raw, &pending); err != nil {
+		return nil, fmt.Errorf("%s: %w", c.releasesFile(), err)
+	}
+	for addr, id := range pending {
+		if !pciAddress.MatchString(addr) || !instanceID.MatchString(id) {
+			delete(pending, addr)
+		}
+	}
+	return pending, nil
+}
+
+func (c *CloudHypervisor) saveReleases(pending map[string]string) error {
+	file := c.releasesFile()
+	if len(pending) == 0 {
+		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	raw, err := json.MarshalIndent(pending, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(c.Dir, 0o700); err != nil {
+		return err
+	}
+	tmp := file + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, file)
+}
+
+// rememberReleases adds failed releases (address: instance) to the file.
+func (c *CloudHypervisor) rememberReleases(failed map[string]string) error {
+	pending, err := c.pendingReleases()
+	if err != nil {
+		return err
+	}
+	for addr, id := range failed {
+		pending[addr] = id
+	}
+	return c.saveReleases(pending)
+}
+
+// forgetReleases drops addresses an instance has bound again: they are in use, and that instance's
+// destroy gives them back.
+func (c *CloudHypervisor) forgetReleases(addrs []string) {
+	pending, err := c.pendingReleases()
+	if err != nil || len(pending) == 0 {
+		return
+	}
+	for _, addr := range addrs {
+		delete(pending, addr)
+	}
+	_ = c.saveReleases(pending)
+}
+
+// boundElsewhere are the PCI addresses the other instances' records have on vfio-pci.
+func (c *CloudHypervisor) boundElsewhere(id string) map[string]bool {
+	held := map[string]bool{}
+	entries, _ := os.ReadDir(filepath.Join(c.Dir, "instances"))
+	for _, e := range entries {
+		if e.Name() == id {
+			continue
+		}
+		if r, err := c.record(e.Name()); err == nil {
+			for _, addr := range r.BoundAddrs {
+				held[addr] = true
+			}
+		}
+	}
+	return held
+}
+
+// retryReleases tries the pending releases again. The caller holds the lock.
+func (c *CloudHypervisor) retryReleases(ctx context.Context) {
+	pending, err := c.pendingReleases()
+	if err != nil || len(pending) == 0 {
+		return
+	}
+	held := c.boundElsewhere("")
+	for addr, id := range pending {
+		if held[addr] || c.releaseVFIO(ctx, id, addr) == nil {
+			delete(pending, addr)
+		}
+	}
+	_ = c.saveReleases(pending)
+}
+
+// PendingVFIOReleases are the PCI addresses still waiting to go back to their host driver after
+// their instance was destroyed, each with that instance's id.
+func (c *CloudHypervisor) PendingVFIOReleases() (map[string]string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pendingReleases()
 }
 
 // VFIOBinder puts a PCI device's IOMMU group on vfio-pci and takes it back (SysfsVFIO).

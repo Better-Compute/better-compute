@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 )
@@ -268,5 +270,113 @@ func TestCloudHypervisorUnknownStateIsNotStopped(t *testing.T) {
 	}
 	if st, _, err := c.state(ctx, "inst_web"); err != nil || st != StateRunning {
 		t.Fatalf("state = %q, %v", st, err)
+	}
+}
+
+// flakyVFIO is a VFIO binder whose releases fail while fail is set.
+type flakyVFIO struct {
+	fail     bool
+	bound    []string
+	released []string
+	tried    int
+}
+
+func (f *flakyVFIO) Bind(addr string) error { f.bound = append(f.bound, addr); return nil }
+func (f *flakyVFIO) Release(addr string) error {
+	f.tried++
+	if f.fail {
+		return errors.New("write /sys/bus/pci/devices/" + addr + "/driver/unbind: device or resource busy")
+	}
+	f.released = append(f.released, addr)
+	return nil
+}
+
+// A destroyed instance's GPU whose release fails is not forgotten with the instance's record: it is
+// written down and its release tried again until it works (or until an instance binds it again).
+func TestCloudHypervisorDestroyRetriesAFailedVFIORelease(t *testing.T) {
+	f := newCHFixture(t)
+	c, ctx := f.c, context.Background()
+	vfio := &flakyVFIO{}
+	c.VFIO = vfio
+	c.releaseEvery = time.Nanosecond
+	const addr = "0000:3b:00.0"
+	gpu := func(id string) *agentv1.InstanceSpec {
+		s := f.spec(id)
+		s.GpuDeviceIds = []string{"GPU-1"}
+		return s
+	}
+	run := func(id string) {
+		t.Helper()
+		if err := c.Ensure(ctx, gpu(id), nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.SetState(ctx, id, StateRunning); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending := func() map[string]string {
+		t.Helper()
+		p, err := c.PendingVFIOReleases()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	run("inst_a")
+	vfio.fail = true
+	if err := c.Destroy(ctx, "inst_a"); err != nil {
+		t.Fatalf("Destroy with a failing VFIO release = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, "instances", "inst_a")); err == nil {
+		t.Fatal("the destroyed instance's files stayed")
+	}
+	if p := pending(); p[addr] != "inst_a" {
+		t.Fatalf("the GPU left on vfio-pci was forgotten with its instance: %v", p)
+	}
+	// Tried again at List, and kept while it still fails.
+	tried := vfio.tried
+	if _, err := c.List(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if vfio.tried == tried || pending()[addr] == "" {
+		t.Fatalf("the release was not retried (%d tries) or was dropped while failing: %v", vfio.tried-tried, pending())
+	}
+	// It works: the GPU is back, nothing is pending, the file is gone.
+	vfio.fail = false
+	if _, err := c.List(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(vfio.released) != 1 || vfio.released[0] != addr || len(pending()) != 0 {
+		t.Fatalf("released %v, pending %v", vfio.released, pending())
+	}
+	if _, err := os.Stat(c.releasesFile()); err == nil {
+		t.Fatal("the release file stayed with nothing pending")
+	}
+
+	// A GPU pending release that another instance binds again is that instance's: no retry takes it
+	// from under its VM.
+	run("inst_b")
+	vfio.fail = true
+	if err := c.Destroy(ctx, "inst_b"); err != nil {
+		t.Fatal(err)
+	}
+	if pending()[addr] != "inst_b" {
+		t.Fatalf("pending = %v", pending())
+	}
+	run("inst_c")
+	vfio.fail = false
+	released := len(vfio.released)
+	if _, err := c.List(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(pending()) != 0 || len(vfio.released) != released {
+		t.Fatalf("a GPU an instance runs with was released under it: pending %v, released %v", pending(), vfio.released[released:])
+	}
+	if err := c.Destroy(ctx, "inst_c"); err != nil {
+		t.Fatal(err)
+	}
+	if len(vfio.released) != released+1 {
+		t.Fatalf("the running instance's own destroy did not release its GPU: %v", vfio.released)
 	}
 }
