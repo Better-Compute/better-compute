@@ -1218,6 +1218,13 @@ export interface ProviderResources {
   /** Removes the ownership labels and leaves the resource running. */
   release?(kind: string, id: string, context: CallContext): Promise<void>;
   /**
+   * Whether `release` works for the kind. Pure; no I/O. A kind owned by its name has no labels to take
+   * off, so it can only be deleted: answering false here lets the caller refuse the release up front
+   * instead of learning it from `UNSUPPORTED` when it calls. Absent: every kind is releasable when
+   * `release` exists.
+   */
+  releasable?(kind: string): boolean;
+  /**
    * The installable applications the provider lists (DigitalOcean 1-Click apps, a marketplace): read-only. Each is
    * installed through another surface, not `ensure`: an `instance` one as the image of an instance create, a
    * `kubernetes` one as an add-on of a managed cluster.

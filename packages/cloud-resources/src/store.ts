@@ -284,8 +284,7 @@ export async function poolResources(
  */
 export function canRelease(resources: ProviderResources, kind: string): boolean {
   if (typeof resources.release !== 'function') return false;
-  const releasable = (resources as { releasable?: (kind: string) => boolean }).releasable;
-  return typeof releasable !== 'function' || releasable.call(resources, kind) !== false;
+  return typeof resources.releasable !== 'function' || resources.releasable(kind) !== false;
 }
 
 /** The kind the provider serves, or UNSUPPORTED naming the ones it does. */
