@@ -1,9 +1,9 @@
 import { ComputeError, type SqlTx } from '@better-compute/core';
 
 // Retention for the cursor-read logs (PLAN.md §8.4): `outbox` and `authz_changes` rows are
-// deleted only once every durable cursor of their stream (`outbox_cursors`) has passed them and
-// they are older than a minimum age. A stream without cursors is never pruned: a reader that has
-// not saved a cursor yet could still need everything.
+// deleted only once every durable cursor of their stream (`outbox_cursors`, and for the outbox the
+// events module's `event_cursors`) has passed them and they are older than a minimum age. A stream
+// without cursors is never pruned: a reader that has not saved a cursor yet could still need everything.
 
 export type CursorStream = 'outbox' | 'authz_changes';
 
@@ -46,9 +46,19 @@ export async function pruneBehindCursors(tx: SqlTx, stream: CursorStream, option
   const batch = options.batch ?? 5000;
   if (!(minAge >= 0) || !Number.isSafeInteger(batch) || batch < 1) throw new ComputeError('INVALID_INPUT', 'minAgeSeconds and batch must be positive');
   const table = stream; // a checked literal, never input
+  // The webhook fan-out (the events module) keeps its outbox position in its own table, `event_cursors`:
+  // it is a reader of the outbox like any sink, so the floor is the slowest cursor of both tables. Without
+  // it a fan-out lagging behind the sinks by more than `minAgeSeconds` lost the events in between.
+  const cursors = [`SELECT txid, seq FROM outbox_cursors WHERE stream = $1`];
+  if (stream === 'outbox') {
+    const { rows } = await tx.query<{ present: boolean }>(
+      `SELECT to_regclass('event_cursors') IS NOT NULL AS present`,
+    );
+    if (rows[0]?.present) cursors.push(`SELECT txid, seq FROM event_cursors`);
+  }
   const result = await tx.query(
     `WITH floor AS (
-       SELECT txid, seq FROM outbox_cursors WHERE stream = $1 ORDER BY txid, seq LIMIT 1
+       SELECT txid, seq FROM (${cursors.join(' UNION ALL ')}) c ORDER BY txid, seq LIMIT 1
      ), doomed AS (
        SELECT t.seq FROM ${table} t, floor f
         WHERE (t.txid, t.seq) <= (f.txid, f.seq)
