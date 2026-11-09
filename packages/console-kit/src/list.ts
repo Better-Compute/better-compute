@@ -91,9 +91,17 @@ export function createListResource<T>(options: ListOptions<T>): ListResource<T> 
       return run(false);
     },
     loadMore() {
+      // A second call shares the page already being fetched.
+      if (loadingMore) return loadingMore;
       const state = store.get();
-      if (!state.hasMore) return Promise.resolve();
-      return (loadingMore ??= run(true).finally(() => (loadingMore = undefined)));
+      // During a refresh there is nothing to append to: starting a load would abort the refresh, drop its
+      // result and append a page of the list it was replacing.
+      if (!state.hasMore || state.status === 'loading') return Promise.resolve();
+      const mine: Promise<void> = run(true).finally(() => {
+        if (loadingMore === mine) loadingMore = undefined;
+      });
+      loadingMore = mine;
+      return mine;
     },
     upsert(item) {
       const key = options.key(item);

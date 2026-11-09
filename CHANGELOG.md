@@ -210,6 +210,15 @@ All notable changes to the better-compute packages are documented here. The form
 - **Kubernetes conformance left failed clusters running** (`@better-compute/testing`). The cases took a cluster's id
   only once it was ready, so a cluster that went to `error` (or never got ready) was not deleted at the end of the
   case and stayed running, and billed, on a live account. The id now comes from the first `ensureCluster` answer.
+- **A stale list after "load more" during a refresh** (`@better-compute/console-kit`). `loadMore()` was documented
+  as a no-op while loading, but during a refresh it aborted the refresh, dropped its result and appended a page of
+  the list being replaced. It now does nothing while a refresh is in flight, and two calls share one load.
+- **Events lost while a live console starts** (`@better-compute/console-kit`). `startLiveConsole` loaded every store
+  and only then connected to `/watch`, so whatever happened in between was never shown. It now opens the stream
+  first, loads once the stream is open, and holds events that arrive during a load until the load has finished. A
+  stream that opens only after a load began, with no cursor to resume from (its first attempt failed, it took
+  longer than the new `openWaitMs`, default 3 s, or it dropped before any event), makes the stores load once more.
+  New options `openWaitMs` and `sleep`.
 
 ## 0.3.0 (2026-10-20)
 
