@@ -665,6 +665,14 @@ export class GcpCompute implements ProviderImpl {
     }
   }
 
+  /**
+   * The region of one of the account's zones. vps asks the provider where a zone's name does not end in
+   * `-<letter>`: an AI zone (`us-south1-ai1b`) is in `us-south1`.
+   */
+  zoneRegion(zone: string): string {
+    return regionOf(zone);
+  }
+
   // ------------------------------------------------------------------------------- power, list
 
   async power(id: string, action: PowerAction, context: CallContext): Promise<void> {

@@ -593,6 +593,9 @@ describe('compute', () => {
     const emu = new GceEmulator();
     emu.addZone('us-south1-ai1b');
     const impl = await build(emu, { projectId: 'p', zones: ['us-south1-ai1b'] });
+    // vps asks the provider for the region of a zone it cannot read off the name.
+    expect(impl.zoneRegion!('us-south1-ai1b')).toBe('us-south1');
+    expect(impl.zoneRegion!('us-central1-a')).toBe('us-central1');
     const offers = await impl.listOffers({ region: 'us-south1' });
     expect(offers.length).toBeGreaterThan(0);
     expect(new Set(offers.map((offer) => offer.region))).toEqual(new Set(['us-south1']));

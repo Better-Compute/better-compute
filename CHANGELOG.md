@@ -192,7 +192,8 @@ All notable changes to the better-compute packages are documented here. The form
 - **AI zones** (`@better-compute/provider-gcp`). `regionOf` took only a one-letter suffix off a zone, so an AI zone
   such as `us-south1-ai1b` was its own region: its offers and machines reported the zone as their region, and a
   create with a subnet named `regions/us-south1-ai1b/subnetworks/…`, which Compute Engine refuses. The region is
-  now the zone without its last segment (`us-south1`).
+  now the zone without its last segment (`us-south1`), and the provider answers `ProviderImpl.zoneRegion` with it, so
+  vps places a tenant network's subnet in that region.
 
 ## 0.3.0 (2026-10-20)
 
