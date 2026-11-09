@@ -13,3 +13,4 @@ export * from './iam.js';
 export * from './catalog.js';
 export * from './meters.js';
 export * from './shard.js';
+export * from './addresses.js';

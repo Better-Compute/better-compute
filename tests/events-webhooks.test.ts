@@ -1,3 +1,5 @@
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   isComputeError,
@@ -19,6 +21,8 @@ import {
   openSecret,
   outboxTail,
   parseCursor,
+  postPinned,
+  preferredAddress,
   pruneWebhookDeliveries,
   purgeTenantWebhooks,
   readOutbox,
@@ -147,9 +151,20 @@ describe('signatures, sealing, URLs and cursors', () => {
       '::ffff:127.0.0.1',
       'fd00::1',
       'fe80::1',
+      // An IPv4 address inside an IPv6 one, in the hex form `new URL` normalizes to, NAT64 and 6to4.
+      '::ffff:a00:5',
+      '::ffff:7f00:1',
+      '::ffff:a9fe:a9fe',
+      '64:ff9b::a9fe:a9fe',
+      '2002:a9fe:a9fe::1',
+      '2002:0a00:0005::',
+      '::10.0.0.5',
+      '0.0.0.0',
+      '240.0.0.1',
+      'not-an-address',
     ])
       expect(isNonPublicAddress(address), address).toBe(true);
-    for (const address of ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111'])
+    for (const address of ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111', '::ffff:8.8.8.8', '::ffff:808:808', '2002:808:808::1'])
       expect(isNonPublicAddress(address), address).toBe(false);
     await expect(
       assertPublicDestination('https://rebind.example.com', {}, async () => [
@@ -159,7 +174,62 @@ describe('signatures, sealing, URLs and cursors', () => {
     ).rejects.toMatchObject({ code: 'DRIVER_ERROR' });
     await expect(
       assertPublicDestination('https://ok.example.com', {}, async () => ['93.184.216.34']),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual(['93.184.216.34']);
+    // What `new URL` makes of a mapped literal is refused at save time and at delivery.
+    for (const bad of [
+      'https://[::ffff:10.0.0.5]/',
+      'https://[::ffff:169.254.169.254]/latest',
+      'https://[2002:a9fe:a9fe::1]/',
+      'https://[64:ff9b::7f00:1]/',
+      'https://intranet/',
+      'https://printer.local/',
+      'https://db.svc.cluster.local/',
+    ]) {
+      expect(() => checkWebhookUrl(bad), bad).toThrow();
+      await expect(assertPublicDestination(bad), bad).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    }
+    await expect(
+      assertPublicDestination('https://mapped.example.com', {}, async () => ['::ffff:a00:5']),
+    ).rejects.toMatchObject({ code: 'DRIVER_ERROR' });
+    expect(preferredAddress(['2606:4700:4700::1111', '1.1.1.1'])).toBe('1.1.1.1');
+    expect(preferredAddress(['2606:4700:4700::1111'])).toBe('2606:4700:4700::1111');
+  });
+
+  it('posts to the address it was given, whatever the host name resolves to', async () => {
+    const seen: { host?: string; url?: string; body: string }[] = [];
+    const server = createServer((request, response) => {
+      let body = '';
+      request.on('data', (chunk) => (body += chunk));
+      request.on('end', () => {
+        seen.push({ host: request.headers.host, url: request.url, body });
+        response.statusCode = request.url === '/redirect' ? 302 : 204;
+        if (request.url === '/redirect') response.setHeader('location', 'http://127.0.0.1:1/elsewhere');
+        // A large answer is never read.
+        response.end(request.url === '/big' ? 'x'.repeat(1 << 20) : undefined);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      // The name does not exist in DNS: only the pinned address can have answered.
+      const base = `http://hooks.does-not-resolve.example:${port}`;
+      const init = { headers: { 'content-type': 'application/json' }, body: '{"n":1}' };
+      expect(await postPinned(`${base}/in?x=1`, '127.0.0.1', init)).toEqual({ status: 204, ok: true });
+      expect(seen[0]).toEqual({
+        host: `hooks.does-not-resolve.example:${port}`,
+        url: '/in?x=1',
+        body: '{"n":1}',
+      });
+      // A redirect is an answer, never followed.
+      expect(await postPinned(`${base}/redirect`, '127.0.0.1', init)).toEqual({ status: 302, ok: false });
+      expect(await postPinned(`${base}/big`, '127.0.0.1', init)).toEqual({ status: 204, ok: true });
+      expect(seen).toHaveLength(3);
+      await expect(
+        postPinned(`${base}/in`, '127.0.0.1', { ...init, signal: AbortSignal.abort() }),
+      ).rejects.toBeDefined();
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   it('pages the outbox by (txid, seq) across a digit boundary, per tenant', async () => {
@@ -301,6 +371,58 @@ describe('webhook delivery', () => {
       dead!.id,
       dead!.id,
     ]);
+  });
+
+  it('ends a failing webhook\'s turn at its first failure and never overwrites a later claim', async () => {
+    await fanOutWebhooks(db);
+    const { webhook: slow } = await db.transaction((tx) =>
+      store.create(tx, { tenantId: 'ten_a', url: 'https://slow.example.com/in', events: ['*'] }),
+    );
+    const { webhook: fine } = await db.transaction((tx) =>
+      store.create(tx, { tenantId: 'ten_a', url: 'https://fine.example.com/in', events: ['*'] }),
+    );
+    await emit('ten_a', 'x.y', 4);
+    await fanOutWebhooks(db);
+    const calls: string[] = [];
+    const fetch = (async (url: string | URL | Request) => {
+      calls.push(String(url));
+      return new Response(null, { status: String(url).includes('slow') ? 503 : 204 });
+    }) as typeof globalThis.fetch;
+    const options = { ...policy, fetch, resolve };
+    // The failing endpoint is called once, not once per claimed row; the healthy one gets all four.
+    expect(await deliverWebhooks(db, options)).toMatchObject({ attempted: 5, delivered: 4, failed: 1 });
+    expect(calls.filter((url) => url.includes('slow'))).toHaveLength(1);
+    const rows = async (id: string) =>
+      (
+        await db.query<{ attempts: number; state: string; wait: number }>(
+          `SELECT attempts, state, extract(epoch FROM next_attempt_at - compute_now())::int AS wait
+             FROM webhook_deliveries WHERE webhook_id = $1 ORDER BY id`,
+          [id],
+        )
+      ).rows;
+    // The rest went back with their attempt and come due within a minute; the failed one keeps its backoff.
+    const after = await rows(slow.id);
+    expect(after.map((row) => Number(row.attempts))).toEqual([1, 0, 0, 0]);
+    expect(after.every((row) => row.state === 'pending')).toBe(true);
+    expect(after.slice(1).every((row) => row.wait <= 60)).toBe(true);
+    expect((await rows(fine.id)).every((row) => row.state === 'delivered')).toBe(true);
+
+    // A pass that outlived its lease: another worker claimed the row again (attempts moved on) and
+    // delivered it while this one was still sending. The stale outcome is not written.
+    await db.query(`UPDATE webhook_deliveries SET next_attempt_at = compute_now() WHERE webhook_id = $1`, [
+      slow.id,
+    ]);
+    const stale = (async () => {
+      await db.query(
+        `UPDATE webhook_deliveries SET attempts = attempts + 1, state = 'delivered', delivered_at = compute_now()
+          WHERE webhook_id = $1`,
+        [slow.id],
+      );
+      return new Response(null, { status: 503 });
+    }) as typeof globalThis.fetch;
+    await deliverWebhooks(db, { ...policy, fetch: stale, resolve });
+    const settled = await rows(slow.id);
+    expect(settled.every((row) => row.state === 'delivered')).toBe(true);
   });
 
   it('backs off failed deliveries by the schedule', async () => {

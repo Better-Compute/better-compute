@@ -2,7 +2,13 @@ import { lookup } from 'node:dns/promises';
 import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { isIP, type LookupFunction } from 'node:net';
-import { ComputeError } from '@better-compute/core';
+import {
+  classifyAddress,
+  ComputeError,
+  isInternalHostName,
+  parseCidr,
+  type AddressCategory,
+} from '@better-compute/core';
 
 // The address policy (U-02) for provider endpoints that an account's config, or a host's API URL override,
 // chooses (`ProviderInput.endpoints`: Proxmox's `url`, Hetzner's `endpoint` override). A tenant must not point
@@ -12,25 +18,13 @@ import { ComputeError } from '@better-compute/core';
 // ranges the host names. Account validation checks every address a name resolves to; the client then calls
 // through `pinnedFetch`, which checks again on every connection and connects to the address it checked, so a
 // DNS answer that changes in between (rebinding) reaches nothing new. Redirects are never followed.
+// Addresses are judged by core's `classifyAddress` (shared with the webhook URL check in events).
 //
 // This never applies to Compute Engine: its token, STS, IAM Credentials and compute hosts come from host options
 // only (the universe pin), and provider-gcp declares no `endpoints`.
 
-/** Why an address or name is refused. */
-export type AddressCategory =
-  | 'unspecified'
-  | 'loopback'
-  | 'private'
-  | 'link-local'
-  | 'cgnat'
-  | 'multicast'
-  | 'reserved'
-  | 'documentation'
-  | 'unique-local'
-  | 'site-local'
-  | 'translation'
-  | 'internal-name'
-  | 'cluster';
+/** Why an address or name is refused (core's, re-exported for the callers that import it from here). */
+export type { AddressCategory } from '@better-compute/core';
 
 export interface AddressPolicyOptions {
   /**
@@ -71,110 +65,6 @@ export interface AddressPolicy {
   readonly fetch: typeof fetch;
 }
 
-// --- Address ranges ---------------------------------------------------------------------------------------------
-
-interface Range {
-  family: 4 | 6;
-  base: bigint;
-  bits: number;
-  category: AddressCategory;
-}
-
-function v4ToBigInt(address: string): bigint {
-  return address.split('.').reduce((value, part) => (value << 8n) | BigInt(Number(part)), 0n);
-}
-
-function v6ToBigInt(address: string): bigint {
-  let text = address.toLowerCase();
-  const zone = text.indexOf('%');
-  if (zone !== -1) text = text.slice(0, zone);
-  // A trailing dotted quad (::ffff:10.0.0.1).
-  const lastColon = text.lastIndexOf(':');
-  if (text.includes('.', lastColon)) {
-    const v4 = v4ToBigInt(text.slice(lastColon + 1));
-    text = `${text.slice(0, lastColon + 1)}${(v4 >> 16n).toString(16)}:${(v4 & 0xffffn).toString(16)}`;
-  }
-  const [head, tail] = text.split('::') as [string, string | undefined];
-  const left = head ? head.split(':') : [];
-  const right = tail !== undefined && tail !== '' ? tail.split(':') : [];
-  const groups =
-    tail === undefined
-      ? left
-      : [...left, ...Array(8 - left.length - right.length).fill('0'), ...right];
-  return groups.reduce((value, group) => (value << 16n) | BigInt(parseInt(group || '0', 16)), 0n);
-}
-
-function parseCidr(cidr: string, category: AddressCategory): Range {
-  const [address, prefix] = cidr.split('/') as [string, string | undefined];
-  const family = isIP(address);
-  if (family !== 4 && family !== 6)
-    throw new ComputeError('INVALID_CONFIG', `Address policy: ${cidr} is not a CIDR`);
-  const width = family === 4 ? 32 : 128;
-  const bits = prefix === undefined ? width : Number(prefix);
-  if (!Number.isInteger(bits) || bits < 0 || bits > width)
-    throw new ComputeError('INVALID_CONFIG', `Address policy: ${cidr} has a bad prefix length`);
-  const value = family === 4 ? v4ToBigInt(address) : v6ToBigInt(address);
-  const shift = BigInt(width - bits);
-  return { family, base: (value >> shift) << shift, bits, category };
-}
-
-const builtinRanges: readonly Range[] = [
-  ['0.0.0.0/8', 'unspecified'],
-  ['10.0.0.0/8', 'private'],
-  ['100.64.0.0/10', 'cgnat'],
-  ['127.0.0.0/8', 'loopback'],
-  ['169.254.0.0/16', 'link-local'],
-  ['172.16.0.0/12', 'private'],
-  ['192.0.0.0/24', 'reserved'],
-  ['192.0.2.0/24', 'documentation'],
-  ['192.88.99.0/24', 'reserved'],
-  ['192.168.0.0/16', 'private'],
-  ['198.18.0.0/15', 'reserved'],
-  ['198.51.100.0/24', 'documentation'],
-  ['203.0.113.0/24', 'documentation'],
-  ['224.0.0.0/4', 'multicast'],
-  ['240.0.0.0/4', 'reserved'],
-  ['::/128', 'unspecified'],
-  ['::1/128', 'loopback'],
-  ['::/96', 'reserved'],
-  ['64:ff9b:1::/48', 'translation'],
-  ['100::/64', 'reserved'],
-  ['2001::/32', 'translation'],
-  ['2001:2::/48', 'reserved'],
-  ['2001:db8::/32', 'documentation'],
-  ['3fff::/20', 'documentation'],
-  ['5f00::/16', 'reserved'],
-  ['fc00::/7', 'unique-local'],
-  ['fe80::/10', 'link-local'],
-  ['fec0::/10', 'site-local'],
-  ['ff00::/8', 'multicast'],
-].map(([cidr, category]) => parseCidr(cidr as string, category as AddressCategory));
-
-function inRange(range: Range, family: 4 | 6, value: bigint): boolean {
-  if (range.family !== family) return false;
-  const shift = BigInt((family === 4 ? 32 : 128) - range.bits);
-  return value >> shift === range.base >> shift;
-}
-
-/** The IPv4 address an IPv6 one carries (mapped, NAT64 well-known prefix, 6to4), if any. */
-function embeddedV4(value: bigint): bigint | undefined {
-  if (value >> 32n === 0xffffn) return value & 0xffffffffn; // ::ffff:0:0/96
-  if (value >> 32n === 0x64ff9b0000000000000000n) return value & 0xffffffffn; // 64:ff9b::/96
-  if (value >> 112n === 0x2002n) return (value >> 80n) & 0xffffffffn; // 2002::/16
-  return undefined;
-}
-
-/** Names that only resolve inside a network: never a provider's public API. */
-function internalName(host: string): boolean {
-  return (
-    host === 'localhost' ||
-    host === 'metadata' ||
-    host === 'kubernetes' ||
-    !host.includes('.') ||
-    /\.(localhost|local|internal|intranet|lan|home|corp|svc|cluster\.local|home\.arpa)$/.test(host)
-  );
-}
-
 /** Compiles `vps({ addressPolicy })`. */
 export function createAddressPolicy(options: AddressPolicyOptions = {}): AddressPolicy {
   const allow = (options.allowCidrs ?? []).map((cidr) => parseCidr(cidr, 'private'));
@@ -185,23 +75,8 @@ export function createAddressPolicy(options: AddressPolicyOptions = {}): Address
     (async (host: string) =>
       (await lookup(host, { all: true, verbatim: true })).map((entry) => entry.address));
 
-  const classify = (address: string): AddressCategory | undefined => {
-    const family = isIP(address);
-    if (family !== 4 && family !== 6) return 'reserved';
-    const value = family === 4 ? v4ToBigInt(address) : v6ToBigInt(address);
-    if (allow.some((range) => inRange(range, family, value))) return undefined;
-    for (const range of [...deny, ...builtinRanges])
-      if (inRange(range, family, value)) return range.category;
-    if (family === 6) {
-      const v4 = embeddedV4(value);
-      if (v4 !== undefined) {
-        if (allow.some((range) => inRange(range, 4, v4))) return undefined;
-        for (const range of [...deny, ...builtinRanges])
-          if (inRange(range, 4, v4)) return range.category;
-      }
-    }
-    return undefined;
-  };
+  const classify = (address: string): AddressCategory | undefined =>
+    classifyAddress(address, { allow, deny });
 
   const refuse = (
     endpoint: string,
@@ -219,7 +94,7 @@ export function createAddressPolicy(options: AddressPolicyOptions = {}): Address
   const addressesOf = async (url: URL, endpoint: string): Promise<string[]> => {
     const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
     const exempt = allowHosts.has(host);
-    if (!exempt && isIP(host) === 0 && internalName(host))
+    if (!exempt && isIP(host) === 0 && isInternalHostName(host))
       throw refuse(endpoint, 'endpoint-address', `${host} is an internal name`, {
         category: 'internal-name',
       });

@@ -1,11 +1,22 @@
 // Webhook URLs are tenant input, and compute's workers sit inside the platform network: a URL pointing at a
 // metadata service, a BMC or a database would turn deliveries into SSRF. URLs are checked when a webhook is
-// saved (scheme, credentials, IP literals) and each delivery resolves the host and refuses private,
-// loopback, link-local and other non-public addresses.
+// saved (scheme, credentials, IP literals, internal names) and each delivery resolves the host, refuses
+// private, loopback, link-local and other non-public addresses, and then connects to the address it
+// checked (`postPinned`), so a DNS answer that changes between the check and the connection (rebinding)
+// reaches nothing new. Addresses are judged by core's `classifyAddress`, the same classifier provider
+// endpoints go through: by value, so an IPv4 address inside an IPv6 one (mapped in hex or dotted form,
+// NAT64, 6to4) is judged too.
 
 import { lookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
-import { ComputeError } from '@better-compute/core';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import type { LookupFunction } from 'node:net';
+import {
+  addressFamily,
+  classifyAddress,
+  ComputeError,
+  isInternalHostName,
+} from '@better-compute/core';
 
 export interface UrlPolicy {
   /** Allow `http:` (development only). */
@@ -14,51 +25,12 @@ export interface UrlPolicy {
   allowPrivate?: boolean;
 }
 
-function v4(address: string): number[] | undefined {
-  const parts = address.split('.').map(Number);
-  return parts.length === 4 &&
-    parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)
-    ? parts
-    : undefined;
-}
-
 /** Whether an IP address is anything but a public unicast address. */
 export function isNonPublicAddress(address: string): boolean {
-  const version = isIP(address);
-  if (version === 4) {
-    const [a, b, c] = v4(address)!;
-    return (
-      a === 0 ||
-      a === 10 ||
-      a === 127 ||
-      (a === 100 && b! >= 64 && b! <= 127) ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b! >= 16 && b! <= 31) ||
-      (a === 192 && b === 0 && c === 0) ||
-      (a === 192 && b === 0 && c === 2) ||
-      (a === 192 && b === 168) ||
-      (a === 198 && (b === 18 || b === 19)) ||
-      (a === 198 && b === 51 && c === 100) ||
-      (a === 203 && b === 0 && c === 113) ||
-      a! >= 224
-    );
-  }
-  if (version === 6) {
-    const lower = address.toLowerCase().replace(/^\[|\]$/g, '');
-    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lower);
-    if (mapped) return isNonPublicAddress(mapped[1]!);
-    return (
-      lower === '::' ||
-      lower === '::1' ||
-      /^f[cd][0-9a-f]{2}:/.test(lower) ||
-      /^fe[89ab][0-9a-f]:/.test(lower) ||
-      /^ff[0-9a-f]{2}:/.test(lower) ||
-      lower.startsWith('64:ff9b:') ||
-      lower.startsWith('2001:db8:')
-    );
-  }
-  return true;
+  return classifyAddress(address) !== undefined;
 }
+
+const hostOf = (url: URL): string => url.hostname.replace(/^\[|\]$/g, '');
 
 /** Checks a webhook URL when it is saved; returns it normalized. */
 export function checkWebhookUrl(value: string, policy: UrlPolicy = {}): string {
@@ -72,31 +44,85 @@ export function checkWebhookUrl(value: string, policy: UrlPolicy = {}): string {
     throw new ComputeError('INVALID_INPUT', 'The webhook URL must use https');
   if (url.username || url.password)
     throw new ComputeError('INVALID_INPUT', 'The webhook URL must not carry credentials');
-  const host = url.hostname.replace(/^\[|\]$/g, '');
+  const host = hostOf(url);
   if (!policy.allowPrivate) {
-    if (isIP(host) && isNonPublicAddress(host))
-      throw new ComputeError('INVALID_INPUT', 'The webhook URL must point at a public address');
-    if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.internal'))
+    const literal = addressFamily(host) !== 0;
+    if (literal ? isNonPublicAddress(host) : isInternalHostName(host))
       throw new ComputeError('INVALID_INPUT', 'The webhook URL must point at a public address');
   }
   url.hash = '';
   return url.toString();
 }
 
-/** Resolves a URL's host and refuses non-public addresses (unless the policy allows them). */
+/**
+ * Resolves a URL's host and refuses non-public addresses (unless the policy allows them). Returns the
+ * addresses it checked, for the caller to connect to (`postPinned`); none when the policy allows private
+ * destinations, where nothing is resolved here.
+ */
 export async function assertPublicDestination(
   value: string,
   policy: UrlPolicy = {},
   resolve: (host: string) => Promise<string[]> = async (host) =>
     (await lookup(host, { all: true, verbatim: true })).map((entry) => entry.address),
-): Promise<void> {
+): Promise<string[]> {
   checkWebhookUrl(value, policy);
-  if (policy.allowPrivate) return;
-  const host = new URL(value).hostname.replace(/^\[|\]$/g, '');
-  const addresses = isIP(host) ? [host] : await resolve(host);
+  if (policy.allowPrivate) return [];
+  const host = hostOf(new URL(value));
+  const addresses = addressFamily(host) !== 0 ? [host] : await resolve(host);
   if (addresses.length === 0 || addresses.some(isNonPublicAddress))
     throw new ComputeError(
       'DRIVER_ERROR',
       `The webhook host ${host} resolves to a non-public address`,
     );
+  return addresses;
+}
+
+/** The address to connect to among checked ones: IPv4 first (the wider reachability), else the first. */
+export function preferredAddress(addresses: readonly string[]): string {
+  return addresses.find((address) => addressFamily(address) === 4) ?? addresses[0]!;
+}
+
+/**
+ * POSTs `body` to `url`, connecting to `address` (an address the caller checked) whatever the host name
+ * resolves to now, with TLS verified against the URL's host name. Redirects are not followed. The
+ * response body is discarded unread; only the status comes back.
+ */
+export function postPinned(
+  url: string,
+  address: string,
+  init: { headers: Record<string, string>; body: string; signal?: AbortSignal },
+): Promise<{ status: number; ok: boolean }> {
+  const target = new URL(url);
+  const family = addressFamily(address) === 6 ? 6 : 4;
+  const pinned: LookupFunction = (_hostname, options, callback) => {
+    if ((options as { all?: boolean }).all) callback(null, [{ address, family }]);
+    else (callback as (error: null, address: string, family: number) => void)(null, address, family);
+  };
+  const host = hostOf(target);
+  const body = Buffer.from(init.body, 'utf8');
+  const send = target.protocol === 'https:' ? httpsRequest : httpRequest;
+  return new Promise((resolve, reject) => {
+    const outgoing = send(
+      {
+        protocol: target.protocol,
+        hostname: host,
+        ...(target.port ? { port: Number(target.port) } : {}),
+        path: `${target.pathname}${target.search}`,
+        method: 'POST',
+        headers: { ...init.headers, 'content-length': String(body.byteLength) },
+        agent: false,
+        lookup: pinned,
+        ...(addressFamily(host) === 0 ? { servername: host } : {}),
+        ...(init.signal ? { signal: init.signal } : {}),
+      },
+      (incoming) => {
+        const status = incoming.statusCode ?? 502;
+        // Nothing of the answer is kept: free the socket without reading a body of any size.
+        incoming.destroy();
+        resolve({ status, ok: status >= 200 && status < 300 });
+      },
+    );
+    outgoing.on('error', reject);
+    outgoing.end(body);
+  });
 }

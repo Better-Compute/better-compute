@@ -13,7 +13,13 @@ import {
 } from '@better-compute/core';
 import { eventCatalog, eventFamilyOf, isKnownEventPattern, type EventFamily } from './catalog.js';
 import { matchesEventType, outboxTail, readOutbox, type OutboxCursor } from './outbox.js';
-import { assertPublicDestination, checkWebhookUrl, type UrlPolicy } from './safe-url.js';
+import {
+  assertPublicDestination,
+  checkWebhookUrl,
+  postPinned,
+  preferredAddress,
+  type UrlPolicy,
+} from './safe-url.js';
 import { newWebhookSecret, openSecret, sealSecret } from './seal.js';
 import { signatureHeader, webhookHeaders } from './signature.js';
 
@@ -495,6 +501,11 @@ export async function fanOutWebhooks(
 }
 
 export interface DeliverOptions extends WebhookSecrets, UrlPolicy {
+  /**
+   * The sender (tests, or a host's own egress proxy). Default: a request pinned to the address the SSRF
+   * check resolved, so a host name cannot answer differently at connect time. A sender given here is called
+   * after the check and resolves the host itself.
+   */
   fetch?: typeof globalThis.fetch;
   clock?: Clock;
   /** Deliveries claimed per pass. Default 50. */
@@ -515,6 +526,11 @@ const defaultBackoff = [60, 300, 1_800, 7_200, 21_600, 43_200, 86_400];
  * One delivery pass: claims due deliveries (leased for the timeout plus a margin, so a crashed worker's
  * claims come back), sends them signed, and records the outcome: `delivered` on 2xx, otherwise retried with
  * backoff until `maxAttempts`, then `dead`. Deliveries of a missing or paused webhook are `cancelled`.
+ *
+ * A webhook's deliveries go out in order, so its first failure in a pass ends its turn: the rest of its
+ * claimed rows go back unattempted and come due again within a minute. An endpoint that hangs therefore
+ * costs a pass one timeout, not one per claimed row. An outcome is written only while the row is still this pass's claim
+ * (same attempt, still pending), so a pass that outlived its lease never overwrites what a later one wrote.
  */
 export async function deliverWebhooks(
   sql: SqlExecutor,
@@ -522,7 +538,6 @@ export async function deliverWebhooks(
 ): Promise<{ attempted: number; delivered: number; failed: number; dead: number }> {
   checkSecrets(options);
   const clock = options.clock ?? systemClock;
-  const send = options.fetch ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? 10_000;
   const maxAttempts = options.maxAttempts ?? 8;
   const backoff = options.backoffSeconds?.length ? options.backoffSeconds : defaultBackoff;
@@ -561,42 +576,60 @@ export async function deliverWebhooks(
   let delivered = 0;
   let failed = 0;
   let dead = 0;
-  const deliver = async (row: (typeof claimed)[number]): Promise<void> => {
+  // Every outcome is fenced on the claim: the attempt number this pass set, and still pending.
+  const fence = `id = $1 AND attempts = $2 AND state = 'pending'`;
+  /** Sends one row. Returns the retry delay (seconds) when it failed and stays pending, else undefined. */
+  const deliver = async (row: (typeof claimed)[number]): Promise<number | undefined> => {
+    const attempts = Number(row.attempts);
     if (!row.url || !row.active || !row.secret_sealed) {
       await sql.query(
         `UPDATE webhook_deliveries SET state = 'cancelled', last_error = 'webhook paused or deleted'
-            WHERE id = $1`,
-        [row.id],
+            WHERE ${fence}`,
+        [row.id, attempts],
       );
-      return;
+      return undefined;
     }
     let status: number | undefined;
     let error: string | undefined;
     try {
-      await assertPublicDestination(row.url, options, options.resolve);
+      const addresses = await assertPublicDestination(row.url, options, options.resolve);
       const context = `webhook:${row.webhook_id}`;
       const signing = [openSecret(row.secret_sealed, secrets, context)];
       if (row.previous_secret_sealed && row.previous_live)
         signing.push(openSecret(row.previous_secret_sealed, secrets, context));
       const timestamp = Math.floor(clock.now() / 1000);
-      const response = await send(row.url, {
-        method: 'POST',
-        redirect: 'error',
-        signal: AbortSignal.timeout(timeoutMs),
-        headers: {
-          'content-type': 'application/json',
-          'user-agent': 'better-compute-webhooks/1',
-          [webhookHeaders.event]: row.event_type,
-          [webhookHeaders.delivery]: row.id,
-          [webhookHeaders.webhook]: row.webhook_id,
-          [webhookHeaders.timestamp]: String(timestamp),
-          [webhookHeaders.signature]: signatureHeader(signing, timestamp, row.body),
-        },
-        body: row.body,
-      });
-      status = response.status;
-      await response.body?.cancel().catch(() => {});
-      if (!response.ok) error = `The endpoint responded with status ${response.status}`;
+      const signal = AbortSignal.timeout(timeoutMs);
+      const headers = {
+        'content-type': 'application/json',
+        'user-agent': 'better-compute-webhooks/1',
+        [webhookHeaders.event]: row.event_type,
+        [webhookHeaders.delivery]: row.id,
+        [webhookHeaders.webhook]: row.webhook_id,
+        [webhookHeaders.timestamp]: String(timestamp),
+        [webhookHeaders.signature]: signatureHeader(signing, timestamp, row.body),
+      };
+      let ok: boolean;
+      if (!options.fetch && addresses.length > 0) {
+        // The default sender connects to the address just checked, whatever the name answers now.
+        const response = await postPinned(row.url, preferredAddress(addresses), {
+          headers,
+          body: row.body,
+          signal,
+        });
+        ({ status, ok } = response);
+      } else {
+        const response = await (options.fetch ?? globalThis.fetch)(row.url, {
+          method: 'POST',
+          redirect: 'error',
+          signal,
+          headers,
+          body: row.body,
+        });
+        status = response.status;
+        ok = response.ok;
+        await response.body?.cancel().catch(() => {});
+      }
+      if (!ok) error = `The endpoint responded with status ${status}`;
     } catch (caught) {
       error = (caught as Error).message.slice(0, 500);
     }
@@ -604,32 +637,53 @@ export async function deliverWebhooks(
       delivered++;
       await sql.query(
         `UPDATE webhook_deliveries SET state = 'delivered', delivered_at = compute_now(),
-                  last_status = $2, last_error = NULL
-            WHERE id = $1`,
-        [row.id, status ?? null],
+                  last_status = $3, last_error = NULL
+            WHERE ${fence}`,
+        [row.id, attempts, status ?? null],
       );
-      return;
+      return undefined;
     }
-    const attempts = Number(row.attempts);
     const isDead = attempts >= maxAttempts;
     if (isDead) dead++;
     else failed++;
     const delay = backoff[Math.min(attempts - 1, backoff.length - 1)]!;
     await sql.query(
-      `UPDATE webhook_deliveries SET state = $2, last_status = $3, last_error = $4,
-                next_attempt_at = compute_now() + make_interval(secs => $5::int)
-          WHERE id = $1`,
-      [row.id, isDead ? 'dead' : 'pending', status ?? null, error, delay],
+      `UPDATE webhook_deliveries SET state = $3, last_status = $4, last_error = $5,
+                next_attempt_at = compute_now() + make_interval(secs => $6::int)
+          WHERE ${fence}`,
+      [row.id, attempts, isDead ? 'dead' : 'pending', status ?? null, error, delay],
     );
+    return isDead ? undefined : delay;
   };
   // One webhook's deliveries go out one at a time in id order (its events' commit order); webhooks in parallel.
   const byWebhook = new Map<string, (typeof claimed)[number][]>();
   for (const row of [...claimed].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)))
     byWebhook.set(row.webhook_id, [...(byWebhook.get(row.webhook_id) ?? []), row]);
+  let attempted = 0;
   await Promise.all(
     [...byWebhook.values()].map(async (rows) => {
-      for (const row of rows) await deliver(row);
+      for (let index = 0; index < rows.length; index++) {
+        attempted++;
+        const retryIn = await deliver(rows[index]!);
+        if (retryIn === undefined) continue;
+        // The endpoint is failing: its later rows go back with their attempt, for at most a minute, so one
+        // event the receiver keeps refusing never holds the others for the whole backoff.
+        const rest = rows.slice(index + 1);
+        if (rest.length > 0)
+          await sql.query(
+            `UPDATE webhook_deliveries d SET attempts = d.attempts - 1,
+                    next_attempt_at = compute_now() + make_interval(secs => $3::int)
+               FROM unnest($1::text[], $2::int[]) AS c(id, attempts)
+              WHERE d.id = c.id AND d.attempts = c.attempts AND d.state = 'pending'`,
+            [
+              rest.map((row) => row.id),
+              rest.map((row) => Number(row.attempts)),
+              Math.min(retryIn, 60),
+            ],
+          );
+        break;
+      }
     }),
   );
-  return { attempted: claimed.length, delivered, failed, dead };
+  return { attempted, delivered, failed, dead };
 }
