@@ -144,6 +144,12 @@ All notable changes to the better-compute packages are documented here. The form
 
 ### Fixed
 
+- **`fleet.apply` without `prune` no longer deletes a cluster** (`@better-compute/fleet`). A document that dropped
+  `policy.substrate` from a pool it kept planned as a plain `pool update (policy)`, and the substrate reconciler
+  then tore the pool's cluster down. It is a delete now: with `prune` the plan carries a `delete` change on the pool
+  (`fields: ['policy.substrate']`, with a note that the substrate is torn down); without `prune` the substrate
+  stays in the policy that is sent, other policy changes are still made, and the pool's change notes
+  `policy.substrate is kept`.
 - **One cluster backs one pool, whoever reaches it** (`@better-compute/kubernetes`, `provider-kubernetes`,
   `provider-gcp`, `provider-aws`, `provider-digitalocean`). Adopting a cluster (`cluster: { adopt }`) was checked
   per provider account with an unlocked read, so two accounts on one project, or two pools at the same moment, both

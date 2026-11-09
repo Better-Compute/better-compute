@@ -92,7 +92,9 @@ export const fleetKey = (tenantId: string, kind: NamedKind, name: string) =>
 
 /**
  * Plans `desired` against `state`: which objects to create, update or (with `prune`) delete, as
- * both human-readable changes and the exact API calls `apply` makes. Pure apart from `idFor`.
+ * both human-readable changes and the exact API calls `apply` makes. Pure apart from `idFor`. Removing
+ * `policy.substrate` from a pool that stays is a delete too (its cluster is torn down): planned as one with
+ * `prune`, and without it the pool keeps its substrate.
  */
 export async function planFleet(
   desired: FleetConfig,
@@ -281,12 +283,21 @@ export async function planFleet(
       const wantedIdentity = substrateIdentity(policy);
       if (identity !== undefined && wantedIdentity !== undefined && identity !== wantedIdentity)
         immutable.push('policy.substrate (account, cluster)');
+      // A document that drops `policy.substrate` from a pool it keeps deletes something: the substrate reconciler
+      // tears the cluster down (bcd removed, a created cluster and its node pools deleted, its nodes retired). Like
+      // every delete it is planned only with `prune`; without it the substrate stays in the policy that is sent.
+      const dropsSubstrate = identity !== undefined && wantedIdentity === undefined;
+      const keptSubstrate = dropsSubstrate && !options.prune;
+      const sent = keptSubstrate ? { ...policy, substrate: current.policy.substrate } : policy;
       const mutable: string[] = [];
       const update: Record<string, unknown> = { tenantId, poolId };
-      if (!same(current.policy, policy)) {
-        mutable.push('policy');
-        update.policy = policy;
+      if (!same(current.policy, sent)) {
+        // The substrate's removal is its own (delete) change below; `policy` names what else differs.
+        if (!dropsSubstrate || !same({ ...current.policy, substrate: undefined }, { ...sent, substrate: undefined }))
+          mutable.push('policy');
+        update.policy = sent;
       }
+      const tornDown = dropsSubstrate && options.prune;
       if (pool.gpuModel !== undefined && current.gpuModel !== pool.gpuModel) {
         mutable.push('gpuModel');
         update.gpuModel = pool.gpuModel;
@@ -299,10 +310,27 @@ export async function planFleet(
           fields: [...immutable, ...mutable],
           blocked: `${immutable.join(', ')} cannot change; create a new pool`,
         });
-      else if (mutable.length) {
-        add({ kind: 'pool', name: pool.name, action: 'update', fields: mutable });
-        updates.push({ path: 'pools/update', input: update });
-      } else add({ kind: 'pool', name: pool.name, action: 'unchanged' });
+      else {
+        if (mutable.length) add({ kind: 'pool', name: pool.name, action: 'update', fields: mutable });
+        else if (!tornDown)
+          add({
+            kind: 'pool',
+            name: pool.name,
+            action: 'unchanged',
+            ...(keptSubstrate
+              ? { note: 'policy.substrate is kept: removing it tears its cluster down, which needs prune' }
+              : {}),
+          });
+        if (tornDown)
+          add({
+            kind: 'pool',
+            name: pool.name,
+            action: 'delete',
+            fields: ['policy.substrate'],
+            note: 'the pool stays; its substrate is torn down: once the bookings on its nodes end, bcd is removed, a created cluster and its node pools are deleted and its nodes are retired',
+          });
+        if (mutable.length || tornDown) updates.push({ path: 'pools/update', input: update });
+      }
 
       for (const [resource, max] of Object.entries(pool.ownerQuota ?? {})) {
         const name = `${pool.name}:${resource}`;

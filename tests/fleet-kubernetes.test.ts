@@ -827,6 +827,88 @@ describe('pool substrates in the document', () => {
   });
 });
 
+describe('dropping policy.substrate from a pool the document keeps', () => {
+  const pool = (policy: Record<string, unknown>): FleetPool => ({
+    name: 'gpu-dropped',
+    site: world.siteId,
+    class: 'vps-host',
+    policy,
+  });
+  const substrate = {
+    kind: 'kubernetes',
+    account: 'gke-main',
+    cluster: { create: { location: 'us-central1' } },
+    flavors: [{ name: 'gpu', machineType: 'g2-standard-8', nodes: 1 }],
+  };
+  const withPool = async (entry: FleetPool): Promise<FleetConfig> => {
+    const document = await exported();
+    return { ...document, pools: [...(document.pools ?? []).filter((item) => item.name !== entry.name), entry] };
+  };
+  const poolChanges = (result: PlanResult) =>
+    result.changes.filter((change) => change.kind === 'pool' && change.name === 'gpu-dropped');
+  const storedPolicy = async (poolId: string) =>
+    (await world.fixture.database.query<{ policy: any }>(`SELECT policy FROM pools WHERE id = $1`, [poolId])).rows[0]!
+      .policy;
+
+  it('is a delete that needs prune: without it the substrate stays, with it the plan says what is torn down', async () => {
+    const document = await withPool(pool({ kubernetes: {}, substrate }));
+    const poolId = (await plan(document)).calls.find((call) => call.path === 'pools/create')!.names!.id;
+    await apply(document);
+    expect((await storedPolicy(poolId)).substrate).toMatchObject({ kind: 'kubernetes' });
+
+    // The document drops the substrate. A plain apply never deletes a cluster: nothing is planned.
+    const dropped = await withPool(pool({ kubernetes: {} }));
+    const kept = await plan(dropped);
+    expect(kept.calls).toEqual([]);
+    expect(kept.blocked).toBe(false);
+    expect(poolChanges(kept)).toEqual([
+      {
+        kind: 'pool',
+        name: 'gpu-dropped',
+        action: 'unchanged',
+        note: 'policy.substrate is kept: removing it tears its cluster down, which needs prune',
+      },
+    ]);
+    await apply(dropped);
+    expect((await storedPolicy(poolId)).substrate).toMatchObject({ kind: 'kubernetes' });
+
+    // Another policy change in the same document is still made; the substrate rides along untouched.
+    const other = await withPool(pool({ kubernetes: { platformOperated: true } }));
+    const changed = await plan(other);
+    expect(poolChanges(changed)).toEqual([{ kind: 'pool', name: 'gpu-dropped', action: 'update', fields: ['policy'] }]);
+    const sent = changed.calls.find((call) => call.path === 'pools/update')!.input.policy as Record<string, any>;
+    expect(sent.kubernetes).toEqual({ platformOperated: true });
+    expect(sent.substrate).toEqual((await storedPolicy(poolId)).substrate);
+    await apply(other);
+    expect(await storedPolicy(poolId)).toMatchObject({ kubernetes: { platformOperated: true }, substrate: { kind: 'kubernetes' } });
+
+    // With prune it is a delete-class change of its own, and says what goes.
+    const pruned = await plan(dropped, true);
+    expect(poolChanges(pruned)).toEqual([
+      { kind: 'pool', name: 'gpu-dropped', action: 'update', fields: ['policy'] },
+      {
+        kind: 'pool',
+        name: 'gpu-dropped',
+        action: 'delete',
+        fields: ['policy.substrate'],
+        note: expect.stringMatching(/the pool stays; its substrate is torn down/),
+      },
+    ]);
+    expect(pruned.summary.delete).toBeGreaterThanOrEqual(1);
+    const update = pruned.calls.filter((call) => call.path === 'pools/update');
+    expect(update).toHaveLength(1);
+    expect(update[0]!.input).toEqual({ tenantId: world.rootTenant, poolId, policy: { kubernetes: {} } });
+    expect(pruned.calls.map((call) => call.path)).not.toContain('pools/archive');
+    await apply(dropped, { prune: true });
+    expect(await storedPolicy(poolId)).toEqual({ kubernetes: {} });
+    // Only the substrate differed this time: one delete change, no update.
+    await apply(document);
+    const only = await plan(await withPool(pool({ kubernetes: {} })), true);
+    expect(poolChanges(only).map((change) => [change.action, change.fields])).toEqual([['delete', ['policy.substrate']]]);
+    await apply({ ...(await exported()), pools: (await exported()).pools!.filter((item) => item.name !== 'gpu-dropped') }, { prune: true });
+  });
+});
+
 describe('fleet.apply of new clusters (composable admission)', () => {
   const projected = (clusterId: string) =>
     world.fixture.compute.authz.get('kubernetes-cluster', clusterId, world.rootTenant);

@@ -42,6 +42,7 @@ Objects that fleet never named appear under their ids. Archived pools and archiv
 Diffs a FleetConfig document against the tenant's current state; returns the changes for people, the exact API calls `apply` would make, a summary, `blocked`, and a `planHash`.
 
 - The call changes nothing. With `prune: true` the plan also deletes what the document no longer lists: flavors and offers are removed, pools archived, and unused provider accounts deleted. Sites are never changed or pruned.
+- A `policy.substrate` the document no longer lists on a pool it keeps is a delete too (the pool's cluster is torn down): with `prune` it is a `delete` change on the pool with `fields: ['policy.substrate']`; without it the substrate stays in the policy that is sent and the pool's change carries a note.
 - A change that cannot be applied (an immutable field such as a pool's class or an account's provider, an unknown reference, an offer to the pool's owner) is marked `blocked` with the reason.
 - The ids of planned creates derive from the caller's identity, so the call needs an authenticated caller (`UNAUTHENTICATED` otherwise).
 

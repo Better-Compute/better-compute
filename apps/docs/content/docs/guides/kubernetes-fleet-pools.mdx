@@ -180,7 +180,9 @@ identity: a plan that changes them is blocked, so create a new pool instead. Siz
    matched to its Kubernetes Node by the Node name bcd reports. When a matched node is disconnected and its Node is
    gone, its reservations end: bound ones are released with their quota refunded once, and Spot ones end as
    `preempted`. Then the node is retired.
-6. **Teardown.** Remove the pool from the document and apply with `prune`, or archive the pool. The token is revoked
+6. **Teardown.** Remove the pool from the document and apply with `prune`, or archive the pool. Taking only
+   `policy.substrate` out of a pool that stays tears the substrate down the same way, and also needs `prune`: a
+   plain apply keeps the substrate. The token is revoked
    and the nodes are cordoned. The substrate waits for their bookings to end; nothing is force-released. Then it
    removes bcd from the cluster (only objects carrying its label), deletes a created cluster and its node pools, and
    retires the nodes. Nothing is left at the provider or in compute.

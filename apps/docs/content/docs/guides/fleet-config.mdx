@@ -240,7 +240,7 @@ What each kind can do:
 | --- | --- | --- | --- | --- |
 | Provider account | `providerAccounts.create` | `providerAccounts.update` (the listed `config` fields) | `providerAccounts.delete`, once no remaining pool uses it | `provider` |
 | Site | `sites.create` | Never | Never | `kind`, `region`, `iamRegion` |
-| Pool | `pools.create`, with its owner quota | `pools.update` (`policy`, `gpuModel`) | `pools.archive`: running reservations keep their bookings | `site`, `class`, `sharing`, `agent`, `providerAccount` |
+| Pool | `pools.create`, with its owner quota | `pools.update` (`policy`, `gpuModel`) | `pools.archive`: running reservations keep their bookings. Removing `policy.substrate` from a pool that stays: its cluster is torn down | `site`, `class`, `sharing`, `agent`, `providerAccount` |
 | Owner quota | `quotas.set` | `quotas.set` | No | |
 | Offer | `pools.offer` | `pools.offer` (`quota`, `includeDescendants`, `priority`) | `pools.unoffer` | |
 | Flavor | `flavors.create` | `flavors.update` (`vcpu`, `memoryGiB`, `diskGiB`, `gpus`, `offerId`, `placement`) | `flavors.delete` | |
@@ -251,6 +251,11 @@ offers a pool to its own owner, or lists flavors or sandbox templates on a deplo
 reads `this deployment does not run sandboxes (vps v0.5)`). Fix the document, or create a new
 object instead of changing a fixed field. Without `prune`, items the document leaves out are left alone, so you can
 adopt FleetConfig one list at a time.
+
+A pool's `policy.substrate` counts as such an item. Taking it out of a pool the document keeps tears the pool's
+cluster down, so the plan shows it as a delete of its own (`- pool gpu (policy.substrate)`) and makes it only with
+`prune`. Without `prune` the pool keeps its substrate, other policy changes are still made, and the plan notes
+`policy.substrate is kept`.
 
 Calls run in dependency order: provider account creates and updates, site creates, pool creates, pool updates and
 quotas, offers, flavor creates and updates, sandbox template creates and updates, template deletes, flavor deletes,
