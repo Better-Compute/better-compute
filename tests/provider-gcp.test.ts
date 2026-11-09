@@ -27,6 +27,7 @@ import {
   offerId,
   parseMachineId,
   parseOfferId,
+  regionOf,
   requestIdFor,
   serviceAccountTokenSource,
   type TokenSource,
@@ -580,6 +581,35 @@ describe('compute', () => {
     });
     const stored = emu.instances.get('us-central1-a/bc-ins-x')!;
     expect(stored.labels['better-compute-managed']).toBe('true');
+  });
+
+  it('an AI zone is in the region its name starts with: offers, machines and the subnet path', async () => {
+    expect(regionOf('us-south1-ai1b')).toBe('us-south1');
+    expect(regionOf('us-central1-ai1a')).toBe('us-central1');
+    expect(regionOf('us-central1-a')).toBe('us-central1');
+    expect(regionOf('northamerica-northeast2-c')).toBe('northamerica-northeast2');
+    // A region is nobody's zone: it is left as it is.
+    expect(regionOf('us-south1')).toBe('us-south1');
+    const emu = new GceEmulator();
+    emu.addZone('us-south1-ai1b');
+    const impl = await build(emu, { projectId: 'p', zones: ['us-south1-ai1b'] });
+    const offers = await impl.listOffers({ region: 'us-south1' });
+    expect(offers.length).toBeGreaterThan(0);
+    expect(new Set(offers.map((offer) => offer.region))).toEqual(new Set(['us-south1']));
+    const machine = await impl.create(
+      {
+        offerId: 'us-south1-ai1b/a3-highgpu-8g',
+        image: 'ubuntu-2404-lts',
+        userData: '',
+        name: 'ins_ai',
+        network: { network: 'bc-net', subnet: 'bc-sub' },
+      },
+      ctx('ai'),
+    );
+    expect(machine).toMatchObject({ zone: 'us-south1-ai1b', region: 'us-south1' });
+    expect(
+      emu.instances.get('us-south1-ai1b/bc-ins-ai')!.networkInterfaces[0].subnetwork,
+    ).toBe('regions/us-south1/subnetworks/bc-sub');
   });
 
   it('create without a network ref uses the configured network and subnet; a full image URL is kept', async () => {

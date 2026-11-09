@@ -70,9 +70,12 @@ export function lastSegment(resource: string): string {
   return resource.split('/').pop() ?? resource;
 }
 
-/** `us-central1-a` is in `us-central1`. */
+/**
+ * The region of a zone: its name without the last segment. `us-central1-a` is in `us-central1`, and an AI
+ * zone such as `us-south1-ai1b` is in `us-south1`. A name that is already a region is returned as it is.
+ */
 export function regionOf(zone: string): string {
-  return zone.replace(/-[a-z]$/, '');
+  return /^(.+-[a-z]+\d+)-[a-z0-9]+$/.exec(zone)?.[1] ?? zone;
 }
 
 /** An accelerator type (`nvidia-h100-80gb`) as the pool `gpuModel` string (`H100`). */

@@ -189,6 +189,10 @@ All notable changes to the better-compute packages are documented here. The form
   `graceful-restart` called `instances.stop` without `discardLocalSsd`, which Compute Engine requires for a VM with
   Local SSD disks (every A3, A4 and G4), so those VMs could only be powered off hard. Every stop now sends
   `discardLocalSsd=false`, as `off` already did: the disks' data is kept.
+- **AI zones** (`@better-compute/provider-gcp`). `regionOf` took only a one-letter suffix off a zone, so an AI zone
+  such as `us-south1-ai1b` was its own region: its offers and machines reported the zone as their region, and a
+  create with a subnet named `regions/us-south1-ai1b/subnetworks/…`, which Compute Engine refuses. The region is
+  now the zone without its last segment (`us-south1`).
 
 ## 0.3.0 (2026-10-20)
 
