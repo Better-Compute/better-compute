@@ -189,6 +189,11 @@ All notable changes to the better-compute packages are documented here. The form
   'purchase-not-sent'` (the reason they had moves to `details.cause`), and vps leaves a purchase as uncertain as
   it was for those and for failures before the provider was asked. A failure of the purchase request itself, or
   after it, is uncertain as before: the double-buy guard is unchanged.
+- **A retried EC2 create whose parameters drifted finds its instance** (`@better-compute/provider-aws`). When a
+  `RunInstances` answer was lost and a parameter changed before the retry, EC2 answers
+  `IdempotentParameterMismatch`; that surfaced as `CONFLICT`, which vps retried forever while the launched
+  instance ran untracked. `create` now answers with the instance the key already launched (as it is: it reports
+  its real zone and type), or a retryable `UNAVAILABLE` (`eventual-consistency`) until EC2 shows it.
 
 ## 0.3.0 (2026-10-20)
 

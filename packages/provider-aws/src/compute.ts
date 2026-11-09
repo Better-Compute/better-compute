@@ -1536,7 +1536,31 @@ export class AwsCompute implements ProviderImpl {
           }
         : {}),
     };
-    const doc = await this.call('RunInstances', params, signal);
+    let doc: XmlElement;
+    try {
+      doc = await this.call('RunInstances', params, signal);
+    } catch (error) {
+      if (
+        !isComputeError(error, 'CONFLICT') ||
+        error.details?.code !== 'IdempotentParameterMismatch'
+      )
+        throw error;
+      // EC2 knows this create's ClientToken with other parameters: an earlier attempt launched (its
+      // answer was lost) and something drifted since (an image alias moved, a subnet or security
+      // group was recreated, a label changed). That instance is this create's result. Passing the
+      // CONFLICT on would have vps retry it forever while the instance runs untracked.
+      const launched = await this.#launchedBefore(context);
+      if (!launched)
+        throw new ComputeError(
+          'UNAVAILABLE',
+          'an earlier attempt of this create launched an instance; EC2 does not show it yet',
+          undefined,
+          { provider: 'aws', reason: 'eventual-consistency' },
+        );
+      const launchedId = launched.textOf('instanceId');
+      if (launchedId) this.#lag.seen(launchedId);
+      return this.machine(launched, signal);
+    }
     const instance = doc.items('instancesSet')[0];
     const id = instance?.textOf('instanceId');
     if (!instance || !id)

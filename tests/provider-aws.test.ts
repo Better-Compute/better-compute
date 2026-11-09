@@ -551,11 +551,14 @@ describe('compute', () => {
     expect(ec2emu.instances.size).toBe(1);
   });
 
-  it('IdempotentParameterMismatch is CONFLICT', async () => {
-    const { create } = await providerWorld();
-    await create('ins_same');
-    const error = await rejection(() => create('ins_same', { offerId: 'us-east-1b/t3.micro' }));
-    expect(error.code).toBe('CONFLICT');
+  it('IdempotentParameterMismatch answers with what the key already launched, as it is', async () => {
+    const { create, ec2emu } = await providerWorld();
+    const first = await create('ins_same');
+    // The same create asked for another zone: the instance its key launched is the answer, and it
+    // reports where it really is. Nothing second is launched and nothing runs untracked.
+    const again = await create('ins_same', { offerId: 'us-east-1b/t3.micro' });
+    expect(again).toMatchObject({ id: first.id, zone: 'us-east-1a' });
+    expect(ec2emu.instances.size).toBe(1);
   });
 
   it('create refuses zones outside config', async () => {
@@ -741,6 +744,26 @@ describe('compute', () => {
     });
     await impl.delete(managed.id, call());
     expect(managed.state).toBe('shutting-down');
+  });
+
+  it('a retried create whose parameters drifted answers with the instance the first attempt launched', async () => {
+    const { emu, ec2emu, create } = await providerWorld();
+    const first = await create('ins_drift');
+    // The answer was lost; before the retry a label changed (as an image alias or a subnet might).
+    const again = await create('ins_drift', { labels: { team: 'ml' } });
+    expect(again.id).toBe(first.id);
+    expect(emu.calls('RunInstances')).toHaveLength(2);
+    expect(ec2emu.instances.size).toBe(1);
+    // While EC2 does not show that instance by its token yet, the create is retried, never CONFLICT.
+    ec2emu.newInstanceNotFound = { byId: 0, byToken: 1 };
+    const other = await create('ins_drift2');
+    const error = await rejection(() => create('ins_drift2', { labels: { team: 'ml' } }));
+    expect(error).toMatchObject({
+      code: 'UNAVAILABLE',
+      details: { reason: 'eventual-consistency' },
+    });
+    expect((await create('ins_drift2', { labels: { team: 'ml' } })).id).toBe(other.id);
+    expect(ec2emu.instances.size).toBe(2);
   });
 
   it('async stockout surfaces through get', async () => {
