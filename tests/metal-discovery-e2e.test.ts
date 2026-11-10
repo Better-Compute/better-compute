@@ -139,10 +139,17 @@ describe('PXE discovery through the real gateway', () => {
     expect(entry.discoveryTokenRef).toMatch(/^secret:\/\//);
     expect(entry.sanbootSha256.length).toBe(0);
     expect(entries.every((e) => e.mac === MAC)).toBe(true);
-    // Every metal command crossed the gateway to the site agent and came back.
-    const { rows } = await stack.database.query<{ kind: string; state: string }>(
-      `SELECT kind, state FROM commands WHERE kind LIKE 'bmc.%' OR kind = 'boot.prepareRamdisk'`,
+    // Every metal command crossed the gateway to the site agent and came back. The boot entry shows while
+    // the site agent is still handling boot.prepareRamdisk: its SUCCEEDED update reaches the database a
+    // moment later, so the states are waited for, not read at once (under load the read used to win).
+    const commands = () =>
+      stack.database.query<{ kind: string; state: string }>(
+        `SELECT kind, state FROM commands WHERE kind LIKE 'bmc.%' OR kind = 'boot.prepareRamdisk'`,
+      );
+    await until('every metal command to come back', async () =>
+      (await commands()).rows.every((r) => r.state === 'succeeded'),
     );
+    const { rows } = await commands();
     expect(rows.map((r) => r.kind)).toEqual(
       expect.arrayContaining(['bmc.boot', 'bmc.power', 'boot.prepareRamdisk']),
     );
